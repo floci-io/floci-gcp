@@ -36,6 +36,48 @@ public class StorageFactory {
         this.config = config;
     }
 
+    /**
+     * Creates a global (non-project-scoped) backend for services whose resources are
+     * globally namespaced (e.g. GCS, where bucket names are globally unique).
+     */
+    public <V> StorageBackend<String, V> createGlobal(String serviceName, String fileName,
+                                                       TypeReference<Map<String, V>> typeReference) {
+        return createGlobal(serviceName, fileName, typeReference, config.storage().mode());
+    }
+
+    public <V> StorageBackend<String, V> createGlobal(String serviceName, String fileName,
+                                                       TypeReference<Map<String, V>> typeReference,
+                                                       String modeOverride) {
+        String mode = modeOverride != null ? modeOverride : config.storage().mode();
+        Path basePath = Path.of(config.storage().persistentPath());
+        Path filePath = basePath.resolve(fileName);
+
+        LOG.debugv("Creating {0} global storage for service {1}", mode, serviceName);
+
+        StorageBackend<String, V> inner = switch (mode) {
+            case "memory" -> new InMemoryStorage<>();
+            case "persistent" -> new PersistentStorage<>(filePath, typeReference);
+            case "hybrid" -> {
+                var hybrid = new HybridStorage<>(filePath, typeReference, 5000L);
+                hybridBackends.add(hybrid);
+                yield hybrid;
+            }
+            case "wal" -> {
+                Path snapshotPath = basePath.resolve(fileName.replace(".json", "-snapshot.json"));
+                Path walFilePath = basePath.resolve(fileName.replace(".json", ".wal"));
+                long compactionInterval = config.storage().wal().compactionIntervalMs();
+                var wal = new WalStorage<>(snapshotPath, walFilePath, typeReference, compactionInterval);
+                walBackends.add(wal);
+                yield wal;
+            }
+            default -> throw new IllegalArgumentException("Unknown storage mode: " + mode);
+        };
+
+        inner.load();
+        allBackends.add(inner);
+        return inner;
+    }
+
     public <V> ProjectAwareStorageBackend<V> create(String serviceName, String fileName,
                                                      TypeReference<Map<String, V>> typeReference) {
         return create(serviceName, fileName, typeReference, config.storage().mode());

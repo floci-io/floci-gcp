@@ -91,6 +91,13 @@ def datastore_client(datastore_emulator_host, project_id):
 
 @pytest.fixture(scope="session")
 def secret_manager_client(secret_manager_emulator_host):
+    import grpc
     from google.cloud import secretmanager
-    os.environ["SECRET_MANAGER_EMULATOR_HOST"] = secret_manager_emulator_host
-    return secretmanager.SecretManagerServiceClient()
+    from google.cloud.secretmanager_v1.services.secret_manager_service.transports.grpc import (
+        SecretManagerServiceGrpcTransport,
+    )
+
+    transport = SecretManagerServiceGrpcTransport(
+        channel=grpc.insecure_channel(secret_manager_emulator_host)
+    )
+    return secretmanager.SecretManagerServiceClient(transport=transport)

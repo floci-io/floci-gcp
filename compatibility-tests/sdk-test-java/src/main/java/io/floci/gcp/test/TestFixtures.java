@@ -48,12 +48,16 @@ public final class TestFixtures {
     }
 
     /**
-     * Creates a Firestore client.
-     * The FIRESTORE_EMULATOR_HOST env var is auto-detected by the GCP SDK.
+     * Creates a Firestore client pointing at the emulator.
+     * GrpcFirestoreRpc uses plaintext when host contains "localhost"; setHost routes traffic there.
      */
     public static Firestore firestoreClient() {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
         return FirestoreOptions.newBuilder()
                 .setProjectId(projectId())
+                .setHost(host + ":" + port)
                 .setCredentials(NoCredentials.getInstance())
                 .build()
                 .getService();
@@ -61,11 +65,20 @@ public final class TestFixtures {
 
     /**
      * Creates a Datastore client.
-     * The DATASTORE_EMULATOR_HOST env var is auto-detected by the GCP SDK.
+     * SDK v2.25.2 uses HttpDatastoreRpc only. setHost() routes to the emulator
+     * at http://{host}:{port}/v1/projects/{projectId}:{method}.
      */
     public static Datastore datastoreClient() {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+        // SDK 2.x isEmulator() only recognises "localhost" — for remote hosts (e.g. Docker)
+        // we must pass the full URL with scheme so the SDK builds a valid project endpoint.
+        boolean isLocalhost = "localhost".equals(host) || "127.0.0.1".equals(host);
+        String datastoreHost = isLocalhost ? (host + ":" + port) : (uri.getScheme() + "://" + host + ":" + port);
         return DatastoreOptions.newBuilder()
                 .setProjectId(projectId())
+                .setHost(datastoreHost)
                 .setCredentials(NoCredentials.getInstance())
                 .build()
                 .getService();

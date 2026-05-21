@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+import * as grpc from '@grpc/grpc-js';
 import { PROJECT_ID, SECRET_MANAGER_HOST, uniqueName } from './setup';
 
 describe('Secret Manager', () => {
@@ -9,8 +10,12 @@ describe('Secret Manager', () => {
   const secretPayload = 'super-secret-password-from-node';
 
   beforeAll(() => {
-    process.env.SECRET_MANAGER_EMULATOR_HOST = SECRET_MANAGER_HOST;
-    client = new SecretManagerServiceClient();
+    const [host, port] = SECRET_MANAGER_HOST.split(':');
+    client = new SecretManagerServiceClient({
+      servicePath: host,
+      port: port ? parseInt(port, 10) : 4588,
+      sslCreds: grpc.credentials.createInsecure(),
+    });
     secretId = uniqueName('test-secret');
     secretName = `projects/${PROJECT_ID}/secrets/${secretId}`;
   });

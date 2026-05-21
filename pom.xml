@@ -43,10 +43,10 @@
             <artifactId>quarkus-config-yaml</artifactId>
         </dependency>
 
-        <!-- Vert.x gRPC server (HTTP/2 via ALPN on shared port, io.grpc.BindableService bridge) -->
+        <!-- Quarkus gRPC (provides @GrpcService, HTTP/2 via ALPN on shared port) -->
         <dependency>
-            <groupId>io.vertx</groupId>
-            <artifactId>vertx-grpc-server</artifactId>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-grpc</artifactId>
         </dependency>
 
         <!-- Vert.x for async processing -->
@@ -60,6 +60,13 @@
             <groupId>com.google.api.grpc</groupId>
             <artifactId>proto-google-common-protos</artifactId>
             <version>2.66.0</version>
+        </dependency>
+
+        <!-- Pub/Sub gRPC stubs (PublisherGrpc, SubscriberGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-pubsub-v1</artifactId>
+            <version>1.118.0</version>
         </dependency>
 
         <!-- Jackson -->

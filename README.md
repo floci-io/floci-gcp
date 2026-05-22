@@ -52,6 +52,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud Storage (GCS) | ✅ | ⚠️ Limited |
 | Secret Manager | ✅ | ❌ |
 | IAM | ✅ | ❌ |
+| Managed Kafka | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ---
@@ -64,12 +65,12 @@ services:
   floci-gcp:
     image: floci/floci-gcp:latest
     ports:
-      - "4578:4578"
+      - "4588:4588"
     volumes:
       - ./data:/app/data
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
-      FLOCI_GCP_BASE_URL: http://floci-gcp:4578
+      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
 ```
 
 ```bash
@@ -80,20 +81,20 @@ Or run directly with Docker:
 
 ```bash
 docker run -d --name floci-gcp \
-  -p 4578:4578 \
+  -p 4588:4588 \
   floci/floci-gcp:latest
 ```
 
-All services are available at `http://localhost:4578`. Credentials are not validated.
+All services are available at `http://localhost:4588`. Credentials are not validated.
 
 Point GCP SDKs at the emulator using the standard emulator environment variables:
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
-export FIRESTORE_EMULATOR_HOST=localhost:4578
-export DATASTORE_EMULATOR_HOST=localhost:4578
-export STORAGE_EMULATOR_HOST=http://localhost:4578
-export SECRET_MANAGER_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
+export FIRESTORE_EMULATOR_HOST=localhost:4588
+export DATASTORE_EMULATOR_HOST=localhost:4588
+export STORAGE_EMULATOR_HOST=http://localhost:4588
+export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 ```
 
 ---
@@ -108,6 +109,7 @@ export SECRET_MANAGER_EMULATOR_HOST=localhost:4578
 | **Datastore** | gRPC | Entities, queries, transactions, indexes |
 | **Secret Manager** | gRPC + REST | Secrets, versions, access, IAM bindings |
 | **IAM** | REST | Service accounts, keys, policy bindings |
+| **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed) |
 
 ---
 
@@ -138,8 +140,8 @@ The project ID is resolved in this order:
 
 ```bash
 # Two projects, full isolation
-PUBSUB_EMULATOR_HOST=localhost:4578 gcloud pubsub topics create my-topic --project=project-a
-PUBSUB_EMULATOR_HOST=localhost:4578 gcloud pubsub topics create my-topic --project=project-b
+PUBSUB_EMULATOR_HOST=localhost:4588 gcloud pubsub topics create my-topic --project=project-a
+PUBSUB_EMULATOR_HOST=localhost:4588 gcloud pubsub topics create my-topic --project=project-b
 ```
 
 ---
@@ -152,7 +154,7 @@ PUBSUB_EMULATOR_HOST=localhost:4578 gcloud pubsub topics create my-topic --proje
 ```java
 // Pub/Sub
 TransportChannelProvider channelProvider = ManagedChannelBuilder
-    .forTarget("localhost:4578")
+    .forTarget("localhost:4588")
     .usePlaintext()
     .build()
     .newChannelProvider();
@@ -171,7 +173,7 @@ topicAdminClient.createTopic(TopicName.of("floci-local", "my-topic"));
 ```java
 // Cloud Storage
 Storage storage = StorageOptions.newBuilder()
-    .setHost("http://localhost:4578")
+    .setHost("http://localhost:4588")
     .setProjectId("floci-local")
     .setCredentials(NoCredentials.getInstance())
     .build()
@@ -185,7 +187,7 @@ storage.create(BlobInfo.newBuilder("my-bucket", "hello.txt").build(),
 ```java
 // Firestore
 FirestoreOptions options = FirestoreOptions.newBuilder()
-    .setHost("localhost:4578")
+    .setHost("localhost:4588")
     .setProjectId("floci-local")
     .setCredentials(NoCredentials.getInstance())
     .build();
@@ -201,7 +203,7 @@ db.collection("users").add(Map.of("name", "Alice"));
 
 ```python
 import os
-os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4578"
+os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4588"
 
 from google.cloud import pubsub_v1
 
@@ -217,7 +219,7 @@ print("Published message")
 
 ```python
 import os
-os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4578"
+os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4588"
 
 from google.cloud import firestore
 
@@ -236,7 +238,7 @@ for doc in docs:
 ```javascript
 import { PubSub } from "@google-cloud/pubsub";
 
-process.env.PUBSUB_EMULATOR_HOST = "localhost:4578";
+process.env.PUBSUB_EMULATOR_HOST = "localhost:4588";
 
 const pubsub = new PubSub({ projectId: "floci-local" });
 
@@ -254,7 +256,7 @@ console.log(messages);
 <summary><strong>Bash (gcloud CLI)</strong></summary>
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
 
 gcloud config set project floci-local
 gcloud pubsub topics create my-topic
@@ -286,9 +288,9 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_PORT` | `4578` | Port for all services (gRPC + REST) |
+| `FLOCI_GCP_PORT` | `4588` | Port for all services (gRPC + REST) |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID |
-| `FLOCI_GCP_BASE_URL` | `http://localhost:4578` | Base URL returned in service responses |
+| `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL returned in service responses |
 | `FLOCI_GCP_HOSTNAME` | *(unset)* | Hostname to use in returned URLs when running inside Docker Compose |
 | `FLOCI_GCP_STORAGE_MODE` | `memory` | Storage mode: `memory` · `persistent` · `hybrid` · `wal` |
 | `FLOCI_GCP_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persisted state |
@@ -298,6 +300,8 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Enable/disable Datastore |
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Enable/disable Secret Manager |
+| `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
+| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; returns ACTIVE immediately) |
 | `FLOCI_GCP_DNS_EXTRA_SUFFIXES` | *(unset)* | Extra DNS suffixes for embedded DNS (comma-separated) |
 
 **Multi-container Docker Compose:** Set `FLOCI_GCP_HOSTNAME` to the service name so returned URLs resolve correctly from other containers:
@@ -307,14 +311,14 @@ services:
   floci-gcp:
     image: floci/floci-gcp:latest
     ports:
-      - "4578:4578"
+      - "4588:4588"
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
-      FLOCI_GCP_BASE_URL: http://floci-gcp:4578
+      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
   my-app:
     environment:
-      PUBSUB_EMULATOR_HOST: floci-gcp:4578
-      FIRESTORE_EMULATOR_HOST: floci-gcp:4578
+      PUBSUB_EMULATOR_HOST: floci-gcp:4588
+      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
     depends_on:
       - floci-gcp
 ```

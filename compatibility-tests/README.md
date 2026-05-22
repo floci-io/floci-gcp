@@ -1,100 +1,105 @@
-# floci-gcp-compatibility-tests
+# floci-gcp compatibility tests
 
-Compatibility test suite for [Floci GCP](https://github.com/hectorvent/floci-gcp) — a local GCP emulator.
+Compatibility test suite for [floci-gcp](https://github.com/hectorvent/floci-gcp) — a local GCP emulator.
 
-Verifies that standard GCP tooling (SDKs) works correctly against the emulator without modification. Tests run against a live Floci GCP instance and use real GCP SDK clients — no mocks.
+Verifies that standard GCP tooling (SDKs, Terraform, OpenTofu) works correctly against the emulator without modification. Tests run against a live floci-gcp instance and use real GCP SDK clients — no mocks.
 
 ## Quick Start
 
 ```bash
 # Install just (task runner)
 # macOS: brew install just
-# Linux: cargo install just
 
 # Copy and configure environment
 cp env.example .env
 
-# Install dependencies
+# Install dependencies for all SDK suites
 just setup
 
-# Run all tests
+# Run all SDK tests
 just test-all
 
-# Run Java SDK tests
-just test-java
+# Run IaC tests (requires terraform and tofu CLIs)
+just test-all-iac
 ```
 
-## Test Runners
+## Test Suites
 
-| Module                            | Language  | Test Framework | Command           |
-| --------------------------------- | --------- | -------------- | ----------------- |
-| [`sdk-test-java`](sdk-test-java/) | Java 21   | JUnit 5        | `just test-java`  |
+### SDK suites
+
+| Module | Language | Framework | Command |
+|---|---|---|---|
+| [`sdk-test-java`](sdk-test-java/) | Java 21 | JUnit 5 | `just test-java` |
+| [`sdk-test-python`](sdk-test-python/) | Python 3 | pytest | `just test-python` |
+| [`sdk-test-node`](sdk-test-node/) | Node.js / TypeScript | vitest | `just test-node` |
+| [`sdk-test-go`](sdk-test-go/) | Go | go test | `just test-go` |
+
+### IaC suites
+
+| Module | Tool | Framework | Command |
+|---|---|---|---|
+| [`compat-terraform`](compat-terraform/) | Terraform + GCP provider v6 | BATS | `just test-terraform` |
+| [`compat-opentofu`](compat-opentofu/) | OpenTofu + GCP provider v6 | BATS | `just test-opentofu` |
 
 ## Test Coverage
 
-The Java test suite covers the following GCP services:
+### SDK tests — 186 tests total
 
-| Test Class          | GCP Service    | Operations                                              |
-| ------------------- | -------------- | ------------------------------------------------------- |
-| `PubSubTest`        | Pub/Sub        | Create topic, create subscription, publish, pull, delete |
-| `GcsTest`           | Cloud Storage  | Create bucket, upload, download, list, delete           |
-| `FirestoreTest`     | Firestore      | Set, get, update, query with filter, delete document    |
-| `DatastoreTest`     | Datastore      | Put, get, update, query with filter, delete entity      |
-| `SecretManagerTest` | Secret Manager | Create secret, add version, access, list versions, delete |
+| Test class | GCP service | Java | Python | Node | Go |
+|---|---|:---:|:---:|:---:|:---:|
+| `GcsTest` | Cloud Storage | 5 | 6 | 9 | 9 |
+| `PubSubTest` | Pub/Sub | 6 | 4 | 8 | 7 |
+| `SecretManagerTest` | Secret Manager | 5 | 5 | 6 | 7 |
+| `FirestoreTest` | Firestore | 5 | 5 | 6 | 5 |
+| `DatastoreTest` | Datastore | 5 | 5 | 5 | 5 |
+| `IamTest` | IAM | 7 | 5 | 7 | 7 |
+| `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
+| **Total** | | **44** | **39** | **52** | **51** |
+
+### IaC tests
+
+| Suite | Resources tested |
+|---|---|
+| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account |
+| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account |
+
+Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 
 ## Prerequisites
 
-- **Floci GCP running** on `http://localhost:4578` (or set `FLOCI_GCP_ENDPOINT`)
-- **Java 21+** and **Maven**
-- **just** — task runner for orchestration
-
-## Setup
-
-```bash
-# Setup all dependencies
-just setup
-
-# Resolve Java dependencies manually
-just setup-java
-```
-
-## Running Tests
-
-### All suites
-
-```bash
-just test-all
-```
-
-### Java SDK tests only
-
-```bash
-just test-java
-```
+- **floci-gcp running** on `http://localhost:4588` (or set `FLOCI_GCP_ENDPOINT`)
+- **Java 21+** and **Maven** — for `sdk-test-java`
+- **Python 3.9+** — for `sdk-test-python`
+- **Node.js 18+** — for `sdk-test-node`
+- **Go 1.21+** — for `sdk-test-go`
+- **just** — task runner
+- **terraform** — for `compat-terraform` BATS tests
+- **tofu** — for `compat-opentofu` BATS tests
+- **bats-core** — for IaC BATS tests (`brew install bats-core`)
 
 ## Configuration
 
 All modules read from environment variables (see `env.example`):
 
 ```bash
-FLOCI_GCP_ENDPOINT=http://localhost:4578
+FLOCI_GCP_ENDPOINT=http://localhost:4588
 FLOCI_GCP_PROJECT=test-project
-PUBSUB_EMULATOR_HOST=localhost:4578
-FIRESTORE_EMULATOR_HOST=localhost:4578
-DATASTORE_EMULATOR_HOST=localhost:4578
-STORAGE_EMULATOR_HOST=http://localhost:4578
+PUBSUB_EMULATOR_HOST=localhost:4588
+FIRESTORE_EMULATOR_HOST=localhost:4588
+DATASTORE_EMULATOR_HOST=localhost:4588
+STORAGE_EMULATOR_HOST=http://localhost:4588
+SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 ```
 
-The GCP SDKs auto-detect the following emulator env vars:
+| Variable | Service | Format |
+|---|---|---|
+| `PUBSUB_EMULATOR_HOST` | Pub/Sub | `host:port` |
+| `FIRESTORE_EMULATOR_HOST` | Firestore | `host:port` |
+| `DATASTORE_EMULATOR_HOST` | Datastore | `host:port` |
+| `STORAGE_EMULATOR_HOST` | Cloud Storage | `http://host:port` |
+| `SECRET_MANAGER_EMULATOR_HOST` | Secret Manager | `host:port` |
 
-| Variable                | Service        | Format                 |
-| ----------------------- | -------------- | ---------------------- |
-| `PUBSUB_EMULATOR_HOST`  | Pub/Sub        | `host:port`            |
-| `FIRESTORE_EMULATOR_HOST` | Firestore    | `host:port`            |
-| `DATASTORE_EMULATOR_HOST` | Datastore    | `host:port`            |
-| `STORAGE_EMULATOR_HOST` | Cloud Storage  | `http://host:port`     |
-
-Secret Manager does not have a GCP-standard emulator env var — the test suite connects via a plaintext gRPC channel configured directly.
+IAM and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly.
 
 ## Running with Docker
 
@@ -105,28 +110,33 @@ docker build -t floci-gcp-sdk-java sdk-test-java/
 docker run --rm --network host floci-gcp-sdk-java
 ```
 
-On macOS/Windows, use `host.docker.internal` instead of `localhost`:
+On macOS/Windows, use `host.docker.internal`:
 
 ```bash
 docker run --rm \
-  -e FLOCI_GCP_ENDPOINT=http://host.docker.internal:4578 \
-  -e PUBSUB_EMULATOR_HOST=host.docker.internal:4578 \
-  -e FIRESTORE_EMULATOR_HOST=host.docker.internal:4578 \
-  -e DATASTORE_EMULATOR_HOST=host.docker.internal:4578 \
-  -e STORAGE_EMULATOR_HOST=http://host.docker.internal:4578 \
+  -e FLOCI_GCP_ENDPOINT=http://host.docker.internal:4588 \
+  -e PUBSUB_EMULATOR_HOST=host.docker.internal:4588 \
+  -e FIRESTORE_EMULATOR_HOST=host.docker.internal:4588 \
+  -e DATASTORE_EMULATOR_HOST=host.docker.internal:4588 \
+  -e STORAGE_EMULATOR_HOST=http://host.docker.internal:4588 \
   floci-gcp-sdk-java
 ```
 
-Test results (JUnit XML) are written to `/results/` inside the container. Mount a volume to retrieve them:
+## IaC suites — notes
 
-```bash
-docker run --rm --network host -v $(pwd)/results:/results floci-gcp-sdk-java
+The Terraform and OpenTofu GCP provider (v6) does **not** respect `STORAGE_EMULATOR_HOST` or `PUBSUB_EMULATOR_HOST` for resource management. The suites configure explicit custom endpoints in `provider.tf`:
+
+```hcl
+provider "google" {
+  storage_custom_endpoint = "${var.endpoint}/storage/v1/"
+  iam_custom_endpoint     = "${var.endpoint}/"
+}
 ```
+
+Auth is bypassed via `GOOGLE_OAUTH_ACCESS_TOKEN=fake-token-floci-gcp`.
+
+Pub/Sub resources (`google_pubsub_topic`, `google_pubsub_subscription`) are not yet supported — the Terraform provider uses REST while our Pub/Sub is gRPC-only.
 
 ## Exit Codes
 
 All test runners exit `0` on full pass and non-zero if any test fails — suitable for CI pipelines.
-
-## Note on Test Status
-
-These tests define the expected behavior of the Floci GCP emulator. Tests are expected to fail until the corresponding service is implemented in the emulator. Failing tests indicate which services still need implementation.

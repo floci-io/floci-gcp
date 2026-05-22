@@ -6,8 +6,8 @@
 #   eval $(gcplocal env --unset)   # unset them
 #   gcplocal <any-gcloud-command>  # run gcloud with emulator endpoints
 
-_ENDPOINT="${FLOCI_GCP_ENDPOINT:-http://localhost:4578}"
-_HOST="${FLOCI_GCP_HOST:-localhost:4578}"
+_ENDPOINT="${FLOCI_GCP_ENDPOINT:-http://localhost:4588}"
+_HOST="${FLOCI_GCP_HOST:-localhost:4588}"
 _PROJECT="${FLOCI_GCP_PROJECT:-floci-local}"
 
 if [[ "${1:-}" == "env" ]]; then
@@ -18,6 +18,7 @@ if [[ "${1:-}" == "env" ]]; then
         echo 'unset FIRESTORE_EMULATOR_HOST'
         echo 'unset DATASTORE_EMULATOR_HOST'
         echo 'unset STORAGE_EMULATOR_HOST'
+        echo 'unset SECRET_MANAGER_EMULATOR_HOST'
         echo '# Run this command to unset floci-gcp env vars:'
         echo '# eval $(gcplocal env --unset)'
     else
@@ -27,6 +28,7 @@ if [[ "${1:-}" == "env" ]]; then
         echo "export FIRESTORE_EMULATOR_HOST=\"${_HOST}\""
         echo "export DATASTORE_EMULATOR_HOST=\"${_HOST}\""
         echo "export STORAGE_EMULATOR_HOST=\"${_ENDPOINT}\""
+        echo "export SECRET_MANAGER_EMULATOR_HOST=\"${_HOST}\""
         echo '# Run this command to configure your shell:'
         echo '# eval $(gcplocal env)'
     fi
@@ -37,6 +39,7 @@ export PUBSUB_EMULATOR_HOST="${_HOST}"
 export FIRESTORE_EMULATOR_HOST="${_HOST}"
 export DATASTORE_EMULATOR_HOST="${_HOST}"
 export STORAGE_EMULATOR_HOST="${_ENDPOINT}"
+export SECRET_MANAGER_EMULATOR_HOST="${_HOST}"
 export CLOUDSDK_CORE_PROJECT="${_PROJECT}"
 
 exec gcloud "$@"

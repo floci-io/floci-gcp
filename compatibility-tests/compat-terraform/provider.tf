@@ -26,14 +26,15 @@ variable "region" {
 # floci-gcp ignores auth headers unconditionally).
 #
 # Custom endpoints redirect each service API to the local emulator.
-# Pub/Sub and gRPC-only services are not yet supported via Terraform
-# (they need REST transcoding). Add them here when REST shims are added.
+# Services that only expose gRPC (Pub/Sub, Firestore, Datastore) are not
+# reachable via Terraform custom endpoints — they need REST transcoding.
 provider "google" {
   project = var.project
   region  = var.region
 
   user_project_override = false
 
-  storage_custom_endpoint = "${var.endpoint}/storage/v1/"
-  iam_custom_endpoint     = "${var.endpoint}/"
+  storage_custom_endpoint        = "${var.endpoint}/storage/v1/"
+  iam_custom_endpoint            = "${var.endpoint}/"
+  secret_manager_custom_endpoint = "${var.endpoint}/"
 }

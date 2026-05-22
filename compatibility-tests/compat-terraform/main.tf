@@ -26,6 +26,21 @@ resource "google_service_account" "compat" {
   display_name = "floci compat test service account"
 }
 
+# ── Secret Manager ────────────────────────────────────────────────────────────
+resource "google_secret_manager_secret" "compat" {
+  secret_id = "floci-compat-secret"
+  project   = var.project
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "compat" {
+  secret      = google_secret_manager_secret.compat.id
+  secret_data = "floci-gcp-compat-test-secret-value"
+}
+
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "bucket_name" {
   value = google_storage_bucket.compat.name
@@ -37,4 +52,12 @@ output "object_name" {
 
 output "service_account_email" {
   value = google_service_account.compat.email
+}
+
+output "secret_name" {
+  value = google_secret_manager_secret.compat.name
+}
+
+output "secret_version_name" {
+  value = google_secret_manager_secret_version.compat.name
 }

@@ -108,9 +108,42 @@ setup() {
     [[ "$email" == *"floci-compat-sa"* ]]
 }
 
+# ── Secret Manager Spot Checks ────────────────────────────────────────────────
+
+@test "Terraform: Secret Manager secret created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret"
+    assert_success
+    assert_output --partial '"name"'
+    assert_output --partial 'floci-compat-secret'
+}
+
+@test "Terraform: Secret Manager secret has automatic replication" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret")
+    [[ "$result" == *'"automatic"'* ]]
+}
+
+@test "Terraform: Secret Manager secret version created" {
+    secret_name=$(terraform output -raw secret_name 2>/dev/null)
+    [ -n "$secret_name" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret/versions"
+    assert_success
+    assert_output --partial '"versions"'
+}
+
+@test "Terraform: Secret Manager version state is ENABLED" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret/versions/1")
+    [[ "$result" == *'"state":"ENABLED"'* ]]
+}
+
+@test "Terraform: Secret Manager secret listed in project" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets"
+    assert_success
+    assert_output --partial 'floci-compat-secret'
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "Terraform: all three resources tracked in state" {
+@test "Terraform: all five resources tracked in state" {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 3 ]
+    [ "$count" -ge 5 ]
 }

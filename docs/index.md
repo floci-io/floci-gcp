@@ -20,12 +20,13 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Datastore** | gRPC | Entities, queries, transactions, indexes |
 | **Secret Manager** | gRPC + REST | Secrets, versions, access, IAM bindings |
 | **IAM** | REST | Service accounts, keys, policy bindings |
+| **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed) |
 
 ## Why floci-gcp?
 
 **No account required.** No auth tokens, no sign-ups, no telemetry. Pull the image and start building.
 
-**Single port.** All GCP services — gRPC and REST — on port `4578` via ALPN negotiation. No per-service setup.
+**Single port.** All GCP services — gRPC and REST — on port `4588` via ALPN negotiation. No per-service setup.
 
 **No feature gates.** Every feature is available to everyone — no community-edition restrictions.
 
@@ -40,12 +41,12 @@ services:
   floci-gcp:
     image: floci/floci-gcp:latest
     ports:
-      - "4578:4578"
+      - "4588:4588"
     volumes:
       - ./data:/app/data
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
-      FLOCI_GCP_BASE_URL: http://floci-gcp:4578
+      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
 ```
 
 ```bash
@@ -55,14 +56,15 @@ docker compose up -d
 Point your GCP SDKs at the emulator:
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
-export FIRESTORE_EMULATOR_HOST=localhost:4578
-export DATASTORE_EMULATOR_HOST=localhost:4578
-export STORAGE_EMULATOR_HOST=http://localhost:4578
-export SECRET_MANAGER_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
+export FIRESTORE_EMULATOR_HOST=localhost:4588
+export DATASTORE_EMULATOR_HOST=localhost:4588
+export STORAGE_EMULATOR_HOST=http://localhost:4588
+export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
+export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are immediately available at `http://localhost:4578`. Credentials are not validated.
+All GCP services are immediately available at `http://localhost:4588`. Credentials are not validated.
 
 [Get started →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [View services →](services/index.md){ .md-button }

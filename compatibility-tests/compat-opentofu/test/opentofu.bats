@@ -108,9 +108,42 @@ setup() {
     [[ "$email" == *"floci-compat-sa-tofu"* ]]
 }
 
+# ── Secret Manager Spot Checks ────────────────────────────────────────────────
+
+@test "OpenTofu: Secret Manager secret created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret-tofu"
+    assert_success
+    assert_output --partial '"name"'
+    assert_output --partial 'floci-compat-secret-tofu'
+}
+
+@test "OpenTofu: Secret Manager secret has automatic replication" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret-tofu")
+    [[ "$result" == *'"automatic"'* ]]
+}
+
+@test "OpenTofu: Secret Manager secret version created" {
+    secret_name=$(tofu output -raw secret_name 2>/dev/null)
+    [ -n "$secret_name" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret-tofu/versions"
+    assert_success
+    assert_output --partial '"versions"'
+}
+
+@test "OpenTofu: Secret Manager version state is ENABLED" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret-tofu/versions/1")
+    [[ "$result" == *'"state":"ENABLED"'* ]]
+}
+
+@test "OpenTofu: Secret Manager secret listed in project" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets"
+    assert_success
+    assert_output --partial 'floci-compat-secret-tofu'
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "OpenTofu: all three resources tracked in state" {
+@test "OpenTofu: all five resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 3 ]
+    [ "$count" -ge 5 ]
 }

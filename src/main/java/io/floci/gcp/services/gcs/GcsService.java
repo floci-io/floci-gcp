@@ -11,6 +11,7 @@ import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
+import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -18,6 +19,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
+import java.util.Optional;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,6 +39,7 @@ public class GcsService {
 
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
+    private final StorageBackend<String, StoredAcl> aclStore;
     private final ConcurrentHashMap<String, byte[]> objectData = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
 
@@ -51,6 +54,8 @@ public class GcsService {
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
+        this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
+                new TypeReference<Map<String, StoredAcl>>() {});
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -64,7 +69,9 @@ public class GcsService {
                 .build());
     }
 
-    public GcsBucket createBucket(String name, String projectId, String baseUrl, Map<String, String> labels) {
+    @SuppressWarnings("unchecked")
+    public GcsBucket createBucket(String name, String projectId, String baseUrl,
+            Map<String, Object> body) {
         LOG.infof("createBucket name=%s project=%s", name, projectId);
         if (bucketStore.get(name).isPresent()) {
             LOG.warnf("createBucket failed: bucket already exists name=%s", name);
@@ -76,14 +83,32 @@ public class GcsService {
         bucket.setName(name);
         bucket.setProjectId(projectId != null ? projectId : config.defaultProjectId());
         bucket.setProjectNumber("1");
-        bucket.setLocation("US");
-        bucket.setStorageClass("STANDARD");
+        String location = body != null && body.containsKey("location")
+                ? (String) body.get("location") : "US";
+        bucket.setLocation(location.toUpperCase());
+        String storageClass = body != null && body.containsKey("storageClass")
+                ? (String) body.get("storageClass") : "STANDARD";
+        bucket.setStorageClass(storageClass);
         bucket.setTimeCreated(now);
         bucket.setUpdated(now);
         bucket.setSelfLink(baseUrl + "/storage/v1/b/" + name);
         bucket.setEtag("CAE=");
-        if (labels != null && !labels.isEmpty()) {
-            bucket.setLabels(labels);
+        if (body != null) {
+            if (body.containsKey("labels")) {
+                bucket.setLabels((Map<String, String>) body.get("labels"));
+            }
+            if (body.containsKey("versioning")) {
+                bucket.setVersioning((Map<String, Object>) body.get("versioning"));
+            }
+            if (body.containsKey("lifecycle")) {
+                bucket.setLifecycle((Map<String, Object>) body.get("lifecycle"));
+            }
+            if (body.containsKey("cors")) {
+                bucket.setCors((List<Map<String, Object>>) body.get("cors"));
+            }
+            if (body.containsKey("retentionPolicy")) {
+                bucket.setRetentionPolicy((Map<String, Object>) body.get("retentionPolicy"));
+            }
         }
         bucketStore.put(name, bucket);
         return bucket;
@@ -95,13 +120,27 @@ public class GcsService {
                 .orElseThrow(() -> GcpException.notFound("Bucket not found: " + name));
     }
 
+    @SuppressWarnings("unchecked")
     public GcsBucket updateBucket(String name, Map<String, Object> patch) {
         LOG.infof("updateBucket name=%s", name);
         GcsBucket bucket = getBucket(name);
         if (patch.containsKey("labels")) {
-            @SuppressWarnings("unchecked")
-            Map<String, String> labels = (Map<String, String>) patch.get("labels");
-            bucket.setLabels(labels);
+            bucket.setLabels((Map<String, String>) patch.get("labels"));
+        }
+        if (patch.containsKey("versioning")) {
+            bucket.setVersioning((Map<String, Object>) patch.get("versioning"));
+        }
+        if (patch.containsKey("lifecycle")) {
+            bucket.setLifecycle((Map<String, Object>) patch.get("lifecycle"));
+        }
+        if (patch.containsKey("cors")) {
+            bucket.setCors((List<Map<String, Object>>) patch.get("cors"));
+        }
+        if (patch.containsKey("retentionPolicy")) {
+            bucket.setRetentionPolicy((Map<String, Object>) patch.get("retentionPolicy"));
+        }
+        if (patch.containsKey("storageClass")) {
+            bucket.setStorageClass((String) patch.get("storageClass"));
         }
         bucket.setUpdated(Instant.now().toString());
         bucketStore.put(name, bucket);
@@ -189,6 +228,90 @@ public class GcsService {
         return true;
     }
 
+    public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch) {
+        LOG.infof("patchObject bucket=%s name=%s", bucket, objectName);
+        String key = objectKey(bucket, objectName);
+        GcsObjectMeta meta = objectMetaStore.get(key)
+                .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+
+        if (patch.containsKey("contentType")) {
+            meta.setContentType((String) patch.get("contentType"));
+        }
+        if (patch.containsKey("contentDisposition")) {
+            meta.setContentDisposition((String) patch.get("contentDisposition"));
+        }
+        if (patch.containsKey("contentEncoding")) {
+            meta.setContentEncoding((String) patch.get("contentEncoding"));
+        }
+        if (patch.containsKey("contentLanguage")) {
+            meta.setContentLanguage((String) patch.get("contentLanguage"));
+        }
+        if (patch.containsKey("metadata")) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> userMeta = (Map<String, String>) patch.get("metadata");
+            meta.setMetadata(userMeta);
+        }
+        meta.setUpdated(Instant.now().toString());
+        long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");
+        meta.setMetageneration(String.valueOf(mg + 1));
+        objectMetaStore.put(key, meta);
+        return meta;
+    }
+
+    public GcsObjectMeta composeObject(String bucket, String destObject,
+            List<String> sourceNames, String contentType, String baseUrl) {
+        LOG.infof("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sourceNames.size());
+        if (bucketStore.get(bucket).isEmpty()) {
+            throw GcpException.notFound("Bucket not found: " + bucket);
+        }
+        byte[] composed = new byte[0];
+        for (String src : sourceNames) {
+            byte[] data = getObjectData(bucket, src);
+            byte[] merged = new byte[composed.length + data.length];
+            System.arraycopy(composed, 0, merged, 0, composed.length);
+            System.arraycopy(data, 0, merged, composed.length, data.length);
+            composed = merged;
+        }
+        String resolvedType = contentType;
+        if (resolvedType == null && !sourceNames.isEmpty()) {
+            resolvedType = objectMetaStore.get(objectKey(bucket, sourceNames.get(0)))
+                    .map(GcsObjectMeta::getContentType).orElse(null);
+        }
+        return putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
+                composed, baseUrl);
+    }
+
+    public void checkPreconditions(String bucket, String objectName,
+            Long ifGenerationMatch, Long ifGenerationNotMatch,
+            Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
+        if (ifGenerationMatch == null && ifGenerationNotMatch == null
+                && ifMetagenerationMatch == null && ifMetagenerationNotMatch == null) {
+            return;
+        }
+        Optional<GcsObjectMeta> metaOpt = objectMetaStore.get(objectKey(bucket, objectName));
+        if (metaOpt.isEmpty()) {
+            if (ifGenerationMatch != null && ifGenerationMatch != 0) {
+                throw GcpException.conditionNotMet("ifGenerationMatch: object does not exist");
+            }
+            return;
+        }
+        GcsObjectMeta meta = metaOpt.get();
+        long gen = meta.getGeneration() != null ? Long.parseLong(meta.getGeneration()) : 0;
+        long mg = meta.getMetageneration() != null ? Long.parseLong(meta.getMetageneration()) : 1;
+        if (ifGenerationMatch != null && gen != ifGenerationMatch) {
+            throw GcpException.conditionNotMet("ifGenerationMatch: " + gen + " != " + ifGenerationMatch);
+        }
+        if (ifGenerationNotMatch != null && gen == ifGenerationNotMatch) {
+            throw GcpException.conditionNotMet("ifGenerationNotMatch: " + gen + " == " + ifGenerationNotMatch);
+        }
+        if (ifMetagenerationMatch != null && mg != ifMetagenerationMatch) {
+            throw GcpException.conditionNotMet("ifMetagenerationMatch: " + mg + " != " + ifMetagenerationMatch);
+        }
+        if (ifMetagenerationNotMatch != null && mg == ifMetagenerationNotMatch) {
+            throw GcpException.conditionNotMet("ifMetagenerationNotMatch: " + mg + " == " + ifMetagenerationNotMatch);
+        }
+    }
+
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
         LOG.infof("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         GcsObjectMeta srcMeta = getObjectMeta(srcBucket, srcObject);
@@ -205,6 +328,90 @@ public class GcsService {
         List<GcsObjectMeta> objects = objectMetaStore.scan(k -> k.startsWith(bucket + "\0"));
         LOG.debugf("listObjects bucket=%s count=%d", bucket, objects.size());
         return objects;
+    }
+
+    // ── ACLs ───────────────────────────────────────────────────────────────────
+
+    public List<StoredAcl> listObjectAcls(String bucket, String objectName) {
+        getObjectMeta(bucket, objectName);
+        String prefix = "oacl:" + bucket + "\0" + objectName + ":";
+        return aclStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public StoredAcl upsertObjectAcl(String bucket, String objectName, String entity, String role) {
+        getObjectMeta(bucket, objectName);
+        StoredAcl acl = buildAcl("storage#objectAccessControl", bucket, objectName, entity, role);
+        aclStore.put("oacl:" + bucket + "\0" + objectName + ":" + entity, acl);
+        return acl;
+    }
+
+    public StoredAcl getObjectAcl(String bucket, String objectName, String entity) {
+        return aclStore.get("oacl:" + bucket + "\0" + objectName + ":" + entity)
+                .orElseThrow(() -> GcpException.notFound("ACL not found: " + entity));
+    }
+
+    public void deleteObjectAcl(String bucket, String objectName, String entity) {
+        aclStore.delete("oacl:" + bucket + "\0" + objectName + ":" + entity);
+    }
+
+    public List<StoredAcl> listBucketAcls(String bucket) {
+        getBucket(bucket);
+        String prefix = "bacl:" + bucket + ":";
+        return aclStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public StoredAcl upsertBucketAcl(String bucket, String entity, String role) {
+        getBucket(bucket);
+        StoredAcl acl = buildAcl("storage#bucketAccessControl", bucket, null, entity, role);
+        aclStore.put("bacl:" + bucket + ":" + entity, acl);
+        return acl;
+    }
+
+    public StoredAcl getBucketAcl(String bucket, String entity) {
+        return aclStore.get("bacl:" + bucket + ":" + entity)
+                .orElseThrow(() -> GcpException.notFound("ACL not found: " + entity));
+    }
+
+    public void deleteBucketAcl(String bucket, String entity) {
+        aclStore.delete("bacl:" + bucket + ":" + entity);
+    }
+
+    public List<StoredAcl> listDefaultAcls(String bucket) {
+        getBucket(bucket);
+        String prefix = "dacl:" + bucket + ":";
+        return aclStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public StoredAcl upsertDefaultAcl(String bucket, String entity, String role) {
+        getBucket(bucket);
+        StoredAcl acl = buildAcl("storage#objectAccessControl", bucket, null, entity, role);
+        aclStore.put("dacl:" + bucket + ":" + entity, acl);
+        return acl;
+    }
+
+    public StoredAcl getDefaultAcl(String bucket, String entity) {
+        return aclStore.get("dacl:" + bucket + ":" + entity)
+                .orElseThrow(() -> GcpException.notFound("Default ACL not found: " + entity));
+    }
+
+    public void deleteDefaultAcl(String bucket, String entity) {
+        aclStore.delete("dacl:" + bucket + ":" + entity);
+    }
+
+    private static StoredAcl buildAcl(String kind, String bucket, String objectName,
+            String entity, String role) {
+        StoredAcl acl = new StoredAcl();
+        acl.setKind(kind);
+        acl.setBucket(bucket);
+        acl.setObject(objectName);
+        acl.setEntity(entity);
+        acl.setRole(role != null ? role : "READER");
+        acl.setEtag("CAE=");
+        if (entity != null && entity.startsWith("user:")) {
+            acl.setEmail(entity.substring("user:".length()));
+        }
+        acl.setId(bucket + (objectName != null ? "/" + objectName : "") + "/" + entity);
+        return acl;
     }
 
     public String startResumableUpload(String bucket, String objectName, String contentType) {

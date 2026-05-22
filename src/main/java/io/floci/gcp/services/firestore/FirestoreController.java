@@ -4,6 +4,7 @@ import com.google.firestore.v1.*;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
+import com.google.rpc.Status;
 import io.floci.gcp.core.common.GcpGrpcController;
 import io.floci.gcp.services.firestore.model.StoredDocument;
 import io.floci.gcp.services.firestore.model.StoredValue;
@@ -214,8 +215,15 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void listCollectionIds(ListCollectionIdsRequest request,
             StreamObserver<ListCollectionIdsResponse> responseObserver) {
         LOG.debugf("listCollectionIds parent=%s", request.getParent());
-        responseObserver.onNext(ListCollectionIdsResponse.getDefaultInstance());
-        responseObserver.onCompleted();
+        try {
+            List<String> ids = service.listCollectionIds(request.getParent());
+            responseObserver.onNext(ListCollectionIdsResponse.newBuilder()
+                    .addAllCollectionIds(ids).build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("listCollectionIds failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     @Override
@@ -245,10 +253,29 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void runAggregationQuery(RunAggregationQueryRequest request,
             StreamObserver<RunAggregationQueryResponse> responseObserver) {
         LOG.debugf("runAggregationQuery parent=%s", request.getParent());
-        responseObserver.onNext(RunAggregationQueryResponse.newBuilder()
-                .setReadTime(toTimestamp(Instant.now().toString()))
-                .build());
-        responseObserver.onCompleted();
+        try {
+            Instant readTime = Instant.now();
+            AggregationResult.Builder agg = AggregationResult.newBuilder();
+            if (request.hasStructuredAggregationQuery()) {
+                StructuredAggregationQuery saq = request.getStructuredAggregationQuery();
+                long count = service.countDocuments(request.getParent(),
+                        saq.hasStructuredQuery() ? saq.getStructuredQuery()
+                                : com.google.firestore.v1.StructuredQuery.getDefaultInstance());
+                for (StructuredAggregationQuery.Aggregation aggregation : saq.getAggregationsList()) {
+                    String alias = aggregation.getAlias().isEmpty() ? "field_1" : aggregation.getAlias();
+                    agg.putAggregateFields(alias,
+                            Value.newBuilder().setIntegerValue(count).build());
+                }
+            }
+            responseObserver.onNext(RunAggregationQueryResponse.newBuilder()
+                    .setResult(agg.build())
+                    .setReadTime(toTimestamp(readTime.toString()))
+                    .build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("runAggregationQuery failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     @Override
@@ -261,8 +288,27 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     @Override
     public StreamObserver<WriteRequest> write(StreamObserver<WriteResponse> responseObserver) {
         return new StreamObserver<>() {
-            public void onNext(WriteRequest req) {}
-            public void onError(Throwable t) {}
+            public void onNext(WriteRequest req) {
+                try {
+                    Instant now = Instant.now();
+                    WriteResponse.Builder resp = WriteResponse.newBuilder()
+                            .setStreamId(req.getStreamId())
+                            .setCommitTime(toTimestamp(now.toString()));
+                    for (Write w : req.getWritesList()) {
+                        FirestoreService.WriteCommitResult r = service.applyWrite(w, now);
+                        WriteResult.Builder wr = WriteResult.newBuilder();
+                        if (r.updateTime() != null) {
+                            wr.setUpdateTime(toTimestamp(r.updateTime()));
+                        }
+                        resp.addWriteResults(wr.build());
+                    }
+                    responseObserver.onNext(resp.build());
+                } catch (Exception e) {
+                    LOG.warnf("write stream error: %s", e.getMessage());
+                    responseObserver.onError(GcpGrpcController.grpcException(e));
+                }
+            }
+            public void onError(Throwable t) { LOG.debugf("write stream closed by client: %s", t.getMessage()); }
             public void onCompleted() { responseObserver.onCompleted(); }
         };
     }
@@ -270,9 +316,61 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     @Override
     public StreamObserver<ListenRequest> listen(StreamObserver<ListenResponse> responseObserver) {
         return new StreamObserver<>() {
-            public void onNext(ListenRequest req) {}
-            public void onError(Throwable t) {}
-            public void onCompleted() { responseObserver.onCompleted(); }
+            private volatile boolean initialized = false;
+
+            public void onNext(ListenRequest req) {
+                try {
+                    if (req.hasAddTarget() && !initialized) {
+                        initialized = true;
+                        Target target = req.getAddTarget();
+                        int targetId = target.getTargetId();
+                        Instant now = Instant.now();
+                        Timestamp readTime = toTimestamp(now.toString());
+
+                        responseObserver.onNext(ListenResponse.newBuilder()
+                                .setTargetChange(TargetChange.newBuilder()
+                                        .setTargetChangeType(TargetChange.TargetChangeType.ADD)
+                                        .addTargetIds(targetId)
+                                        .setReadTime(readTime)
+                                        .build())
+                                .build());
+
+                        if (target.hasQuery()) {
+                            Target.QueryTarget qt = target.getQuery();
+                            List<StoredDocument> docs = service.runQuery(qt.getParent(),
+                                    qt.hasStructuredQuery() ? qt.getStructuredQuery()
+                                            : StructuredQuery.getDefaultInstance());
+                            for (StoredDocument doc : docs) {
+                                responseObserver.onNext(ListenResponse.newBuilder()
+                                        .setDocumentChange(DocumentChange.newBuilder()
+                                                .setDocument(toProto(doc))
+                                                .addTargetIds(targetId)
+                                                .build())
+                                        .build());
+                            }
+                        }
+
+                        responseObserver.onNext(ListenResponse.newBuilder()
+                                .setTargetChange(TargetChange.newBuilder()
+                                        .setTargetChangeType(TargetChange.TargetChangeType.CURRENT)
+                                        .addTargetIds(targetId)
+                                        .setReadTime(readTime)
+                                        .build())
+                                .build());
+                    }
+                } catch (Exception e) {
+                    LOG.warnf("listen error: %s", e.getMessage());
+                    responseObserver.onError(GcpGrpcController.grpcException(e));
+                }
+            }
+
+            public void onError(Throwable t) {
+                LOG.debugf("listen stream closed by client: %s", t.getMessage());
+            }
+
+            public void onCompleted() {
+                responseObserver.onCompleted();
+            }
         };
     }
 

@@ -59,6 +59,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(500, "INTERNAL", Status.Code.INTERNAL, message);
     }
 
+    public static GcpException conditionNotMet(String message) {
+        return new GcpException(412, "CONDITION_NOT_MET", Status.Code.FAILED_PRECONDITION, message);
+    }
+
     public static GcpException unimplemented(String message) {
         return new GcpException(501, "UNIMPLEMENTED", Status.Code.UNIMPLEMENTED, message);
     }

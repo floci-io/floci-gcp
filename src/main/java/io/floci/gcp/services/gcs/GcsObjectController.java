@@ -2,7 +2,9 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.StoredAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -32,23 +34,85 @@ public class GcsObjectController {
     }
 
     @GET
-    public Response listObjects(@PathParam("bucket") String bucket) {
-        List<GcsObjectMeta> items = service.listObjects(bucket);
+    public Response listObjects(@PathParam("bucket") String bucket,
+            @QueryParam("maxResults") @DefaultValue("0") int maxResults,
+            @QueryParam("pageToken") String pageToken,
+            @QueryParam("prefix") String prefix,
+            @QueryParam("delimiter") String delimiter) {
+        List<GcsObjectMeta> all = service.listObjects(bucket);
+        if (prefix != null && !prefix.isBlank()) {
+            all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
+        }
+        PageToken.Page<GcsObjectMeta> page = PageToken.paginate(all, maxResults, pageToken);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#objects");
-        if (!items.isEmpty()) {
-            response.put("items", items);
+        if (!page.items().isEmpty()) {
+            response.put("items", page.items());
+        }
+        if (page.nextPageToken() != null) {
+            response.put("nextPageToken", page.nextPageToken());
         }
         return Response.ok(response).build();
     }
 
     @GET
+    @Path("/{object: .+}/acl")
+    public Response listObjectAcls(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath) {
+        String objectName = decode(objectPath);
+        List<StoredAcl> items = service.listObjectAcls(bucket, objectName);
+        return Response.ok(Map.of("kind", "storage#objectAccessControls", "items", items)).build();
+    }
+
+    @POST
+    @Path("/{object: .+}/acl")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response insertObjectAcl(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath, Map<String, Object> body) {
+        String objectName = decode(objectPath);
+        String entity = body != null ? (String) body.get("entity") : null;
+        String role = body != null ? (String) body.get("role") : "READER";
+        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, entity, role);
+        return Response.ok(acl).build();
+    }
+
+    @GET
+    @Path("/{object: .+}/acl/{entity}")
+    public Response getObjectAcl(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath,
+            @PathParam("entity") String entity) {
+        String objectName = decode(objectPath);
+        return Response.ok(service.getObjectAcl(bucket, objectName, decode(entity))).build();
+    }
+
+    @PUT
+    @Path("/{object: .+}/acl/{entity}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response updateObjectAcl(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath,
+            @PathParam("entity") String entity, Map<String, Object> body) {
+        String objectName = decode(objectPath);
+        String role = body != null ? (String) body.get("role") : "READER";
+        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, decode(entity), role);
+        return Response.ok(acl).build();
+    }
+
+    @DELETE
+    @Path("/{object: .+}/acl/{entity}")
+    public Response deleteObjectAcl(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath,
+            @PathParam("entity") String entity) {
+        String objectName = decode(objectPath);
+        service.deleteObjectAcl(bucket, objectName, decode(entity));
+        return Response.noContent().build();
+    }
+
+    @GET
     @Path("/{object: .+}")
-    public Response getObject(
-            @PathParam("bucket") String bucket,
+    public Response getObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @QueryParam("alt") String alt) {
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        String objectName = decode(objectPath);
         if ("media".equals(alt)) {
             byte[] data = service.getObjectData(bucket, objectName);
             GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
@@ -57,12 +121,20 @@ public class GcsObjectController {
         return Response.ok(service.getObjectMeta(bucket, objectName)).build();
     }
 
+    @PATCH
+    @Path("/{object: .+}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response patchObject(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath, Map<String, Object> body) {
+        String objectName = decode(objectPath);
+        return Response.ok(service.patchObject(bucket, objectName, body)).build();
+    }
+
     @DELETE
     @Path("/{object: .+}")
-    public Response deleteObject(
-            @PathParam("bucket") String bucket,
+    public Response deleteObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath) {
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        String objectName = decode(objectPath);
         if (!service.deleteObject(bucket, objectName)) {
             throw GcpException.notFound("Object not found: " + objectName);
         }
@@ -70,30 +142,51 @@ public class GcsObjectController {
     }
 
     @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("/{destObject: .+?}:compose")
+    public Response composeObject(@PathParam("bucket") String bucket,
+            @PathParam("destObject") String destObjectPath,
+            @Context HttpHeaders headers, Map<String, Object> body) {
+        String destObject = decode(destObjectPath);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> sourceObjects = body != null
+                ? (List<Map<String, Object>>) body.get("sourceObjects") : List.of();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> destReq = body != null
+                ? (Map<String, Object>) body.get("destination") : Map.of();
+        String contentType = destReq != null ? (String) destReq.get("contentType") : null;
+        List<String> sourceNames = sourceObjects == null ? List.of()
+                : sourceObjects.stream().map(s -> (String) s.get("name")).toList();
+        GcsObjectMeta meta = service.composeObject(bucket, destObject, sourceNames, contentType,
+                requestBaseUrl(headers));
+        return Response.ok(meta).build();
+    }
+
+    @POST
     @Path("/{srcObject: .+}/copyTo/b/{dstBucket}/o/{dstObject: .+}")
-    public Response copyObject(
-            @PathParam("bucket") String srcBucket,
+    public Response copyObject(@PathParam("bucket") String srcBucket,
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = URLDecoder.decode(srcObjectPath, StandardCharsets.UTF_8);
-        String dstObject = URLDecoder.decode(dstObjectPath, StandardCharsets.UTF_8);
-        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject, requestBaseUrl(headers));
+        String srcObject = decode(srcObjectPath);
+        String dstObject = decode(dstObjectPath);
+        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
+                requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 
     @POST
     @Path("/{srcObject: .+}/rewriteTo/b/{dstBucket}/o/{dstObject: .+}")
-    public Response rewriteObject(
-            @PathParam("bucket") String srcBucket,
+    public Response rewriteObject(@PathParam("bucket") String srcBucket,
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = URLDecoder.decode(srcObjectPath, StandardCharsets.UTF_8);
-        String dstObject = URLDecoder.decode(dstObjectPath, StandardCharsets.UTF_8);
-        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject, requestBaseUrl(headers));
+        String srcObject = decode(srcObjectPath);
+        String dstObject = decode(dstObjectPath);
+        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
+                requestBaseUrl(headers));
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#rewriteResponse");
         response.put("totalBytesRewritten", meta.getSize());
@@ -101,6 +194,10 @@ public class GcsObjectController {
         response.put("done", true);
         response.put("resource", meta);
         return Response.ok(response).build();
+    }
+
+    private static String decode(String s) {
+        return URLDecoder.decode(s, StandardCharsets.UTF_8);
     }
 
     private String requestBaseUrl(HttpHeaders headers) {

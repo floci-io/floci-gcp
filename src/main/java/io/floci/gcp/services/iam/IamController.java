@@ -1,7 +1,9 @@
 package io.floci.gcp.services.iam;
 
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
+import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -27,7 +29,7 @@ public class IamController {
     private static final Logger LOG = Logger.getLogger(IamController.class);
 
     private static final List<String> CUSTOM_METHODS =
-            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions");
+            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob");
 
     @Inject
     IamService service;
@@ -46,12 +48,22 @@ public class IamController {
             return createServiceAccount(p.project(), body);
         }
 
+        if ("serviceAccounts".equals(p.resourceType()) && p.identifier() != null) {
+            KeySubPath ksp = parseKeySubPath(p.identifier());
+            if (ksp.isKeyList()) {
+                StoredServiceAccountKey key = service.createKey(p.project(), ksp.email());
+                return Response.ok(key).build();
+            }
+        }
+
         return Response.status(Response.Status.NOT_FOUND).build();
     }
 
     @GET
     @Path("/{rest:.*}")
-    public Response get(@PathParam("rest") String rest) {
+    public Response get(@PathParam("rest") String rest,
+            @QueryParam("pageSize") @DefaultValue("0") int pageSize,
+            @QueryParam("pageToken") String pageToken) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM GET %s project=%s id=%s", rest, p.project(), p.identifier());
 
@@ -60,8 +72,29 @@ public class IamController {
         }
 
         if (p.identifier() == null) {
-            List<StoredServiceAccount> accounts = service.listServiceAccounts(p.project());
-            return Response.ok(Map.of("accounts", accounts)).build();
+            List<StoredServiceAccount> all = service.listServiceAccounts(p.project());
+            PageToken.Page<StoredServiceAccount> page = PageToken.paginate(all, pageSize, pageToken);
+            Map<String, Object> resp = new java.util.LinkedHashMap<>();
+            resp.put("accounts", page.items());
+            if (page.nextPageToken() != null) {
+                resp.put("nextPageToken", page.nextPageToken());
+            }
+            return Response.ok(resp).build();
+        }
+
+        KeySubPath ksp = parseKeySubPath(p.identifier());
+        if (ksp.isKeyList()) {
+            List<StoredServiceAccountKey> all = service.listKeys(p.project(), ksp.email());
+            PageToken.Page<StoredServiceAccountKey> page = PageToken.paginate(all, pageSize, pageToken);
+            Map<String, Object> resp = new java.util.LinkedHashMap<>();
+            resp.put("keys", page.items());
+            if (page.nextPageToken() != null) {
+                resp.put("nextPageToken", page.nextPageToken());
+            }
+            return Response.ok(resp).build();
+        }
+        if (ksp.keyId() != null) {
+            return Response.ok(service.getKey(p.project(), ksp.email(), ksp.keyId())).build();
         }
 
         return Response.ok(service.getServiceAccount(p.project(), p.identifier())).build();
@@ -75,6 +108,12 @@ public class IamController {
 
         if (!"serviceAccounts".equals(p.resourceType()) || p.identifier() == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        KeySubPath ksp = parseKeySubPath(p.identifier());
+        if (ksp.keyId() != null) {
+            service.deleteKey(p.project(), ksp.email(), ksp.keyId());
+            return Response.ok(Map.of()).build();
         }
 
         service.deleteServiceAccount(p.project(), p.identifier());
@@ -100,6 +139,16 @@ public class IamController {
                 List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
                 List<String> granted = service.testPermissions(requested != null ? requested : List.of());
                 yield Response.ok(Map.of("permissions", granted)).build();
+            }
+            case "signBlob" -> {
+                String bytesToSign = body != null ? (String) body.get("bytesToSign") : null;
+                if (bytesToSign == null || bytesToSign.isBlank()) {
+                    yield Response.status(Response.Status.BAD_REQUEST)
+                            .entity(Map.of("error", Map.of("code", 400, "message", "bytesToSign is required", "status", "INVALID_ARGUMENT")))
+                            .build();
+                }
+                Map<String, String> result = service.signBlob(p.project(), p.identifier(), bytesToSign);
+                yield Response.ok(result).build();
             }
             default -> Response.status(Response.Status.NOT_FOUND).build();
         };
@@ -158,5 +207,21 @@ public class IamController {
         return new IamPath(project, resourceType, identifier, customMethod);
     }
 
+    private static KeySubPath parseKeySubPath(String identifier) {
+        int keysIdx = identifier.indexOf("/keys");
+        if (keysIdx < 0) {
+            return new KeySubPath(identifier, false, null);
+        }
+        String email = identifier.substring(0, keysIdx);
+        String after = identifier.substring(keysIdx + "/keys".length());
+        if (after.isEmpty() || after.equals("/")) {
+            return new KeySubPath(email, true, null);
+        }
+        String keyId = after.startsWith("/") ? after.substring(1) : after;
+        return new KeySubPath(email, false, keyId);
+    }
+
     private record IamPath(String project, String resourceType, String identifier, String customMethod) {}
+
+    private record KeySubPath(String email, boolean isKeyList, String keyId) {}
 }

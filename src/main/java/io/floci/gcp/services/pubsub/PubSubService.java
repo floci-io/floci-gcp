@@ -14,6 +14,7 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.pubsub.model.StoredMessage;
+import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
 import io.quarkus.runtime.StartupEvent;
@@ -38,6 +39,7 @@ public class PubSubService {
 
     private final StorageBackend<String, StoredTopic> topicStore;
     private final StorageBackend<String, StoredSubscription> subStore;
+    private final StorageBackend<String, StoredSnapshot> snapshotStore;
 
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<StoredMessage>> queues = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, StoredMessage>> delivered = new ConcurrentHashMap<>();
@@ -57,6 +59,8 @@ public class PubSubService {
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.subStore = storageFactory.createGlobal("pubsub-subs", "pubsub-subs.json",
                 new TypeReference<Map<String, StoredSubscription>>() {});
+        this.snapshotStore = storageFactory.createGlobal("pubsub-snapshots", "pubsub-snapshots.json",
+                new TypeReference<Map<String, StoredSnapshot>>() {});
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -95,6 +99,26 @@ public class PubSubService {
         List<StoredTopic> topics = topicStore.scan(k -> k.startsWith(prefix));
         LOG.debugf("listTopics project=%s count=%d", project, topics.size());
         return topics;
+    }
+
+    public StoredTopic updateTopic(String name, com.google.pubsub.v1.Topic topicProto,
+            com.google.protobuf.FieldMask updateMask) {
+        LOG.infof("updateTopic name=%s", name);
+        StoredTopic stored = getTopic(name);
+        for (String path : updateMask.getPathsList()) {
+            switch (path) {
+                case "labels" -> stored.setLabels(topicProto.getLabelsMap().isEmpty() ? null
+                        : new java.util.HashMap<>(topicProto.getLabelsMap()));
+                case "message_retention_duration" -> {
+                    if (topicProto.hasMessageRetentionDuration()) {
+                        stored.setMessageRetentionDuration(
+                                topicProto.getMessageRetentionDuration().getSeconds() + "s");
+                    }
+                }
+            }
+        }
+        topicStore.put(name, stored);
+        return stored;
     }
 
     public void deleteTopic(String name) {
@@ -138,6 +162,43 @@ public class PubSubService {
         List<StoredSubscription> subs = subStore.scan(k -> k.startsWith(prefix));
         LOG.debugf("listSubscriptions project=%s count=%d", project, subs.size());
         return subs;
+    }
+
+    public StoredSubscription updateSubscription(com.google.pubsub.v1.Subscription subProto,
+            com.google.protobuf.FieldMask updateMask) {
+        LOG.infof("updateSubscription name=%s", subProto.getName());
+        StoredSubscription stored = getSubscription(subProto.getName());
+        for (String path : updateMask.getPathsList()) {
+            switch (path) {
+                case "ack_deadline_seconds" -> stored.setAckDeadlineSeconds(subProto.getAckDeadlineSeconds());
+                case "filter" -> stored.setFilter(subProto.getFilter().isEmpty() ? null : subProto.getFilter());
+                case "retain_acked_messages" -> stored.setRetainAckedMessages(subProto.getRetainAckedMessages());
+                case "message_retention_duration" -> {
+                    if (subProto.hasMessageRetentionDuration()) {
+                        stored.setMessageRetentionDuration(
+                                subProto.getMessageRetentionDuration().getSeconds() + "s");
+                    }
+                }
+                case "push_config" -> stored.setPushEndpoint(
+                        subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
+                                : subProto.getPushConfig().getPushEndpoint());
+                case "dead_letter_policy" -> {
+                    if (subProto.hasDeadLetterPolicy()) {
+                        stored.setDeadLetterTopic(subProto.getDeadLetterPolicy().getDeadLetterTopic());
+                        stored.setMaxDeliveryAttempts(subProto.getDeadLetterPolicy().getMaxDeliveryAttempts());
+                    }
+                }
+            }
+        }
+        subStore.put(subProto.getName(), stored);
+        return stored;
+    }
+
+    public void modifyPushConfig(String subName, com.google.pubsub.v1.PushConfig pushConfig) {
+        LOG.infof("modifyPushConfig subscription=%s", subName);
+        StoredSubscription stored = getSubscription(subName);
+        stored.setPushEndpoint(pushConfig.getPushEndpoint().isEmpty() ? null : pushConfig.getPushEndpoint());
+        subStore.put(subName, stored);
     }
 
     public void deleteSubscription(String name) {
@@ -251,6 +312,70 @@ public class PubSubService {
         }
         for (String ackId : ackIds) {
             deliveredMap.remove(ackId);
+        }
+    }
+
+    // ── Snapshots ──────────────────────────────────────────────────────────────
+
+    public StoredSnapshot createSnapshot(String snapshotName, String subscriptionName,
+            Map<String, String> labels) {
+        LOG.infof("createSnapshot name=%s subscription=%s", snapshotName, subscriptionName);
+        if (snapshotStore.get(snapshotName).isPresent()) {
+            throw GcpException.alreadyExists("Snapshot already exists: " + snapshotName);
+        }
+        StoredSubscription sub = getSubscription(subscriptionName);
+        String expireTime = Instant.now().plus(7, java.time.temporal.ChronoUnit.DAYS).toString();
+        StoredSnapshot snapshot = new StoredSnapshot(snapshotName, sub.getTopic(), expireTime);
+        if (labels != null && !labels.isEmpty()) {
+            snapshot.setLabels(labels);
+        }
+        snapshotStore.put(snapshotName, snapshot);
+        return snapshot;
+    }
+
+    public StoredSnapshot getSnapshot(String snapshotName) {
+        LOG.debugf("getSnapshot name=%s", snapshotName);
+        return snapshotStore.get(snapshotName)
+                .orElseThrow(() -> GcpException.notFound("Snapshot not found: " + snapshotName));
+    }
+
+    public List<StoredSnapshot> listSnapshots(String project) {
+        LOG.debugf("listSnapshots project=%s", project);
+        String prefix = "projects/" + project + "/snapshots/";
+        return snapshotStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public StoredSnapshot updateSnapshot(String snapshotName, Map<String, String> labels,
+            String expireTime, List<String> updateMaskPaths) {
+        LOG.infof("updateSnapshot name=%s", snapshotName);
+        StoredSnapshot stored = getSnapshot(snapshotName);
+        for (String path : updateMaskPaths) {
+            switch (path) {
+                case "labels" -> stored.setLabels(labels);
+                case "expire_time" -> { if (expireTime != null) stored.setExpireTime(expireTime); }
+            }
+        }
+        snapshotStore.put(snapshotName, stored);
+        return stored;
+    }
+
+    public void deleteSnapshot(String snapshotName) {
+        LOG.infof("deleteSnapshot name=%s", snapshotName);
+        snapshotStore.get(snapshotName)
+                .orElseThrow(() -> GcpException.notFound("Snapshot not found: " + snapshotName));
+        snapshotStore.delete(snapshotName);
+    }
+
+    public void seek(String subscriptionName, String snapshotName) {
+        LOG.infof("seek subscription=%s snapshot=%s", subscriptionName, snapshotName);
+        getSubscription(subscriptionName);
+        if (snapshotName != null) {
+            getSnapshot(snapshotName);
+        }
+        // Minimal: clear delivered to simulate seeking back to snapshot position
+        ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subscriptionName);
+        if (deliveredMap != null) {
+            deliveredMap.clear();
         }
     }
 

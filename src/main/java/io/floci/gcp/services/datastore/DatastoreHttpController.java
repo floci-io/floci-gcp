@@ -2,6 +2,7 @@ package io.floci.gcp.services.datastore;
 
 import com.google.datastore.v1.*;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.GqlParser;
 import io.floci.gcp.services.datastore.model.StoredEntity;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -52,6 +53,7 @@ public class DatastoreHttpController {
                 case "lookup" -> handleLookup(projectId, body);
                 case "commit" -> handleCommit(projectId, body);
                 case "runQuery" -> handleRunQuery(projectId, body);
+                case "runAggregationQuery" -> handleRunAggregationQuery(projectId, body);
                 case "beginTransaction" -> handleBeginTransaction(projectId, body);
                 case "rollback" -> handleRollback(projectId, body);
                 case "allocateIds" -> handleAllocateIds(projectId, body);
@@ -109,8 +111,15 @@ public class DatastoreHttpController {
     private byte[] handleRunQuery(String projectId, byte[] body) throws Exception {
         RunQueryRequest request = RunQueryRequest.parseFrom(body);
         Instant readTime = Instant.now();
-        List<StoredEntity> results =
-                service.runQuery(projectId, request.getPartitionId(), request.getQuery());
+
+        Query query;
+        if (request.hasGqlQuery()) {
+            query = GqlParser.toStructuredQuery(request.getGqlQuery());
+        } else {
+            query = request.getQuery();
+        }
+
+        List<StoredEntity> results = service.runQuery(projectId, request.getPartitionId(), query);
 
         QueryResultBatch.Builder batch = QueryResultBatch.newBuilder()
                 .setEntityResultType(EntityResult.ResultType.FULL)
@@ -124,6 +133,29 @@ public class DatastoreHttpController {
                     .build());
         }
         return RunQueryResponse.newBuilder().setBatch(batch.build()).build().toByteArray();
+    }
+
+    private byte[] handleRunAggregationQuery(String projectId, byte[] body) throws Exception {
+        RunAggregationQueryRequest request = RunAggregationQueryRequest.parseFrom(body);
+        Instant readTime = Instant.now();
+        List<StoredEntity> results = service.runQuery(
+                projectId,
+                request.getPartitionId(),
+                request.getAggregationQuery().getNestedQuery());
+
+        AggregationResultBatch.Builder batch = AggregationResultBatch.newBuilder()
+                .setMoreResults(QueryResultBatch.MoreResultsType.NO_MORE_RESULTS)
+                .setReadTime(DatastoreService.toTimestamp(readTime.toString()));
+
+        AggregationResult.Builder agg = AggregationResult.newBuilder();
+        for (AggregationQuery.Aggregation aggregation : request.getAggregationQuery().getAggregationsList()) {
+            String alias = aggregation.getAlias().isEmpty() ? "property_1" : aggregation.getAlias();
+            agg.putAggregateProperties(alias,
+                    Value.newBuilder().setIntegerValue(results.size()).build());
+        }
+        batch.addAggregationResults(agg.build());
+
+        return RunAggregationQueryResponse.newBuilder().setBatch(batch.build()).build().toByteArray();
     }
 
     private byte[] handleBeginTransaction(String projectId, byte[] body) throws Exception {

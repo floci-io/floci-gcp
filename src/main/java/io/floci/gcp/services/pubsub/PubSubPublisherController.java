@@ -1,8 +1,10 @@
 package io.floci.gcp.services.pubsub;
 
 import com.google.protobuf.Empty;
+import com.google.protobuf.FieldMask;
 import com.google.pubsub.v1.*;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
 import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
@@ -50,10 +52,15 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
         LOG.debugf("listTopics project=%s", request.getProject());
         try {
             String project = extractProjectId(request.getProject());
-            List<StoredTopic> topics = service.listTopics(project);
+            List<StoredTopic> all = service.listTopics(project);
+            PageToken.Page<StoredTopic> page = PageToken.paginate(all,
+                    request.getPageSize(), request.getPageToken());
             ListTopicsResponse.Builder response = ListTopicsResponse.newBuilder();
-            for (StoredTopic t : topics) {
+            for (StoredTopic t : page.items()) {
                 response.addTopics(Topic.newBuilder().setName(t.getName()).build());
+            }
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
             }
             responseObserver.onNext(response.build());
             responseObserver.onCompleted();
@@ -85,6 +92,21 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("publish failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
+    @Override
+    public void updateTopic(UpdateTopicRequest request, StreamObserver<Topic> responseObserver) {
+        LOG.infof("updateTopic name=%s", request.getTopic().getName());
+        try {
+            FieldMask mask = request.hasUpdateMask() ? request.getUpdateMask() : FieldMask.getDefaultInstance();
+            io.floci.gcp.services.pubsub.model.StoredTopic stored =
+                    service.updateTopic(request.getTopic().getName(), request.getTopic(), mask);
+            responseObserver.onNext(Topic.newBuilder().setName(stored.getName()).build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("updateTopic failed: %s", e.getMessage());
             GcpGrpcController.grpcError(responseObserver, e);
         }
     }

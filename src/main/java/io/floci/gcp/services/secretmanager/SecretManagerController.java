@@ -6,6 +6,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import io.grpc.stub.StreamObserver;
@@ -57,10 +58,15 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
         LOG.debugf("listSecrets parent=%s", request.getParent());
         try {
             String project = extractProject(request.getParent());
-            List<StoredSecret> secrets = service.listSecrets(project);
+            List<StoredSecret> all = service.listSecrets(project);
+            PageToken.Page<StoredSecret> page = PageToken.paginate(all,
+                    request.getPageSize(), request.getPageToken());
             ListSecretsResponse.Builder response = ListSecretsResponse.newBuilder();
-            for (StoredSecret s : secrets) {
+            for (StoredSecret s : page.items()) {
                 response.addSecrets(toProto(s));
+            }
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
             }
             responseObserver.onNext(response.build());
             responseObserver.onCompleted();
@@ -129,10 +135,15 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<ListSecretVersionsResponse> responseObserver) {
         LOG.debugf("listSecretVersions parent=%s", request.getParent());
         try {
-            List<StoredSecretVersion> versions = service.listSecretVersions(request.getParent());
+            List<StoredSecretVersion> all = service.listSecretVersions(request.getParent());
+            PageToken.Page<StoredSecretVersion> page = PageToken.paginate(all,
+                    request.getPageSize(), request.getPageToken());
             ListSecretVersionsResponse.Builder response = ListSecretVersionsResponse.newBuilder();
-            for (StoredSecretVersion v : versions) {
+            for (StoredSecretVersion v : page.items()) {
                 response.addVersions(toVersionProto(v));
+            }
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
             }
             responseObserver.onNext(response.build());
             responseObserver.onCompleted();

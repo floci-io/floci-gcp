@@ -35,17 +35,6 @@ VOLUME /app/data
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chown=1001:root target/quarkus-app quarkus-app/
 
-LABEL org.opencontainers.image.title="floci-gcp" \
-      org.opencontainers.image.description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="Floci" \
-      io.k8s.description="Local GCP emulator" \
-      io.k8s.display-name="floci-gcp" \
-      io.openshift.expose-services="4578:tcp" \
-      io.openshift.tags="floci-gcp gcp-emulator" \
-      name="floci/floci-gcp" \
-      summary="Local GCP emulator — open-source alternative to GCP-provided emulators"
-
 EXPOSE 4588
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \

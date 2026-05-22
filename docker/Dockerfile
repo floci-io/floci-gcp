@@ -47,10 +47,27 @@ COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 VOLUME /app/data
 
-EXPOSE 4578
+LABEL org.opencontainers.image.title="floci-gcp" \
+      org.opencontainers.image.description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
+      org.opencontainers.image.url="https://floci.io" \
+      org.opencontainers.image.source="https://github.com/hectorvent/floci-gcp" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Floci" \
+      description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
+      io.k8s.description="Local GCP emulator" \
+      io.k8s.display-name="floci-gcp" \
+      io.openshift.expose-services="4588:tcp" \
+      io.openshift.tags="floci-gcp gcp-emulator" \
+      maintainer="Floci <https://github.com/hectorvent/floci-gcp>" \
+      name="floci/floci-gcp" \
+      summary="Local GCP emulator — open-source alternative to GCP-provided emulators" \
+      url="https://floci.io" \
+      vendor="Floci"
+
+EXPOSE 4588
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD wget -q --spider http://localhost:4578/_floci-gcp/health || exit 1
+    CMD wget -q --spider http://localhost:4588/_floci-gcp/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar"]
+CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar", "-Dquarkus.http.host=0.0.0.0"]

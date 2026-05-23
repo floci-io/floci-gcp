@@ -1,5 +1,5 @@
 *
-!bin/awslocal
+!bin/gcplocal
 !docker/entrypoint.sh
 !docker/localstack-parity.sh
 !pom.xml

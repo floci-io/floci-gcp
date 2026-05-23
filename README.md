@@ -592,7 +592,7 @@ services:
 
 ## Contributors
 
-<a href="https://github.com/hectorvent/floci-gcp/graphs/contributors">
+<a href="https://github.com/floci-io/floci-gcp/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=hectorvent/floci-gcp" />
 </a>
 

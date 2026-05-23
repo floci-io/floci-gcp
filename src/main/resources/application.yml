@@ -22,6 +22,7 @@ quarkus:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
       - --enable-url-protocols=http,https
+      - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
 
 floci-gcp:
   port: 4588

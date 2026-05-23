@@ -2,7 +2,7 @@ services:
   floci-gcp:
     build:
       context: .
-      dockerfile: docker/Dockerfile.jvm-package
+      dockerfile: docker/Dockerfile.native
     tty: true
     ports:
       - "4588:4588"

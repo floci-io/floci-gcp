@@ -7,13 +7,14 @@ LABEL org.opencontainers.image.title="floci-gcp (compat)" \
       org.opencontainers.image.vendor="Floci"
 
 USER root
-RUN microdnf install -y --nodocs python3 python3-pip \
-    && pip3 install --no-cache-dir \
+RUN microdnf install -y --nodocs python3.11 python3.11-pip \
+    && python3.11 -m pip install --upgrade pip \
+    && python3.11 -m pip install --no-cache-dir \
          google-cloud-pubsub \
          google-cloud-storage \
          google-cloud-firestore \
          google-cloud-datastore \
-         google-cloud-secretmanager \
+         google-cloud-secret-manager \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 

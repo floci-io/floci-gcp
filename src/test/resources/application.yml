@@ -16,3 +16,5 @@ floci-gcp:
     kafka:
       enabled: true
       mock: true
+    cloudtasks:
+      enabled: true

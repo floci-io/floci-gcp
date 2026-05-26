@@ -53,6 +53,8 @@ floci-gcp:
       enabled: true
       mock: false
       default-image: "redpandadata/redpanda:latest"
+    cloudtasks:
+      enabled: true
   dns:
     extra-suffixes:
   docker:

@@ -85,6 +85,8 @@ public interface EmulatorConfig {
         SecretManagerServiceConfig secretmanager();
 
         KafkaServiceConfig kafka();
+
+        CloudTasksServiceConfig cloudtasks();
     }
 
     interface GcsServiceConfig {
@@ -128,6 +130,11 @@ public interface EmulatorConfig {
         String defaultImage();
 
         Optional<String> dockerNetwork();
+    }
+
+    interface CloudTasksServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface DockerConfig {

@@ -11,6 +11,8 @@ import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceSettings;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
+import com.google.cloud.tasks.v2.CloudTasksClient;
+import com.google.cloud.tasks.v2.CloudTasksSettings;
 
 import java.io.IOException;
 import java.net.URI;
@@ -103,5 +105,26 @@ public final class TestFixtures {
                 .build();
 
         return SecretManagerServiceClient.create(settings);
+    }
+
+    /**
+     * Creates a Cloud Tasks client pointing at the emulator.
+     * No standard emulator env var exists; configure explicitly via gRPC channel.
+     */
+    public static CloudTasksClient cloudTasksClient() throws IOException {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+
+        CloudTasksSettings settings = CloudTasksSettings.newBuilder()
+                .setTransportChannelProvider(
+                        InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(host + ":" + port)
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+
+        return CloudTasksClient.create(settings);
     }
 }

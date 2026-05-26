@@ -82,6 +82,12 @@
             <artifactId>grpc-google-cloud-secretmanager-v1</artifactId>
         </dependency>
 
+        <!-- Cloud Tasks gRPC stubs (CloudTasksGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-tasks-v2</artifactId>
+        </dependency>
+
         <!-- Firestore gRPC stubs (FirestoreGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>
@@ -117,6 +123,11 @@
         <dependency>
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-secretmanager</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-tasks</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

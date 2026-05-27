@@ -30,14 +30,17 @@ public class ContainerLifecycleManager {
     private final DockerClient dockerClient;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+    private final ImageCacheService imageCacheService;
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator) {
+                                     PortAllocator portAllocator,
+                                     ImageCacheService imageCacheService) {
         this.dockerClient = dockerClient;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
+        this.imageCacheService = imageCacheService;
     }
 
     public ContainerInfo createAndStart(ContainerSpec spec) {
@@ -47,6 +50,8 @@ public class ContainerLifecycleManager {
 
     public String create(ContainerSpec spec) {
         LOG.debugv("Creating container: image={0}, name={1}", spec.image(), spec.name());
+
+        imageCacheService.ensureImageExists(spec.image());
 
         HostConfig hostConfig = buildHostConfig(spec);
 

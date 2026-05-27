@@ -97,7 +97,10 @@ func TestPubSub(t *testing.T) {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 
+		var wg sync.WaitGroup
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			sub.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
 				mu.Lock()
 				received = append(received, string(m.Data))
@@ -111,6 +114,7 @@ func TestPubSub(t *testing.T) {
 		}()
 
 		<-cctx.Done()
+		wg.Wait()
 
 		mu.Lock()
 		defer mu.Unlock()

@@ -192,6 +192,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             @Override
             public void onError(Throwable t) {
                 LOG.debugf("streamingPull stream closed by client: %s", t.getMessage());
+                try {
+                    responseObserver.onCompleted();
+                } catch (Exception ignored) {}
             }
 
             @Override

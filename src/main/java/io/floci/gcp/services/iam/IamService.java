@@ -57,6 +57,16 @@ public class IamService {
                 new TypeReference<Map<String, StoredPolicy>>() {});
     }
 
+    IamService(StorageBackend<String, StoredServiceAccount> saStore,
+            StorageBackend<String, StoredServiceAccountKey> keyStore,
+            StorageBackend<String, StoredPolicy> policyStore) {
+        this.saStore = saStore;
+        this.keyStore = keyStore;
+        this.policyStore = policyStore;
+        this.serviceRegistry = null;
+        this.config = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("iam")
                 .enabled(config.services().iam().enabled())

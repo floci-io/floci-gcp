@@ -63,6 +63,17 @@ public class PubSubService {
                 new TypeReference<Map<String, StoredSnapshot>>() {});
     }
 
+    PubSubService(StorageBackend<String, StoredTopic> topicStore,
+            StorageBackend<String, StoredSubscription> subStore,
+            StorageBackend<String, StoredSnapshot> snapshotStore) {
+        this.topicStore = topicStore;
+        this.subStore = subStore;
+        this.snapshotStore = snapshotStore;
+        this.serviceRegistry = null;
+        this.config = null;
+        this.grpcServerManager = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("pubsub")
                 .enabled(config.services().pubsub().enabled())

@@ -45,17 +45,31 @@ public class GcsService {
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final String defaultProjectId;
 
     @Inject
     public GcsService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.defaultProjectId = config.defaultProjectId();
         this.bucketStore = storageFactory.createGlobal("gcs-buckets", "gcs-buckets.json",
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
+    }
+
+    GcsService(StorageBackend<String, GcsBucket> bucketStore,
+            StorageBackend<String, GcsObjectMeta> objectMetaStore,
+            StorageBackend<String, StoredAcl> aclStore,
+            String defaultProjectId) {
+        this.bucketStore = bucketStore;
+        this.objectMetaStore = objectMetaStore;
+        this.aclStore = aclStore;
+        this.defaultProjectId = defaultProjectId;
+        this.serviceRegistry = null;
+        this.config = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -81,7 +95,7 @@ public class GcsService {
         GcsBucket bucket = new GcsBucket();
         bucket.setId(name);
         bucket.setName(name);
-        bucket.setProjectId(projectId != null ? projectId : config.defaultProjectId());
+        bucket.setProjectId(projectId != null ? projectId : defaultProjectId);
         bucket.setProjectNumber("1");
         String location = body != null && body.containsKey("location")
                 ? (String) body.get("location") : "US";

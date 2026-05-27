@@ -4,6 +4,8 @@ import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
 import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.CreateSecretRequest;
 import com.google.cloud.secretmanager.v1.DeleteSecretRequest;
+import com.google.cloud.secretmanager.v1.DisableSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.EnableSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.ListSecretVersionsRequest;
 import com.google.cloud.secretmanager.v1.ProjectName;
 import com.google.cloud.secretmanager.v1.Replication;
@@ -119,6 +121,40 @@ class SecretManagerTest {
 
     @Test
     @Order(5)
+    void disableSecretVersion() {
+        SecretVersion disabled = client.disableSecretVersion(
+                DisableSecretVersionRequest.newBuilder()
+                        .setName(secretVersionName)
+                        .build());
+
+        assertThat(disabled.getState()).isEqualTo(SecretVersion.State.DISABLED);
+    }
+
+    @Test
+    @Order(6)
+    void enableSecretVersion() {
+        SecretVersion enabled = client.enableSecretVersion(
+                EnableSecretVersionRequest.newBuilder()
+                        .setName(secretVersionName)
+                        .build());
+
+        assertThat(enabled.getState()).isEqualTo(SecretVersion.State.ENABLED);
+    }
+
+    @Test
+    @Order(7)
+    void listSecrets() {
+        ProjectName projectName = ProjectName.of(PROJECT_ID);
+
+        List<String> secretNames = new ArrayList<>();
+        client.listSecrets(projectName).iterateAll()
+                .forEach(s -> secretNames.add(s.getName()));
+
+        assertThat(secretNames).anyMatch(name -> name.endsWith(SECRET_ID));
+    }
+
+    @Test
+    @Order(8)
     void deleteSecret() {
         SecretName secretName = SecretName.of(PROJECT_ID, SECRET_ID);
 
@@ -128,7 +164,6 @@ class SecretManagerTest {
 
         client.deleteSecret(request);
 
-        // Verify it no longer appears in list
         ProjectName projectName = ProjectName.of(PROJECT_ID);
         List<String> secretNames = new ArrayList<>();
         client.listSecrets(projectName).iterateAll()

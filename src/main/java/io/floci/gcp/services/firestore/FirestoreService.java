@@ -52,6 +52,13 @@ public class FirestoreService {
                 new TypeReference<Map<String, StoredDocument>>() {});
     }
 
+    FirestoreService(StorageBackend<String, StoredDocument> documentStore) {
+        this.documentStore = documentStore;
+        this.serviceRegistry = null;
+        this.config = null;
+        this.grpcServerManager = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("firestore")
                 .enabled(config.services().firestore().enabled())

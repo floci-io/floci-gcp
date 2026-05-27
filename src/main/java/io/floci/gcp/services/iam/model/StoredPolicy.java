@@ -1,9 +1,12 @@
 package io.floci.gcp.services.iam.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+@RegisterForReflection
 public class StoredPolicy {
 
     private int version = 1;

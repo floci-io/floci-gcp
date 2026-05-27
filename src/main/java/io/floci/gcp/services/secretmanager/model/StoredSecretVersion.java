@@ -1,5 +1,9 @@
 package io.floci.gcp.services.secretmanager.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
+
 public class StoredSecretVersion {
 
     private String name;

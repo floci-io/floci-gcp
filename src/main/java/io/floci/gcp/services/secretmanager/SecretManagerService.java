@@ -46,6 +46,15 @@ public class SecretManagerService {
                 new TypeReference<Map<String, StoredSecretVersion>>() {});
     }
 
+    SecretManagerService(StorageBackend<String, StoredSecret> secretStore,
+            StorageBackend<String, StoredSecretVersion> versionStore) {
+        this.secretStore = secretStore;
+        this.versionStore = versionStore;
+        this.serviceRegistry = null;
+        this.config = null;
+        this.grpcServerManager = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("secretmanager")
                 .enabled(config.services().secretmanager().enabled())

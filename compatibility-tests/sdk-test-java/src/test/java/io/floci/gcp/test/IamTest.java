@@ -23,6 +23,7 @@ class IamTest {
     private static final ObjectMapper json = new ObjectMapper();
 
     private static String email;
+    private static String createdKeyId;
 
     @BeforeAll
     static void init() {
@@ -74,6 +75,48 @@ class IamTest {
 
     @Test
     @Order(4)
+    void createServiceAccountKey() throws Exception {
+        JsonNode resp = post(
+                "/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email + "/keys", "{}");
+
+        assertThat(resp.path("name").asText()).contains(email);
+        assertThat(resp.path("keyId").asText()).isNotBlank();
+        createdKeyId = resp.path("keyId").asText();
+    }
+
+    @Test
+    @Order(5)
+    void listServiceAccountKeys() throws Exception {
+        JsonNode resp = get("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email + "/keys");
+
+        assertThat(resp.path("keys").isArray()).isTrue();
+        assertThat(resp.path("keys").size()).isGreaterThanOrEqualTo(1);
+
+        boolean found = false;
+        for (JsonNode key : resp.path("keys")) {
+            if (createdKeyId != null && createdKeyId.equals(key.path("keyId").asText())) {
+                found = true;
+                break;
+            }
+        }
+        assertThat(found).isTrue();
+    }
+
+    @Test
+    @Order(6)
+    void deleteServiceAccountKey() throws Exception {
+        if (createdKeyId != null) {
+            delete("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email + "/keys/" + createdKeyId);
+
+            JsonNode resp = get("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email + "/keys");
+            for (JsonNode key : resp.path("keys")) {
+                assertThat(key.path("keyId").asText()).isNotEqualTo(createdKeyId);
+            }
+        }
+    }
+
+    @Test
+    @Order(7)
     void getIamPolicy() throws Exception {
         JsonNode resp = post(
                 "/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email + ":getIamPolicy", "{}");
@@ -84,7 +127,7 @@ class IamTest {
     }
 
     @Test
-    @Order(5)
+    @Order(8)
     void setAndGetIamPolicy() throws Exception {
         String binding = json.writeValueAsString(Map.of(
                 "policy", Map.of(
@@ -101,7 +144,7 @@ class IamTest {
     }
 
     @Test
-    @Order(6)
+    @Order(9)
     void testIamPermissions() throws Exception {
         String body = json.writeValueAsString(Map.of(
                 "permissions", List.of("iam.serviceAccounts.get", "iam.serviceAccounts.list")));
@@ -114,7 +157,7 @@ class IamTest {
     }
 
     @Test
-    @Order(7)
+    @Order(10)
     void deleteServiceAccount() throws Exception {
         delete("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email);
 

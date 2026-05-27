@@ -1,5 +1,6 @@
 package io.floci.gcp.services.datastore.model;
 
+
 import com.google.datastore.v1.ArrayValue;
 import com.google.datastore.v1.Key;
 import com.google.datastore.v1.Value;
@@ -12,6 +13,9 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 
 public class StoredProperty {
 

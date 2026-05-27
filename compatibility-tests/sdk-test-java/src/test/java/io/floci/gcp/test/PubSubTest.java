@@ -32,7 +32,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.IOException;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -97,7 +96,6 @@ class PubSubTest {
     void createTopic() {
         ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
         Topic topic = topicAdminClient.createTopic(topicName);
-
         assertThat(topic.getName()).isEqualTo(topicName.toString());
     }
 
@@ -119,6 +117,45 @@ class PubSubTest {
 
     @Test
     @Order(3)
+    void getTopic() {
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
+        Topic topic = topicAdminClient.getTopic(topicName);
+        assertThat(topic.getName()).isEqualTo(topicName.toString());
+    }
+
+    @Test
+    @Order(4)
+    void listTopics() {
+        List<String> topicNames = new ArrayList<>();
+        topicAdminClient.listTopics("projects/" + PROJECT_ID)
+                .iterateAll()
+                .forEach(t -> topicNames.add(t.getName()));
+
+        assertThat(topicNames).contains(ProjectTopicName.of(PROJECT_ID, TOPIC_ID).toString());
+    }
+
+    @Test
+    @Order(5)
+    void getSubscription() {
+        ProjectSubscriptionName subscriptionName = ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID);
+        Subscription subscription = subscriptionAdminClient.getSubscription(subscriptionName);
+        assertThat(subscription.getName()).isEqualTo(subscriptionName.toString());
+        assertThat(subscription.getTopic()).isEqualTo(ProjectTopicName.of(PROJECT_ID, TOPIC_ID).toString());
+    }
+
+    @Test
+    @Order(6)
+    void listSubscriptions() {
+        List<String> subscriptionNames = new ArrayList<>();
+        subscriptionAdminClient.listSubscriptions("projects/" + PROJECT_ID)
+                .iterateAll()
+                .forEach(s -> subscriptionNames.add(s.getName()));
+
+        assertThat(subscriptionNames).contains(ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID).toString());
+    }
+
+    @Test
+    @Order(7)
     void publishMessages() throws Exception {
         ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
 
@@ -151,7 +188,7 @@ class PubSubTest {
     }
 
     @Test
-    @Order(4)
+    @Order(8)
     void pullMessagesAndVerifyContent() throws IOException {
         ProjectSubscriptionName subscriptionName = ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID);
 
@@ -181,7 +218,6 @@ class PubSubTest {
 
             assertThat(messageContents).contains("Hello, GCP Pub/Sub!", "Second message");
 
-            // Acknowledge the messages
             AcknowledgeRequest acknowledgeRequest = AcknowledgeRequest.newBuilder()
                     .setSubscription(subscriptionName.toString())
                     .addAllAckIds(ackIds)
@@ -191,12 +227,106 @@ class PubSubTest {
     }
 
     @Test
-    @Order(5)
+    @Order(9)
+    void publishMultipleMessagesAndVerifyCount() throws Exception {
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
+        ProjectSubscriptionName subscriptionName = ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID);
+
+        Publisher publisher = Publisher.newBuilder(topicName)
+                .setChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+
+        try {
+            for (int i = 1; i <= 3; i++) {
+                publisher.publish(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("batch-msg-" + i))
+                        .build()).get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            publisher.shutdown();
+            publisher.awaitTermination(5, TimeUnit.SECONDS);
+        }
+
+        SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                .setTransportChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+
+        try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+            PullResponse pullResponse = subscriberStub.pullCallable().call(
+                    PullRequest.newBuilder()
+                            .setSubscription(subscriptionName.toString())
+                            .setMaxMessages(10)
+                            .build());
+
+            assertThat(pullResponse.getReceivedMessagesList()).hasSize(3);
+
+            List<String> ackIds = pullResponse.getReceivedMessagesList().stream()
+                    .map(ReceivedMessage::getAckId).toList();
+
+            subscriberStub.acknowledgeCallable().call(
+                    AcknowledgeRequest.newBuilder()
+                            .setSubscription(subscriptionName.toString())
+                            .addAllAckIds(ackIds)
+                            .build());
+        }
+    }
+
+    @Test
+    @Order(10)
+    void acknowledgeRemovesMessagesFromQueue() throws Exception {
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
+        ProjectSubscriptionName subscriptionName = ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID);
+
+        Publisher publisher = Publisher.newBuilder(topicName)
+                .setChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+
+        try {
+            publisher.publish(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("ack-test"))
+                    .build()).get(10, TimeUnit.SECONDS);
+        } finally {
+            publisher.shutdown();
+            publisher.awaitTermination(5, TimeUnit.SECONDS);
+        }
+
+        SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                .setTransportChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+
+        try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+            PullRequest pullRequest = PullRequest.newBuilder()
+                    .setSubscription(subscriptionName.toString())
+                    .setMaxMessages(10)
+                    .build();
+
+            PullResponse pullResponse = subscriberStub.pullCallable().call(pullRequest);
+            assertThat(pullResponse.getReceivedMessagesList()).isNotEmpty();
+
+            List<String> ackIds = pullResponse.getReceivedMessagesList().stream()
+                    .map(ReceivedMessage::getAckId).toList();
+
+            subscriberStub.acknowledgeCallable().call(
+                    AcknowledgeRequest.newBuilder()
+                            .setSubscription(subscriptionName.toString())
+                            .addAllAckIds(ackIds)
+                            .build());
+
+            PullResponse emptyResponse = subscriberStub.pullCallable().call(pullRequest);
+            assertThat(emptyResponse.getReceivedMessagesList()).isEmpty();
+        }
+    }
+
+    @Test
+    @Order(11)
     void deleteSubscription() {
         ProjectSubscriptionName subscriptionName = ProjectSubscriptionName.of(PROJECT_ID, SUBSCRIPTION_ID);
         subscriptionAdminClient.deleteSubscription(subscriptionName);
 
-        // Verify it no longer appears in the list
         List<String> subscriptionNames = new ArrayList<>();
         subscriptionAdminClient
                 .listSubscriptions("projects/" + PROJECT_ID)
@@ -207,12 +337,11 @@ class PubSubTest {
     }
 
     @Test
-    @Order(6)
+    @Order(12)
     void deleteTopic() {
         ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TOPIC_ID);
         topicAdminClient.deleteTopic(topicName);
 
-        // Verify it no longer appears in the list
         List<String> topicNames = new ArrayList<>();
         topicAdminClient
                 .listTopics("projects/" + PROJECT_ID)

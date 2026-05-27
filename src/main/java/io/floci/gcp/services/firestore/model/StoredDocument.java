@@ -1,6 +1,10 @@
 package io.floci.gcp.services.firestore.model;
 
+
 import java.util.Map;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 
 public class StoredDocument {
 

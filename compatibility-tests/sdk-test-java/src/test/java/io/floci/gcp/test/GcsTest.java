@@ -23,7 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class GcsTest {
 
     private static final String BUCKET_NAME = TestFixtures.uniqueName("test-bucket");
-    private static final String OBJECT_NAME = "test-object.txt";
+    private static final String OBJECT_NAME = "test/object.txt";
+    private static final String SECOND_OBJECT_NAME = "test/second.txt";
     private static final String OBJECT_CONTENT = "Hello, GCP Cloud Storage!";
 
     private static Storage storage;
@@ -44,12 +45,27 @@ class GcsTest {
     @Order(1)
     void createBucket() {
         Bucket bucket = storage.create(BucketInfo.of(BUCKET_NAME));
-
         assertThat(bucket.getName()).isEqualTo(BUCKET_NAME);
     }
 
     @Test
     @Order(2)
+    void getBucket() {
+        Bucket bucket = storage.get(BUCKET_NAME);
+        assertThat(bucket).isNotNull();
+        assertThat(bucket.getName()).isEqualTo(BUCKET_NAME);
+    }
+
+    @Test
+    @Order(3)
+    void listBuckets() {
+        List<String> names = new ArrayList<>();
+        storage.list().iterateAll().forEach(b -> names.add(b.getName()));
+        assertThat(names).contains(BUCKET_NAME);
+    }
+
+    @Test
+    @Order(4)
     void uploadObject() {
         BlobId blobId = BlobId.of(BUCKET_NAME, OBJECT_NAME);
         BlobInfo blobInfo = BlobInfo.newBuilder(blobId)
@@ -65,47 +81,58 @@ class GcsTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
+    void getObjectMetadata() {
+        Blob blob = storage.get(BlobId.of(BUCKET_NAME, OBJECT_NAME));
+        assertThat(blob).isNotNull();
+        assertThat(blob.getContentType()).isEqualTo("text/plain");
+        assertThat(blob.getCreateTime()).isNotNull();
+    }
+
+    @Test
+    @Order(6)
     void downloadAndVerifyObjectContent() {
         BlobId blobId = BlobId.of(BUCKET_NAME, OBJECT_NAME);
         Blob blob = storage.get(blobId);
 
         assertThat(blob).isNotNull();
 
-        byte[] content = blob.getContent();
-        String downloadedContent = new String(content, StandardCharsets.UTF_8);
-
+        String downloadedContent = new String(blob.getContent(), StandardCharsets.UTF_8);
         assertThat(downloadedContent).isEqualTo(OBJECT_CONTENT);
     }
 
     @Test
-    @Order(4)
+    @Order(7)
     void listObjectsInBucket() {
         List<String> objectNames = new ArrayList<>();
         storage.list(BUCKET_NAME).iterateAll().forEach(blob -> objectNames.add(blob.getName()));
-
         assertThat(objectNames).contains(OBJECT_NAME);
     }
 
     @Test
-    @Order(5)
-    void deleteObjectAndBucket() {
-        BlobId blobId = BlobId.of(BUCKET_NAME, OBJECT_NAME);
-        boolean objectDeleted = storage.delete(blobId);
-        assertThat(objectDeleted).isTrue();
+    @Order(8)
+    void uploadSecondObjectAndListWithPrefix() {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, SECOND_OBJECT_NAME)).build();
+        storage.create(blobInfo, "second content".getBytes(StandardCharsets.UTF_8));
 
-        // Verify object is gone
-        Blob deletedBlob = storage.get(blobId);
-        assertThat(deletedBlob).isNull();
+        List<String> names = new ArrayList<>();
+        storage.list(BUCKET_NAME, Storage.BlobListOption.prefix("test/"))
+                .iterateAll().forEach(b -> names.add(b.getName()));
 
-        // Delete the bucket
+        assertThat(names).contains(OBJECT_NAME, SECOND_OBJECT_NAME);
+    }
+
+    @Test
+    @Order(9)
+    void deleteObjectsAndBucket() {
+        assertThat(storage.delete(BlobId.of(BUCKET_NAME, OBJECT_NAME))).isTrue();
+        assertThat(storage.get(BlobId.of(BUCKET_NAME, OBJECT_NAME))).isNull();
+
+        assertThat(storage.delete(BlobId.of(BUCKET_NAME, SECOND_OBJECT_NAME))).isTrue();
+
         Bucket bucket = storage.get(BUCKET_NAME);
         assertThat(bucket).isNotNull();
-        boolean bucketDeleted = bucket.delete();
-        assertThat(bucketDeleted).isTrue();
-
-        // Verify bucket is gone
-        Bucket deletedBucket = storage.get(BUCKET_NAME);
-        assertThat(deletedBucket).isNull();
+        assertThat(bucket.delete()).isTrue();
+        assertThat(storage.get(BUCKET_NAME)).isNull();
     }
 }

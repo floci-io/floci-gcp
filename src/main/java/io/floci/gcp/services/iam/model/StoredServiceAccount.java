@@ -1,5 +1,8 @@
 package io.floci.gcp.services.iam.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public class StoredServiceAccount {
 
     private String name;

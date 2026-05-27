@@ -1,5 +1,6 @@
 package io.floci.gcp.services.firestore.model;
 
+
 import com.google.firestore.v1.ArrayValue;
 import com.google.firestore.v1.MapValue;
 import com.google.firestore.v1.Value;
@@ -13,6 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 
 public class StoredValue {
 

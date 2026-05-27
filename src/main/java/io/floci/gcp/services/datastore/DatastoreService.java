@@ -50,6 +50,13 @@ public class DatastoreService {
                 "datastore-entities.json", new TypeReference<Map<String, StoredEntity>>() {});
     }
 
+    DatastoreService(StorageBackend<String, StoredEntity> entityStore) {
+        this.entityStore = entityStore;
+        this.serviceRegistry = null;
+        this.config = null;
+        this.grpcServerManager = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("datastore")
                 .enabled(config.services().datastore().enabled())

@@ -1,5 +1,9 @@
 package io.floci.gcp.services.tasks.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
+
 public class StoredQueue {
 
     private String name;

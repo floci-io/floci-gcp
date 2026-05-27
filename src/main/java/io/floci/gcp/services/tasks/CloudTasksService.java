@@ -46,6 +46,15 @@ public class CloudTasksService {
                 new TypeReference<Map<String, StoredTask>>() {});
     }
 
+    CloudTasksService(StorageBackend<String, StoredQueue> queueStore,
+            StorageBackend<String, StoredTask> taskStore) {
+        this.queueStore = queueStore;
+        this.taskStore = taskStore;
+        this.serviceRegistry = null;
+        this.config = null;
+        this.grpcServerManager = null;
+    }
+
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("cloudtasks")
                 .enabled(config.services().cloudtasks().enabled())

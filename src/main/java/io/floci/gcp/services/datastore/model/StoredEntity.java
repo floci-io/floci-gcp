@@ -1,6 +1,10 @@
 package io.floci.gcp.services.datastore.model;
 
+
 import java.util.Map;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 
 public class StoredEntity {
 

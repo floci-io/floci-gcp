@@ -89,4 +89,25 @@ public class GcsObjectMeta {
 
     public Map<String, String> getMetadata() { return metadata; }
     public void setMetadata(Map<String, String> metadata) { this.metadata = metadata; }
+
+    private String timeDeleted;
+    private Boolean isLatest;
+    private Boolean temporaryHold;
+    private Boolean eventBasedHold;
+    private String retentionExpirationTime;
+
+    public String getTimeDeleted() { return timeDeleted; }
+    public void setTimeDeleted(String timeDeleted) { this.timeDeleted = timeDeleted; }
+
+    public Boolean getIsLatest() { return isLatest; }
+    public void setIsLatest(Boolean isLatest) { this.isLatest = isLatest; }
+
+    public Boolean getTemporaryHold() { return temporaryHold; }
+    public void setTemporaryHold(Boolean temporaryHold) { this.temporaryHold = temporaryHold; }
+
+    public Boolean getEventBasedHold() { return eventBasedHold; }
+    public void setEventBasedHold(Boolean eventBasedHold) { this.eventBasedHold = eventBasedHold; }
+
+    public String getRetentionExpirationTime() { return retentionExpirationTime; }
+    public void setRetentionExpirationTime(String retentionExpirationTime) { this.retentionExpirationTime = retentionExpirationTime; }
 }

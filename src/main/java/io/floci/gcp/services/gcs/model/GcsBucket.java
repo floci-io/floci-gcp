@@ -28,6 +28,7 @@ public class GcsBucket {
     private Map<String, Object> lifecycle;
     private List<Map<String, Object>> cors;
     private Map<String, Object> retentionPolicy;
+    private Boolean defaultEventBasedHold;
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -80,4 +81,7 @@ public class GcsBucket {
 
     public Map<String, Object> getRetentionPolicy() { return retentionPolicy; }
     public void setRetentionPolicy(Map<String, Object> retentionPolicy) { this.retentionPolicy = retentionPolicy; }
+
+    public Boolean getDefaultEventBasedHold() { return defaultEventBasedHold; }
+    public void setDefaultEventBasedHold(Boolean defaultEventBasedHold) { this.defaultEventBasedHold = defaultEventBasedHold; }
 }

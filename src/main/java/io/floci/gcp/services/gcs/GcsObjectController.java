@@ -33,14 +33,23 @@ public class GcsObjectController {
         this.config = config;
     }
 
+    @OPTIONS
+    @Path("/{anyPath: .*}")
+    public Response options() {
+        return Response.ok().build();
+    }
+
     @GET
     public Response listObjects(@PathParam("bucket") String bucket,
             @QueryParam("maxResults") @DefaultValue("0") int maxResults,
             @QueryParam("pageToken") String pageToken,
             @QueryParam("prefix") String prefix,
-            @QueryParam("delimiter") String delimiter) {
-        List<GcsObjectMeta> all = service.listObjects(bucket);
-        if (prefix != null && !prefix.isBlank()) {
+            @QueryParam("delimiter") String delimiter,
+            @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
+        List<GcsObjectMeta> all = includeVersions
+                ? service.listObjectVersions(bucket, prefix)
+                : service.listObjects(bucket);
+        if (!includeVersions && prefix != null && !prefix.isBlank()) {
             all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
         }
         PageToken.Page<GcsObjectMeta> page = PageToken.paginate(all, maxResults, pageToken);
@@ -111,8 +120,17 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     public Response getObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
-            @QueryParam("alt") String alt) {
+            @QueryParam("alt") String alt,
+            @QueryParam("generation") String generation) {
         String objectName = decode(objectPath);
+        if (generation != null) {
+            if ("media".equals(alt)) {
+                byte[] data = service.getObjectData(bucket, objectName, generation);
+                GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
+                return Response.ok(data).type(meta.getContentType()).build();
+            }
+            return Response.ok(service.getObjectMeta(bucket, objectName, generation)).build();
+        }
         if ("media".equals(alt)) {
             byte[] data = service.getObjectData(bucket, objectName);
             GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
@@ -130,11 +148,38 @@ public class GcsObjectController {
         return Response.ok(service.patchObject(bucket, objectName, body)).build();
     }
 
+    @PUT
+    @Path("/{object: .+}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response updateObject(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath, Map<String, Object> body) {
+        String objectName = decode(objectPath);
+        return Response.ok(service.patchObject(bucket, objectName, body)).build();
+    }
+
+    @POST
+    @Path("/{object: .+}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response postObjectMethodOverride(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath,
+            @HeaderParam("X-HTTP-Method-Override") String methodOverride,
+            Map<String, Object> body) {
+        if ("PATCH".equalsIgnoreCase(methodOverride)) {
+            return Response.ok(service.patchObject(bucket, decode(objectPath), body)).build();
+        }
+        throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
+    }
+
     @DELETE
     @Path("/{object: .+}")
     public Response deleteObject(@PathParam("bucket") String bucket,
-            @PathParam("object") String objectPath) {
+            @PathParam("object") String objectPath,
+            @QueryParam("generation") String generation) {
         String objectName = decode(objectPath);
+        if (generation != null) {
+            service.deleteObjectVersion(bucket, objectName, generation);
+            return Response.noContent().build();
+        }
         if (!service.deleteObject(bucket, objectName)) {
             throw GcpException.notFound("Object not found: " + objectName);
         }

@@ -1,6 +1,9 @@
 package io.floci.gcp.services.gcs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.PubsubMessage;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -12,6 +15,8 @@ import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
+import io.floci.gcp.services.gcs.model.StoredNotification;
+import io.floci.gcp.services.pubsub.PubSubService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -40,24 +45,32 @@ public class GcsService {
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
     private final StorageBackend<String, StoredAcl> aclStore;
+    private final StorageBackend<String, StoredNotification> notificationStore;
     private final ConcurrentHashMap<String, byte[]> objectData = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final String defaultProjectId;
+    private final PubSubService pubSubService;
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Inject
-    public GcsService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory) {
+    public GcsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
+            StorageFactory storageFactory, PubSubService pubSubService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.defaultProjectId = config.defaultProjectId();
+        this.pubSubService = pubSubService;
         this.bucketStore = storageFactory.createGlobal("gcs-buckets", "gcs-buckets.json",
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
+        this.notificationStore = storageFactory.createGlobal("gcs-notifications", "gcs-notifications.json",
+                new TypeReference<Map<String, StoredNotification>>() {});
     }
 
     GcsService(StorageBackend<String, GcsBucket> bucketStore,
@@ -68,8 +81,10 @@ public class GcsService {
         this.objectMetaStore = objectMetaStore;
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
+        this.notificationStore = new io.floci.gcp.core.storage.InMemoryStorage<>();
         this.serviceRegistry = null;
         this.config = null;
+        this.pubSubService = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -79,7 +94,8 @@ public class GcsService {
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(GcsBucketController.class, GcsObjectController.class,
                         GcsUploadController.class, GcsDownloadController.class,
-                        GcsXmlDownloadController.class)
+                        GcsXmlDownloadController.class, GcsNotificationController.class,
+                        GcsBatchController.class)
                 .build());
     }
 
@@ -123,6 +139,9 @@ public class GcsService {
             if (body.containsKey("retentionPolicy")) {
                 bucket.setRetentionPolicy((Map<String, Object>) body.get("retentionPolicy"));
             }
+            if (body.containsKey("defaultEventBasedHold")) {
+                bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
+            }
         }
         bucketStore.put(name, bucket);
         return bucket;
@@ -155,6 +174,9 @@ public class GcsService {
         }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
+        }
+        if (patch.containsKey("defaultEventBasedHold")) {
+            bucket.setDefaultEventBasedHold((Boolean) patch.get("defaultEventBasedHold"));
         }
         bucket.setUpdated(Instant.now().toString());
         bucketStore.put(name, bucket);
@@ -190,6 +212,24 @@ public class GcsService {
         String now = Instant.now().toString();
         String encodedName = urlEncode(objectName);
 
+        GcsObjectMeta existing = objectMetaStore.get(key).orElse(null);
+        if (existing != null && existing.getTimeDeleted() == null) {
+            checkObjectMutable(existing);
+        }
+
+        if (isVersioningEnabled(bucket)) {
+            if (existing != null) {
+                String archiveKey = key + "\0" + existing.getGeneration();
+                GcsObjectMeta archived = cloneMeta(existing);
+                archived.setIsLatest(false);
+                objectMetaStore.put(archiveKey, archived);
+                byte[] oldData = objectData.get(key);
+                if (oldData != null) {
+                    objectData.put(archiveKey, oldData);
+                }
+            }
+        }
+
         GcsObjectMeta meta = new GcsObjectMeta();
         meta.setId(bucket + "/" + objectName + "/" + generation);
         meta.setName(objectName);
@@ -203,26 +243,59 @@ public class GcsService {
         meta.setSelfLink(baseUrl + "/storage/v1/b/" + bucket + "/o/" + encodedName);
         meta.setMediaLink(baseUrl + "/storage/v1/b/" + bucket + "/o/" + encodedName
                 + "?alt=media&generation=" + generation);
+        meta.setIsLatest(true);
         String crc32c = computeCrc32c(data);
         meta.setCrc32c(crc32c);
         String md5 = computeMd5(data);
         meta.setMd5Hash(md5);
         meta.setEtag(md5);
 
+        String retentionExpiry = computeRetentionExpiry(bucket, now);
+        if (retentionExpiry != null) {
+            meta.setRetentionExpirationTime(retentionExpiry);
+        }
+        GcsBucket b = bucketStore.get(bucket).orElse(null);
+        if (b != null && Boolean.TRUE.equals(b.getDefaultEventBasedHold())) {
+            meta.setEventBasedHold(true);
+        }
+
         objectMetaStore.put(key, meta);
         objectData.put(key, data);
+        publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
         return meta;
     }
 
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
         LOG.debugf("getObjectMeta bucket=%s name=%s", bucket, objectName);
-        return objectMetaStore.get(objectKey(bucket, objectName))
+        GcsObjectMeta meta = objectMetaStore.get(objectKey(bucket, objectName))
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+        if (meta.getTimeDeleted() != null) {
+            throw GcpException.notFound("Object not found: " + objectName);
+        }
+        return meta;
+    }
+
+    public GcsObjectMeta getObjectMeta(String bucket, String objectName, String generation) {
+        LOG.debugf("getObjectMeta bucket=%s name=%s generation=%s", bucket, objectName, generation);
+        String liveKey = objectKey(bucket, objectName);
+        GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
+        if (live != null && generation.equals(live.getGeneration())) {
+            return live;
+        }
+        String archiveKey = liveKey + "\0" + generation;
+        return objectMetaStore.get(archiveKey)
+                .orElseThrow(() -> GcpException.notFound(
+                        "Object version not found: " + objectName + "@" + generation));
     }
 
     public byte[] getObjectData(String bucket, String objectName) {
         LOG.debugf("getObjectData bucket=%s name=%s", bucket, objectName);
-        byte[] data = objectData.get(objectKey(bucket, objectName));
+        String key = objectKey(bucket, objectName);
+        GcsObjectMeta meta = objectMetaStore.get(key).orElse(null);
+        if (meta != null && meta.getTimeDeleted() != null) {
+            throw GcpException.notFound("Object not found: " + objectName);
+        }
+        byte[] data = objectData.get(key);
         if (data == null) {
             LOG.warnf("getObjectData failed: object not found bucket=%s name=%s", bucket, objectName);
             throw GcpException.notFound("Object not found: " + objectName);
@@ -230,16 +303,80 @@ public class GcsService {
         return data;
     }
 
+    public byte[] getObjectData(String bucket, String objectName, String generation) {
+        LOG.debugf("getObjectData bucket=%s name=%s generation=%s", bucket, objectName, generation);
+        String liveKey = objectKey(bucket, objectName);
+        GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
+        if (live != null && generation.equals(live.getGeneration())) {
+            byte[] data = objectData.get(liveKey);
+            if (data != null) {
+                return data;
+            }
+        }
+        String archiveKey = liveKey + "\0" + generation;
+        byte[] data = objectData.get(archiveKey);
+        if (data == null) {
+            throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
+        }
+        return data;
+    }
+
     public boolean deleteObject(String bucket, String objectName) {
         LOG.infof("deleteObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
-        objectData.remove(key);
-        if (objectMetaStore.get(key).isEmpty()) {
+        GcsObjectMeta live = objectMetaStore.get(key).orElse(null);
+        if (live == null) {
             LOG.debugf("deleteObject: object metadata not found bucket=%s name=%s", bucket, objectName);
             return false;
         }
+        if (live.getTimeDeleted() == null) {
+            checkObjectMutable(live);
+        }
+        if (isVersioningEnabled(bucket)) {
+            String archiveKey = key + "\0" + live.getGeneration();
+            GcsObjectMeta archived = cloneMeta(live);
+            archived.setIsLatest(false);
+            objectMetaStore.put(archiveKey, archived);
+            byte[] oldData = objectData.get(key);
+            if (oldData != null) {
+                objectData.put(archiveKey, oldData);
+            }
+            long markerGen = System.currentTimeMillis() + 1;
+            GcsObjectMeta marker = new GcsObjectMeta();
+            marker.setName(objectName);
+            marker.setBucket(bucket);
+            marker.setGeneration(String.valueOf(markerGen));
+            marker.setIsLatest(true);
+            String now = Instant.now().toString();
+            marker.setTimeDeleted(now);
+            marker.setTimeCreated(now);
+            marker.setUpdated(now);
+            objectMetaStore.put(key + "\0" + markerGen, marker);
+        }
+        GcsObjectMeta deletedMeta = live;
         objectMetaStore.delete(key);
+        objectData.remove(key);
+        if (deletedMeta != null) {
+            publishNotificationEvent(bucket, objectName, deletedMeta, "OBJECT_DELETE");
+        }
         return true;
+    }
+
+    public void deleteObjectVersion(String bucket, String objectName, String generation) {
+        LOG.infof("deleteObjectVersion bucket=%s name=%s generation=%s", bucket, objectName, generation);
+        String liveKey = objectKey(bucket, objectName);
+        GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
+        if (live != null && generation.equals(live.getGeneration())) {
+            objectMetaStore.delete(liveKey);
+            objectData.remove(liveKey);
+            return;
+        }
+        String archiveKey = liveKey + "\0" + generation;
+        if (objectMetaStore.get(archiveKey).isEmpty()) {
+            throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
+        }
+        objectMetaStore.delete(archiveKey);
+        objectData.remove(archiveKey);
     }
 
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch) {
@@ -264,6 +401,12 @@ public class GcsService {
             @SuppressWarnings("unchecked")
             Map<String, String> userMeta = (Map<String, String>) patch.get("metadata");
             meta.setMetadata(userMeta);
+        }
+        if (patch.containsKey("temporaryHold")) {
+            meta.setTemporaryHold((Boolean) patch.get("temporaryHold"));
+        }
+        if (patch.containsKey("eventBasedHold")) {
+            meta.setEventBasedHold((Boolean) patch.get("eventBasedHold"));
         }
         meta.setUpdated(Instant.now().toString());
         long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");
@@ -339,9 +482,27 @@ public class GcsService {
             LOG.warnf("listObjects failed: bucket not found bucket=%s", bucket);
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
-        List<GcsObjectMeta> objects = objectMetaStore.scan(k -> k.startsWith(bucket + "\0"));
+        String prefix = bucket + "\0";
+        int prefixLen = prefix.length();
+        List<GcsObjectMeta> objects = objectMetaStore.scan(k ->
+                k.startsWith(prefix) && k.indexOf('\0', prefixLen) == -1
+                        && (objectMetaStore.get(k).map(m -> m.getTimeDeleted() == null).orElse(true)));
         LOG.debugf("listObjects bucket=%s count=%d", bucket, objects.size());
         return objects;
+    }
+
+    public List<GcsObjectMeta> listObjectVersions(String bucket, String prefix) {
+        LOG.debugf("listObjectVersions bucket=%s prefix=%s", bucket, prefix);
+        if (bucketStore.get(bucket).isEmpty()) {
+            throw GcpException.notFound("Bucket not found: " + bucket);
+        }
+        String bucketPrefix = bucket + "\0";
+        List<GcsObjectMeta> all = objectMetaStore.scan(k -> k.startsWith(bucketPrefix));
+        List<GcsObjectMeta> result = all.stream()
+                .filter(m -> prefix == null || prefix.isBlank() || m.getName() != null && m.getName().startsWith(prefix))
+                .toList();
+        LOG.debugf("listObjectVersions bucket=%s count=%d", bucket, result.size());
+        return result;
     }
 
     // ── ACLs ───────────────────────────────────────────────────────────────────
@@ -448,6 +609,199 @@ public class GcsService {
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data, baseUrl);
+    }
+
+    // ── Notifications ──────────────────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    public StoredNotification createNotification(String bucket, Map<String, Object> body) {
+        LOG.infof("createNotification bucket=%s", bucket);
+        getBucket(bucket);
+        String prefix = bucket + ":";
+        int nextId = (int) notificationStore.scan(k -> k.startsWith(prefix)).size() + 1;
+        String id = String.valueOf(nextId);
+
+        StoredNotification notif = new StoredNotification();
+        notif.setId(id);
+        notif.setTopic((String) body.get("topic"));
+        String fmt = (String) body.get("payloadFormat");
+        if (fmt != null) notif.setPayloadFormat(fmt);
+        if (body.containsKey("eventTypes")) {
+            notif.setEventTypes((List<String>) body.get("eventTypes"));
+        }
+        if (body.containsKey("customAttributes")) {
+            notif.setCustomAttributes((Map<String, String>) body.get("customAttributes"));
+        }
+        if (body.containsKey("objectNamePrefix")) {
+            notif.setObjectNamePrefix((String) body.get("objectNamePrefix"));
+        }
+        notif.setSelfLink(config != null
+                ? config.baseUrl() + "/storage/v1/b/" + bucket + "/notificationConfigs/" + id
+                : "/storage/v1/b/" + bucket + "/notificationConfigs/" + id);
+        notificationStore.put(prefix + id, notif);
+        return notif;
+    }
+
+    public StoredNotification getNotification(String bucket, String notificationId) {
+        LOG.debugf("getNotification bucket=%s id=%s", bucket, notificationId);
+        return notificationStore.get(bucket + ":" + notificationId)
+                .orElseThrow(() -> GcpException.notFound(
+                        "Notification not found: " + notificationId));
+    }
+
+    public List<StoredNotification> listNotifications(String bucket) {
+        LOG.debugf("listNotifications bucket=%s", bucket);
+        String prefix = bucket + ":";
+        return notificationStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public void deleteNotification(String bucket, String notificationId) {
+        LOG.infof("deleteNotification bucket=%s id=%s", bucket, notificationId);
+        String key = bucket + ":" + notificationId;
+        if (notificationStore.get(key).isEmpty()) {
+            throw GcpException.notFound("Notification not found: " + notificationId);
+        }
+        notificationStore.delete(key);
+    }
+
+    private void publishNotificationEvent(String bucket, String objectName,
+            GcsObjectMeta meta, String eventType) {
+        if (pubSubService == null) return;
+        String prefix = bucket + ":";
+        List<StoredNotification> notifications = notificationStore.scan(k -> k.startsWith(prefix));
+        if (notifications.isEmpty()) return;
+
+        for (StoredNotification notif : notifications) {
+            if (notif.getEventTypes() != null && !notif.getEventTypes().contains(eventType)) {
+                continue;
+            }
+            String namePrefix = notif.getObjectNamePrefix();
+            if (namePrefix != null && !namePrefix.isBlank() && !objectName.startsWith(namePrefix)) {
+                continue;
+            }
+            try {
+                PubsubMessage.Builder msg = PubsubMessage.newBuilder()
+                        .putAttributes("eventType", eventType)
+                        .putAttributes("payloadFormat", notif.getPayloadFormat() != null
+                                ? notif.getPayloadFormat() : "JSON_API_V1")
+                        .putAttributes("bucketId", bucket)
+                        .putAttributes("objectId", objectName)
+                        .putAttributes("objectGeneration",
+                                meta.getGeneration() != null ? meta.getGeneration() : "0")
+                        .putAttributes("notificationConfig", notif.getSelfLink() != null
+                                ? notif.getSelfLink() : bucket + "/notificationConfigs/" + notif.getId());
+
+                if ("JSON_API_V1".equals(notif.getPayloadFormat()) || notif.getPayloadFormat() == null) {
+                    byte[] payload = MAPPER.writeValueAsBytes(meta);
+                    msg.setData(ByteString.copyFrom(payload));
+                }
+
+                pubSubService.publish(notif.getTopic(), List.of(msg.build()));
+            } catch (Exception e) {
+                LOG.warnf("Failed to publish GCS notification event bucket=%s object=%s topic=%s: %s",
+                        bucket, objectName, notif.getTopic(), e.getMessage());
+            }
+        }
+    }
+
+    public Optional<GcsBucket> findBucket(String name) {
+        return bucketStore.get(name);
+    }
+
+    public GcsBucket lockRetentionPolicy(String bucket, Long ifMetagenerationMatch) {
+        LOG.infof("lockRetentionPolicy bucket=%s", bucket);
+        GcsBucket b = getBucket(bucket);
+        long current = b.getMetageneration() != null ? Long.parseLong(b.getMetageneration()) : 1;
+        if (ifMetagenerationMatch != null && current != ifMetagenerationMatch) {
+            throw GcpException.conditionNotMet(
+                    "ifMetagenerationMatch: " + current + " != " + ifMetagenerationMatch);
+        }
+        Map<String, Object> rp = b.getRetentionPolicy();
+        if (rp == null) {
+            rp = new java.util.LinkedHashMap<>();
+        }
+        rp.put("isLocked", true);
+        if (!rp.containsKey("effectiveTime")) {
+            rp.put("effectiveTime", Instant.now().toString());
+        }
+        b.setRetentionPolicy(rp);
+        b.setMetageneration(String.valueOf(current + 1));
+        b.setUpdated(Instant.now().toString());
+        bucketStore.put(bucket, b);
+        return b;
+    }
+
+    private void checkObjectMutable(GcsObjectMeta meta) {
+        if (Boolean.TRUE.equals(meta.getTemporaryHold())) {
+            throw GcpException.permissionDenied(
+                    "Object '" + meta.getName() + "' is under a temporary hold.");
+        }
+        if (Boolean.TRUE.equals(meta.getEventBasedHold())) {
+            throw GcpException.permissionDenied(
+                    "Object '" + meta.getName() + "' is under an event-based hold.");
+        }
+        if (meta.getRetentionExpirationTime() != null) {
+            Instant expiry = Instant.parse(meta.getRetentionExpirationTime());
+            if (Instant.now().isBefore(expiry)) {
+                throw GcpException.permissionDenied(
+                        "Object '" + meta.getName() + "' is subject to the bucket's retention policy "
+                        + "and cannot be deleted or overwritten until "
+                        + meta.getRetentionExpirationTime());
+            }
+        }
+    }
+
+    private String computeRetentionExpiry(String bucket, String timeCreated) {
+        return bucketStore.get(bucket).map(b -> {
+            if (b.getRetentionPolicy() == null) {
+                return null;
+            }
+            Object period = b.getRetentionPolicy().get("retentionPeriod");
+            if (period == null) {
+                return null;
+            }
+            long seconds = period instanceof Number n ? n.longValue() : Long.parseLong(period.toString());
+            return Instant.parse(timeCreated).plusSeconds(seconds).toString();
+        }).orElse(null);
+    }
+
+    private boolean isVersioningEnabled(String bucketName) {
+        return bucketStore.get(bucketName)
+                .map(b -> {
+                    if (b.getVersioning() == null) {
+                        return false;
+                    }
+                    Object enabled = b.getVersioning().get("enabled");
+                    return Boolean.TRUE.equals(enabled);
+                })
+                .orElse(false);
+    }
+
+    private static GcsObjectMeta cloneMeta(GcsObjectMeta src) {
+        GcsObjectMeta copy = new GcsObjectMeta();
+        copy.setKind(src.getKind());
+        copy.setId(src.getId());
+        copy.setName(src.getName());
+        copy.setBucket(src.getBucket());
+        copy.setGeneration(src.getGeneration());
+        copy.setMetageneration(src.getMetageneration());
+        copy.setContentType(src.getContentType());
+        copy.setStorageClass(src.getStorageClass());
+        copy.setSize(src.getSize());
+        copy.setTimeCreated(src.getTimeCreated());
+        copy.setUpdated(src.getUpdated());
+        copy.setCrc32c(src.getCrc32c());
+        copy.setMd5Hash(src.getMd5Hash());
+        copy.setMediaLink(src.getMediaLink());
+        copy.setSelfLink(src.getSelfLink());
+        copy.setEtag(src.getEtag());
+        copy.setMetadata(src.getMetadata());
+        copy.setTimeDeleted(src.getTimeDeleted());
+        copy.setIsLatest(src.getIsLatest());
+        copy.setTemporaryHold(src.getTemporaryHold());
+        copy.setEventBasedHold(src.getEventBasedHold());
+        copy.setRetentionExpirationTime(src.getRetentionExpirationTime());
+        return copy;
     }
 
     private static String objectKey(String bucket, String objectName) {

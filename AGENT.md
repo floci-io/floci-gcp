@@ -12,7 +12,7 @@ Its goal is full GCP SDK and gcloud CLI compatibility through real GCP wire prot
 
 floci-gcp acts as an open-source alternative to the GCP-provided emulators, unified under a single port.
 
-- Port: 4578
+- Port: 4588
 - Stack:
   - Java 25
   - Quarkus 3.34.6
@@ -107,7 +107,7 @@ floci-gcp must implement real GCP wire protocols.
 
 ### Single-port design
 
-Both gRPC and REST are served on port **4578** via ALPN negotiation:
+Both gRPC and REST are served on port **4588** via ALPN negotiation:
 - `quarkus.http.http2=true`
 - `quarkus.grpc.server.use-separate-server=false`
 

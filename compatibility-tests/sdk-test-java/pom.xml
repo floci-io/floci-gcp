@@ -91,6 +91,7 @@
                 <version>${surefire.version}</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
+                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true</argLine>
                 </configuration>
                 <dependencies>
                     <dependency>

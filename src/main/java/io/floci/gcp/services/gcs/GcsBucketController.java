@@ -37,6 +37,17 @@ public class GcsBucketController {
         this.iamService = iamService;
     }
 
+    @OPTIONS
+    public Response optionsRoot() {
+        return Response.ok().build();
+    }
+
+    @OPTIONS
+    @Path("/{anyPath: .*}")
+    public Response options() {
+        return Response.ok().build();
+    }
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public Response createBucket(@QueryParam("project") String project,
@@ -79,11 +90,30 @@ public class GcsBucketController {
         return Response.ok(service.updateBucket(bucket, body)).build();
     }
 
+    @POST
+    @Path("/{bucket}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response postBucketMethodOverride(@PathParam("bucket") String bucket,
+            @HeaderParam("X-HTTP-Method-Override") String methodOverride,
+            Map<String, Object> body) {
+        if ("PATCH".equalsIgnoreCase(methodOverride)) {
+            return Response.ok(service.updateBucket(bucket, body)).build();
+        }
+        throw GcpException.invalidArgument("unsupported method override: " + methodOverride);
+    }
+
     @DELETE
     @Path("/{bucket}")
     public Response deleteBucket(@PathParam("bucket") String bucket) {
         service.deleteBucket(bucket);
         return Response.noContent().build();
+    }
+
+    @POST
+    @Path("/{bucket}/lockRetentionPolicy")
+    public Response lockRetentionPolicy(@PathParam("bucket") String bucket,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch) {
+        return Response.ok(service.lockRetentionPolicy(bucket, ifMetagenerationMatch)).build();
     }
 
     // ── Bucket IAM ────────────────────────────────────────────────────────────

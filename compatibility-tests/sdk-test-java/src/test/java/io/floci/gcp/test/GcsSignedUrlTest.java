@@ -107,6 +107,8 @@ class GcsSignedUrlTest {
         URL emulatorUrl = toHttp(signed);
 
         HttpURLConnection conn = (HttpURLConnection) emulatorUrl.openConnection();
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(30_000);
         conn.setRequestMethod("GET");
         assertThat(conn.getResponseCode()).isEqualTo(200);
         try (InputStream is = conn.getInputStream()) {
@@ -133,6 +135,8 @@ class GcsSignedUrlTest {
 
         byte[] body = "uploaded via signed url".getBytes(StandardCharsets.UTF_8);
         HttpURLConnection conn = (HttpURLConnection) emulatorUrl.openConnection();
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(30_000);
         conn.setRequestMethod("PUT");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "text/plain");

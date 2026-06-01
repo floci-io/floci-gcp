@@ -13,6 +13,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +37,7 @@ public class GcsBatchController {
         this.config = config;
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
 
@@ -180,6 +182,7 @@ public class GcsBatchController {
 
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(uri)
+                    .timeout(Duration.ofSeconds(30))
                     .method(req.method(), bodyPublisher);
 
             req.headers().forEach((k, v) -> {

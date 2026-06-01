@@ -68,6 +68,8 @@ jobs:
           - sdk-test-node
           - sdk-test-python
           - sdk-test-go
+          - compat-terraform
+          - compat-opentofu
 
     steps:
       - name: Download floci-gcp image
@@ -119,6 +121,9 @@ jobs:
           mkdir -p test-results
           docker run --rm --network compat-net \
             -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
+            -e FLOCI_ENDPOINT=http://floci-gcp:4588 \
+            -e FLOCI_HOST=floci-gcp:4588 \
+            -e FLOCI_PROJECT=test-project \
             -v "$(pwd)/test-results:/results" \
             compat-${{ matrix.test }}
 

@@ -36,5 +36,5 @@ provider "google" {
 
   storage_custom_endpoint        = "${var.endpoint}/storage/v1/"
   iam_custom_endpoint            = "${var.endpoint}/"
-  secret_manager_custom_endpoint = "${var.endpoint}/"
+  secret_manager_custom_endpoint = "${var.endpoint}/v1/"
 }

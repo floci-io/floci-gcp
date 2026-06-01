@@ -15,7 +15,7 @@ floci-gcp is MIT licensed and welcomes contributions of all kinds.
 git clone https://github.com/hectorvent/floci-gcp.git
 cd floci-gcp
 
-# Run in dev mode (hot reload, port 4578)
+# Run in dev mode (hot reload, port 4588)
 ./mvnw quarkus:dev
 
 # Run all tests

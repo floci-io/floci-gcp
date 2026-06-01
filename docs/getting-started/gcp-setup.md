@@ -7,11 +7,11 @@ floci-gcp accepts all requests unconditionally — no real GCP credentials are n
 Set these in your shell before running any GCP SDK or CLI code:
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
-export FIRESTORE_EMULATOR_HOST=localhost:4578
-export DATASTORE_EMULATOR_HOST=localhost:4578
-export STORAGE_EMULATOR_HOST=http://localhost:4578
-export SECRET_MANAGER_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
+export FIRESTORE_EMULATOR_HOST=localhost:4588
+export DATASTORE_EMULATOR_HOST=localhost:4588
+export STORAGE_EMULATOR_HOST=http://localhost:4588
+export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 ```
 
 Add them to your shell profile (`.bashrc` / `.zshrc`) to persist across sessions.
@@ -41,7 +41,7 @@ gcloud storage ls gs://my-bucket
 ```java
 // Pub/Sub
 ManagedChannel channel = ManagedChannelBuilder
-    .forTarget("localhost:4578")
+    .forTarget("localhost:4588")
     .usePlaintext()
     .build();
 
@@ -64,7 +64,7 @@ SubscriberStubSettings subscriberSettings = SubscriberStubSettings.newBuilder()
 ```java
 // Cloud Storage
 Storage storage = StorageOptions.newBuilder()
-    .setHost("http://localhost:4578")
+    .setHost("http://localhost:4588")
     .setProjectId("floci-local")
     .setCredentials(NoCredentials.getInstance())
     .build()
@@ -78,7 +78,7 @@ storage.create(BlobInfo.newBuilder("my-bucket", "hello.txt").build(),
 ```java
 // Firestore
 FirestoreOptions options = FirestoreOptions.newBuilder()
-    .setHost("localhost:4578")
+    .setHost("localhost:4588")
     .setProjectId("floci-local")
     .setCredentials(NoCredentials.getInstance())
     .build();
@@ -90,7 +90,7 @@ db.collection("users").add(Map.of("name", "Alice")).get();
 ```java
 // Datastore
 DatastoreOptions options = DatastoreOptions.newBuilder()
-    .setHost("http://localhost:4578")
+    .setHost("http://localhost:4588")
     .setProjectId("floci-local")
     .setCredentials(NoCredentials.getInstance())
     .build();
@@ -114,7 +114,7 @@ SecretManagerServiceClient client = SecretManagerServiceClient.create(
 import os
 
 # Pub/Sub
-os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4578"
+os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4588"
 from google.cloud import pubsub_v1
 
 publisher = pubsub_v1.PublisherClient()
@@ -128,7 +128,7 @@ future.result()
 ```python
 # Firestore
 import os
-os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4578"
+os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4588"
 from google.cloud import firestore
 
 db = firestore.Client(project="floci-local")
@@ -141,7 +141,7 @@ for doc in docs:
 ```python
 # Cloud Storage
 import os
-os.environ["STORAGE_EMULATOR_HOST"] = "http://localhost:4578"
+os.environ["STORAGE_EMULATOR_HOST"] = "http://localhost:4588"
 from google.cloud import storage
 
 client = storage.Client(project="floci-local")
@@ -156,7 +156,7 @@ blob.upload_from_string("hello from floci-gcp")
 
 ```javascript
 // Pub/Sub
-process.env.PUBSUB_EMULATOR_HOST = "localhost:4578";
+process.env.PUBSUB_EMULATOR_HOST = "localhost:4588";
 import { PubSub } from "@google-cloud/pubsub";
 
 const pubsub = new PubSub({ projectId: "floci-local" });

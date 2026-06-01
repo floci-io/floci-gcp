@@ -158,6 +158,10 @@ Rules:
 - Respect lifecycle hooks for load and flush behavior
 - Storage keys are namespaced by GCP project ID via `ProjectAwareStorageBackend`
 
+Important nuance:
+
+`EmulatorConfig` declares `@WithDefault` values, but `application.yml` defines effective runtime behavior. Treat repository YAML as the source of truth unless a task explicitly changes configuration semantics.
+
 When adding storage-related behavior:
 
 1. Update `EmulatorConfig`
@@ -172,7 +176,7 @@ When adding storage-related behavior:
 
 Configuration lives under `floci-gcp.*`.
 
-`EmulatorConfig` is a `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface. Do **not** use `@ApplicationScoped` + `@ConfigProperty` for config — use `@ConfigMapping` instead.
+`EmulatorConfig` is a `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface. Nested config groups are inner interfaces. Defaults use `@WithDefault`. Do **not** use `@ApplicationScoped` + `@ConfigProperty` for config — use `@ConfigMapping` instead.
 
 When adding config:
 
@@ -210,15 +214,50 @@ Critical areas:
 
 ## Compatibility Project
 
-Compatibility test suite: `./compatibility-tests/`
+Compatibility tests live in `./compatibility-tests/` and validate floci-gcp against real GCP tooling — SDK clients and Infrastructure-as-Code providers — not just handcrafted HTTP.
 
-Guidelines:
+### Layout
 
-- Prefer GCP SDK clients over raw HTTP for management-plane validation
-- Use this suite when changes may affect real SDK behavior
-- If the suite is unavailable locally, state that limitation explicitly
+Each subdirectory is a self-contained suite with its own `Dockerfile`:
 
-Default module: `sdk-test-java` (GCP SDK for Java)
+- `sdk-test-java` — GCP SDK for Java. **Default / reference suite**; preferred for management-plane validation.
+- `sdk-test-node` — GCP SDK for Node.js
+- `sdk-test-python` — GCP SDK for Python
+- `sdk-test-go` — GCP SDK for Go
+- `compat-terraform` — Terraform `hashicorp/google` provider (bats-based)
+- `compat-opentofu` — OpenTofu `hashicorp/google` provider (bats-based)
+
+`justfile` provides per-suite recipes (`just test-java`, `just test-terraform`, …) for running a suite locally against a running floci-gcp instance.
+
+### How suites run in CI
+
+`.github/workflows/compatibility.yml` builds the floci-gcp image once, then runs one matrix job per suite:
+
+1. Start floci-gcp as a container on a shared Docker network (`compat-net`), reachable as `http://floci-gcp:4588`.
+2. Build the suite image from `compatibility-tests/<suite>`.
+3. `docker run` the suite against the emulator with `/results` mounted.
+4. Each suite writes JUnit XML to `/results`, consumed by the test-summary step; emulator logs are dumped on failure.
+
+The endpoint is passed via env: `FLOCI_GCP_ENDPOINT` for the SDK suites; `FLOCI_ENDPOINT` / `FLOCI_HOST` / `FLOCI_PROJECT` for the bats/IaC suites.
+
+### Adding a suite to CI
+
+1. Give the suite directory a `Dockerfile` whose entrypoint runs the tests and writes JUnit XML to `/results`.
+2. Add the directory name to the `matrix.test` list in `compatibility.yml`.
+3. Keep test output visible — do not silence the runner (e.g. avoid `mvn test -q`); a hanging test must be diagnosable from the streamed log.
+
+### IaC suites (Terraform / OpenTofu)
+
+- Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version** — e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
+- Auth is bypassed with a fake `GOOGLE_OAUTH_ACCESS_TOKEN`; the emulator ignores it.
+- Only REST-exposed services are reachable via Terraform custom endpoints (GCS, IAM, Secret Manager). gRPC-only services (Pub/Sub, Firestore, Datastore) are not, without REST transcoding.
+
+### Guidelines
+
+- Prefer GCP SDK clients over raw HTTP for management-plane validation.
+- Validate any change that may affect real SDK behavior against this suite.
+- Java-based tests (`sdk-test-java`) are preferred for management-plane API validation.
+- If the suite is unavailable locally, state that limitation explicitly (e.g. in the PR description).
 
 ---
 
@@ -384,6 +423,8 @@ If a task would require broad architectural changes, stop and surface the tradeo
 ## GCP SDK Source as Reference
 
 Don't try to look into jars from `~/.m2/repository` — they are not source code. Refer to the actual GCP SDK source code for accurate behavior and protocol details.
+
+The proto definitions for each gRPC service are the authoritative source for request/response shapes and field semantics.
 
 Pre-compiled stub artifacts used (do not add raw `.proto` codegen):
 - `com.google.api.grpc:grpc-google-cloud-pubsub-java`

@@ -11,17 +11,17 @@ floci-gcp generates absolute URLs for certain response fields (GCS object URLs, 
 
 | Setting | Env variable | Default | Description |
 |---|---|---|---|
-| `floci-gcp.base-url` | `FLOCI_GCP_BASE_URL` | `http://localhost:4578` | Full base URL used to build response URLs |
+| `floci-gcp.base-url` | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Full base URL used to build response URLs |
 | `floci-gcp.hostname` | `FLOCI_GCP_HOSTNAME` | _(none)_ | Override only the hostname in `base-url`. Useful in Docker Compose where `localhost` is unreachable from other containers |
 
-When `floci-gcp.hostname` is set it replaces just the host portion of `base-url`, leaving the scheme and port unchanged. Setting `FLOCI_GCP_HOSTNAME: floci-gcp` is equivalent to changing `base-url` from `http://localhost:4578` to `http://floci-gcp:4578`.
+When `floci-gcp.hostname` is set it replaces just the host portion of `base-url`, leaving the scheme and port unchanged. Setting `FLOCI_GCP_HOSTNAME: floci-gcp` is equivalent to changing `base-url` from `http://localhost:4588` to `http://floci-gcp:4588`.
 
 **Example — Docker Compose multi-container setup:**
 
 ```yaml
 environment:
   FLOCI_GCP_HOSTNAME: floci-gcp   # matches the compose service name
-  FLOCI_GCP_BASE_URL: http://floci-gcp:4578
+  FLOCI_GCP_BASE_URL: http://floci-gcp:4588
 ```
 
 See [Docker Compose — Multi-container networking](../docker-compose.md#multi-container-networking) for a full example.
@@ -32,8 +32,8 @@ The block below mirrors `src/main/resources/application.yml`.
 
 ```yaml
 floci-gcp:
-  port: 4578
-  base-url: "http://localhost:4578"  # Used to build GCS object URLs and pre-signed URLs
+  port: 4588
+  base-url: "http://localhost:4588"  # Used to build GCS object URLs and pre-signed URLs
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-project-id: floci-local
 

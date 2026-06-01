@@ -27,7 +27,7 @@ assignees: ''
 ```bash
 # Minimal gcloud CLI or SDK snippet that triggers the issue
 # e.g.:
-# export PUBSUB_EMULATOR_HOST=localhost:4578
+# export PUBSUB_EMULATOR_HOST=localhost:4588
 # gcloud pubsub topics create my-topic --project my-project
 ```
 

@@ -32,7 +32,7 @@ services:
   floci-gcp:
     image: floci/floci-gcp:latest
     ports:
-      - "4578:4578"
+      - "4588:4588"
 ```
 
 ## Build from Source
@@ -48,7 +48,7 @@ services:
 ```bash
 git clone https://github.com/hectorvent/floci-gcp.git
 cd floci-gcp
-./mvnw quarkus:dev          # dev mode with hot reload on port 4578
+./mvnw quarkus:dev          # dev mode with hot reload on port 4588
 ```
 
 ### Build a production JAR

@@ -1,7 +1,7 @@
 # floci-gcp
 
 <p align="center">
-  <img src="assets/floci.png" alt="floci-gcp" width="300" />
+  <img src="assets/floci.svg" alt="floci-gcp" width="500" />
 </p>
 
 <p align="center"><em>Light, fluffy, and always free — GCP Local Emulator</em></p>

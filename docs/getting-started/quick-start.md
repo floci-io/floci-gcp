@@ -11,12 +11,12 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
       floci-gcp:
         image: floci/floci-gcp:latest
         ports:
-          - "4578:4578"
+          - "4588:4588"
         volumes:
           - ./data:/app/data
         environment:
           FLOCI_GCP_HOSTNAME: floci-gcp
-          FLOCI_GCP_BASE_URL: http://floci-gcp:4578
+          FLOCI_GCP_BASE_URL: http://floci-gcp:4588
     ```
 
     ```bash
@@ -27,7 +27,7 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
 
     ```bash
     docker run -d --name floci-gcp \
-      -p 4578:4578 \
+      -p 4588:4588 \
       floci/floci-gcp:latest
     ```
 
@@ -36,7 +36,7 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
     ```bash
     git clone https://github.com/hectorvent/floci-gcp.git
     cd floci-gcp
-    ./mvnw quarkus:dev   # hot reload, port 4578
+    ./mvnw quarkus:dev   # hot reload, port 4588
     ```
 
 ## Step 2 — Configure GCP emulator environment variables
@@ -44,11 +44,11 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
 GCP SDKs automatically skip credential validation when these emulator variables are set:
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
-export FIRESTORE_EMULATOR_HOST=localhost:4578
-export DATASTORE_EMULATOR_HOST=localhost:4578
-export STORAGE_EMULATOR_HOST=http://localhost:4578
-export SECRET_MANAGER_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
+export FIRESTORE_EMULATOR_HOST=localhost:4588
+export DATASTORE_EMULATOR_HOST=localhost:4588
+export STORAGE_EMULATOR_HOST=http://localhost:4588
+export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 ```
 
 Add these to your shell profile (`.bashrc` / `.zshrc`) to persist across sessions.
@@ -81,7 +81,7 @@ Point your GCP SDK clients at floci-gcp:
     ```java
     // Pub/Sub
     ManagedChannel channel = ManagedChannelBuilder
-        .forTarget("localhost:4578")
+        .forTarget("localhost:4588")
         .usePlaintext()
         .build();
 
@@ -98,7 +98,7 @@ Point your GCP SDK clients at floci-gcp:
     ```java
     // Cloud Storage
     Storage storage = StorageOptions.newBuilder()
-        .setHost("http://localhost:4578")
+        .setHost("http://localhost:4588")
         .setProjectId("floci-local")
         .setCredentials(NoCredentials.getInstance())
         .build()
@@ -112,7 +112,7 @@ Point your GCP SDK clients at floci-gcp:
     ```java
     // Firestore
     FirestoreOptions options = FirestoreOptions.newBuilder()
-        .setHost("localhost:4578")
+        .setHost("localhost:4588")
         .setProjectId("floci-local")
         .setCredentials(NoCredentials.getInstance())
         .build();
@@ -125,7 +125,7 @@ Point your GCP SDK clients at floci-gcp:
 
     ```python
     import os
-    os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4578"
+    os.environ["PUBSUB_EMULATOR_HOST"] = "localhost:4588"
 
     from google.cloud import pubsub_v1
 
@@ -139,7 +139,7 @@ Point your GCP SDK clients at floci-gcp:
 
     ```python
     import os
-    os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4578"
+    os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:4588"
 
     from google.cloud import firestore
 
@@ -152,7 +152,7 @@ Point your GCP SDK clients at floci-gcp:
     ```javascript
     import { PubSub } from "@google-cloud/pubsub";
 
-    process.env.PUBSUB_EMULATOR_HOST = "localhost:4578";
+    process.env.PUBSUB_EMULATOR_HOST = "localhost:4588";
 
     const pubsub = new PubSub({ projectId: "floci-local" });
     await pubsub.createTopic("my-topic");
@@ -161,7 +161,7 @@ Point your GCP SDK clients at floci-gcp:
 === "gcloud CLI"
 
     ```bash
-    export PUBSUB_EMULATOR_HOST=localhost:4578
+    export PUBSUB_EMULATOR_HOST=localhost:4588
 
     gcloud config set project floci-local
     gcloud pubsub topics create my-topic

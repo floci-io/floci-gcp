@@ -165,7 +165,7 @@ Pre-signed URLs are generated using the `FLOCI_GCP_BASE_URL` as the base.
 floci-gcp supports virtual-hosted style GCS URLs:
 
 ```
-http://my-bucket.localhost.floci.io:4578/hello.txt
+http://my-bucket.localhost.floci.io:4588/hello.txt
 ```
 
 The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container IP when running inside Docker, so virtual-hosted URLs work from sidecar containers without extra DNS configuration.

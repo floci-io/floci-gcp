@@ -54,7 +54,7 @@ floci-gcp implements real GCP wire protocols. Review protocol-affecting changes 
 - gRPC services (Pub/Sub, Firestore, Datastore, Secret Manager) must use proto3 wire format via pre-compiled `grpc-google-cloud-*-java` stubs
 - REST XML services (GCS object operations) must use `XmlBuilder` and match GCS XML response shapes
 - REST JSON services (GCS management, IAM) must return GCP-style JSON
-- Both gRPC and REST are served on the same port (4578) via ALPN — do not split them onto separate ports
+- Both gRPC and REST are served on the same port (4588) via ALPN — do not split them onto separate ports
 
 Pay extra attention to these cases:
 

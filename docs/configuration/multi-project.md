@@ -26,7 +26,7 @@ floci-gcp resolves the project ID in this order:
 ## Working with Multiple Projects
 
 ```bash
-export PUBSUB_EMULATOR_HOST=localhost:4578
+export PUBSUB_EMULATOR_HOST=localhost:4588
 
 # Create the same topic name in two different projects — fully isolated
 gcloud pubsub topics create my-topic --project=project-a
@@ -83,7 +83,7 @@ environment:
 === "gcloud CLI"
 
     ```bash
-    export PUBSUB_EMULATOR_HOST=localhost:4578
+    export PUBSUB_EMULATOR_HOST=localhost:4588
 
     gcloud pubsub topics create my-topic --project=project-a
     gcloud pubsub topics create my-topic --project=project-b

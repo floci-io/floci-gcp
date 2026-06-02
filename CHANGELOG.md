@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-01
+
+### Added
+
+- **gcs:** object holds (temporary and event-based), bucket retention policy with lock, Batch API (`/batch/storage/v1`), Pub/Sub notification configs, object versioning, lifecycle rules, CORS, and V4 signed URLs
+- **cloudtasks:** Cloud Tasks v2 gRPC service — queues and tasks
+- **firestore:** `orderBy` sorting and `start_at`/`end_at` query cursors (`startAt`/`startAfter`/`endAt`/`endBefore`)
+- **pubsub:** `DetachSubscription` — detaches a subscription from its topic and stops delivery
+- **iam:** `UpdateServiceAccount` / `PatchServiceAccount` — update `displayName` and `description`
+- **core:** legacy `errors[]` array (`domain`, `reason`) in REST error bodies for SDK retry/error inspection
+- **compat:** Terraform and OpenTofu compatibility suites run in the CI matrix
+
+### Fixed
+
+- **kafka:** Docker image pull strategy and `/var/run/docker.sock` mounting for Managed Kafka sidecar orchestration
+
+## [0.1.0] - 2026-05-23
+
 ### Added
 
 - **core:** single-port HTTP/2 + gRPC via ALPN on port `4588`; gRPC and REST share one port with no split-server config
@@ -40,4 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci-gcp/compare/main...HEAD
+[Unreleased]: https://github.com/floci-io/floci-gcp/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/floci-io/floci-gcp/compare/0.1.0...0.2.0
+[0.1.0]: https://github.com/floci-io/floci-gcp/releases/tag/0.1.0

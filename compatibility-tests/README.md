@@ -1,6 +1,6 @@
 # floci-gcp compatibility tests
 
-Compatibility test suite for [floci-gcp](https://github.com/hectorvent/floci-gcp) — a local GCP emulator.
+Compatibility test suite for [floci-gcp](https://github.com/floci-io/floci-gcp) — a local GCP emulator.
 
 Verifies that standard GCP tooling (SDKs, Terraform, OpenTofu) works correctly against the emulator without modification. Tests run against a live floci-gcp instance and use real GCP SDK clients — no mocks.
 

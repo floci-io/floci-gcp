@@ -40,4 +40,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/hectorvent/floci-gcp/compare/main...HEAD
+[Unreleased]: https://github.com/floci-io/floci-gcp/compare/main...HEAD

@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="floci_banner.svg" alt="floci-gcp"/>
+  <img src="floci-gcp-black.svg#gh-light-mode-only" alt="floci-gcp" width="500" />
+  <img src="floci-gcp-white.svg#gh-dark-mode-only" alt="floci-gcp" width="500" />
 </p>
 
 <p align="center">
@@ -8,12 +9,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/floci-io/floci-gcp/releases/latest"><img src="https://img.shields.io/github/v/release/hectorvent/floci-gcp?label=latest%20release&color=blue" alt="Latest Release"></a>
-  <a href="https://github.com/floci-io/floci-gcp/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/hectorvent/floci-gcp/release.yml?label=build" alt="Build Status"></a>
+  <a href="https://github.com/floci-io/floci-gcp/releases/latest"><img src="https://img.shields.io/github/v/release/floci-io/floci-gcp?label=latest%20release&color=blue" alt="Latest Release"></a>
+  <a href="https://github.com/floci-io/floci-gcp/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/floci-io/floci-gcp/release.yml?label=build" alt="Build Status"></a>
   <a href="https://hub.docker.com/r/floci/floci-gcp"><img src="https://img.shields.io/docker/pulls/floci/floci-gcp?label=docker%20pulls" alt="Docker Pulls"></a>
   <a href="https://hub.docker.com/r/floci/floci-gcp"><img src="https://img.shields.io/docker/image-size/floci/floci-gcp/latest?label=image%20size" alt="Docker Image Size"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
-  <a href="https://github.com/floci-io/floci-gcp/stargazers"><img src="https://img.shields.io/github/stars/hectorvent/floci-gcp?style=flat" alt="GitHub Stars"></a>
+  <a href="https://github.com/floci-io/floci-gcp/stargazers"><img src="https://img.shields.io/github/stars/floci-io/floci-gcp?style=flat" alt="GitHub Stars"></a>
 </p>
 
 <p align="center">
@@ -593,7 +594,7 @@ services:
 ## Contributors
 
 <a href="https://github.com/floci-io/floci-gcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=hectorvent/floci-gcp" />
+  <img src="https://contrib.rocks/image?repo=floci-io/floci-gcp" />
 </a>
 
 ---

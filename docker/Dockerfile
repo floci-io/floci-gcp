@@ -50,7 +50,7 @@ VOLUME /app/data
 LABEL org.opencontainers.image.title="floci-gcp" \
       org.opencontainers.image.description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
       org.opencontainers.image.url="https://floci.io" \
-      org.opencontainers.image.source="https://github.com/hectorvent/floci-gcp" \
+      org.opencontainers.image.source="https://github.com/floci-io/floci-gcp" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Floci" \
       description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
@@ -58,7 +58,7 @@ LABEL org.opencontainers.image.title="floci-gcp" \
       io.k8s.display-name="floci-gcp" \
       io.openshift.expose-services="4588:tcp" \
       io.openshift.tags="floci-gcp gcp-emulator" \
-      maintainer="Floci <https://github.com/hectorvent/floci-gcp>" \
+      maintainer="Floci <https://github.com/floci-io/floci-gcp>" \
       name="floci/floci-gcp" \
       summary="Local GCP emulator — open-source alternative to GCP-provided emulators" \
       url="https://floci.io" \

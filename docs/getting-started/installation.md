@@ -46,7 +46,7 @@ services:
 ### Clone and run
 
 ```bash
-git clone https://github.com/hectorvent/floci-gcp.git
+git clone https://github.com/floci-io/floci-gcp.git
 cd floci-gcp
 ./mvnw quarkus:dev          # dev mode with hot reload on port 4588
 ```

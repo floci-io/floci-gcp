@@ -4,15 +4,15 @@ floci-gcp is MIT licensed and welcomes contributions of all kinds.
 
 ## Ways to Help
 
-- **Bug reports** — open a [GitHub issue](https://github.com/hectorvent/floci-gcp/issues/new?template=bug_report.md) with a minimal reproduction
-- **Missing API operations** — open a [feature request](https://github.com/hectorvent/floci-gcp/issues/new?template=feature_request.md)
+- **Bug reports** — open a [GitHub issue](https://github.com/floci-io/floci-gcp/issues/new?template=bug_report.md) with a minimal reproduction
+- **Missing API operations** — open a [feature request](https://github.com/floci-io/floci-gcp/issues/new?template=feature_request.md)
 - **Pull requests** — new service operations, bug fixes, documentation improvements
 
 ## Development Setup
 
 ```bash
 # Clone
-git clone https://github.com/hectorvent/floci-gcp.git
+git clone https://github.com/floci-io/floci-gcp.git
 cd floci-gcp
 
 # Run in dev mode (hot reload, port 4588)
@@ -69,7 +69,7 @@ FIX(gcs): uppercase type      # type must be lowercase
 
 ## Adding a New GCP Service
 
-See [AGENT.md](https://github.com/hectorvent/floci-gcp/blob/main/AGENT.md) for the full architecture guide.
+See [AGENT.md](https://github.com/floci-io/floci-gcp/blob/main/AGENT.md) for the full architecture guide.
 
 Quick summary:
 

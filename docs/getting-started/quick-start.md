@@ -34,7 +34,7 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
 === "Build from source"
 
     ```bash
-    git clone https://github.com/hectorvent/floci-gcp.git
+    git clone https://github.com/floci-io/floci-gcp.git
     cd floci-gcp
     ./mvnw quarkus:dev   # hot reload, port 4588
     ```

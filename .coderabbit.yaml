@@ -17,8 +17,8 @@ reviews:
         (not @Path annotation totals), so one @Path can serve multiple AWS
         operations via query-string or header markers. If a new operation is
         added to the table, check the corresponding Java handler exists in
-        src/main/java/io/github/hectorvent/floci/services/.
-    - path: "src/main/java/io/github/hectorvent/floci/services/**/*Controller.java"
+        src/main/java/io/floci/gcp/services/.
+    - path: "src/main/java/io/floci/gcp/services/**/*Controller.java"
       instructions: |
         When adding a new @Path handler or AWS operation branch:
         1. Check that the corresponding docs/services/{service}.md Supported

@@ -329,6 +329,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                 .setName(stored.getName())
                 .setTopic(stored.getTopic())
                 .setAckDeadlineSeconds(stored.getAckDeadlineSeconds())
+                .setDetached(stored.isDetached())
                 .build();
     }
 

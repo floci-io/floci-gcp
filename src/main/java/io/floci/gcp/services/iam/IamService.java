@@ -105,6 +105,23 @@ public class IamService {
                 .orElseThrow(() -> GcpException.notFound("Service account not found: " + email));
     }
 
+    public StoredServiceAccount updateServiceAccount(String project, String emailOrId,
+            String displayName, String description) {
+        LOG.debugf("updateServiceAccount project=%s id=%s", project, emailOrId);
+        String email = resolveEmail(project, emailOrId);
+        String key = saKey(project, email);
+        StoredServiceAccount sa = saStore.get(key)
+                .orElseThrow(() -> GcpException.notFound("Service account not found: " + email));
+        if (displayName != null) {
+            sa.setDisplayName(displayName);
+        }
+        if (description != null) {
+            sa.setDescription(description);
+        }
+        saStore.put(key, sa);
+        return sa;
+    }
+
     public List<StoredServiceAccount> listServiceAccounts(String project) {
         String prefix = "sa:" + project + ":";
         return saStore.scan(k -> k.startsWith(prefix));

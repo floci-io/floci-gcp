@@ -158,6 +158,25 @@ class IamTest {
 
     @Test
     @Order(10)
+    void updateServiceAccount() throws Exception {
+        String body = json.writeValueAsString(Map.of(
+                "serviceAccount", Map.of(
+                        "displayName", "Updated SA",
+                        "description", "updated via patch"),
+                "updateMask", "displayName,description"));
+
+        JsonNode resp = patch(
+                "/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email, body);
+        assertThat(resp.path("displayName").asText()).isEqualTo("Updated SA");
+        assertThat(resp.path("description").asText()).isEqualTo("updated via patch");
+
+        JsonNode got = get("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email);
+        assertThat(got.path("displayName").asText()).isEqualTo("Updated SA");
+        assertThat(got.path("description").asText()).isEqualTo("updated via patch");
+    }
+
+    @Test
+    @Order(11)
     void deleteServiceAccount() throws Exception {
         delete("/v1/projects/" + PROJECT_ID + "/serviceAccounts/" + email);
 
@@ -175,6 +194,17 @@ class IamTest {
                 .uri(URI.create(TestFixtures.endpoint() + path))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(200);
+        return json.readTree(resp.body());
+    }
+
+    private static JsonNode patch(String path, String body) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(TestFixtures.endpoint() + path))
+                .header("Content-Type", "application/json")
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(body))
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);

@@ -223,6 +223,16 @@ public class PubSubService {
         delivered.remove(name);
     }
 
+    public void detachSubscription(String name) {
+        LOG.infof("detachSubscription name=%s", name);
+        StoredSubscription sub = subStore.get(name)
+                .orElseThrow(() -> GcpException.notFound("Subscription not found: " + name));
+        sub.setDetached(true);
+        subStore.put(name, sub);
+        queues.remove(name);
+        delivered.remove(name);
+    }
+
     public List<String> listTopicSubscriptions(String topicName) {
         LOG.debugf("listTopicSubscriptions topic=%s", topicName);
         return subStore.scan(k -> true).stream()
@@ -259,7 +269,7 @@ public class PubSubService {
             int fanOut = 0;
             for (var entry : subStore.keys()) {
                 StoredSubscription sub = subStore.get(entry).orElse(null);
-                if (sub != null && topicName.equals(sub.getTopic())) {
+                if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())) {
                     queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
                     fanOut++;
                 }

@@ -13,6 +13,7 @@ import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
 import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.AcknowledgeRequest;
+import com.google.pubsub.v1.DetachSubscriptionRequest;
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.ProjectTopicName;
 import com.google.pubsub.v1.PubsubMessage;
@@ -349,5 +350,30 @@ class PubSubTest {
                 .forEach(t -> topicNames.add(t.getName()));
 
         assertThat(topicNames).doesNotContain(topicName.toString());
+    }
+
+    @Test
+    @Order(13)
+    void detachSubscription() {
+        String topicId = TestFixtures.uniqueName("detach-topic");
+        String subId = TestFixtures.uniqueName("detach-sub");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, subId);
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(
+                subName, topicName, PushConfig.getDefaultInstance(), 10);
+        try {
+            assertThat(subscriptionAdminClient.getSubscription(subName).getDetached()).isFalse();
+
+            topicAdminClient.detachSubscription(DetachSubscriptionRequest.newBuilder()
+                    .setSubscription(subName.toString())
+                    .build());
+
+            assertThat(subscriptionAdminClient.getSubscription(subName).getDetached()).isTrue();
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
     }
 }

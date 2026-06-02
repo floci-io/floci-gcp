@@ -59,6 +59,43 @@ public class IamController {
         return Response.status(Response.Status.NOT_FOUND).build();
     }
 
+    // UpdateServiceAccount: PUT /v1/projects/{project}/serviceAccounts/{email} with the
+    // ServiceAccount as the body.
+    @PUT
+    @Path("/{rest:.*}")
+    public Response put(@PathParam("rest") String rest, Map<String, Object> body) {
+        IamPath p = parsePath(rest);
+        LOG.debugf("IAM PUT %s project=%s id=%s", rest, p.project(), p.identifier());
+        if (!"serviceAccounts".equals(p.resourceType()) || p.identifier() == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return updateServiceAccount(p, body);
+    }
+
+    // PatchServiceAccount: PATCH /v1/projects/{project}/serviceAccounts/{email} with body
+    // { "serviceAccount": {...}, "updateMask": "displayName,description" }.
+    @PATCH
+    @Path("/{rest:.*}")
+    public Response patch(@PathParam("rest") String rest, Map<String, Object> body) {
+        IamPath p = parsePath(rest);
+        LOG.debugf("IAM PATCH %s project=%s id=%s", rest, p.project(), p.identifier());
+        if (!"serviceAccounts".equals(p.resourceType()) || p.identifier() == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> sa = body.get("serviceAccount") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m : body;
+        return updateServiceAccount(p, sa);
+    }
+
+    private Response updateServiceAccount(IamPath p, Map<String, Object> saProps) {
+        String displayName = (String) saProps.get("displayName");
+        String description = (String) saProps.get("description");
+        StoredServiceAccount sa = service.updateServiceAccount(
+                p.project(), p.identifier(), displayName, description);
+        return Response.ok(sa).build();
+    }
+
     @GET
     @Path("/{rest:.*}")
     public Response get(@PathParam("rest") String rest,

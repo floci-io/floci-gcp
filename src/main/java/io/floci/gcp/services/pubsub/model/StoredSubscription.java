@@ -16,6 +16,7 @@ public class StoredSubscription {
     private String messageRetentionDuration;
     private String deadLetterTopic;
     private int maxDeliveryAttempts;
+    private boolean detached;
 
     public StoredSubscription() {}
 
@@ -51,4 +52,7 @@ public class StoredSubscription {
 
     public int getMaxDeliveryAttempts() { return maxDeliveryAttempts; }
     public void setMaxDeliveryAttempts(int maxDeliveryAttempts) { this.maxDeliveryAttempts = maxDeliveryAttempts; }
+
+    public boolean isDetached() { return detached; }
+    public void setDetached(boolean detached) { this.detached = detached; }
 }

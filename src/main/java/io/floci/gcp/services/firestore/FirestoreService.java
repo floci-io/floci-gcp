@@ -1,6 +1,7 @@
 package io.floci.gcp.services.firestore;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.firestore.v1.Cursor;
 import com.google.firestore.v1.Document;
 import com.google.firestore.v1.DocumentMask;
 import com.google.firestore.v1.StructuredQuery;
@@ -24,6 +25,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -218,18 +220,122 @@ public class FirestoreService {
         String collectionId = query.getFromCount() > 0 ? query.getFrom(0).getCollectionId() : "";
         String prefix = parent + "/" + collectionId + "/";
 
-        List<StoredDocument> candidates = documentStore.scan(k -> k.startsWith(prefix)
+        List<StoredDocument> results = documentStore.scan(k -> k.startsWith(prefix)
                 && k.substring(prefix.length()).indexOf('/') < 0);
 
-        if (!query.hasWhere()) {
-            return applyLimitAndOffset(candidates, query);
+        if (query.hasWhere()) {
+            results = results.stream()
+                    .filter(doc -> matchesFilter(doc, query.getWhere()))
+                    .toList();
         }
 
-        List<StoredDocument> filtered = candidates.stream()
-                .filter(doc -> matchesFilter(doc, query.getWhere()))
-                .toList();
+        // Firestore order of operations: where → order by → cursors → offset → limit
+        results = sortByOrderBy(results, query);
+        results = applyCursors(results, query);
+        return applyLimitAndOffset(results, query);
+    }
 
-        return applyLimitAndOffset(filtered, query);
+    /**
+     * Sorts results by the query's {@code orderBy} clauses. Only sorts when an explicit
+     * orderBy is present (preserving prior behavior for unordered queries), or when cursors
+     * are used without an explicit orderBy — in which case Firestore implicitly orders by
+     * document name.
+     */
+    private List<StoredDocument> sortByOrderBy(List<StoredDocument> docs, StructuredQuery query) {
+        List<StructuredQuery.Order> orders = query.getOrderByList();
+        if (orders.isEmpty()) {
+            if (!query.hasStartAt() && !query.hasEndAt()) {
+                return docs;
+            }
+            return docs.stream().sorted(Comparator.comparing(StoredDocument::getName)).toList();
+        }
+        Comparator<StoredDocument> comparator = null;
+        for (StructuredQuery.Order order : orders) {
+            String path = order.getField().getFieldPath();
+            Comparator<StoredDocument> c = (a, b) -> compareDocsByField(a, b, path);
+            if (order.getDirection() == StructuredQuery.Direction.DESCENDING) {
+                c = c.reversed();
+            }
+            comparator = (comparator == null) ? c : comparator.thenComparing(c);
+        }
+        return docs.stream().sorted(comparator).toList();
+    }
+
+    private int compareDocsByField(StoredDocument a, StoredDocument b, String path) {
+        if ("__name__".equals(path)) {
+            return a.getName().compareTo(b.getName());
+        }
+        StoredValue va = a.getFields() != null ? a.getFields().get(path) : null;
+        StoredValue vb = b.getFields() != null ? b.getFields().get(path) : null;
+        if (va == null && vb == null) {
+            return 0;
+        }
+        if (va == null) {
+            return -1;
+        }
+        if (vb == null) {
+            return 1;
+        }
+        return compareValues(va, vb.toProto());
+    }
+
+    /**
+     * Applies {@code start_at} / {@code end_at} cursors against the already-sorted results.
+     * Cursor {@code before} semantics: start_at before=true is inclusive (startAt) and
+     * before=false is exclusive (startAfter); end_at before=false is inclusive (endAt) and
+     * before=true is exclusive (endBefore).
+     */
+    private List<StoredDocument> applyCursors(List<StoredDocument> docs, StructuredQuery query) {
+        if (!query.hasStartAt() && !query.hasEndAt()) {
+            return docs;
+        }
+        List<StructuredQuery.Order> orders = query.getOrderByList();
+        var stream = docs.stream();
+        if (query.hasStartAt()) {
+            Cursor start = query.getStartAt();
+            boolean inclusive = start.getBefore();
+            stream = stream.filter(doc -> {
+                int c = compareDocToCursor(doc, start.getValuesList(), orders);
+                return inclusive ? c >= 0 : c > 0;
+            });
+        }
+        if (query.hasEndAt()) {
+            Cursor end = query.getEndAt();
+            boolean exclusive = end.getBefore();
+            stream = stream.filter(doc -> {
+                int c = compareDocToCursor(doc, end.getValuesList(), orders);
+                return exclusive ? c < 0 : c <= 0;
+            });
+        }
+        return stream.toList();
+    }
+
+    private int compareDocToCursor(StoredDocument doc, List<Value> cursorValues,
+            List<StructuredQuery.Order> orders) {
+        int n = Math.min(cursorValues.size(), orders.size());
+        for (int i = 0; i < n; i++) {
+            StructuredQuery.Order order = orders.get(i);
+            int c = compareDocFieldToValue(doc, order.getField().getFieldPath(), cursorValues.get(i));
+            if (order.getDirection() == StructuredQuery.Direction.DESCENDING) {
+                c = -c;
+            }
+            if (c != 0) {
+                return c;
+            }
+        }
+        return 0;
+    }
+
+    private int compareDocFieldToValue(StoredDocument doc, String path, Value value) {
+        if ("__name__".equals(path)) {
+            String target = value.hasReferenceValue() ? value.getReferenceValue() : value.getStringValue();
+            return doc.getName().compareTo(target);
+        }
+        StoredValue stored = doc.getFields() != null ? doc.getFields().get(path) : null;
+        if (stored == null) {
+            return -1;
+        }
+        return compareValues(stored, value);
     }
 
     private List<StoredDocument> applyLimitAndOffset(List<StoredDocument> docs, StructuredQuery query) {

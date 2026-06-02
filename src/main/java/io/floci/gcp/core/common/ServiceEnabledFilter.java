@@ -40,7 +40,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         return Response.status(503)
                 .type(MediaType.APPLICATION_JSON)
                 .entity(new GcpExceptionMapper.ErrorWrapper(
-                        new GcpExceptionMapper.ErrorDetail(503, "Service " + serviceName + " is not enabled.", "UNAVAILABLE")))
+                        GcpExceptionMapper.ErrorDetail.of(503, "Service " + serviceName + " is not enabled.", "UNAVAILABLE")))
                 .build();
     }
 }

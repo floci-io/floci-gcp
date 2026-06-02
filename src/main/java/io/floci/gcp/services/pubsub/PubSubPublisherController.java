@@ -126,6 +126,20 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
         }
     }
 
+    @Override
+    public void detachSubscription(DetachSubscriptionRequest request,
+            StreamObserver<DetachSubscriptionResponse> responseObserver) {
+        LOG.infof("detachSubscription subscription=%s", request.getSubscription());
+        try {
+            service.detachSubscription(request.getSubscription());
+            responseObserver.onNext(DetachSubscriptionResponse.getDefaultInstance());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("detachSubscription failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
     private static String extractProjectId(String parent) {
         if (parent.startsWith("projects/")) {
             return parent.substring("projects/".length());

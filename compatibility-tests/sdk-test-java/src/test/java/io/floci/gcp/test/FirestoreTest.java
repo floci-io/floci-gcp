@@ -115,6 +115,53 @@ class FirestoreTest {
 
     @Test
     @Order(5)
+    void queryWithOrderingAndCursors() throws ExecutionException, InterruptedException {
+        String collection = TestFixtures.uniqueName("cursor-coll");
+        long[] ages = {10L, 20L, 30L, 40L};
+        for (long age : ages) {
+            Map<String, Object> data = new HashMap<>();
+            data.put("name", "u" + age);
+            data.put("age", age);
+            firestore.collection(collection).document("doc-" + age).set(data).get();
+        }
+        try {
+            // orderBy ascending
+            List<Long> asc = firestore.collection(collection).orderBy("age").get().get()
+                    .getDocuments().stream().map(d -> d.getLong("age")).toList();
+            assertThat(asc).containsExactly(10L, 20L, 30L, 40L);
+
+            // orderBy descending
+            List<Long> desc = firestore.collection(collection)
+                    .orderBy("age", Query.Direction.DESCENDING).get().get()
+                    .getDocuments().stream().map(d -> d.getLong("age")).toList();
+            assertThat(desc).containsExactly(40L, 30L, 20L, 10L);
+
+            // startAfter (exclusive)
+            List<Long> after = firestore.collection(collection).orderBy("age")
+                    .startAfter(20L).get().get()
+                    .getDocuments().stream().map(d -> d.getLong("age")).toList();
+            assertThat(after).containsExactly(30L, 40L);
+
+            // startAt (inclusive) + endAt (inclusive) — a window
+            List<Long> window = firestore.collection(collection).orderBy("age")
+                    .startAt(20L).endAt(30L).get().get()
+                    .getDocuments().stream().map(d -> d.getLong("age")).toList();
+            assertThat(window).containsExactly(20L, 30L);
+
+            // endBefore (exclusive)
+            List<Long> before = firestore.collection(collection).orderBy("age")
+                    .endBefore(30L).get().get()
+                    .getDocuments().stream().map(d -> d.getLong("age")).toList();
+            assertThat(before).containsExactly(10L, 20L);
+        } finally {
+            for (long age : ages) {
+                firestore.collection(collection).document("doc-" + age).delete().get();
+            }
+        }
+    }
+
+    @Test
+    @Order(6)
     void deleteDocument() throws ExecutionException, InterruptedException {
         DocumentReference docRef = firestore.collection(COLLECTION).document(DOC_ID);
         WriteResult result = docRef.delete().get();

@@ -11,6 +11,8 @@ import (
 	"cloud.google.com/go/pubsub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestPubSub(t *testing.T) {
@@ -124,8 +126,19 @@ func TestPubSub(t *testing.T) {
 	})
 
 	t.Run("DeleteSubscription", func(t *testing.T) {
+		// The streaming Receive above is cancelled just before this call; its
+		// teardown can race the delete at the gRPC layer and surface NotFound for
+		// an already-deleted subscription. Treat that as success, then verify the
+		// subscription is actually gone so a genuinely broken delete still fails.
 		err := client.Subscription(subID).Delete(ctx)
+		if status.Code(err) == codes.NotFound {
+			err = nil
+		}
 		require.NoError(t, err)
+
+		exists, err := client.Subscription(subID).Exists(ctx)
+		require.NoError(t, err)
+		assert.False(t, exists, "subscription should be deleted")
 	})
 
 	t.Run("DeleteTopic", func(t *testing.T) {

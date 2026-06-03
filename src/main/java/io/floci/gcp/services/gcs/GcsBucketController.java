@@ -133,6 +133,27 @@ public class GcsBucketController {
         return Response.ok(service.lockRetentionPolicy(bucket, ifMetagenerationMatch)).build();
     }
 
+    @GET
+    @Path("/{bucket}/storageLayout")
+    public Response getStorageLayout(@PathParam("bucket") String bucket) {
+        GcsBucket b = service.getBucket(bucket);
+        String location = b.getLocation() != null ? b.getLocation() : "US";
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("kind", "storage#storageLayout");
+        response.put("bucket", bucket);
+        response.put("location", location);
+        response.put("locationType", locationType(location));
+        response.put("hierarchicalNamespace", Map.of("enabled", false));
+        return Response.ok(response).build();
+    }
+
+    private static String locationType(String location) {
+        return switch (location.toUpperCase()) {
+            case "US", "EU", "ASIA" -> "multi-region";
+            default -> "region";
+        };
+    }
+
     // ── Bucket IAM ────────────────────────────────────────────────────────────
 
     @GET

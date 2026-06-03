@@ -203,7 +203,9 @@ public class GcsUploadController {
             String trimmed = segment.trim();
             if (trimmed.startsWith("boundary=")) {
                 String boundary = trimmed.substring("boundary=".length());
-                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+                if (boundary.length() >= 2
+                        && ((boundary.startsWith("\"") && boundary.endsWith("\""))
+                        || (boundary.startsWith("'") && boundary.endsWith("'")))) {
                     boundary = boundary.substring(1, boundary.length() - 1);
                 }
                 return boundary;

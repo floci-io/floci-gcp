@@ -15,9 +15,12 @@ import jakarta.ws.rs.core.Response;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 @ApplicationScoped
 @Path("/storage/v1/b/{bucket}/o")
@@ -52,11 +55,29 @@ public class GcsObjectController {
         if (!includeVersions && prefix != null && !prefix.isBlank()) {
             all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
         }
+        Set<String> prefixes = new TreeSet<>();
+        if (delimiter != null && !delimiter.isEmpty()) {
+            String basePrefix = prefix != null ? prefix : "";
+            List<GcsObjectMeta> rolledUp = new ArrayList<>();
+            for (GcsObjectMeta meta : all) {
+                String rest = meta.getName().substring(basePrefix.length());
+                int idx = rest.indexOf(delimiter);
+                if (idx >= 0) {
+                    prefixes.add(basePrefix + rest.substring(0, idx + delimiter.length()));
+                } else {
+                    rolledUp.add(meta);
+                }
+            }
+            all = rolledUp;
+        }
         PageToken.Page<GcsObjectMeta> page = PageToken.paginate(all, maxResults, pageToken);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#objects");
         if (!page.items().isEmpty()) {
             response.put("items", page.items());
+        }
+        if (!prefixes.isEmpty()) {
+            response.put("prefixes", new ArrayList<>(prefixes));
         }
         if (page.nextPageToken() != null) {
             response.put("nextPageToken", page.nextPageToken());
@@ -143,8 +164,15 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response patchObject(@PathParam("bucket") String bucket,
-            @PathParam("object") String objectPath, Map<String, Object> body) {
+            @PathParam("object") String objectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+            Map<String, Object> body) {
         String objectName = decode(objectPath);
+        service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectName, body)).build();
     }
 
@@ -152,8 +180,15 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateObject(@PathParam("bucket") String bucket,
-            @PathParam("object") String objectPath, Map<String, Object> body) {
+            @PathParam("object") String objectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+            Map<String, Object> body) {
         String objectName = decode(objectPath);
+        service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectName, body)).build();
     }
 
@@ -163,9 +198,16 @@ public class GcsObjectController {
     public Response postObjectMethodOverride(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @HeaderParam("X-HTTP-Method-Override") String methodOverride,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            return Response.ok(service.patchObject(bucket, decode(objectPath), body)).build();
+            String objectName = decode(objectPath);
+            service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
+                    ifMetagenerationMatch, ifMetagenerationNotMatch);
+            return Response.ok(service.patchObject(bucket, objectName, body)).build();
         }
         throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
     }
@@ -188,7 +230,7 @@ public class GcsObjectController {
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
-    @Path("/{destObject: .+?}:compose")
+    @Path("/{destObject: .+}/compose")
     public Response composeObject(@PathParam("bucket") String bucket,
             @PathParam("destObject") String destObjectPath,
             @Context HttpHeaders headers, Map<String, Object> body) {

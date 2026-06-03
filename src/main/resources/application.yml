@@ -2,6 +2,10 @@ quarkus:
   log:
     console:
       format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] %s%e%n"
+      async:
+        enabled: true
+        overflow: block
+        queue-length: 512
 
   http:
     port: ${floci-gcp.port}

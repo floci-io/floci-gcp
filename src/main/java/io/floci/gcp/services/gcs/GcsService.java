@@ -31,6 +31,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -102,7 +103,7 @@ public class GcsService {
     @SuppressWarnings("unchecked")
     public GcsBucket createBucket(String name, String projectId, String baseUrl,
             Map<String, Object> body) {
-        LOG.infof("createBucket name=%s project=%s", name, projectId);
+        LOG.debugf("createBucket name=%s project=%s", name, projectId);
         if (bucketStore.get(name).isPresent()) {
             LOG.warnf("createBucket failed: bucket already exists name=%s", name);
             throw GcpException.alreadyExists("Bucket already exists: " + name);
@@ -155,7 +156,7 @@ public class GcsService {
 
     @SuppressWarnings("unchecked")
     public GcsBucket updateBucket(String name, Map<String, Object> patch) {
-        LOG.infof("updateBucket name=%s", name);
+        LOG.debugf("updateBucket name=%s", name);
         GcsBucket bucket = getBucket(name);
         if (patch.containsKey("labels")) {
             bucket.setLabels((Map<String, String>) patch.get("labels"));
@@ -184,7 +185,7 @@ public class GcsService {
     }
 
     public void deleteBucket(String name) {
-        LOG.infof("deleteBucket name=%s", name);
+        LOG.debugf("deleteBucket name=%s", name);
         if (bucketStore.get(name).isEmpty()) {
             LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
             throw GcpException.notFound("Bucket not found: " + name);
@@ -202,8 +203,9 @@ public class GcsService {
     }
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
-        LOG.infof("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
-        if (bucketStore.get(bucket).isEmpty()) {
+        LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
+        GcsBucket b = bucketStore.get(bucket).orElse(null);
+        if (b == null) {
             LOG.warnf("putObject failed: bucket not found bucket=%s", bucket);
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
@@ -254,8 +256,7 @@ public class GcsService {
         if (retentionExpiry != null) {
             meta.setRetentionExpirationTime(retentionExpiry);
         }
-        GcsBucket b = bucketStore.get(bucket).orElse(null);
-        if (b != null && Boolean.TRUE.equals(b.getDefaultEventBasedHold())) {
+        if (Boolean.TRUE.equals(b.getDefaultEventBasedHold())) {
             meta.setEventBasedHold(true);
         }
 
@@ -322,7 +323,7 @@ public class GcsService {
     }
 
     public boolean deleteObject(String bucket, String objectName) {
-        LOG.infof("deleteObject bucket=%s name=%s", bucket, objectName);
+        LOG.debugf("deleteObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(key).orElse(null);
         if (live == null) {
@@ -363,7 +364,7 @@ public class GcsService {
     }
 
     public void deleteObjectVersion(String bucket, String objectName, String generation) {
-        LOG.infof("deleteObjectVersion bucket=%s name=%s generation=%s", bucket, objectName, generation);
+        LOG.debugf("deleteObjectVersion bucket=%s name=%s generation=%s", bucket, objectName, generation);
         String liveKey = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
@@ -380,7 +381,7 @@ public class GcsService {
     }
 
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch) {
-        LOG.infof("patchObject bucket=%s name=%s", bucket, objectName);
+        LOG.debugf("patchObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = objectMetaStore.get(key)
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
@@ -417,7 +418,7 @@ public class GcsService {
 
     public GcsObjectMeta composeObject(String bucket, String destObject,
             List<String> sourceNames, String contentType, String baseUrl) {
-        LOG.infof("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sourceNames.size());
+        LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sourceNames.size());
         if (bucketStore.get(bucket).isEmpty()) {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
@@ -470,10 +471,18 @@ public class GcsService {
     }
 
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
-        LOG.infof("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
+        LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         GcsObjectMeta srcMeta = getObjectMeta(srcBucket, srcObject);
         byte[] data = getObjectData(srcBucket, srcObject);
-        return putObject(dstBucket, dstObject, srcMeta.getContentType(), data, baseUrl);
+        GcsObjectMeta dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), data, baseUrl);
+        if (srcMeta.getMetadata() != null) {
+            dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
+        }
+        dstMeta.setContentDisposition(srcMeta.getContentDisposition());
+        dstMeta.setContentEncoding(srcMeta.getContentEncoding());
+        dstMeta.setContentLanguage(srcMeta.getContentLanguage());
+        objectMetaStore.put(objectKey(dstBucket, dstObject), dstMeta);
+        return dstMeta;
     }
 
     public List<GcsObjectMeta> listObjects(String bucket) {
@@ -590,7 +599,7 @@ public class GcsService {
     }
 
     public String startResumableUpload(String bucket, String objectName, String contentType) {
-        LOG.infof("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
+        LOG.debugf("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("startResumableUpload failed: bucket not found bucket=%s", bucket);
             throw GcpException.notFound("Bucket not found: " + bucket);
@@ -602,7 +611,7 @@ public class GcsService {
     }
 
     public GcsObjectMeta completeResumableUpload(String uploadId, byte[] data, String baseUrl) {
-        LOG.infof("completeResumableUpload uploadId=%s size=%d", uploadId, data.length);
+        LOG.debugf("completeResumableUpload uploadId=%s size=%d", uploadId, data.length);
         ResumableUpload upload = resumableUploads.remove(uploadId);
         if (upload == null) {
             LOG.warnf("completeResumableUpload failed: upload not found uploadId=%s", uploadId);

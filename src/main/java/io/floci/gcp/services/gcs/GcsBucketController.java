@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
@@ -29,12 +30,15 @@ public class GcsBucketController {
     private final GcsService service;
     private final EmulatorConfig config;
     private final IamService iamService;
+    private final ObjectMapper objectMapper;
 
     @Inject
-    public GcsBucketController(GcsService service, EmulatorConfig config, IamService iamService) {
+    public GcsBucketController(GcsService service, EmulatorConfig config, IamService iamService,
+            ObjectMapper objectMapper) {
         this.service = service;
         this.config = config;
         this.iamService = iamService;
+        this.objectMapper = objectMapper;
     }
 
     @OPTIONS
@@ -49,15 +53,28 @@ public class GcsBucketController {
     }
 
     @POST
-    @Consumes(MediaType.APPLICATION_JSON)
+    @Consumes(MediaType.WILDCARD)
     public Response createBucket(@QueryParam("project") String project,
-            @Context HttpHeaders headers, Map<String, Object> body) {
-        String name = body != null ? (String) body.get("name") : null;
+            @Context HttpHeaders headers, byte[] body) {
+        Map<String, Object> parsed = parseJsonBody(body);
+        String name = parsed != null ? (String) parsed.get("name") : null;
         if (name == null || name.isBlank()) {
             throw GcpException.invalidArgument("bucket name is required");
         }
-        GcsBucket bucket = service.createBucket(name, project, requestBaseUrl(headers), body);
+        GcsBucket bucket = service.createBucket(name, project, requestBaseUrl(headers), parsed);
         return Response.ok(bucket).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseJsonBody(byte[] body) {
+        if (body == null || body.length == 0) {
+            return Map.of();
+        }
+        try {
+            return objectMapper.readValue(body, Map.class);
+        } catch (Exception e) {
+            throw GcpException.invalidArgument("invalid JSON body");
+        }
     }
 
     @GET

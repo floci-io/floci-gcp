@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -35,6 +36,20 @@ class GcsServiceTest {
         GcsBucket bucket = service.getBucket("my-bucket");
         assertNotNull(bucket);
         assertEquals("my-bucket", bucket.getName());
+    }
+
+    @Test
+    void timestampsUseAtMostMicrosecondPrecision() {
+        service.createBucket("ts-bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta meta = service.putObject("ts-bucket", "obj.txt", "text/plain",
+                "x".getBytes(StandardCharsets.UTF_8), BASE_URL);
+
+        for (String ts : List.of(meta.getTimeCreated(), meta.getUpdated(),
+                service.getBucket("ts-bucket").getTimeCreated())) {
+            // Sub-microsecond digits make gcloud warn and truncate.
+            assertEquals(0, Instant.parse(ts).getNano() % 1000,
+                    "timestamp has finer-than-microsecond precision: " + ts);
+        }
     }
 
     @Test

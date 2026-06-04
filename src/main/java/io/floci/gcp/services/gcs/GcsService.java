@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -108,7 +109,7 @@ public class GcsService {
             LOG.warnf("createBucket failed: bucket already exists name=%s", name);
             throw GcpException.alreadyExists("Bucket already exists: " + name);
         }
-        String now = Instant.now().toString();
+        String now = nowTimestamp();
         GcsBucket bucket = new GcsBucket();
         bucket.setId(name);
         bucket.setName(name);
@@ -179,7 +180,7 @@ public class GcsService {
         if (patch.containsKey("defaultEventBasedHold")) {
             bucket.setDefaultEventBasedHold((Boolean) patch.get("defaultEventBasedHold"));
         }
-        bucket.setUpdated(Instant.now().toString());
+        bucket.setUpdated(nowTimestamp());
         bucketStore.put(name, bucket);
         return bucket;
     }
@@ -211,7 +212,7 @@ public class GcsService {
         }
         String key = objectKey(bucket, objectName);
         long generation = System.currentTimeMillis();
-        String now = Instant.now().toString();
+        String now = nowTimestamp();
         String encodedName = urlEncode(objectName);
 
         GcsObjectMeta existing = objectMetaStore.get(key).orElse(null);
@@ -348,7 +349,7 @@ public class GcsService {
             marker.setBucket(bucket);
             marker.setGeneration(String.valueOf(markerGen));
             marker.setIsLatest(true);
-            String now = Instant.now().toString();
+            String now = nowTimestamp();
             marker.setTimeDeleted(now);
             marker.setTimeCreated(now);
             marker.setUpdated(now);
@@ -409,7 +410,7 @@ public class GcsService {
         if (patch.containsKey("eventBasedHold")) {
             meta.setEventBasedHold((Boolean) patch.get("eventBasedHold"));
         }
-        meta.setUpdated(Instant.now().toString());
+        meta.setUpdated(nowTimestamp());
         long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");
         meta.setMetageneration(String.valueOf(mg + 1));
         objectMetaStore.put(key, meta);
@@ -731,11 +732,11 @@ public class GcsService {
         }
         rp.put("isLocked", true);
         if (!rp.containsKey("effectiveTime")) {
-            rp.put("effectiveTime", Instant.now().toString());
+            rp.put("effectiveTime", nowTimestamp());
         }
         b.setRetentionPolicy(rp);
         b.setMetageneration(String.valueOf(current + 1));
-        b.setUpdated(Instant.now().toString());
+        b.setUpdated(nowTimestamp());
         bucketStore.put(bucket, b);
         return b;
     }
@@ -770,8 +771,18 @@ public class GcsService {
                 return null;
             }
             long seconds = period instanceof Number n ? n.longValue() : Long.parseLong(period.toString());
-            return Instant.parse(timeCreated).plusSeconds(seconds).toString();
+            return Instant.parse(timeCreated).plusSeconds(seconds)
+                    .truncatedTo(ChronoUnit.MICROS).toString();
         }).orElse(null);
+    }
+
+    /**
+     * Current time as an RFC 3339 string with at most microsecond precision.
+     * GCS timestamps are microsecond-resolution; emitting nanoseconds makes
+     * clients (e.g. the gcloud CLI) warn and truncate.
+     */
+    private static String nowTimestamp() {
+        return Instant.now().truncatedTo(ChronoUnit.MICROS).toString();
     }
 
     private boolean isVersioningEnabled(String bucketName) {

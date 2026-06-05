@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Response;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +49,7 @@ public class GcsObjectController {
             @QueryParam("pageToken") String pageToken,
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
+            @QueryParam("startOffset") String startOffset,
             @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
         List<GcsObjectMeta> all = includeVersions
                 ? service.listObjectVersions(bucket, prefix)
@@ -55,6 +57,10 @@ public class GcsObjectController {
         if (!includeVersions && prefix != null && !prefix.isBlank()) {
             all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
         }
+        all = all.stream()
+                .sorted(Comparator.comparing(GcsObjectMeta::getName))
+                .filter(o -> startOffset == null || o.getName().compareTo(startOffset) >= 0)
+                .toList();
         Set<String> prefixes = new TreeSet<>();
         if (delimiter != null && !delimiter.isEmpty()) {
             String basePrefix = prefix != null ? prefix : "";

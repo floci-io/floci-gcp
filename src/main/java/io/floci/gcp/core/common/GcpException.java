@@ -43,6 +43,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(400, "INVALID_ARGUMENT", Status.Code.INVALID_ARGUMENT, message);
     }
 
+    public static GcpException outOfRange(String message) {
+        return new GcpException(416, "OUT_OF_RANGE", Status.Code.OUT_OF_RANGE, message);
+    }
+
     public static GcpException failedPrecondition(String message) {
         return new GcpException(400, "FAILED_PRECONDITION", Status.Code.FAILED_PRECONDITION, message);
     }

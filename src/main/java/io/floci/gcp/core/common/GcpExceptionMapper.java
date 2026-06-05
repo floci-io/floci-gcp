@@ -36,6 +36,7 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
             case "NOT_FOUND" -> "notFound";
             case "ALREADY_EXISTS" -> "alreadyExists";
             case "INVALID_ARGUMENT" -> "invalid";
+            case "OUT_OF_RANGE" -> "outOfRange";
             case "FAILED_PRECONDITION" -> "failedPrecondition";
             case "CONDITION_NOT_MET" -> "conditionNotMet";
             case "PERMISSION_DENIED" -> "forbidden";

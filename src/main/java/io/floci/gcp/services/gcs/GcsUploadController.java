@@ -75,8 +75,76 @@ public class GcsUploadController {
         if (uploadId == null) {
             throw GcpException.invalidArgument("missing upload_id query parameter");
         }
+        String contentRange = headers.getHeaderString("Content-Range");
+        if (contentRange != null && !contentRange.isBlank()) {
+            ContentRange range = parseContentRange(contentRange, body.length);
+            if (range.statusQuery()) {
+                Response.ResponseBuilder response = Response.status(308);
+                long uploadedLength = service.resumableUploadLength(uploadId);
+                if (uploadedLength > 0) {
+                    response.header("Range", "bytes=0-" + (uploadedLength - 1));
+                }
+                return response.build();
+            }
+            if (range.totalSize() == null) {
+                long end = service.appendResumableUpload(uploadId, range.start(), body);
+                return Response.status(308).header("Range", "bytes=0-" + end).build();
+            }
+            GcsObjectMeta meta = service.completeResumableUpload(
+                    uploadId, range.start(), body, range.totalSize(), requestBaseUrl(headers));
+            return Response.ok(meta).build();
+        }
         GcsObjectMeta meta = service.completeResumableUpload(uploadId, body, requestBaseUrl(headers));
         return Response.ok(meta).build();
+    }
+
+    private record ContentRange(long start, long end, Long totalSize, boolean statusQuery) {}
+
+    private static ContentRange parseContentRange(String header, int bodyLength) {
+        if (!header.startsWith("bytes ")) {
+            throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+        }
+        String value = header.substring("bytes ".length());
+        if (value.startsWith("*/")) {
+            if (bodyLength != 0) {
+                throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+            }
+            String totalValue = value.substring(2);
+            Long totalSize = "*".equals(totalValue) ? null : parseLong(totalValue, header);
+            return new ContentRange(0, -1, totalSize, true);
+        }
+        int dash = value.indexOf('-');
+        int slash = value.indexOf('/');
+        if (dash < 0 || slash < 0 || slash < dash) {
+            throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+        }
+
+        long start = parseLong(value.substring(0, dash), header);
+        String endValue = value.substring(dash + 1, slash);
+        String totalValue = value.substring(slash + 1);
+        Long totalSize = "*".equals(totalValue) ? null : parseLong(totalValue, header);
+        long end;
+        if ("*".equals(endValue)) {
+            if (totalSize != null || bodyLength == 0) {
+                throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+            }
+            end = start + bodyLength - 1L;
+            totalSize = end + 1L;
+        } else {
+            end = parseLong(endValue, header);
+        }
+        if (start < 0 || end < start || bodyLength != end - start + 1) {
+            throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+        }
+        return new ContentRange(start, end, totalSize, false);
+    }
+
+    private static long parseLong(String value, String header) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+        }
     }
 
     private Response handleMultipart(String bucket, String nameParam, HttpHeaders headers, byte[] body,

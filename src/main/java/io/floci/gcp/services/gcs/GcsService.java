@@ -625,7 +625,7 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata()));
+                customerEncryption.metadata(), new byte[0]));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -639,6 +639,55 @@ public class GcsService {
         }
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+    }
+
+    public long appendResumableUpload(String uploadId, long start, byte[] data) {
+        ResumableUpload upload = resumableUploads.get(uploadId);
+        if (upload == null) {
+            LOG.warnf("appendResumableUpload failed: upload not found uploadId=%s", uploadId);
+            throw GcpException.notFound("Resumable upload not found: " + uploadId);
+        }
+        byte[] combined = appendChunk(upload, start, data);
+        resumableUploads.put(uploadId, new ResumableUpload(
+                upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(), combined));
+        return combined.length - 1L;
+    }
+
+    public long resumableUploadLength(String uploadId) {
+        ResumableUpload upload = resumableUploads.get(uploadId);
+        if (upload == null) {
+            LOG.warnf("resumableUploadLength failed: upload not found uploadId=%s", uploadId);
+            throw GcpException.notFound("Resumable upload not found: " + uploadId);
+        }
+        return upload.data().length;
+    }
+
+    public GcsObjectMeta completeResumableUpload(String uploadId, long start, byte[] data,
+            long totalSize, String baseUrl) {
+        ResumableUpload upload = resumableUploads.get(uploadId);
+        if (upload == null) {
+            LOG.warnf("completeResumableUpload failed: upload not found uploadId=%s", uploadId);
+            throw GcpException.notFound("Resumable upload not found: " + uploadId);
+        }
+        byte[] combined = appendChunk(upload, start, data);
+        if (combined.length != totalSize) {
+            throw GcpException.invalidArgument(
+                    "Content-Range total size does not match uploaded bytes: " + totalSize);
+        }
+        resumableUploads.remove(uploadId);
+        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), combined,
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+    }
+
+    private static byte[] appendChunk(ResumableUpload upload, long start, byte[] data) {
+        byte[] existing = upload.data();
+        if (start != existing.length) {
+            throw GcpException.invalidArgument("Content-Range start does not match uploaded bytes: " + start);
+        }
+        byte[] combined = new byte[existing.length + data.length];
+        System.arraycopy(existing, 0, combined, 0, existing.length);
+        System.arraycopy(data, 0, combined, existing.length, data.length);
+        return combined;
     }
 
     // ── Notifications ──────────────────────────────────────────────────────────

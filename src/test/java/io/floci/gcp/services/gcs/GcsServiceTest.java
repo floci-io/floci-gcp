@@ -42,7 +42,7 @@ class GcsServiceTest {
     void timestampsUseAtMostMicrosecondPrecision() {
         service.createBucket("ts-bucket", "p1", BASE_URL, Map.of());
         GcsObjectMeta meta = service.putObject("ts-bucket", "obj.txt", "text/plain",
-                "x".getBytes(StandardCharsets.UTF_8), BASE_URL);
+                "x".getBytes(StandardCharsets.UTF_8), GcsCustomerEncryption.none(), BASE_URL);
 
         for (String ts : List.of(meta.getTimeCreated(), meta.getUpdated(),
                 service.getBucket("ts-bucket").getTimeCreated())) {
@@ -82,14 +82,15 @@ class GcsServiceTest {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
         byte[] data = "hello".getBytes(StandardCharsets.UTF_8);
 
-        GcsObjectMeta meta = service.putObject("bucket", "obj.txt", "text/plain", data, BASE_URL);
+        GcsObjectMeta meta = service.putObject("bucket", "obj.txt", "text/plain", data,
+                GcsCustomerEncryption.none(), BASE_URL);
 
         assertNotNull(meta);
         assertEquals("obj.txt", meta.getName());
         assertEquals("text/plain", meta.getContentType());
         assertEquals(String.valueOf(data.length), meta.getSize());
 
-        byte[] retrieved = service.getObjectData("bucket", "obj.txt");
+        byte[] retrieved = service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none());
         assertArrayEquals(data, retrieved);
     }
 
@@ -105,7 +106,8 @@ class GcsServiceTest {
     @Test
     void deleteObjectRemovesFromStorage() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
-        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1}, BASE_URL);
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
 
         assertTrue(service.deleteObject("bucket", "obj.txt"));
 
@@ -117,8 +119,10 @@ class GcsServiceTest {
     @Test
     void listObjectsReturnsAll() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
-        service.putObject("bucket", "a/1.txt", "text/plain", new byte[]{1}, BASE_URL);
-        service.putObject("bucket", "b/2.txt", "text/plain", new byte[]{2}, BASE_URL);
+        service.putObject("bucket", "a/1.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.putObject("bucket", "b/2.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
 
         List<GcsObjectMeta> objects = service.listObjects("bucket");
         assertEquals(2, objects.size());

@@ -46,14 +46,16 @@ public class GcsXmlDownloadController {
     public Response download(
             @PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
-            @QueryParam("generation") String generation) {
+            @QueryParam("generation") String generation,
+            @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256) {
         String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
-            byte[] data = service.getObjectData(bucket, objectName, generation);
+            byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
             GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
             return Response.ok(data).type(meta.getContentType()).build();
         }
-        byte[] data = service.getObjectData(bucket, objectName);
+        byte[] data = service.getObjectData(bucket, objectName, customerEncryption);
         GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
         return Response.ok(data).type(meta.getContentType()).build();
     }
@@ -71,7 +73,8 @@ public class GcsXmlDownloadController {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String host = headers.getHeaderString("Host");
         String baseUrl = host != null ? "http://" + host : config.baseUrl();
-        GcsObjectMeta meta = service.putObject(bucket, objectName, contentType, body != null ? body : new byte[0], baseUrl);
+        GcsObjectMeta meta = service.putObject(bucket, objectName, contentType, body != null ? body : new byte[0],
+                GcsCustomerEncryption.fromHeaders(headers), baseUrl);
         return Response.ok(meta).build();
     }
 }

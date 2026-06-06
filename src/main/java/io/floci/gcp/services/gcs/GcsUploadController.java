@@ -101,7 +101,8 @@ public class GcsUploadController {
         }
         preconditions.check(service, bucket, objectName);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
-        GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes, requestBaseUrl(headers));
+        GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
+                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 
@@ -132,7 +133,8 @@ public class GcsUploadController {
         }
 
         preconditions.check(service, bucket, name);
-        String uploadId = service.startResumableUpload(bucket, name, contentType);
+        String uploadId = service.startResumableUpload(bucket, name, contentType,
+                GcsCustomerEncryption.fromHeaders(headers));
         String location = requestBaseUrl(headers) + "/upload/storage/v1/b/" + bucket
                 + "/o?uploadType=resumable&upload_id=" + uploadId;
 
@@ -143,7 +145,8 @@ public class GcsUploadController {
             Preconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         preconditions.check(service, bucket, name);
-        GcsObjectMeta meta = service.putObject(bucket, name, contentType, body, requestBaseUrl(headers));
+        GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
+                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 

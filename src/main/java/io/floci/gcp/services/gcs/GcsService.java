@@ -203,7 +203,8 @@ public class GcsService {
         return buckets;
     }
 
-    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, String baseUrl) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -240,6 +241,7 @@ public class GcsService {
         meta.setGeneration(String.valueOf(generation));
         meta.setSize(String.valueOf(data.length));
         meta.setContentType(contentType != null ? contentType : "application/octet-stream");
+        meta.setCustomerEncryption(customerEncryption.metadata());
         meta.setStorageClass("STANDARD");
         meta.setTimeCreated(now);
         meta.setUpdated(now);
@@ -290,13 +292,14 @@ public class GcsService {
                         "Object version not found: " + objectName + "@" + generation));
     }
 
-    public byte[] getObjectData(String bucket, String objectName) {
+    public byte[] getObjectData(String bucket, String objectName, GcsCustomerEncryption customerEncryption) {
         LOG.debugf("getObjectData bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = objectMetaStore.get(key).orElse(null);
         if (meta != null && meta.getTimeDeleted() != null) {
             throw GcpException.notFound("Object not found: " + objectName);
         }
+        checkCustomerEncryption(meta, customerEncryption);
         byte[] data = objectData.get(key);
         if (data == null) {
             LOG.warnf("getObjectData failed: object not found bucket=%s name=%s", bucket, objectName);
@@ -305,22 +308,35 @@ public class GcsService {
         return data;
     }
 
-    public byte[] getObjectData(String bucket, String objectName, String generation) {
+    public byte[] getObjectData(String bucket, String objectName, String generation,
+            GcsCustomerEncryption customerEncryption) {
         LOG.debugf("getObjectData bucket=%s name=%s generation=%s", bucket, objectName, generation);
         String liveKey = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
+            checkCustomerEncryption(live, customerEncryption);
             byte[] data = objectData.get(liveKey);
             if (data != null) {
                 return data;
             }
         }
         String archiveKey = liveKey + "\0" + generation;
+        checkCustomerEncryption(objectMetaStore.get(archiveKey).orElse(null), customerEncryption);
         byte[] data = objectData.get(archiveKey);
         if (data == null) {
             throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
         }
         return data;
+    }
+
+    private static void checkCustomerEncryption(GcsObjectMeta meta, GcsCustomerEncryption customerEncryption) {
+        if (meta == null || meta.getCustomerEncryption() == null) {
+            return;
+        }
+        String expected = meta.getCustomerEncryption().get("keySha256");
+        if (!expected.equals(customerEncryption.keySha256())) {
+            throw GcpException.permissionDenied("Missing or invalid customer-supplied encryption key");
+        }
     }
 
     public boolean deleteObject(String bucket, String objectName) {
@@ -425,7 +441,7 @@ public class GcsService {
         }
         byte[] composed = new byte[0];
         for (String src : sourceNames) {
-            byte[] data = getObjectData(bucket, src);
+            byte[] data = getObjectData(bucket, src, GcsCustomerEncryption.none());
             byte[] merged = new byte[composed.length + data.length];
             System.arraycopy(composed, 0, merged, 0, composed.length);
             System.arraycopy(data, 0, merged, composed.length, data.length);
@@ -437,7 +453,7 @@ public class GcsService {
                     .map(GcsObjectMeta::getContentType).orElse(null);
         }
         return putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
-                composed, baseUrl);
+                composed, GcsCustomerEncryption.none(), baseUrl);
     }
 
     public void checkPreconditions(String bucket, String objectName,
@@ -474,8 +490,9 @@ public class GcsService {
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         GcsObjectMeta srcMeta = getObjectMeta(srcBucket, srcObject);
-        byte[] data = getObjectData(srcBucket, srcObject);
-        GcsObjectMeta dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), data, baseUrl);
+        byte[] data = getObjectData(srcBucket, srcObject, GcsCustomerEncryption.none());
+        GcsObjectMeta dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), data,
+                GcsCustomerEncryption.none(), baseUrl);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }
@@ -599,14 +616,16 @@ public class GcsService {
         return acl;
     }
 
-    public String startResumableUpload(String bucket, String objectName, String contentType) {
+    public String startResumableUpload(String bucket, String objectName, String contentType,
+            GcsCustomerEncryption customerEncryption) {
         LOG.debugf("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("startResumableUpload failed: bucket not found bucket=%s", bucket);
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String uploadId = UUID.randomUUID().toString();
-        resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType));
+        resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
+                customerEncryption.metadata()));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -618,7 +637,8 @@ public class GcsService {
             LOG.warnf("completeResumableUpload failed: upload not found uploadId=%s", uploadId);
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
-        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data, baseUrl);
+        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
     }
 
     // ── Notifications ──────────────────────────────────────────────────────────
@@ -816,6 +836,7 @@ public class GcsService {
         copy.setSelfLink(src.getSelfLink());
         copy.setEtag(src.getEtag());
         copy.setMetadata(src.getMetadata());
+        copy.setCustomerEncryption(src.getCustomerEncryption());
         copy.setTimeDeleted(src.getTimeDeleted());
         copy.setIsLatest(src.getIsLatest());
         copy.setTemporaryHold(src.getTemporaryHold());

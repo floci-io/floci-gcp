@@ -29,6 +29,7 @@ public class GcsObjectMeta {
     private String contentEncoding;
     private String contentLanguage;
     private Map<String, String> metadata;
+    private Map<String, String> customerEncryption;
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -89,6 +90,9 @@ public class GcsObjectMeta {
 
     public Map<String, String> getMetadata() { return metadata; }
     public void setMetadata(Map<String, String> metadata) { this.metadata = metadata; }
+
+    public Map<String, String> getCustomerEncryption() { return customerEncryption; }
+    public void setCustomerEncryption(Map<String, String> customerEncryption) { this.customerEncryption = customerEncryption; }
 
     private String timeDeleted;
     private Boolean isLatest;

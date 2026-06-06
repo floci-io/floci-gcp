@@ -142,18 +142,20 @@ public class GcsObjectController {
     public Response getObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @QueryParam("alt") String alt,
-            @QueryParam("generation") String generation) {
+            @QueryParam("generation") String generation,
+            @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256) {
         String objectName = decode(objectPath);
+        GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             if ("media".equals(alt)) {
-                byte[] data = service.getObjectData(bucket, objectName, generation);
+                byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
                 GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
                 return Response.ok(data).type(meta.getContentType()).build();
             }
             return Response.ok(service.getObjectMeta(bucket, objectName, generation)).build();
         }
         if ("media".equals(alt)) {
-            byte[] data = service.getObjectData(bucket, objectName);
+            byte[] data = service.getObjectData(bucket, objectName, customerEncryption);
             GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
             return Response.ok(data).type(meta.getContentType()).build();
         }

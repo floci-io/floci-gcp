@@ -4,6 +4,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 @ApplicationScoped
 public class K3dDriver {
@@ -13,8 +15,7 @@ public class K3dDriver {
                 "k3d",
                 "cluster",
                 "get",
-                name
-        ) == 0;
+                name) == 0;
     }
 
     public boolean createCluster(String name) {
@@ -22,13 +23,51 @@ public class K3dDriver {
         ensureDockerInstalled();
         ensureK3dInstalled();
 
-        return execute(
+        boolean created = execute(
                 "k3d",
                 "cluster",
                 "create",
                 name,
-                "--wait"
-        ) == 0;
+                "--wait") == 0;
+
+        if (!created) {
+            return false;
+        }
+
+        try {
+
+            String kubeConfig = getKubeConfig(name);
+
+            Path clusterDir = Path.of(
+                    System.getProperty("user.home"),
+                    ".floci",
+                    "clusters",
+                    name);
+
+            Files.createDirectories(clusterDir);
+
+            Files.writeString(
+                    clusterDir.resolve("kubeconfig.yaml"),
+                    kubeConfig);
+
+            Files.writeString(
+                    clusterDir.resolve("metadata.json"),
+                    """
+                            {
+                              "name":"%s",
+                              "driver":"k3d",
+                              "status":"RUNNING"
+                            }
+                            """.formatted(name));
+
+            return true;
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(
+                    "Failed to persist cluster metadata",
+                    e);
+        }
     }
 
     public boolean deleteCluster(String name) {
@@ -39,8 +78,7 @@ public class K3dDriver {
                 "k3d",
                 "cluster",
                 "delete",
-                name
-        ) == 0;
+                name) == 0;
     }
 
     public String getKubeConfig(String name) {
@@ -53,17 +91,15 @@ public class K3dDriver {
                     "k3d",
                     "kubeconfig",
                     "get",
-                    name
-            )
+                    name)
                     .redirectErrorStream(true)
                     .start();
 
             StringBuilder output = new StringBuilder();
 
-            try (BufferedReader reader =
-                         new BufferedReader(
-                                 new InputStreamReader(
-                                         process.getInputStream()))) {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(
+                            process.getInputStream()))) {
 
                 String line;
 
@@ -86,8 +122,7 @@ public class K3dDriver {
 
         if (execute("docker", "version") != 0) {
             throw new RuntimeException(
-                    "Docker is not installed"
-            );
+                    "Docker is not installed");
         }
     }
 
@@ -99,30 +134,28 @@ public class K3dDriver {
 
         throw new RuntimeException(
                 """
-                k3d not found.
+                        k3d not found.
 
-                Install it first:
+                        Install it first:
 
-                macOS:
-                  brew install k3d
+                        macOS:
+                          brew install k3d
 
-                Linux:
-                  wget -q -O - https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+                        Linux:
+                          wget -q -O - https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 
-                Windows:
-                  choco install k3d
-                """
-        );
+                        Windows:
+                          choco install k3d
+                        """);
     }
 
     private int execute(String... command) {
 
         try {
 
-            Process process =
-                    new ProcessBuilder(command)
-                            .redirectErrorStream(true)
-                            .start();
+            Process process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
 
             return process.waitFor();
 

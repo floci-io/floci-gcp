@@ -19,7 +19,7 @@ import java.util.UUID;
  *
  * Cluster create/delete return immediately-complete LRO responses (done=true).
  */
-@Path("/v1/k/projects/{project}/locations/{location}")
+@Path("/v1/projects/{project}/locations/{location}")
 @ApplicationScoped
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)

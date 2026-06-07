@@ -15,66 +15,66 @@ import java.util.UUID;
 @ApplicationScoped
 public class GkeOperationService {
 
-    private final StorageBackend<String, StoredOperation> operationStore;
+        private final StorageBackend<String, StoredOperation> operationStore;
 
-    private final Map<String, StoredOperation> operations =
-            new HashMap<>();
+        private final Map<String, StoredOperation> operations = new HashMap<>();
 
-    @Inject
-    public GkeOperationService(
-            StorageFactory storageFactory) {
+        @Inject
+        public GkeOperationService(
+                        StorageFactory storageFactory) {
 
-        this.operationStore = storageFactory.createGlobal(
-                "gke",
-                "gke-operations.json",
-                new TypeReference<Map<String, StoredOperation>>() {});
-    }
+                this.operationStore = storageFactory.createGlobal(
+                                "gke",
+                                "gke-operations.json",
+                                new TypeReference<Map<String, StoredOperation>>() {
+                                });
+        }
 
-    public StoredOperation createOperation(
-            String project,
-            String location,
-            String clusterId,
-            OperationType type) {
+        public StoredOperation createOperation(
+                        String project,
+                        String location,
+                        String clusterId,
+                        OperationType type) {
 
-        String operationId = UUID.randomUUID().toString();
+                String operationId = UUID.randomUUID().toString();
 
-        String selfLink = "projects/" + project
-                + "/locations/" + location
-                + "/operations/" + operationId;
+                String selfLink = "projects/" + project
+                                + "/locations/" + location
+                                + "/operations/" + operationId;
 
-        String targetLink = "projects/" + project
-                + "/locations/" + location
-                + "/clusters/" + clusterId;
+                String targetLink = "projects/" + project
+                                + "/locations/" + location
+                                + "/clusters/" + clusterId;
 
-        StoredOperation op = new StoredOperation(
-                operationId,
-                type,
-                location,
-                targetLink,
-                selfLink);
+                StoredOperation op = new StoredOperation(
+                                operationId,
+                                type,
+                                location,
+                                targetLink,
+                                selfLink);
 
-        operationStore.put(operationId, op);
-        operations.put(operationId, op);
+                operationStore.put(operationId, op);
+                operations.put(operationId, op);
 
-        return op;
-    }
+                return op;
+        }
 
-    public List<StoredOperation> listOperations(
-            String project,
-            String location) {
+        public List<StoredOperation> listOperations(
+                        String project,
+                        String location) {
 
-        return operations.values()
-                .stream()
-                .filter(op -> location.equals(op.getLocation()))
-                .toList();
-    }
+                return operations.values()
+                                .stream()
+                                .filter(op -> location.equals(op.getLocation()))
+                                .toList();
+        }
 
-    public StoredOperation getOperation(
-            String operationId) {
+        public StoredOperation getOperation(
+                        String operationId) {
 
-        return operationStore
-                .get(operationId)
-                .orElseThrow(() -> GcpException.notFound(
-                        "Operation not found: " + operationId));
-    }
+                return operationStore
+                                .get(operationId)
+                                .orElseThrow(() -> GcpException.notFound(
+                                                "Operation not found: " + operationId));
+        }
 }

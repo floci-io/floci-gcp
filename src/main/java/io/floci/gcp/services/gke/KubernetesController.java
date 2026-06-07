@@ -128,19 +128,19 @@ public class KubernetesController {
         }
 
         @GET
-@Path("/operations")
-public Response listOperations(
-        @PathParam("project") String project,
-        @PathParam("location") String location) {
+        @Path("/operations")
+        public Response listOperations(
+                        @PathParam("project") String project,
+                        @PathParam("location") String location) {
 
-    return Response.ok(
-            Map.of(
-                    "operations",
-                    operationService.listOperations(
-                            project,
-                            location)))
-            .build();
-}
+                return Response.ok(
+                                Map.of(
+                                                "operations",
+                                                operationService.listOperations(
+                                                                project,
+                                                                location)))
+                                .build();
+        }
 
         @GET
         @Path("/operations/{operationId}")

@@ -171,6 +171,11 @@
             <artifactId>client-java</artifactId>
             <version>24.0.0</version>
         </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

@@ -662,6 +662,22 @@ public class GcsService {
         return upload.data().length;
     }
 
+    public GcsObjectMeta completeBufferedResumableUpload(String uploadId, long totalSize, String baseUrl) {
+        ResumableUpload upload = resumableUploads.get(uploadId);
+        if (upload == null) {
+            LOG.warnf("completeBufferedResumableUpload failed: upload not found uploadId=%s", uploadId);
+            throw GcpException.notFound("Resumable upload not found: " + uploadId);
+        }
+        byte[] data = upload.data();
+        if (data.length != totalSize) {
+            throw GcpException.invalidArgument(
+                    "Content-Range total size does not match uploaded bytes: " + totalSize);
+        }
+        resumableUploads.remove(uploadId);
+        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+    }
+
     public GcsObjectMeta completeResumableUpload(String uploadId, long start, byte[] data,
             long totalSize, String baseUrl) {
         ResumableUpload upload = resumableUploads.get(uploadId);

@@ -79,8 +79,13 @@ public class GcsUploadController {
         if (contentRange != null && !contentRange.isBlank()) {
             ContentRange range = parseContentRange(contentRange, body.length);
             if (range.statusQuery()) {
-                Response.ResponseBuilder response = Response.status(308);
                 long uploadedLength = service.resumableUploadLength(uploadId);
+                if (range.totalSize() != null && uploadedLength == range.totalSize()) {
+                    GcsObjectMeta meta = service.completeBufferedResumableUpload(
+                            uploadId, range.totalSize(), requestBaseUrl(headers));
+                    return Response.ok(meta).build();
+                }
+                Response.ResponseBuilder response = Response.status(308);
                 if (uploadedLength > 0) {
                     response.header("Range", "bytes=0-" + (uploadedLength - 1));
                 }

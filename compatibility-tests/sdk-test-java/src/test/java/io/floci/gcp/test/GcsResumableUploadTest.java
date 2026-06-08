@@ -58,6 +58,37 @@ class GcsResumableUploadTest {
     }
 
     @Test
+    void resumableUploadCompletesAtChunkBoundary() throws Exception {
+        String objectName = "boundary-complete.bin";
+        byte[] data = new byte[CHUNK_SIZE];
+        Arrays.fill(data, (byte) 'c');
+
+        writeObject(objectName, data);
+
+        Blob blob = storage.get(BlobId.of(BUCKET, objectName));
+        assertThat(blob.getSize()).isEqualTo(data.length);
+        assertThat(storage.readAllBytes(BlobId.of(BUCKET, objectName))).containsExactly(data);
+    }
+
+    @Test
+    void resumableUploadCompletesAtSecondChunkBoundary() throws Exception {
+        String objectName = "second-boundary-complete.bin";
+        byte[] data = new byte[CHUNK_SIZE * 2];
+        Arrays.fill(data, 0, CHUNK_SIZE, (byte) 'c');
+        Arrays.fill(data, CHUNK_SIZE, data.length, (byte) 'd');
+
+        writeObject(objectName, data);
+
+        Blob blob = storage.get(BlobId.of(BUCKET, objectName));
+        assertThat(blob.getSize()).isEqualTo(data.length);
+
+        byte[] stored = storage.readAllBytes(BlobId.of(BUCKET, objectName));
+        assertThat(stored).hasSize(data.length);
+        assertThat(stored[0]).isEqualTo((byte) 'c');
+        assertThat(stored[CHUNK_SIZE]).isEqualTo((byte) 'd');
+    }
+
+    @Test
     void resumableUploadWritesSmallObject() throws Exception {
         String objectName = "small-object.bin";
         byte[] data = "small-object-data".getBytes(StandardCharsets.UTF_8);

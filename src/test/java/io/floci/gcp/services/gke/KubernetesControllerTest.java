@@ -1,7 +1,7 @@
 package io.floci.gcp.services.gke;
 
 import io.floci.gcp.core.common.kubernetes.Cluster;
-import io.floci.gcp.core.common.kubernetes.ClusterDriverType;
+import io.floci.gcp.core.common.kubernetes.drivers.ClusterDriverType;
 import io.floci.gcp.core.common.kubernetes.ClusterStatus;
 import io.floci.gcp.core.common.kubernetes.drivers.K3dDriver;
 import io.floci.gcp.core.common.kubernetes.metadata.ClusterMetadata;

@@ -2,6 +2,8 @@ package io.floci.gcp.core.common.kubernetes;
 
 import org.junit.jupiter.api.Test;
 
+import io.floci.gcp.core.common.kubernetes.drivers.ClusterDriverType;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class ClusterTest {

@@ -32,6 +32,8 @@ class GcsSignedUrlTest {
     private static final String BUCKET_NAME = TestFixtures.uniqueName("signed-url-bucket");
     private static final String OBJECT_NAME = "test/signed-object.txt";
     private static final String OBJECT_CONTENT = "content via signed URL";
+    private static final long MAX_EXPIRES_SECONDS = 604_800;
+    private static final String INVALID_EXPIRES = String.valueOf(MAX_EXPIRES_SECONDS + 1);
 
     private static Storage storage;
     private static ServiceAccountSigner fakeSigner;
@@ -103,13 +105,7 @@ class GcsSignedUrlTest {
         assertThat(signed).isNotNull();
         assertThat(signed.toString()).contains(BUCKET_NAME);
 
-        // SDK defaults to https:// — rewrite to http:// for the plaintext emulator
-        URL emulatorUrl = toHttp(signed);
-
-        HttpURLConnection conn = (HttpURLConnection) emulatorUrl.openConnection();
-        conn.setConnectTimeout(10_000);
-        conn.setReadTimeout(30_000);
-        conn.setRequestMethod("GET");
+        HttpURLConnection conn = openConnection(signed, "GET");
         assertThat(conn.getResponseCode()).isEqualTo(200);
         try (InputStream is = conn.getInputStream()) {
             String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
@@ -131,13 +127,8 @@ class GcsSignedUrlTest {
                 SignUrlOption.signWith(fakeSigner),
                 SignUrlOption.withHostName(emulatorHost));
 
-        URL emulatorUrl = toHttp(signed);
-
         byte[] body = "uploaded via signed url".getBytes(StandardCharsets.UTF_8);
-        HttpURLConnection conn = (HttpURLConnection) emulatorUrl.openConnection();
-        conn.setConnectTimeout(10_000);
-        conn.setReadTimeout(30_000);
-        conn.setRequestMethod("PUT");
+        HttpURLConnection conn = openConnection(signed, "PUT");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "text/plain");
         conn.setRequestProperty("Content-Length", String.valueOf(body.length));
@@ -151,11 +142,150 @@ class GcsSignedUrlTest {
         assertThat(content).isEqualTo("uploaded via signed url");
     }
 
+    @Test
+    @Order(3)
+    void expiredSignedUrlDownloadReturnsExpiredToken() throws Exception {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME)).build();
+
+        URL signed = storage.signUrl(blobInfo, 1, TimeUnit.SECONDS,
+                SignUrlOption.withV4Signature(),
+                SignUrlOption.signWith(fakeSigner),
+                SignUrlOption.withHostName(emulatorHost));
+
+        Thread.sleep(2_000);
+
+        HttpURLConnection conn = openConnection(signed, "GET");
+
+        assertThat(conn.getResponseCode()).isEqualTo(400);
+        try (InputStream is = conn.getErrorStream()) {
+            String error = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(error).contains("<Code>ExpiredToken</Code>");
+            assertThat(error).contains("<Message>The provided token has expired.</Message>");
+            assertThat(error).doesNotContain("<Details>");
+        }
+    }
+
+    @Test
+    @Order(4)
+    void expiredSignedUrlUploadReturnsExpiredToken() throws Exception {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "test/expired-upload.txt"))
+                .setContentType("text/plain")
+                .build();
+
+        URL signed = storage.signUrl(blobInfo, 1, TimeUnit.SECONDS,
+                SignUrlOption.httpMethod(HttpMethod.PUT),
+                SignUrlOption.withV4Signature(),
+                SignUrlOption.signWith(fakeSigner),
+                SignUrlOption.withHostName(emulatorHost));
+
+        Thread.sleep(2_000);
+
+        byte[] body = "expired upload".getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection conn = openConnection(signed, "PUT");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "text/plain");
+        conn.setRequestProperty("Content-Length", String.valueOf(body.length));
+        conn.getOutputStream().write(body);
+
+        assertThat(conn.getResponseCode()).isEqualTo(400);
+        try (InputStream is = conn.getErrorStream()) {
+            String error = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(error).contains("<Code>ExpiredToken</Code>");
+            assertThat(error).contains("<Message>The provided token has expired.</Message>");
+            assertThat(error).doesNotContain("<Details>");
+        }
+    }
+
+    @Test
+    @Order(5)
+    void malformedSignedUrlDateReturnsMalformedSecurityHeader() throws Exception {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME)).build();
+
+        URL signed = storage.signUrl(blobInfo, 1, TimeUnit.HOURS,
+                SignUrlOption.withV4Signature(),
+                SignUrlOption.signWith(fakeSigner),
+                SignUrlOption.withHostName(emulatorHost));
+
+        URL malformed = replaceQueryParameterValue(signed, "X-Goog-Date", "not-a-date");
+        HttpURLConnection conn = openConnection(malformed, "GET");
+
+        assertThat(conn.getResponseCode()).isEqualTo(400);
+        try (InputStream is = conn.getErrorStream()) {
+            String error = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(error).contains("<Code>MalformedSecurityHeader</Code>");
+            assertThat(error).contains("<Message>Your request has a malformed header.</Message>");
+            assertThat(error).contains("<ParameterName>Date</ParameterName>");
+        }
+    }
+
+    @Test
+    @Order(6)
+    void invalidSignedUrlExpiresReturnsMalformedSecurityHeader() throws Exception {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME)).build();
+
+        URL signed = storage.signUrl(blobInfo, 1, TimeUnit.HOURS,
+                SignUrlOption.withV4Signature(),
+                SignUrlOption.signWith(fakeSigner),
+                SignUrlOption.withHostName(emulatorHost));
+
+        URL invalid = replaceQueryParameterValue(signed, "X-Goog-Expires", INVALID_EXPIRES);
+        HttpURLConnection conn = openConnection(invalid, "GET");
+
+        assertThat(conn.getResponseCode()).isEqualTo(400);
+        try (InputStream is = conn.getErrorStream()) {
+            String error = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(error).contains("<Code>MalformedSecurityHeader</Code>");
+            assertThat(error).contains("<Message>Your request has a malformed header.</Message>");
+            assertThat(error).contains("<ParameterName>Expires</ParameterName>");
+        }
+    }
+
+    @Test
+    @Order(7)
+    void lowerCaseSignedUrlParametersReturnMalformedSecurityHeader() throws Exception {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME)).build();
+
+        URL signed = storage.signUrl(blobInfo, 1, TimeUnit.HOURS,
+                SignUrlOption.withV4Signature(),
+                SignUrlOption.signWith(fakeSigner),
+                SignUrlOption.withHostName(emulatorHost));
+
+        URL lowerCase = replaceQueryParameterValue(signed, "X-Goog-Expires", INVALID_EXPIRES);
+        lowerCase = replaceQueryParameterName(lowerCase, "X-Goog-Date", "x-goog-date");
+        lowerCase = replaceQueryParameterName(lowerCase, "X-Goog-Expires", "x-goog-expires");
+        HttpURLConnection conn = openConnection(lowerCase, "GET");
+
+        assertThat(conn.getResponseCode()).isEqualTo(400);
+        try (InputStream is = conn.getErrorStream()) {
+            String error = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(error).contains("<Code>MalformedSecurityHeader</Code>");
+            assertThat(error).contains("<Message>Your request has a malformed header.</Message>");
+            assertThat(error).contains("<ParameterName>Expires</ParameterName>");
+        }
+    }
+
+    // SDK defaults to https:// — rewrite to http:// for the plaintext emulator
     private static URL toHttp(URL url) throws Exception {
         String s = url.toString();
         if (s.startsWith("https://")) {
             s = "http://" + s.substring("https://".length());
         }
         return new URL(s);
+    }
+
+    private static HttpURLConnection openConnection(URL url, String method) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) toHttp(url).openConnection();
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(30_000);
+        conn.setRequestMethod(method);
+        return conn;
+    }
+
+    private static URL replaceQueryParameterValue(URL url, String name, String value) throws Exception {
+        return new URL(url.toString().replaceFirst("([?&]" + name + "=)[^&]*", "$1" + value));
+    }
+
+    private static URL replaceQueryParameterName(URL url, String name, String replacement) throws Exception {
+        return new URL(url.toString().replaceFirst("([?&])" + name + "=", "$1" + replacement + "="));
     }
 }

@@ -9,6 +9,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -46,9 +47,11 @@ public class GcsXmlDownloadController {
     public Response download(
             @PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
+            @Context UriInfo uriInfo,
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
+        GcsSignedUrl.checkNotExpired(uriInfo);
         String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
@@ -68,8 +71,10 @@ public class GcsXmlDownloadController {
     public Response upload(
             @PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
+            @Context UriInfo uriInfo,
             @Context HttpHeaders headers,
             byte[] body) {
+        GcsSignedUrl.checkNotExpired(uriInfo);
         String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String host = headers.getHeaderString("Host");

@@ -193,7 +193,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Secret Manager** | gRPC | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
-| **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane only, no runtime invocation |
+| **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane by default, experimental Docker-backed invocation when enabled |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 
 </details>
@@ -568,6 +568,7 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Enable/disable Secret Manager |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Enable/disable Cloud Run |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED` | `false` | Enable experimental Docker-backed Cloud Run execution |
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Enable/disable Cloud Functions |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
 | `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; returns `ACTIVE` immediately) |

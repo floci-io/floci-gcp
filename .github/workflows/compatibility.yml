@@ -94,6 +94,7 @@ jobs:
             -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 \
             -e FLOCI_GCP_HOSTNAME=floci-gcp \
             -e FLOCI_GCP_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED=true \
             floci-gcp:test
 
       - name: Wait for floci-gcp to be ready
@@ -124,6 +125,7 @@ jobs:
             -e FLOCI_ENDPOINT=http://floci-gcp:4588 \
             -e FLOCI_HOST=floci-gcp:4588 \
             -e FLOCI_PROJECT=test-project \
+            -e FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true \
             -v "$(pwd)/test-results:/results" \
             compat-${{ matrix.test }}
 

@@ -10,6 +10,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -56,6 +57,18 @@ public class CloudRunController {
                                @PathParam("location") String location,
                                @PathParam("serviceId") String serviceId) {
         return json(ProtoJson.print(service.getService(serviceName(project, location, serviceId))));
+    }
+
+    @PATCH
+    @Path("/services/{serviceId}")
+    public Response updateService(@PathParam("project") String project,
+                                  @PathParam("location") String location,
+                                  @PathParam("serviceId") String serviceId,
+                                  @QueryParam("updateMask") String updateMask,
+                                  @QueryParam("validateOnly") @DefaultValue("false") boolean validateOnly,
+                                  String body) {
+        return json(ProtoJson.print(service.updateService(
+                serviceName(project, location, serviceId), body, updateMask, validateOnly)));
     }
 
     @DELETE

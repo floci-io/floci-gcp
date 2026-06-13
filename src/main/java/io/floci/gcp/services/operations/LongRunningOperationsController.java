@@ -52,9 +52,9 @@ public class LongRunningOperationsController {
                          @PathParam("location") String location,
                          @PathParam("operation") String operation,
                          String body) {
-        ProtoJson.merge(body, WaitOperationRequest.newBuilder()).build();
+        WaitOperationRequest request = ProtoJson.merge(body, WaitOperationRequest.newBuilder()).build();
         String name = operationName(project, location, operation);
-        return json(ProtoJson.print(operations.get(name)));
+        return json(ProtoJson.print(operations.wait(name, request.getTimeout())));
     }
 
     @DELETE

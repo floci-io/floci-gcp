@@ -41,6 +41,51 @@ resource "google_secret_manager_secret_version" "compat" {
   secret_data = "floci-gcp-compat-test-secret-value"
 }
 
+# ── Cloud Run ────────────────────────────────────────────────────────────────
+resource "google_cloud_run_v2_service" "compat" {
+  name                = "floci-compat-run"
+  location            = var.region
+  deletion_protection = false
+  ingress             = "INGRESS_TRAFFIC_ALL"
+
+  labels = {
+    env = var.cloud_run_label
+  }
+
+  template {
+    service_account                  = google_service_account.compat.email
+    timeout                          = "30s"
+    max_instance_request_concurrency = 8
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+
+    containers {
+      image = "nginx:latest"
+
+      ports {
+        container_port = 80
+      }
+
+      env {
+        name  = "FLOCI_COMPAT"
+        value = var.cloud_run_env_value
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "128Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+    }
+  }
+}
+
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "bucket_name" {
   value = google_storage_bucket.compat.name
@@ -60,4 +105,12 @@ output "secret_name" {
 
 output "secret_version_name" {
   value = google_secret_manager_secret_version.compat.name
+}
+
+output "cloud_run_service_name" {
+  value = google_cloud_run_v2_service.compat.name
+}
+
+output "cloud_run_uri" {
+  value = google_cloud_run_v2_service.compat.uri
 }

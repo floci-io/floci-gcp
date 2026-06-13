@@ -38,8 +38,8 @@ just test-all-iac
 
 | Module | Tool | Framework | Command |
 |---|---|---|---|
-| [`compat-terraform`](compat-terraform/) | Terraform + GCP provider v6 | BATS | `just test-terraform` |
-| [`compat-opentofu`](compat-opentofu/) | OpenTofu + GCP provider v6 | BATS | `just test-opentofu` |
+| [`compat-terraform`](compat-terraform/) | Terraform + GCP provider v7+ | BATS | `just test-terraform` |
+| [`compat-opentofu`](compat-opentofu/) | OpenTofu + GCP provider v7+ | BATS | `just test-opentofu` |
 
 ## Test Coverage
 
@@ -60,8 +60,8 @@ just test-all-iac
 
 | Suite | Resources tested |
 |---|---|
-| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account |
-| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account |
+| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke |
+| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke |
 
 Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 
@@ -76,6 +76,7 @@ Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-
 - **terraform** — for `compat-terraform` BATS tests
 - **tofu** — for `compat-opentofu` BATS tests
 - **bats-core** — for IaC BATS tests (`brew install bats-core`)
+- **Docker** — for Cloud Run execution checks when `FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true`
 
 ## Configuration
 

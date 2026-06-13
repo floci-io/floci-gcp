@@ -2,7 +2,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 6.0"
+      version = ">= 7.36.0"
     }
   }
 }
@@ -22,6 +22,16 @@ variable "region" {
   default = "us-central1"
 }
 
+variable "cloud_run_label" {
+  type    = string
+  default = "compat-test"
+}
+
+variable "cloud_run_env_value" {
+  type    = string
+  default = "initial"
+}
+
 # Credentials are provided via GOOGLE_OAUTH_ACCESS_TOKEN env var (fake value —
 # floci-gcp ignores auth headers unconditionally).
 #
@@ -35,6 +45,9 @@ provider "google" {
   user_project_override = false
 
   storage_custom_endpoint        = "${var.endpoint}/storage/v1/"
-  iam_custom_endpoint            = "${var.endpoint}/"
+  iam_custom_endpoint            = "${var.endpoint}/v1/"
+  iam_beta_custom_endpoint       = "${var.endpoint}/v1/"
   secret_manager_custom_endpoint = "${var.endpoint}/v1/"
+  cloud_run_custom_endpoint      = "${var.endpoint}/v2/"
+  cloud_run_v2_custom_endpoint   = "${var.endpoint}/v2/"
 }

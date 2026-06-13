@@ -141,9 +141,49 @@ setup() {
     assert_output --partial 'floci-compat-secret-tofu'
 }
 
+# ── Cloud Run Spot Checks ────────────────────────────────────────────────────
+
+@test "OpenTofu: Cloud Run service created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-run-tofu'
+    assert_output --partial '"latestReadyRevision"'
+}
+
+@test "OpenTofu: Cloud Run service URI is in state" {
+    uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
+    [[ "$uri" == http* ]]
+}
+
+@test "OpenTofu: Cloud Run service URI is invokable when execution is enabled" {
+    if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
+        skip "Cloud Run execution is not enabled"
+    fi
+
+    uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
+    [ -n "$uri" ]
+    run curl -fsS "$uri"
+    assert_success
+    assert_output --partial "Welcome to nginx"
+}
+
+@test "OpenTofu: Cloud Run service update uses provider patch path" {
+    run tofu apply \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="cloud_run_label=compat-updated" \
+        -var="cloud_run_env_value=updated" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu")
+    [[ "$result" == *'"env":"compat-updated"'* ]]
+    [[ "$result" == *'floci-compat-run-tofu/revisions/floci-compat-run-tofu-00002'* ]]
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "OpenTofu: all five resources tracked in state" {
+@test "OpenTofu: all six resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 5 ]
+    [ "$count" -ge 6 ]
 }

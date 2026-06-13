@@ -63,6 +63,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(500, "INTERNAL", Status.Code.INTERNAL, message);
     }
 
+    public static GcpException badGateway(String message) {
+        return new GcpException(502, "UNAVAILABLE", Status.Code.UNAVAILABLE, message);
+    }
+
     public static GcpException conditionNotMet(String message) {
         return new GcpException(412, "CONDITION_NOT_MET", Status.Code.FAILED_PRECONDITION, message);
     }
@@ -73,5 +77,9 @@ public class GcpException extends RuntimeException {
 
     public static GcpException unavailable(String message) {
         return new GcpException(503, "UNAVAILABLE", Status.Code.UNAVAILABLE, message);
+    }
+
+    public static GcpException deadlineExceeded(String message) {
+        return new GcpException(504, "DEADLINE_EXCEEDED", Status.Code.DEADLINE_EXCEEDED, message);
     }
 }

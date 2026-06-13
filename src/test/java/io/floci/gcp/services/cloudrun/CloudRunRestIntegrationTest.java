@@ -168,4 +168,51 @@ class CloudRunRestIntegrationTest {
                 .body("$", anEmptyMap());
     }
 
+    @Test
+    void patchServiceUpdatesTemplateAndReturnsOperation() {
+        String project = "run-it-patch";
+        String location = "us-central1";
+        String serviceId = "svc";
+        String servicePath = "/v2/projects/" + project + "/locations/" + location + "/services/" + serviceId;
+
+        given()
+                .contentType("application/json")
+                .queryParam("serviceId", serviceId)
+                .body("{\"template\":{\"containers\":[{\"image\":\"gcr.io/run-it-patch/svc:v1\"}]}}")
+                .when().post("/v2/projects/" + project + "/locations/" + location + "/services")
+                .then()
+                .statusCode(200)
+                .body("done", equalTo(true));
+
+        String updatedRevision = given()
+                .contentType("application/json")
+                .queryParam("updateMask", "labels,template")
+                .body("""
+                        {
+                          "labels": {"env": "patch"},
+                          "template": {
+                            "containers": [{
+                              "image": "gcr.io/run-it-patch/svc:v2",
+                              "ports": [{"containerPort": 9090}]
+                            }]
+                          }
+                        }
+                        """)
+                .when().patch(servicePath)
+                .then()
+                .statusCode(200)
+                .body("done", equalTo(true))
+                .body("response.labels.env", equalTo("patch"))
+                .body("response.latestCreatedRevision", endsWith("/revisions/svc-00002"))
+                .body("response.latestReadyRevision", endsWith("/revisions/svc-00002"))
+                .extract().path("response.latestReadyRevision");
+
+        given()
+                .when().get("/v2/" + updatedRevision)
+                .then()
+                .statusCode(200)
+                .body("containers[0].image", equalTo("gcr.io/run-it-patch/svc:v2"))
+                .body("containers[0].ports[0].containerPort", equalTo(9090));
+    }
+
 }

@@ -4,7 +4,10 @@ import com.google.cloud.functions.v2.OperationMetadata;
 import com.google.cloud.run.v2.Service;
 import com.google.longrunning.ListOperationsResponse;
 import com.google.longrunning.Operation;
+import com.google.protobuf.Duration;
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.rpc.Code;
+import com.google.rpc.Status;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.BeforeEach;
@@ -73,6 +76,29 @@ class LongRunningOperationsServiceTest {
         GcpException ex = assertThrows(GcpException.class, () -> service.get(operation.getName()));
         assertEquals("NOT_FOUND", ex.getGcpStatus());
         assertEquals(0, service.list("projects/p1/locations/us-central1", 10, null).getOperationsCount());
+    }
+
+    @Test
+    void pendingCompleteFailAndWaitUpdateStoredOperation() throws InvalidProtocolBufferException {
+        Operation pending = service.pending("projects/p1/locations/us-central1", service("a"));
+
+        assertFalse(pending.getDone());
+        assertFalse(service.wait(pending.getName(), Duration.newBuilder().setNanos(1).build()).getDone());
+
+        Operation completed = service.complete(pending.getName(), service("a"), service("a"));
+        assertTrue(completed.getDone());
+        assertEquals(service("a").getName(), service.get(pending.getName()).getResponse().unpack(Service.class).getName());
+
+        Operation failed = service.pending("projects/p1/locations/us-central1", service("b"));
+        service.fail(failed.getName(), Status.newBuilder()
+                .setCode(Code.INTERNAL_VALUE)
+                .setMessage("boom")
+                .build(), service("b"));
+
+        Operation fetched = service.get(failed.getName());
+        assertTrue(fetched.getDone());
+        assertEquals("boom", fetched.getError().getMessage());
+        assertEquals(Code.INTERNAL_VALUE, fetched.getError().getCode());
     }
 
     private static Service service(String id) {

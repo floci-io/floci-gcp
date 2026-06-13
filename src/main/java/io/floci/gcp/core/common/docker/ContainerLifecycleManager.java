@@ -79,6 +79,9 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
+        if (spec.labels() != null && !spec.labels().isEmpty()) {
+            createCmd.withLabels(spec.labels());
+        }
 
         CreateContainerResponse response = createCmd.exec();
         String containerId = response.getId();
@@ -220,7 +223,7 @@ public class ContainerLifecycleManager {
             return false;
         } catch (Exception e) {
             LOG.warnv("Liveness check failed for container {0}: {1}", containerId, e.getMessage());
-            return true;
+            return false;
         }
     }
 

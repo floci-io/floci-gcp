@@ -63,6 +63,7 @@ public class ContainerBuilder {
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
+        private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
         private boolean privileged;
         private final List<String> dnsServers = new ArrayList<>();
@@ -188,6 +189,16 @@ public class ContainerBuilder {
             return this;
         }
 
+        public Builder withLabel(String key, String value) {
+            this.labels.put(key, value);
+            return this;
+        }
+
+        public Builder withLabels(Map<String, String> labels) {
+            this.labels.putAll(labels);
+            return this;
+        }
+
         public Builder withLogRotation() {
             return withLogRotation(config.docker().logMaxSize(), config.docker().logMaxFile());
         }
@@ -228,6 +239,7 @@ public class ContainerBuilder {
                     List.copyOf(mounts),
                     List.copyOf(binds),
                     List.copyOf(extraHosts),
+                    Map.copyOf(labels),
                     logConfig,
                     privileged,
                     List.copyOf(dnsServers),

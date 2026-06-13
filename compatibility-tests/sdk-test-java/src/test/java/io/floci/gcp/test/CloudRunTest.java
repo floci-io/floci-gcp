@@ -40,6 +40,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CloudRunTest {
 
+    static {
+        System.setProperty("jdk.httpclient.allowRestrictedHeaders", "host");
+    }
+
     private static final String PROJECT_ID = TestFixtures.projectId();
     private static final String LOCATION = "us-central1";
     private static final String SERVICE_ID = TestFixtures.uniqueName("run-svc");
@@ -89,8 +93,11 @@ class CloudRunTest {
 
         assertThat(created.getName()).isEqualTo(SERVICE_NAME);
         if (EXECUTION_ENABLED) {
-            assertThat(created.getUri()).isEqualTo(TestFixtures.endpoint()
-                    + "/run/v2/projects/" + PROJECT_ID + "/locations/" + LOCATION + "/services/" + SERVICE_ID);
+            assertThat(created.getUri())
+                    .startsWith("http://" + SERVICE_ID + "-")
+                    .contains("." + LOCATION + ".run.floci-gcp:4588");
+            assertThat(created.getUrlsList()).contains(created.getUri());
+            assertThat(created.getTrafficStatuses(0).getUri()).isEqualTo(created.getUri());
         } else {
             assertThat(created.getUri()).startsWith("https://" + SERVICE_ID + "-");
         }
@@ -110,8 +117,10 @@ class CloudRunTest {
         Service service = servicesClient.getService(GetServiceRequest.newBuilder()
                 .setName(SERVICE_NAME)
                 .build());
+        URI serviceUri = URI.create(service.getUri());
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(service.getUri() + "/?compat=java"))
+                .uri(URI.create(TestFixtures.endpoint() + "/?compat=java"))
+                .header("Host", serviceUri.getAuthority())
                 .header("X-Compat-Test", "cloud-run")
                 .GET()
                 .build();

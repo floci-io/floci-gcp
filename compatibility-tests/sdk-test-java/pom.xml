@@ -99,7 +99,7 @@
                 <version>${surefire.version}</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
-                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true</argLine>
+                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true -Djdk.httpclient.allowRestrictedHeaders=host</argLine>
                 </configuration>
                 <dependencies>
                     <dependency>

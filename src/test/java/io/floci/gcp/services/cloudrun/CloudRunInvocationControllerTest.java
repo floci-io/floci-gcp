@@ -2,6 +2,7 @@ package io.floci.gcp.services.cloudrun;
 
 import com.sun.net.httpserver.HttpServer;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
@@ -123,6 +124,39 @@ class CloudRunInvocationControllerTest {
         assertEquals("/a%20b/%2Fliteral?x=a%2Bb", pathAndQuery.get());
     }
 
+    @Test
+    void routedUrlUsesOriginalAppPathAndForwardedHeaders() throws IOException {
+        AtomicReference<String> pathAndQuery = new AtomicReference<>();
+        AtomicReference<String> forwardedHost = new AtomicReference<>();
+        AtomicReference<String> forwardedUri = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            pathAndQuery.set(exchange.getRequestURI().toString());
+            forwardedHost.set(exchange.getRequestHeaders().getFirst("X-Forwarded-Host"));
+            forwardedUri.set(exchange.getRequestHeaders().getFirst("X-Forwarded-Uri"));
+            byte[] response = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        CloudRunService service = mock(CloudRunService.class);
+        when(service.readyRuntime("projects/p1/locations/us-central1/services/svc"))
+                .thenReturn(Optional.of(instance(server.getAddress().getPort())));
+        CloudRunInvocationController controller = new CloudRunInvocationController(service);
+        controller.requestContext = routedRequestContext(
+                "svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                "/api/database?x=1");
+
+        controller.get("p1", "us-central1", "svc",
+                headers(), uriInfo("/api/database?x=1"));
+
+        assertEquals("/api/database?x=1", pathAndQuery.get());
+        assertEquals("svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588", forwardedHost.get());
+        assertEquals("/api/database?x=1", forwardedUri.get());
+    }
+
     private static ResponseData invokePost(CloudRunInvocationController controller) {
         jakarta.ws.rs.core.Response response = controller.post("p1", "us-central1", "svc",
                 "payload".getBytes(StandardCharsets.UTF_8), headers(), uriInfo("/extra/path?x=1"));
@@ -154,6 +188,14 @@ class CloudRunInvocationControllerTest {
         when(uriInfo.getRequestUri()).thenReturn(URI.create(
                 "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc" + pathAndQuery));
         return uriInfo;
+    }
+
+    private static ContainerRequestContext routedRequestContext(String host, String pathAndQuery) {
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getProperty(CloudRunUrlRoutingFilter.ORIGINAL_SCHEME)).thenReturn("http");
+        when(ctx.getProperty(CloudRunUrlRoutingFilter.ORIGINAL_AUTHORITY)).thenReturn(host);
+        when(ctx.getProperty(CloudRunUrlRoutingFilter.ORIGINAL_PATH_QUERY)).thenReturn(pathAndQuery);
+        return ctx;
     }
 
     private record ResponseData(int status, String body, String header) {}

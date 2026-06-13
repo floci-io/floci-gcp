@@ -94,6 +94,7 @@ floci-gcp:
         startup-timeout: 240s
         request-timeout: 300s
         container-name-prefix: floci-cloudrun
+        url-host-suffix:              # Optional; defaults to hostname, then localhost.floci.io
 
     cloudfunctions:
       enabled: true

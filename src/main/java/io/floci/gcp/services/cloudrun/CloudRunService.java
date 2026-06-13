@@ -36,6 +36,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -57,6 +58,7 @@ public class CloudRunService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final CloudRunRuntimeService runtimeService;
+    private final CloudRunUrlService urlService;
 
     @Inject
     public CloudRunService(StorageFactory storageFactory,
@@ -64,7 +66,8 @@ public class CloudRunService {
                            IamService iamService,
                            ServiceRegistry serviceRegistry,
                            EmulatorConfig config,
-                           CloudRunRuntimeService runtimeService) {
+                           CloudRunRuntimeService runtimeService,
+                           CloudRunUrlService urlService) {
         this.serviceStore = storageFactory.createGlobal("cloudrun-services", "cloudrun-services.json",
                 new TypeReference<Map<String, String>>() {});
         this.revisionStore = storageFactory.createGlobal("cloudrun-revisions", "cloudrun-revisions.json",
@@ -74,13 +77,14 @@ public class CloudRunService {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.runtimeService = runtimeService;
+        this.urlService = urlService;
     }
 
     CloudRunService(StorageBackend<String, String> serviceStore,
                     StorageBackend<String, String> revisionStore,
                     LongRunningOperationsService operations,
                     IamService iamService) {
-        this(serviceStore, revisionStore, operations, iamService, null, null);
+        this(serviceStore, revisionStore, operations, iamService, null, null, null);
     }
 
     CloudRunService(StorageBackend<String, String> serviceStore,
@@ -89,6 +93,17 @@ public class CloudRunService {
                     IamService iamService,
                     EmulatorConfig config,
                     CloudRunRuntimeService runtimeService) {
+        this(serviceStore, revisionStore, operations, iamService, config, runtimeService,
+                config == null ? null : new CloudRunUrlService(config));
+    }
+
+    CloudRunService(StorageBackend<String, String> serviceStore,
+                    StorageBackend<String, String> revisionStore,
+                    LongRunningOperationsService operations,
+                    IamService iamService,
+                    EmulatorConfig config,
+                    CloudRunRuntimeService runtimeService,
+                    CloudRunUrlService urlService) {
         this.serviceStore = serviceStore;
         this.revisionStore = revisionStore;
         this.operations = operations;
@@ -96,6 +111,7 @@ public class CloudRunService {
         this.serviceRegistry = null;
         this.config = config;
         this.runtimeService = runtimeService;
+        this.urlService = urlService;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -103,7 +119,8 @@ public class CloudRunService {
                 .enabled(config.services().cloudrun().enabled())
                 .storageKey("cloudrun")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(CloudRunController.class, CloudRunInvocationController.class)
+                .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
+                        CloudRunUrlRoutingFilter.class)
                 .build());
     }
 
@@ -256,6 +273,31 @@ public class CloudRunService {
             return Optional.empty();
         }
         return runtimeService.getReady(service.getLatestReadyRevision());
+    }
+
+    public Optional<InvocationRoute> resolveInvocationHost(String host) {
+        if (urlService == null) {
+            return Optional.empty();
+        }
+        Optional<CloudRunUrlService.ParsedHost> parsed = urlService.parseHost(host);
+        if (parsed.isEmpty()) {
+            return Optional.empty();
+        }
+
+        CloudRunUrlService.ParsedHost candidate = parsed.get();
+        String suffix = "/locations/" + candidate.location() + "/services/" + candidate.serviceId();
+        return serviceStore.keys().stream()
+                .filter(name -> name.endsWith(suffix))
+                .filter(name -> urlService.matchesProjectToken(nameProject(name), candidate.projectToken()))
+                .filter(name -> serviceStore.get(name)
+                        .map(json -> storedUriMatchesHost(json, candidate))
+                        .orElse(false))
+                .findFirst()
+                .map(name -> new InvocationRoute(nameProject(name), candidate.location(), candidate.serviceId()));
+    }
+
+    public boolean isGeneratedInvocationHost(String host) {
+        return urlService != null && urlService.parseHost(host).isPresent();
     }
 
     public Revision getRevision(String name) {
@@ -597,10 +639,16 @@ public class CloudRunService {
     }
 
     private String invocationUri(String project, String location, String serviceId) {
-        return config.effectiveBaseUrl()
-                + "/run/v2/projects/" + project
-                + "/locations/" + location
-                + "/services/" + serviceId;
+        return urlService.invocationUri(project, location, serviceId);
+    }
+
+    private boolean storedUriMatchesHost(String json, CloudRunUrlService.ParsedHost candidate) {
+        com.google.cloud.run.v2.Service service = ProtoJson
+                .merge(json, com.google.cloud.run.v2.Service.newBuilder())
+                .build();
+        return urlService.parseHost(URI.create(service.getUri()).getRawAuthority())
+                .map(candidate::equals)
+                .orElse(false);
     }
 
     private static com.google.cloud.run.v2.Service applyServiceUpdate(
@@ -738,4 +786,6 @@ public class CloudRunService {
         String[] parts = serviceName.split("/");
         return parts.length > 3 ? parts[3] : "";
     }
+
+    public record InvocationRoute(String project, String location, String serviceId) {}
 }

@@ -27,5 +27,6 @@ floci-gcp:
         startup-timeout: 240s
         request-timeout: 300s
         container-name-prefix: floci-cloudrun
+        url-host-suffix:
     cloudfunctions:
       enabled: true

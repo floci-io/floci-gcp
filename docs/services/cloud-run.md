@@ -11,6 +11,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT` | `240s` | Time to wait for the container TCP port to become reachable |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_REQUEST_TIMEOUT` | `300s` | Default invocation proxy timeout |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CONTAINER_NAME_PREFIX` | `floci-cloudrun` | Prefix for Docker containers created for Cloud Run execution |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
 
 ## Supported API Surface
 
@@ -33,17 +34,19 @@ When execution is disabled, create, update, and delete return completed `google.
 
 By default Cloud Run services are metadata only. Creating a service synthesizes the service URL, timestamps, etag, ready condition, traffic status, latest revision fields, and one read-only revision. No container image is pulled and no request-serving runtime is started.
 
-Execution is experimental and opt-in with `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED=true`. In execution mode, image-based service creation starts one Docker container for the created revision, injects `PORT`, `K_SERVICE`, `K_REVISION`, and `K_CONFIGURATION`, waits for the ingress TCP port, and returns a same-port invocation URL:
+Execution is experimental and opt-in with `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED=true`. In execution mode, image-based service creation starts one Docker container for the created revision, injects `PORT`, `K_SERVICE`, `K_REVISION`, and `K_CONFIGURATION`, waits for the ingress TCP port, and returns a deterministic app-root invocation URL on the floci-gcp front door:
 
 ```text
-http://localhost:4588/run/v2/projects/{project}/locations/{location}/services/{service}
+http://{service}-{project-token}.{location}.run.localhost.floci.io:4588
 ```
+
+The URL scheme and port come from `floci-gcp.effectiveBaseUrl()`. The project token is a deterministic SHA-256 based token derived from the project ID. `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` can override the host suffix; when it is unset, floci-gcp uses `FLOCI_GCP_HOSTNAME` if configured, otherwise `localhost.floci.io`. Direct Docker runtime container ports are internal implementation details and are not returned in `uri`, `urls[]`, or `trafficStatuses[].uri`.
 
 While the create operation is pending, the stored service has `Ready=CONDITION_PENDING`, `reconciling=true`, and no `latestReadyRevision`. After the runtime port becomes reachable, the operation completes and the service is updated with `Ready=CONDITION_SUCCEEDED` and the ready revision name. If runtime startup fails, the operation fails and both the service and created revision are updated with `Ready=CONDITION_FAILED`, `reconciling=false`, and the startup error message.
 
 PATCH accepts a Cloud Run v2 `Service` body and an optional `updateMask` query parameter. Template-changing updates create a new revision. With execution enabled, the previous ready revision remains invokable while the replacement container starts; after the replacement is ready, `latestReadyRevision` moves to the new revision and older runtime containers for that service are stopped.
 
-The invocation proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
+The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path `/run/v2/projects/{project}/locations/{location}/services/{service}` for compatibility. Host-routed requests preserve the original app path and query string, so `GET $uri/api/database?x=1` reaches the container as `/api/database?x=1`. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
 
 `validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.
 

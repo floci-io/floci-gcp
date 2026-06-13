@@ -164,7 +164,7 @@ setup() {
 
     uri=$(terraform output -raw cloud_run_uri 2>/dev/null)
     [ -n "$uri" ]
-    run curl -fsS "$uri"
+    run cloud_run_curl "$uri"
     assert_success
     assert_output --partial "Welcome to nginx"
 }

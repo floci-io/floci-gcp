@@ -35,3 +35,25 @@ export TF_VAR_project="${FLOCI_PROJECT}"
 gcp_curl() {
     curl -sf -H "Authorization: Bearer ${GOOGLE_OAUTH_ACCESS_TOKEN}" "$@"
 }
+
+cloud_run_curl() {
+    local uri="$1"
+    local without_scheme="${uri#*://}"
+    local authority="${without_scheme%%/*}"
+    local host="${authority%%:*}"
+    local port="80"
+    local floci_host="${FLOCI_HOST%%:*}"
+    local floci_ip=""
+
+    if [[ "${authority}" == *:* ]]; then
+        port="${authority##*:}"
+    fi
+    if command -v getent >/dev/null 2>&1; then
+        floci_ip="$(getent hosts "${floci_host}" | awk '/^[0-9.]+/ { print $1; exit }')"
+    fi
+    if [[ -n "${floci_ip}" ]]; then
+        curl -fsS --resolve "${host}:${port}:${floci_ip}" "${uri}"
+    else
+        curl -fsS "${uri}"
+    fi
+}

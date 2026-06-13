@@ -166,6 +166,8 @@ public interface EmulatorConfig {
 
             @WithDefault("floci-cloudrun")
             String containerNamePrefix();
+
+            Optional<String> urlHostSuffix();
         }
     }
 

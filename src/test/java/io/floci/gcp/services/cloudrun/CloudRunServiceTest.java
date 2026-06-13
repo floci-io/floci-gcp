@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -142,7 +143,7 @@ class CloudRunServiceTest {
                         "projects/p1/locations/us-central1/services/svc",
                         "projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
                         "gcr.io/p1/svc:latest", "container-id", 8080, null, "localhost", 12345,
-                        "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
+                        "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
                         "READY", 1, 1, null, 300_000);
                 });
         CloudRunService gated = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -164,7 +165,9 @@ class CloudRunServiceTest {
         Service ready = gated.getService("projects/p1/locations/us-central1/services/svc");
         assertFalse(ready.getReconciling());
         assertEquals(ready.getLatestCreatedRevision(), ready.getLatestReadyRevision());
-        assertEquals("http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc", ready.getUri());
+        assertEquals("http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588", ready.getUri());
+        assertEquals(ready.getUri(), ready.getUrls(0));
+        assertEquals(ready.getUri(), ready.getTrafficStatuses(0).getUri());
     }
 
     @Test
@@ -309,13 +312,13 @@ class CloudRunServiceTest {
                         "projects/p1/locations/us-central1/services/svc",
                         "projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
                         "gcr.io/p1/svc:v1", "container-v1", 8080, null, "localhost", 12345,
-                        "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
+                        "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
                         "READY", 1, 1, null, 300_000))
                 .thenReturn(new CloudRunRuntimeInstance("p1", "us-central1",
                         "projects/p1/locations/us-central1/services/svc",
                         "projects/p1/locations/us-central1/services/svc/revisions/svc-00002",
                         "gcr.io/p1/svc:v2", "container-v2", 8080, null, "localhost", 12346,
-                        "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
+                        "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
                         "READY", 1, 1, null, 300_000));
         CloudRunService gated = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 operations, iamService, cloudRunConfig(true), runtime);
@@ -370,6 +373,30 @@ class CloudRunServiceTest {
     }
 
     @Test
+    void resolvesGeneratedInvocationHostToStoredService() {
+        CloudRunRuntimeService runtime = mock(CloudRunRuntimeService.class);
+        when(runtime.start(anyString(), anyString(), any(Service.class), any(Revision.class)))
+                .thenReturn(new CloudRunRuntimeInstance("p1", "us-central1",
+                        "projects/p1/locations/us-central1/services/orders-api",
+                        "projects/p1/locations/us-central1/services/orders-api/revisions/orders-api-00001",
+                        "gcr.io/p1/orders-api:latest", "container-id", 8080, null, "localhost", 12345,
+                        "http://orders-api-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                        "READY", 1, 1, null, 300_000));
+        CloudRunService gated = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                operationsMock(), iamService, cloudRunConfig(true), runtime);
+        gated.createService("p1", "us-central1", "orders-api",
+                "{\"template\":{\"containers\":[{\"image\":\"gcr.io/p1/orders-api:latest\"}]}}", false);
+
+        Optional<CloudRunService.InvocationRoute> route = gated.resolveInvocationHost(
+                "orders-api-f64551fcd6f0.us-central1.run.localhost.floci.io:4588");
+
+        assertTrue(route.isPresent());
+        assertEquals("p1", route.get().project());
+        assertEquals("us-central1", route.get().location());
+        assertEquals("orders-api", route.get().serviceId());
+    }
+
+    @Test
     void iamPolicyConversionsDelegateToIamService() {
         String resource = "projects/p1/locations/us-central1/services/svc";
         StoredPolicy stored = new StoredPolicy();
@@ -417,6 +444,8 @@ class CloudRunServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudrun().execution().enabled()).thenReturn(executionEnabled);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4588");
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(config.services().cloudrun().execution().urlHostSuffix()).thenReturn(Optional.empty());
         return config;
     }
 }

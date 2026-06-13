@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -51,6 +52,9 @@ public class CloudRunInvocationController {
 
     private final CloudRunService cloudRunService;
     private final HttpClient httpClient;
+
+    @Context
+    ContainerRequestContext requestContext;
 
     @Inject
     public CloudRunInvocationController(CloudRunService cloudRunService) {
@@ -182,7 +186,7 @@ public class CloudRunInvocationController {
         String serviceName = "projects/" + project + "/locations/" + location + "/services/" + serviceId;
         CloudRunRuntimeInstance instance = cloudRunService.readyRuntime(serviceName)
                 .orElseThrow(() -> GcpException.unavailable("Cloud Run service has no ready runtime: " + serviceName));
-        String target = instance.endpointUri(pathAndQuery(project, location, serviceId, uriInfo));
+        String target = instance.endpointUri(pathAndQueryFromRequest(project, location, serviceId, uriInfo));
         HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis());
         try {
             HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
@@ -207,9 +211,12 @@ public class CloudRunInvocationController {
                 values.forEach(value -> builder.header(name, value));
             }
         });
-        builder.header("X-Forwarded-Proto", uriInfo.getRequestUri().getScheme());
-        builder.header("X-Forwarded-Host", uriInfo.getRequestUri().getAuthority());
-        builder.header("X-Forwarded-Uri", rawPathAndQuery(uriInfo));
+        builder.header("X-Forwarded-Proto", contextProperty(CloudRunUrlRoutingFilter.ORIGINAL_SCHEME,
+                uriInfo.getRequestUri().getScheme()));
+        builder.header("X-Forwarded-Host", contextProperty(CloudRunUrlRoutingFilter.ORIGINAL_AUTHORITY,
+                uriInfo.getRequestUri().getAuthority()));
+        builder.header("X-Forwarded-Uri", contextProperty(CloudRunUrlRoutingFilter.ORIGINAL_PATH_QUERY,
+                rawPathAndQuery(uriInfo)));
         builder.method(method, requestBody(body));
         return builder.build();
     }
@@ -251,6 +258,19 @@ public class CloudRunInvocationController {
             result.append('?').append(query);
         }
         return result.toString();
+    }
+
+    private String pathAndQueryFromRequest(String project, String location, String serviceId, UriInfo uriInfo) {
+        String routedPath = contextProperty(CloudRunUrlRoutingFilter.ORIGINAL_PATH_QUERY, null);
+        return routedPath != null ? routedPath : pathAndQuery(project, location, serviceId, uriInfo);
+    }
+
+    private String contextProperty(String name, String fallback) {
+        if (requestContext == null) {
+            return fallback;
+        }
+        Object value = requestContext.getProperty(name);
+        return value instanceof String text ? text : fallback;
     }
 
     private static String rawPathAndQuery(UriInfo uriInfo) {

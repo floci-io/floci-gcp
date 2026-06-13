@@ -7,6 +7,7 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -54,7 +55,7 @@ class CloudRunExecutionRestIntegrationTest {
                 .body("metadata.latestReadyRevision", nullValue())
                 .extract().path("name");
 
-        given()
+        String serviceUri = given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
                 .body("{\"timeout\":\"60s\"}")
@@ -64,7 +65,16 @@ class CloudRunExecutionRestIntegrationTest {
                 .body("done", equalTo(true))
                 .body("response.terminalCondition.state", equalTo("CONDITION_SUCCEEDED"))
                 .body("response.latestReadyRevision", notNullValue())
-                .body("response.uri", equalTo("http://localhost:4588" + invocationPath));
+                .body("response.uri", equalTo("http://nginx-d7b4d7c7e6dc.us-central1.run.localhost.floci.io:4588"))
+                .extract().path("response.uri");
+
+        URI uri = URI.create(serviceUri);
+        given()
+                .header("Host", uri.getAuthority())
+                .when().get("/?probe=1")
+                .then()
+                .statusCode(200)
+                .body(containsString("Welcome to nginx"));
 
         given()
                 .header("X-Cloud-Run-Test", "execution")

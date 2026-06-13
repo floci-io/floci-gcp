@@ -1,4 +1,4 @@
-FROM ghcr.io/opentofu/opentofu:1.8 AS opentofu
+FROM ghcr.io/opentofu/opentofu:1.12.2 AS opentofu
 
 FROM alpine:3.20
 

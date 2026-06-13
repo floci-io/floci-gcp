@@ -2,7 +2,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 6.0"
+      version = "~> 7.36"
     }
   }
 }
@@ -36,5 +36,7 @@ provider "google" {
 
   storage_custom_endpoint        = "${var.endpoint}/storage/v1/"
   iam_custom_endpoint            = "${var.endpoint}/"
+  iam_beta_custom_endpoint       = "${var.endpoint}/v1/"
   secret_manager_custom_endpoint = "${var.endpoint}/v1/"
+  sql_custom_endpoint            = "${var.endpoint}/sql/v1beta4/"
 }

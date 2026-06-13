@@ -141,9 +141,43 @@ setup() {
     assert_output --partial 'floci-compat-secret'
 }
 
+# ── Cloud SQL Spot Checks ────────────────────────────────────────────────────
+
+@test "Terraform: Cloud SQL PostgreSQL instance created" {
+    instance=$(terraform output -raw sql_instance_name 2>/dev/null)
+    [ -n "$instance" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/sql/v1beta4/projects/${FLOCI_PROJECT}/instances/${instance}"
+    assert_success
+    assert_output --partial '"kind":"sql#instance"'
+    assert_output --partial '"databaseVersion":"POSTGRES_15"'
+    assert_output --partial '"state":"RUNNABLE"'
+}
+
+@test "Terraform: Cloud SQL database created" {
+    instance=$(terraform output -raw sql_instance_name 2>/dev/null)
+    database=$(terraform output -raw sql_database_name 2>/dev/null)
+    [ -n "$instance" ]
+    [ -n "$database" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/sql/v1beta4/projects/${FLOCI_PROJECT}/instances/${instance}/databases/${database}"
+    assert_success
+    assert_output --partial '"kind":"sql#database"'
+    assert_output --partial '"name":"appdb"'
+}
+
+@test "Terraform: Cloud SQL user created" {
+    instance=$(terraform output -raw sql_instance_name 2>/dev/null)
+    user=$(terraform output -raw sql_user_name 2>/dev/null)
+    [ -n "$instance" ]
+    [ -n "$user" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/sql/v1beta4/projects/${FLOCI_PROJECT}/instances/${instance}/users/${user}"
+    assert_success
+    assert_output --partial '"kind":"sql#user"'
+    assert_output --partial '"name":"app"'
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "Terraform: all five resources tracked in state" {
+@test "Terraform: all eight resources tracked in state" {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 5 ]
+    [ "$count" -ge 8 ]
 }

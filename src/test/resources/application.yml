@@ -16,6 +16,8 @@ floci-gcp:
     kafka:
       enabled: true
       mock: true
+    cloudsql:
+      enabled: true
     cloudtasks:
       enabled: true
     cloudrun:

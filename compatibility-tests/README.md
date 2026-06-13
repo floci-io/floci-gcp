@@ -38,12 +38,12 @@ just test-all-iac
 
 | Module | Tool | Framework | Command |
 |---|---|---|---|
-| [`compat-terraform`](compat-terraform/) | Terraform + GCP provider v6 | BATS | `just test-terraform` |
-| [`compat-opentofu`](compat-opentofu/) | OpenTofu + GCP provider v6 | BATS | `just test-opentofu` |
+| [`compat-terraform`](compat-terraform/) | Terraform + GCP provider v7.36 | BATS | `just test-terraform` |
+| [`compat-opentofu`](compat-opentofu/) | OpenTofu + GCP provider v7.36 | BATS | `just test-opentofu` |
 
 ## Test Coverage
 
-### SDK tests — 186 tests total
+### SDK tests — 190 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
@@ -54,14 +54,15 @@ just test-all-iac
 | `DatastoreTest` | Datastore | 5 | 5 | 5 | 5 |
 | `IamTest` | IAM | 7 | 5 | 7 | 7 |
 | `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
-| **Total** | | **44** | **39** | **52** | **51** |
+| `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
+| **Total** | | **48** | **39** | **52** | **51** |
 
 ### IaC tests
 
 | Suite | Resources tested |
 |---|---|
-| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account |
-| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account |
+| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user |
+| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user |
 
 Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 
@@ -73,8 +74,8 @@ Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-
 - **Node.js 18+** — for `sdk-test-node`
 - **Go 1.21+** — for `sdk-test-go`
 - **just** — task runner
-- **terraform** — for `compat-terraform` BATS tests
-- **tofu** — for `compat-opentofu` BATS tests
+- **terraform** — for `compat-terraform` BATS tests; use a CLI compatible with `hashicorp/google` v7.36
+- **tofu** — for `compat-opentofu` BATS tests; use a CLI compatible with `hashicorp/google` v7.36
 - **bats-core** — for IaC BATS tests (`brew install bats-core`)
 
 ## Configuration
@@ -124,12 +125,15 @@ docker run --rm \
 
 ## IaC suites — notes
 
-The Terraform and OpenTofu GCP provider (v6) does **not** respect `STORAGE_EMULATOR_HOST` or `PUBSUB_EMULATOR_HOST` for resource management. The suites configure explicit custom endpoints in `provider.tf`:
+The Terraform and OpenTofu GCP provider does **not** respect `STORAGE_EMULATOR_HOST` or `PUBSUB_EMULATOR_HOST` for resource management. The suites configure explicit custom endpoints in `provider.tf`:
 
 ```hcl
 provider "google" {
-  storage_custom_endpoint = "${var.endpoint}/storage/v1/"
-  iam_custom_endpoint     = "${var.endpoint}/"
+  storage_custom_endpoint        = "${var.endpoint}/storage/v1/"
+  iam_custom_endpoint            = "${var.endpoint}/"
+  iam_beta_custom_endpoint       = "${var.endpoint}/v1/"
+  secret_manager_custom_endpoint = "${var.endpoint}/v1/"
+  sql_custom_endpoint            = "${var.endpoint}/sql/v1beta4/"
 }
 ```
 

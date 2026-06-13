@@ -86,6 +86,8 @@ public interface EmulatorConfig {
 
         KafkaServiceConfig kafka();
 
+        CloudSqlServiceConfig cloudsql();
+
         CloudTasksServiceConfig cloudtasks();
 
         CloudRunServiceConfig cloudrun();
@@ -134,6 +136,11 @@ public interface EmulatorConfig {
         String defaultImage();
 
         Optional<String> dockerNetwork();
+    }
+
+    interface CloudSqlServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface CloudTasksServiceConfig {

@@ -19,6 +19,9 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.google.cloud.tasks.v2.CloudTasksClient;
 import com.google.cloud.tasks.v2.CloudTasksSettings;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.services.sqladmin.SQLAdmin;
 
 import java.io.IOException;
 import java.net.URI;
@@ -156,5 +159,17 @@ public final class TestFixtures {
                 .setCredentialsProvider(NoCredentialsProvider.create())
                 .build();
         return FunctionServiceClient.create(settings);
+    }
+
+    public static SQLAdmin sqlAdminClient() {
+        return new SQLAdmin.Builder(new NetHttpTransport(), GsonFactory.getDefaultInstance(), request -> {
+        })
+                .setApplicationName("floci-gcp-compat")
+                .setRootUrl(endpoint() + "/")
+                // The generated v1beta4 request classes already include sql/v1beta4/
+                // in their URI templates. Setting it here would produce
+                // /sql/v1beta4/sql/v1beta4/... and miss the emulator routes.
+                .setServicePath("")
+                .build();
     }
 }

@@ -41,6 +41,33 @@ resource "google_secret_manager_secret_version" "compat" {
   secret_data = "floci-gcp-compat-test-secret-value"
 }
 
+# ── Cloud SQL for PostgreSQL ─────────────────────────────────────────────────
+resource "google_sql_database_instance" "compat" {
+  name             = "floci-compat-postgres"
+  project          = var.project
+  region           = var.region
+  database_version = "POSTGRES_15"
+
+  deletion_protection = false
+
+  settings {
+    tier = "db-custom-1-3840"
+  }
+}
+
+resource "google_sql_database" "compat" {
+  name     = "appdb"
+  project  = var.project
+  instance = google_sql_database_instance.compat.name
+}
+
+resource "google_sql_user" "compat" {
+  name     = "app"
+  project  = var.project
+  instance = google_sql_database_instance.compat.name
+  password = "floci-compat-password"
+}
+
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "bucket_name" {
   value = google_storage_bucket.compat.name
@@ -60,4 +87,16 @@ output "secret_name" {
 
 output "secret_version_name" {
   value = google_secret_manager_secret_version.compat.name
+}
+
+output "sql_instance_name" {
+  value = google_sql_database_instance.compat.name
+}
+
+output "sql_database_name" {
+  value = google_sql_database.compat.name
+}
+
+output "sql_user_name" {
+  value = google_sql_user.compat.name
 }

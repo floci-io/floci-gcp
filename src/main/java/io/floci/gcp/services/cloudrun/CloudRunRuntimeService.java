@@ -84,7 +84,7 @@ public class CloudRunRuntimeService {
             }
 
             CloudRunRuntimeInstance starting = instance(project, location, service, revision, container,
-                    info.containerId(), containerPort, endpoint, "STARTING", null);
+                    info.containerId(), containerPort, spec.networkMode(), endpoint, "STARTING", null);
             runtimeStore.put(revision.getName(), starting);
             waitForReady(endpoint, config.services().cloudrun().execution().startupTimeout());
             CloudRunRuntimeInstance ready = starting.withStatus("READY", null);
@@ -133,7 +133,7 @@ public class CloudRunRuntimeService {
 
         try {
             ContainerLifecycleManager.EndpointInfo endpoint = lifecycleManager.resolveEndpoint(
-                    instance.containerId(), instance.ingressContainerPort());
+                    instance.containerId(), instance.ingressContainerPort(), instance.dockerNetwork());
             CloudRunRuntimeInstance refreshed = instance.withEndpoint(endpoint.host(), endpoint.port());
             if (!refreshed.equals(instance)) {
                 runtimeStore.put(revisionName, refreshed);
@@ -238,13 +238,14 @@ public class CloudRunRuntimeService {
                                              com.google.cloud.run.v2.Container container,
                                              String containerId,
                                              int containerPort,
+                                             String dockerNetwork,
                                              ContainerLifecycleManager.EndpointInfo endpoint,
                                              String status,
                                              String lastError) {
         long now = System.currentTimeMillis();
         long requestTimeoutMillis = requestTimeout(revision).toMillis();
         return new CloudRunRuntimeInstance(project, location, service.getName(), revision.getName(),
-                container.getImage(), containerId, containerPort, endpoint.host(), endpoint.port(),
+                container.getImage(), containerId, containerPort, dockerNetwork, endpoint.host(), endpoint.port(),
                 service.getUri(), status, now, now, lastError, requestTimeoutMillis);
     }
 

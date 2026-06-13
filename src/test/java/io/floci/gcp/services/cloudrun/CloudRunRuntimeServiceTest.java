@@ -122,7 +122,7 @@ class CloudRunRuntimeServiceTest {
         CloudRunRuntimeService service = new CloudRunRuntimeService(store, mock(ContainerBuilder.class),
                 lifecycleManager, config);
         when(lifecycleManager.isContainerRunning("container-id")).thenReturn(true);
-        when(lifecycleManager.resolveEndpoint("container-id", 8080))
+        when(lifecycleManager.resolveEndpoint("container-id", 8080, null))
                 .thenReturn(new ContainerLifecycleManager.EndpointInfo("localhost", 23456));
 
         CloudRunRuntimeInstance ready = service.getReady(revision).orElseThrow();
@@ -132,10 +132,31 @@ class CloudRunRuntimeServiceTest {
         assertEquals(23456, store.get(revision).orElseThrow().endpointPort());
     }
 
+    @Test
+    void getReadyRefreshesEndpointUsingStoredDockerNetwork() {
+        InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
+        String revision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00001";
+        store.put(revision, new CloudRunRuntimeInstance("p1", "us-central1",
+                "projects/p1/locations/us-central1/services/svc", revision,
+                "gcr.io/p1/svc:latest", "container-id", 8080, "compat-net", "172.18.0.4", 80,
+                "http://floci-gcp:4588/run/v2/projects/p1/locations/us-central1/services/svc",
+                "READY", 1, 1, null, 300_000));
+        CloudRunRuntimeService service = new CloudRunRuntimeService(store, mock(ContainerBuilder.class),
+                lifecycleManager, config);
+        when(lifecycleManager.isContainerRunning("container-id")).thenReturn(true);
+        when(lifecycleManager.resolveEndpoint("container-id", 8080, "compat-net"))
+                .thenReturn(new ContainerLifecycleManager.EndpointInfo("172.18.0.4", 80));
+
+        CloudRunRuntimeInstance ready = service.getReady(revision).orElseThrow();
+
+        assertEquals("172.18.0.4", ready.endpointHost());
+        verify(lifecycleManager).resolveEndpoint("container-id", 8080, "compat-net");
+    }
+
     private static CloudRunRuntimeInstance instance(String revision, int endpointPort) {
         return new CloudRunRuntimeInstance("p1", "us-central1",
                 "projects/p1/locations/us-central1/services/svc", revision,
-                "gcr.io/p1/svc:latest", "container-id", 8080, "127.0.0.1", endpointPort,
+                "gcr.io/p1/svc:latest", "container-id", 8080, null, "127.0.0.1", endpointPort,
                 "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
                 "READY", 1, 1, null, 300_000);
     }

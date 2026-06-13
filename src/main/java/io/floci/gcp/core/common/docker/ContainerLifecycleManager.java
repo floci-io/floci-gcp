@@ -232,6 +232,11 @@ public class ContainerLifecycleManager {
         return resolveEndpoint(inspect, containerPort);
     }
 
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoint(inspect, containerPort, preferredNetwork);
+    }
+
     public DockerClient getDockerClient() {
         return dockerClient;
     }

@@ -135,7 +135,7 @@ class CloudRunInvocationControllerTest {
         return new CloudRunRuntimeInstance("p1", "us-central1",
                 "projects/p1/locations/us-central1/services/svc",
                 "projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
-                "gcr.io/p1/svc:latest", "container-id", 8080, "127.0.0.1", port,
+                "gcr.io/p1/svc:latest", "container-id", 8080, null, "127.0.0.1", port,
                 "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
                 "READY", 1, 1, null, 300_000);
     }

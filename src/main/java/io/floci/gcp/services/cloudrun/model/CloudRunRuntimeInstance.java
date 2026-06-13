@@ -11,6 +11,7 @@ public record CloudRunRuntimeInstance(
         String image,
         String containerId,
         int ingressContainerPort,
+        String dockerNetwork,
         String endpointHost,
         int endpointPort,
         String publicUrl,
@@ -34,13 +35,13 @@ public record CloudRunRuntimeInstance(
 
     public CloudRunRuntimeInstance withStatus(String status, String lastError) {
         return new CloudRunRuntimeInstance(project, location, serviceName, revisionName, image,
-                containerId, ingressContainerPort, endpointHost, endpointPort, publicUrl, status,
+                containerId, ingressContainerPort, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
                 createTimeMillis, System.currentTimeMillis(), lastError, requestTimeoutMillis);
     }
 
     public CloudRunRuntimeInstance withEndpoint(String endpointHost, int endpointPort) {
         return new CloudRunRuntimeInstance(project, location, serviceName, revisionName, image,
-                containerId, ingressContainerPort, endpointHost, endpointPort, publicUrl, status,
+                containerId, ingressContainerPort, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
                 createTimeMillis, System.currentTimeMillis(), lastError, requestTimeoutMillis);
     }
 }

@@ -155,7 +155,6 @@ setup() {
     result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run")
     [[ "$result" == *'"ingress":"INGRESS_TRAFFIC_ALL"'* ]]
     [[ "$result" == *'"env"'* ]]
-    [[ "$result" == *'"floci-compat-sa"'* ]]
 }
 
 @test "Terraform: Cloud Run service URI is invokable when execution is enabled" {

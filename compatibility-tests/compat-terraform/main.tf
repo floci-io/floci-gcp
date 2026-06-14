@@ -42,6 +42,10 @@ resource "google_secret_manager_secret_version" "compat" {
 }
 
 # ── Cloud Run ────────────────────────────────────────────────────────────────
+resource "terraform_data" "cloud_run_replacement" {
+  input = var.cloud_run_replace_token
+}
+
 resource "google_cloud_run_v2_service" "compat" {
   name                = var.cloud_run_name
   location            = var.region
@@ -83,6 +87,12 @@ resource "google_cloud_run_v2_service" "compat" {
         startup_cpu_boost = true
       }
     }
+  }
+
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.cloud_run_replacement
+    ]
   }
 }
 

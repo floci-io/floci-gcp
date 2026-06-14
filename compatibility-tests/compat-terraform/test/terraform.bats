@@ -183,6 +183,30 @@ setup() {
     [[ "$result" == *'floci-compat-run/revisions/floci-compat-run-00002'* ]]
 }
 
+@test "Terraform: Cloud Run same-name service replacement destroy completes" {
+    if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
+        skip "Cloud Run execution is not enabled"
+    fi
+
+    run terraform apply \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="cloud_run_label=compat-same-name-replaced" \
+        -var="cloud_run_env_value=same-name-replaced" \
+        -var="cloud_run_replace_token=same-name-replaced" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run"
+    assert_success
+    assert_output --partial 'compat-same-name-replaced'
+
+    uri=$(terraform output -raw cloud_run_uri 2>/dev/null)
+    run cloud_run_curl "$uri"
+    assert_success
+    assert_output --partial "Welcome to nginx"
+}
+
 @test "Terraform: Cloud Run service replacement destroy completes" {
     if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
         skip "Cloud Run execution is not enabled"

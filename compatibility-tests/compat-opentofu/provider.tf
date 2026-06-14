@@ -37,6 +37,11 @@ variable "cloud_run_env_value" {
   default = "initial"
 }
 
+variable "cloud_run_replace_token" {
+  type    = string
+  default = "initial"
+}
+
 # Credentials are provided via GOOGLE_OAUTH_ACCESS_TOKEN env var (fake value —
 # floci-gcp ignores auth headers unconditionally).
 #

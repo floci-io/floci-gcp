@@ -262,6 +262,54 @@ class CloudRunServiceTest {
     }
 
     @Test
+    void executionEnabledLateRuntimeStartAfterTimeoutIsCleanedUp() throws InterruptedException {
+        LongRunningOperationsService operations = operationsMock();
+        Operation pending = Operation.newBuilder()
+                .setName("projects/p1/locations/us-central1/operations/runtime-op")
+                .setDone(false)
+                .build();
+        when(operations.pending(anyString(), any(Message.class))).thenReturn(pending);
+        CloudRunRuntimeService runtime = mock(CloudRunRuntimeService.class);
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch allowStartToReturn = new CountDownLatch(1);
+        CloudRunRuntimeInstance lateInstance = new CloudRunRuntimeInstance("p1", "us-central1",
+                "projects/p1/locations/us-central1/services/svc",
+                "projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
+                "gcr.io/p1/svc:latest", "late-container-id", 8080, null, "localhost", 12345,
+                "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                "READY", 1, 1, null, 300_000);
+        when(runtime.start(anyString(), anyString(), any(Service.class), any(Revision.class)))
+                .thenAnswer(invocation -> {
+                    startEntered.countDown();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                    while (allowStartToReturn.getCount() > 0 && System.nanoTime() < deadline) {
+                        try {
+                            allowStartToReturn.await(10, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException ignored) {
+                            Thread.interrupted();
+                        }
+                    }
+                    assertEquals(0, allowStartToReturn.getCount());
+                    return lateInstance;
+                });
+        CloudRunService gated = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                operations, iamService, cloudRunConfig(true, Duration.ofMillis(25)), runtime);
+
+        Operation operation = gated.createService("p1", "us-central1", "svc",
+                "{\"template\":{\"containers\":[{\"image\":\"gcr.io/p1/svc:latest\"}]}}", false);
+
+        assertFalse(operation.getDone());
+        assertTrue(startEntered.await(1, TimeUnit.SECONDS));
+        verify(operations, timeout(1000)).fail(eq(pending.getName()), argThat(status ->
+                status.getCode() == Code.DEADLINE_EXCEEDED_VALUE), any(Service.class));
+
+        allowStartToReturn.countDown();
+
+        verify(runtime, timeout(1000)).stopInstances(argThat(instances ->
+                instances.size() == 1 && "late-container-id".equals(instances.get(0).containerId())));
+    }
+
+    @Test
     void updateServiceAppliesFieldMaskAndCreatesReadyRevision() {
         service.createService("p1", "us-central1", "svc",
                 "{\"template\":{\"containers\":[{\"image\":\"gcr.io/p1/svc:v1\"}]},\"labels\":{\"env\":\"old\"}}",
@@ -346,23 +394,26 @@ class CloudRunServiceTest {
         CloudRunRuntimeService runtime = mock(CloudRunRuntimeService.class);
         CountDownLatch updateStartEntered = new CountDownLatch(1);
         CountDownLatch allowUpdateStartToFinish = new CountDownLatch(1);
+        String serviceName = "projects/p1/locations/us-central1/services/svc";
+        String revision1 = serviceName + "/revisions/svc-00001";
+        String revision2 = serviceName + "/revisions/svc-00002";
+        CloudRunRuntimeInstance initialInstance = new CloudRunRuntimeInstance("p1", "us-central1",
+                serviceName, revision1, "gcr.io/p1/svc:v1", "container-v1", 8080, null, "localhost", 12345,
+                "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                "READY", 1, 1, null, 300_000);
+        CloudRunRuntimeInstance updatedInstance = new CloudRunRuntimeInstance("p1", "us-central1",
+                serviceName, revision2, "gcr.io/p1/svc:v2", "container-v2", 8080, null, "localhost", 12346,
+                "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                "READY", 1, 1, null, 300_000);
         when(runtime.start(anyString(), anyString(), any(Service.class), any(Revision.class)))
-                .thenReturn(new CloudRunRuntimeInstance("p1", "us-central1",
-                        "projects/p1/locations/us-central1/services/svc",
-                        "projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
-                        "gcr.io/p1/svc:v1", "container-v1", 8080, null, "localhost", 12345,
-                        "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
-                        "READY", 1, 1, null, 300_000))
+                .thenReturn(initialInstance)
                 .thenAnswer(invocation -> {
                     updateStartEntered.countDown();
                     assertTrue(allowUpdateStartToFinish.await(2, TimeUnit.SECONDS));
-                    return new CloudRunRuntimeInstance("p1", "us-central1",
-                            "projects/p1/locations/us-central1/services/svc",
-                            "projects/p1/locations/us-central1/services/svc/revisions/svc-00002",
-                            "gcr.io/p1/svc:v2", "container-v2", 8080, null, "localhost", 12346,
-                            "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
-                            "READY", 1, 1, null, 300_000);
+                    return updatedInstance;
                 });
+        when(runtime.serviceInstancesExcept(serviceName, revision1)).thenReturn(List.of());
+        when(runtime.serviceInstancesExcept(serviceName, revision2)).thenReturn(List.of(initialInstance));
         CloudRunService gated = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 operations, iamService, cloudRunConfig(true), runtime);
 
@@ -384,8 +435,7 @@ class CloudRunServiceTest {
                 updating.getLatestCreatedRevision());
 
         allowUpdateStartToFinish.countDown();
-        verify(runtime, timeout(1000)).stopOtherRevisions(eq("projects/p1/locations/us-central1/services/svc"),
-                eq("projects/p1/locations/us-central1/services/svc/revisions/svc-00002"));
+        verify(runtime, timeout(1000)).stopInstances(List.of(initialInstance));
         Service ready = gated.getService("projects/p1/locations/us-central1/services/svc");
         assertFalse(ready.getReconciling());
         assertEquals(ready.getLatestCreatedRevision(), ready.getLatestReadyRevision());
@@ -432,11 +482,16 @@ class CloudRunServiceTest {
                             .build();
                 });
         CloudRunRuntimeService runtime = mock(CloudRunRuntimeService.class);
+        CloudRunRuntimeInstance oldInstance = new CloudRunRuntimeInstance("p1", "us-central1",
+                name, revision, "gcr.io/p1/svc:latest", "old-container-id", 8080, null, "localhost", 12345,
+                "http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588",
+                "READY", 1, 1, null, 300_000);
+        when(runtime.serviceInstances(name)).thenReturn(List.of(oldInstance));
         doAnswer(invocation -> {
             stopEntered.countDown();
             assertTrue(allowStopToFinish.await(2, TimeUnit.SECONDS));
             return null;
-        }).when(runtime).stopService(name);
+        }).when(runtime).stopInstances(List.of(oldInstance));
         CloudRunService gated = new CloudRunService(serviceStore, revisionStore,
                 operations, iamService, cloudRunConfig(true), runtime);
 
@@ -446,9 +501,11 @@ class CloudRunServiceTest {
         assertTrue(operationCompleted.await(1, TimeUnit.SECONDS));
         assertThrows(GcpException.class, () -> gated.getService(name));
         assertThrows(GcpException.class, () -> gated.getRevision(revision));
+        assertFalse(gated.createService("p1", "us-central1", "svc",
+                "{\"template\":{\"containers\":[{\"image\":\"gcr.io/p1/svc:latest\"}]}}", false).getDone());
         assertTrue(stopEntered.await(1, TimeUnit.SECONDS));
         allowStopToFinish.countDown();
-        verify(runtime, timeout(1000)).stopService(name);
+        verify(runtime, timeout(1000)).stopInstances(List.of(oldInstance));
     }
 
     @Test

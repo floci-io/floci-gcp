@@ -27,6 +27,7 @@ import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
@@ -448,10 +449,13 @@ public class CloudRunService {
                               com.google.cloud.run.v2.Service service, Revision revision) {
         try {
             runtimeService.initialize();
-            runtimeService.start(project, location, service, revision);
+            CloudRunRuntimeInstance instance = runtimeService.start(project, location, service, revision);
             if (guard.isTerminal()) {
+                runtimeService.stopInstances(List.of(instance));
                 return;
             }
+            List<CloudRunRuntimeInstance> oldInstances =
+                    runtimeService.serviceInstancesExcept(service.getName(), revision.getName());
             Timestamp now = timestampNow();
             com.google.cloud.run.v2.Service ready = service.toBuilder()
                     .setLatestReadyRevision(revision.getName())
@@ -472,7 +476,7 @@ public class CloudRunService {
             guard.complete(ready, ready);
             runCleanupWithTimeout("old revision cleanup service=" + service.getName()
                     + " revision=" + revision.getName(),
-                    () -> runtimeService.stopOtherRevisions(service.getName(), revision.getName()));
+                    () -> runtimeService.stopInstances(oldInstances));
         } catch (Exception e) {
             if (guard.isTerminal()) {
                 return;
@@ -484,8 +488,8 @@ public class CloudRunService {
     }
 
     private void deleteRuntime(OperationGuard guard, String name, com.google.cloud.run.v2.Service deleted) {
+        List<CloudRunRuntimeInstance> instances = runtimeService.serviceInstances(name);
         try {
-            runtimeService.initialize();
             deleteMetadata(name);
             guard.complete(deleted, deleted);
         } catch (Exception e) {
@@ -501,7 +505,7 @@ public class CloudRunService {
             return;
         }
 
-        runCleanupWithTimeout("runtime cleanup service=" + name, () -> runtimeService.stopService(name));
+        runCleanupWithTimeout("runtime cleanup service=" + name, () -> runtimeService.stopInstances(instances));
     }
 
     private void submitOperation(OperationGuard guard, Runnable work, Runnable onTimeout) {

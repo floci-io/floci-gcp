@@ -18,6 +18,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -102,6 +104,27 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void startUsesRevisionUidInContainerNameAndDoesNotRemoveStaleNameSynchronously() {
+        when(config.services().cloudrun().execution().startupTimeout()).thenReturn(Duration.ofMillis(1));
+        when(lifecycleManager.createAndStart(argThat(spec -> spec.name().endsWith("-revision-uid"))))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("new-container-id",
+                        Map.of(8080, new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 1))));
+        Service service = Service.newBuilder()
+                .setName("projects/p1/locations/us-central1/services/svc")
+                .build();
+        Revision revision = Revision.newBuilder()
+                .setName(service.getName() + "/revisions/svc-00001")
+                .setUid("revision-uid")
+                .addContainers(Container.newBuilder().setImage("gcr.io/p1/svc:latest"))
+                .build();
+
+        assertThrows(GcpException.class, () -> runtimeService.start("p1", "us-central1", service, revision));
+
+        verify(lifecycleManager, never()).removeIfExists(anyString());
+        verify(lifecycleManager).stopAndRemove("new-container-id", null);
+    }
+
+    @Test
     void getReadyDropsStaleRuntimeRecordWhenContainerIsGone() {
         InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
         String revision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00001";
@@ -112,6 +135,24 @@ class CloudRunRuntimeServiceTest {
 
         assertTrue(service.getReady(revision).isEmpty());
         assertTrue(store.get(revision).isEmpty());
+    }
+
+    @Test
+    void stopInstancesOnlyDeletesMatchingRuntimeSnapshot() {
+        InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
+        String revision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00001";
+        CloudRunRuntimeInstance oldInstance = instance(revision, 12345, "old-container-id", 1);
+        CloudRunRuntimeInstance replacement = instance(revision, 23456, "new-container-id", 2);
+        store.put(revision, oldInstance);
+        CloudRunRuntimeService service = new CloudRunRuntimeService(store, mock(ContainerBuilder.class),
+                lifecycleManager, config);
+        List<CloudRunRuntimeInstance> snapshot = service.serviceInstances("projects/p1/locations/us-central1/services/svc");
+        store.put(revision, replacement);
+
+        service.stopInstances(snapshot);
+
+        verify(lifecycleManager).stopAndRemove("old-container-id", null);
+        assertEquals("new-container-id", store.get(revision).orElseThrow().containerId());
     }
 
     @Test
@@ -154,10 +195,15 @@ class CloudRunRuntimeServiceTest {
     }
 
     private static CloudRunRuntimeInstance instance(String revision, int endpointPort) {
+        return instance(revision, endpointPort, "container-id", 1);
+    }
+
+    private static CloudRunRuntimeInstance instance(String revision, int endpointPort,
+                                                   String containerId, long createTimeMillis) {
         return new CloudRunRuntimeInstance("p1", "us-central1",
                 "projects/p1/locations/us-central1/services/svc", revision,
-                "gcr.io/p1/svc:latest", "container-id", 8080, null, "127.0.0.1", endpointPort,
+                "gcr.io/p1/svc:latest", containerId, 8080, null, "127.0.0.1", endpointPort,
                 "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
-                "READY", 1, 1, null, 300_000);
+                "READY", createTimeMillis, createTimeMillis, null, 300_000);
     }
 }

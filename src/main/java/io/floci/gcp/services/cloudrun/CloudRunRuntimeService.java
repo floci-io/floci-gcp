@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 @ApplicationScoped
@@ -70,8 +71,7 @@ public class CloudRunRuntimeService {
 
         com.google.cloud.run.v2.Container container = revision.getContainers(0);
         int containerPort = ingressPort(container);
-        String containerName = containerName(service.getName(), revision.getName());
-        lifecycleManager.removeIfExists(containerName);
+        String containerName = containerName(service.getName(), revision);
 
         ContainerSpec spec = buildSpec(project, location, service, revision, container, containerPort, containerName);
         String containerId = null;
@@ -101,21 +101,32 @@ public class CloudRunRuntimeService {
     }
 
     public void stopService(String serviceName) {
+        stopInstances(serviceInstances(serviceName));
+    }
+
+    List<CloudRunRuntimeInstance> serviceInstances(String serviceName) {
         String prefix = serviceName + "/revisions/";
-        for (String key : List.copyOf(runtimeStore.keys())) {
-            if (key.startsWith(prefix)) {
-                stopRevision(key);
-            }
+        return List.copyOf(runtimeStore.keys()).stream()
+                .filter(key -> key.startsWith(prefix))
+                .map(runtimeStore::get)
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
+    List<CloudRunRuntimeInstance> serviceInstancesExcept(String serviceName, String keepRevisionName) {
+        return serviceInstances(serviceName).stream()
+                .filter(instance -> !instance.revisionName().equals(keepRevisionName))
+                .toList();
+    }
+
+    void stopInstances(List<CloudRunRuntimeInstance> instances) {
+        for (CloudRunRuntimeInstance instance : List.copyOf(instances)) {
+            stopInstance(instance);
         }
     }
 
     public void stopOtherRevisions(String serviceName, String keepRevisionName) {
-        String prefix = serviceName + "/revisions/";
-        for (String key : List.copyOf(runtimeStore.keys())) {
-            if (key.startsWith(prefix) && !key.equals(keepRevisionName)) {
-                stopRevision(key);
-            }
-        }
+        stopInstances(serviceInstancesExcept(serviceName, keepRevisionName));
     }
 
     public Optional<CloudRunRuntimeInstance> getReady(String revisionName) {
@@ -195,13 +206,18 @@ public class CloudRunRuntimeService {
         return builder.build();
     }
 
-    private void stopRevision(String revisionName) {
-        runtimeStore.get(revisionName).ifPresent(instance -> {
-            if (instance.containerId() != null && !instance.containerId().isBlank()) {
-                lifecycleManager.stopAndRemove(instance.containerId(), null);
-            }
-            runtimeStore.delete(revisionName);
-        });
+    private void stopInstance(CloudRunRuntimeInstance instance) {
+        if (instance.containerId() != null && !instance.containerId().isBlank()) {
+            lifecycleManager.stopAndRemove(instance.containerId(), null);
+        }
+        runtimeStore.get(instance.revisionName())
+                .filter(current -> sameRuntime(current, instance))
+                .ifPresent(current -> runtimeStore.delete(instance.revisionName()));
+    }
+
+    private static boolean sameRuntime(CloudRunRuntimeInstance current, CloudRunRuntimeInstance expected) {
+        return Objects.equals(current.containerId(), expected.containerId())
+                && current.createTimeMillis() == expected.createTimeMillis();
     }
 
     static void validateSupported(Revision revision) {
@@ -280,10 +296,14 @@ public class CloudRunRuntimeService {
         throw GcpException.unavailable("Cloud Run runtime did not become ready before timeout: " + detail);
     }
 
-    private String containerName(String serviceName, String revisionName) {
-        return config.services().cloudrun().execution().containerNamePrefix()
+    private String containerName(String serviceName, Revision revision) {
+        String name = config.services().cloudrun().execution().containerNamePrefix()
                 + "-" + sanitize(lastSegment(serviceName))
-                + "-" + sanitize(lastSegment(revisionName));
+                + "-" + sanitize(lastSegment(revision.getName()));
+        if (revision.getUid().isBlank()) {
+            return name;
+        }
+        return name + "-" + sanitize(revision.getUid());
     }
 
     private static String sanitize(String value) {

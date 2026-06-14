@@ -269,6 +269,10 @@ public class GcsService {
         return meta;
     }
 
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), baseUrl);
+    }
+
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
         LOG.debugf("getObjectMeta bucket=%s name=%s", bucket, objectName);
         GcsObjectMeta meta = objectMetaStore.get(objectKey(bucket, objectName))
@@ -306,6 +310,10 @@ public class GcsService {
             throw GcpException.notFound("Object not found: " + objectName);
         }
         return data;
+    }
+
+    public byte[] getObjectData(String bucket, String objectName) {
+        return getObjectData(bucket, objectName, GcsCustomerEncryption.none());
     }
 
     public byte[] getObjectData(String bucket, String objectName, String generation,

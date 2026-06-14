@@ -164,7 +164,7 @@ setup() {
     [ -n "$uri" ]
     run cloud_run_curl "$uri"
     assert_success
-    assert_output --partial "Welcome to nginx"
+    assert_output --partial "floci-gcp opentofu cloud run gcs volume"
 }
 
 @test "OpenTofu: Cloud Run service update uses provider patch path" {
@@ -202,7 +202,7 @@ setup() {
     uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
     run cloud_run_curl "$uri"
     assert_success
-    assert_output --partial "Welcome to nginx"
+    assert_output --partial "floci-gcp opentofu cloud run gcs volume"
 }
 
 @test "OpenTofu: Cloud Run service replacement destroy completes" {
@@ -229,7 +229,7 @@ setup() {
 
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "OpenTofu: all six resources tracked in state" {
+@test "OpenTofu: all managed resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 6 ]
+    [ "$count" -ge 8 ]
 }

@@ -20,6 +20,13 @@ resource "google_storage_bucket_object" "readme" {
   content_type = "text/plain"
 }
 
+resource "google_storage_bucket_object" "cloud_run_index" {
+  bucket       = google_storage_bucket.compat.name
+  name         = "index.html"
+  content      = "floci-gcp opentofu cloud run gcs volume"
+  content_type = "text/html"
+}
+
 # ── IAM Service Account ───────────────────────────────────────────────────────
 resource "google_service_account" "compat" {
   account_id   = "floci-compat-sa-tofu"
@@ -66,6 +73,15 @@ resource "google_cloud_run_v2_service" "compat" {
       max_instance_count = 1
     }
 
+    volumes {
+      name = "site"
+
+      gcs {
+        bucket    = google_storage_bucket.compat.name
+        read_only = true
+      }
+    }
+
     containers {
       image = "nginx:latest"
 
@@ -76,6 +92,11 @@ resource "google_cloud_run_v2_service" "compat" {
       env {
         name  = "FLOCI_COMPAT"
         value = var.cloud_run_env_value
+      }
+
+      volume_mounts {
+        name       = "site"
+        mount_path = "/usr/share/nginx/html"
       }
 
       resources {
@@ -94,6 +115,10 @@ resource "google_cloud_run_v2_service" "compat" {
       terraform_data.cloud_run_replacement
     ]
   }
+
+  depends_on = [
+    google_storage_bucket_object.cloud_run_index
+  ]
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────

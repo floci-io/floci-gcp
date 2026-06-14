@@ -1,10 +1,15 @@
 package io.floci.gcp.services.cloudrun;
 
+import com.github.dockerjava.api.model.MountType;
 import com.google.cloud.run.v2.Container;
 import com.google.cloud.run.v2.ContainerPort;
+import com.google.cloud.run.v2.EmptyDirVolumeSource;
 import com.google.cloud.run.v2.EnvVar;
+import com.google.cloud.run.v2.GCSVolumeSource;
 import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.Service;
+import com.google.cloud.run.v2.Volume;
+import com.google.cloud.run.v2.VolumeMount;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.dns.EmbeddedDnsServer;
@@ -14,10 +19,17 @@ import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
+import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
+import io.floci.gcp.services.gcs.GcsService;
+import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +52,7 @@ class CloudRunRuntimeServiceTest {
         when(config.services().cloudrun().execution().startupTimeout()).thenReturn(Duration.ofSeconds(1));
         when(config.services().cloudrun().execution().requestTimeout()).thenReturn(Duration.ofSeconds(300));
         when(config.services().cloudrun().execution().containerNamePrefix()).thenReturn("floci-cloudrun");
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4588");
         when(config.docker().logMaxSize()).thenReturn("10m");
         when(config.docker().logMaxFile()).thenReturn("3");
 
@@ -87,6 +100,55 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void buildSpecMountsReadOnlyGcsVolumeSnapshot() {
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config);
+        Service cloudRunService = Service.newBuilder()
+                .setName("projects/p1/locations/us-central1/services/svc")
+                .build();
+        Revision revision = Revision.newBuilder()
+                .setName(cloudRunService.getName() + "/revisions/svc-00001")
+                .addContainers(Container.newBuilder()
+                        .setImage("nginx:latest"))
+                .build();
+        List<CloudRunRuntimeVolumeMount> mounts = List.of(new CloudRunRuntimeVolumeMount(
+                "site-bucket", "", "floci-gcp-cloudrun-gcs-test", null, null,
+                "/usr/share/nginx/html", true));
+
+        ContainerSpec spec = service.buildSpec("p1", "us-central1", cloudRunService, revision,
+                revision.getContainers(0), 8080, "container-name", mounts);
+
+        assertTrue(spec.binds().isEmpty());
+        assertEquals(1, spec.mounts().size());
+        assertEquals(MountType.VOLUME, spec.mounts().get(0).getType());
+        assertEquals("floci-gcp-cloudrun-gcs-test", spec.mounts().get(0).getSource());
+        assertEquals("/usr/share/nginx/html", spec.mounts().get(0).getTarget());
+        assertEquals(Boolean.TRUE, spec.mounts().get(0).getReadOnly());
+        assertEquals(Boolean.TRUE, spec.mounts().get(0).getVolumeOptions().getNoCopy());
+    }
+
+    @Test
+    void stopInstancesSyncsWritableGcsVolumeBeforeDeletingSnapshot() throws Exception {
+        GcsService gcsService = mock(GcsService.class);
+        when(gcsService.listObjects("site-bucket")).thenReturn(List.of(object("old.txt")));
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config, gcsService);
+        Path root = Files.createTempDirectory("cloudrun-gcs-test-");
+        Files.writeString(root.resolve("new.txt"), "new content");
+        List<CloudRunRuntimeVolumeMount> mounts = List.of(new CloudRunRuntimeVolumeMount(
+                "site-bucket", root.toString(), root.toString(), "/data", false));
+
+        service.stopInstances(List.of(instance("projects/p1/locations/us-central1/services/svc/revisions/svc-00001",
+                12345, "container-id", 1, mounts)));
+
+        verify(gcsService).putObject(eq("site-bucket"), eq("new.txt"), anyString(),
+                argThat(bytes -> Arrays.equals(bytes, "new content".getBytes(StandardCharsets.UTF_8))),
+                eq("http://localhost:4588"));
+        verify(gcsService).deleteObject("site-bucket", "old.txt");
+        assertFalse(Files.exists(root));
+    }
+
+    @Test
     void unsupportedContainerShapesFailBeforeDocker() {
         Service service = Service.newBuilder()
                 .setName("projects/p1/locations/us-central1/services/svc")
@@ -101,6 +163,49 @@ class CloudRunRuntimeServiceTest {
                 () -> runtimeService.start("p1", "us-central1", service, revision));
 
         assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
+
+    @Test
+    void unsupportedVolumeShapesFailBeforeDocker() {
+        Revision nonGcsVolume = Revision.newBuilder()
+                .addVolumes(Volume.newBuilder()
+                        .setName("cache")
+                        .setEmptyDir(EmptyDirVolumeSource.newBuilder()))
+                .addContainers(Container.newBuilder()
+                        .setImage("gcr.io/p1/svc:latest")
+                        .addVolumeMounts(VolumeMount.newBuilder()
+                                .setName("cache")
+                                .setMountPath("/cache")))
+                .build();
+        Revision unknownMount = Revision.newBuilder()
+                .addVolumes(Volume.newBuilder()
+                        .setName("site")
+                        .setGcs(GCSVolumeSource.newBuilder().setBucket("site-bucket")))
+                .addContainers(Container.newBuilder()
+                        .setImage("gcr.io/p1/svc:latest")
+                        .addVolumeMounts(VolumeMount.newBuilder()
+                                .setName("missing")
+                                .setMountPath("/site")))
+                .build();
+        Revision mountOptions = Revision.newBuilder()
+                .addVolumes(Volume.newBuilder()
+                        .setName("site")
+                        .setGcs(GCSVolumeSource.newBuilder()
+                                .setBucket("site-bucket")
+                                .addMountOptions("implicit-dirs")))
+                .addContainers(Container.newBuilder()
+                        .setImage("gcr.io/p1/svc:latest")
+                        .addVolumeMounts(VolumeMount.newBuilder()
+                                .setName("site")
+                                .setMountPath("/site")))
+                .build();
+
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                () -> CloudRunRuntimeService.validateSupported(nonGcsVolume)).getGcpStatus());
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                () -> CloudRunRuntimeService.validateSupported(unknownMount)).getGcpStatus());
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                () -> CloudRunRuntimeService.validateSupported(mountOptions)).getGcpStatus());
     }
 
     @Test
@@ -200,10 +305,29 @@ class CloudRunRuntimeServiceTest {
 
     private static CloudRunRuntimeInstance instance(String revision, int endpointPort,
                                                    String containerId, long createTimeMillis) {
+        return instance(revision, endpointPort, containerId, createTimeMillis, List.of());
+    }
+
+    private static CloudRunRuntimeInstance instance(String revision, int endpointPort,
+                                                   String containerId, long createTimeMillis,
+                                                   List<CloudRunRuntimeVolumeMount> mounts) {
         return new CloudRunRuntimeInstance("p1", "us-central1",
                 "projects/p1/locations/us-central1/services/svc", revision,
                 "gcr.io/p1/svc:latest", containerId, 8080, null, "127.0.0.1", endpointPort,
                 "http://localhost:4588/run/v2/projects/p1/locations/us-central1/services/svc",
-                "READY", createTimeMillis, createTimeMillis, null, 300_000);
+                "READY", createTimeMillis, createTimeMillis, null, 300_000, mounts);
+    }
+
+    private ContainerBuilder containerBuilder() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.isLinuxHost()).thenReturn(false);
+        EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
+        return new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
+    }
+
+    private static GcsObjectMeta object(String name) {
+        GcsObjectMeta object = new GcsObjectMeta();
+        object.setName(name);
+        return object;
     }
 }

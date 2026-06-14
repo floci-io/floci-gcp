@@ -60,8 +60,8 @@ just test-all-iac
 
 | Suite | Resources tested |
 |---|---|
-| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke |
-| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke |
+| `compat-terraform` | GCS bucket (with labels), GCS objects, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke with GCS volume mount |
+| `compat-opentofu` | GCS bucket (with labels), GCS objects, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke with GCS volume mount |
 
 Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 

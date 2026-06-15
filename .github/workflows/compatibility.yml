@@ -59,7 +59,7 @@ jobs:
     name: ${{ matrix.test }}
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -123,6 +123,7 @@ jobs:
 
       - name: Run tests
         id: tests
+        timeout-minutes: 30
         run: |
           mkdir -p test-results
           docker run --rm --network compat-net \
@@ -141,5 +142,5 @@ jobs:
           paths: test-results/*.xml
 
       - name: Dump floci-gcp logs
-        if: failure()
+        if: failure() || cancelled()
         run: docker logs floci-gcp

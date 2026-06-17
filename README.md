@@ -132,6 +132,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Datastore | ✅ | ✅ |
 | Cloud Storage (GCS) | ✅ | ⚠️ Limited |
 | Secret Manager | ✅ | ❌ |
+| Cloud Logging | ✅ | ❌ |
 | IAM | ✅ | ❌ |
 | Managed Kafka | ✅ | ❌ |
 | Cloud Run | ✅ | ❌ |
@@ -148,7 +149,7 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nSecret Manager"]
+            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging"]
         end
 
         subgraph REST ["REST services"]
@@ -180,6 +181,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Messaging | Pub/Sub, Managed Kafka |
 | Security and identity | Secret Manager, IAM |
 | Serverless control planes | Cloud Run, Cloud Functions |
+| Observability | Cloud Logging |
 
 <details>
 <summary>Detailed service notes</summary>
@@ -191,6 +193,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
 | **Secret Manager** | gRPC | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
+| **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane only, no runtime invocation |

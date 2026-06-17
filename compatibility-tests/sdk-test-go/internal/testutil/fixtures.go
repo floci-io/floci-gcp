@@ -8,6 +8,7 @@ import (
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/firestore"
+	logging "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/pubsub"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -84,6 +85,24 @@ func SecretManagerClient(ctx context.Context) *secretmanager.Client {
 	client, err := secretmanager.NewClient(ctx, option.WithGRPCConn(conn))
 	if err != nil {
 		panic("failed to create secret manager client: " + err.Error())
+	}
+	return client
+}
+
+// LoggingClient returns a Cloud Logging (v2) client configured for the emulator.
+// Reads LOGGING_EMULATOR_HOST (e.g. localhost:4588).
+func LoggingClient(ctx context.Context) *logging.Client {
+	host := os.Getenv("LOGGING_EMULATOR_HOST")
+	if host == "" {
+		host = "localhost:4588"
+	}
+	conn, err := grpc.NewClient(host, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		panic("failed to create gRPC connection: " + err.Error())
+	}
+	client, err := logging.NewClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		panic("failed to create logging client: " + err.Error())
 	}
 	return client
 }

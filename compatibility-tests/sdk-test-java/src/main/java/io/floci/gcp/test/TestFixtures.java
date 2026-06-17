@@ -17,6 +17,8 @@ import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceSettings;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
+import com.google.cloud.logging.v2.LoggingClient;
+import com.google.cloud.logging.v2.LoggingSettings;
 import com.google.cloud.tasks.v2.CloudTasksClient;
 import com.google.cloud.tasks.v2.CloudTasksSettings;
 import com.google.api.client.http.javanet.NetHttpTransport;
@@ -171,5 +173,26 @@ public final class TestFixtures {
                 // /sql/v1beta4/sql/v1beta4/... and miss the emulator routes.
                 .setServicePath("")
                 .build();
+    }
+
+    /**
+     * Creates a Cloud Logging client pointing at the emulator.
+     * No standard emulator env var exists; configure explicitly via plaintext gRPC channel.
+     */
+    public static LoggingClient loggingClient() throws IOException {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+
+        LoggingSettings settings = LoggingSettings.newBuilder()
+                .setTransportChannelProvider(
+                        InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(host + ":" + port)
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+
+        return LoggingClient.create(settings);
     }
 }

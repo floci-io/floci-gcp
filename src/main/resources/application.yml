@@ -53,6 +53,8 @@ floci-gcp:
       enabled: true
     secretmanager:
       enabled: true
+    logging:
+      enabled: true
     kafka:
       enabled: true
       mock: false

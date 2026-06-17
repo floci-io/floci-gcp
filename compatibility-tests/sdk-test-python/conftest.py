@@ -43,6 +43,11 @@ def secret_manager_emulator_host():
     return os.environ.get("SECRET_MANAGER_EMULATOR_HOST", "localhost:4588")
 
 
+@pytest.fixture(scope="session")
+def logging_emulator_host():
+    return os.environ.get("LOGGING_EMULATOR_HOST", "localhost:4588")
+
+
 @pytest.fixture
 def unique_name():
     return f"pytest-{uuid.uuid4().hex[:8]}"
@@ -101,3 +106,17 @@ def secret_manager_client(secret_manager_emulator_host):
         channel=grpc.insecure_channel(secret_manager_emulator_host)
     )
     return secretmanager.SecretManagerServiceClient(transport=transport)
+
+
+@pytest.fixture(scope="session")
+def logging_client(logging_emulator_host):
+    import grpc
+    from google.cloud import logging_v2
+    from google.cloud.logging_v2.services.logging_service_v2.transports.grpc import (
+        LoggingServiceV2GrpcTransport,
+    )
+
+    transport = LoggingServiceV2GrpcTransport(
+        channel=grpc.insecure_channel(logging_emulator_host)
+    )
+    return logging_v2.services.logging_service_v2.LoggingServiceV2Client(transport=transport)

@@ -7,6 +7,7 @@ export const FIRESTORE_HOST = process.env.FIRESTORE_EMULATOR_HOST || 'localhost:
 export const DATASTORE_HOST = process.env.DATASTORE_EMULATOR_HOST || 'localhost:4588';
 export const STORAGE_HOST = process.env.STORAGE_EMULATOR_HOST || 'http://localhost:4588';
 export const SECRET_MANAGER_HOST = process.env.SECRET_MANAGER_EMULATOR_HOST || 'localhost:4588';
+export const LOGGING_HOST = process.env.LOGGING_EMULATOR_HOST || 'localhost:4588';
 
 export function uniqueName(prefix = 'test'): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;

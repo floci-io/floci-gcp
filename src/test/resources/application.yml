@@ -24,3 +24,5 @@ floci-gcp:
       enabled: true
     cloudfunctions:
       enabled: true
+    monitoring:
+      enabled: true

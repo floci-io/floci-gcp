@@ -69,6 +69,8 @@ floci-gcp:
       enabled: true
     cloudfunctions:
       enabled: true
+    monitoring:
+      enabled: true
   dns:
     extra-suffixes:
   docker:

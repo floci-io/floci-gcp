@@ -55,6 +55,8 @@ floci-gcp:
       enabled: true
     logging:
       enabled: true
+    kms:
+      enabled: true
     kafka:
       enabled: true
       mock: false

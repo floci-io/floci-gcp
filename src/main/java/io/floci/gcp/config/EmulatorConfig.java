@@ -86,6 +86,8 @@ public interface EmulatorConfig {
 
         LoggingServiceConfig logging();
 
+        CloudKmsServiceConfig kms();
+
         KafkaServiceConfig kafka();
 
         CloudSqlServiceConfig cloudsql();
@@ -128,6 +130,11 @@ public interface EmulatorConfig {
     }
 
     interface LoggingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudKmsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

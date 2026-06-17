@@ -48,6 +48,11 @@ def logging_emulator_host():
     return os.environ.get("LOGGING_EMULATOR_HOST", "localhost:4588")
 
 
+@pytest.fixture(scope="session")
+def kms_emulator_host():
+    return os.environ.get("KMS_EMULATOR_HOST", "localhost:4588")
+
+
 @pytest.fixture
 def unique_name():
     return f"pytest-{uuid.uuid4().hex[:8]}"
@@ -120,3 +125,17 @@ def logging_client(logging_emulator_host):
         channel=grpc.insecure_channel(logging_emulator_host)
     )
     return logging_v2.services.logging_service_v2.LoggingServiceV2Client(transport=transport)
+
+
+@pytest.fixture(scope="session")
+def kms_client(kms_emulator_host):
+    import grpc
+    from google.cloud import kms
+    from google.cloud.kms_v1.services.key_management_service.transports.grpc import (
+        KeyManagementServiceGrpcTransport,
+    )
+
+    transport = KeyManagementServiceGrpcTransport(
+        channel=grpc.insecure_channel(kms_emulator_host)
+    )
+    return kms.KeyManagementServiceClient(transport=transport)

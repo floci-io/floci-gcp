@@ -106,6 +106,12 @@
             <artifactId>grpc-google-cloud-logging-v2</artifactId>
         </dependency>
 
+        <!-- Cloud KMS gRPC stubs (KeyManagementServiceGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-kms-v1</artifactId>
+        </dependency>
+
         <!-- Cloud Tasks gRPC stubs (CloudTasksGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

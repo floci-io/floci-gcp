@@ -175,9 +175,29 @@ setup() {
     assert_output --partial '"name":"app"'
 }
 
+# ── Cloud KMS Spot Checks ─────────────────────────────────────────────────────
+
+@test "Terraform: KMS key ring created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring"
+    assert_success
+    assert_output --partial 'floci-compat-keyring'
+}
+
+@test "Terraform: KMS crypto key created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring/cryptoKeys/floci-compat-key"
+    assert_success
+    assert_output --partial 'floci-compat-key'
+    assert_output --partial '"purpose":"ENCRYPT_DECRYPT"'
+}
+
+@test "Terraform: KMS crypto key has a primary version" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring/cryptoKeys/floci-compat-key/cryptoKeyVersions")
+    [[ "$result" == *'"state":"ENABLED"'* ]]
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "Terraform: all eight resources tracked in state" {
+@test "Terraform: all ten resources tracked in state" {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 8 ]
+    [ "$count" -ge 10 ]
 }

@@ -133,6 +133,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud Storage (GCS) | ✅ | ⚠️ Limited |
 | Secret Manager | ✅ | ❌ |
 | Cloud Logging | ✅ | ❌ |
+| Cloud KMS | ✅ | ❌ |
 | IAM | ✅ | ❌ |
 | Managed Kafka | ✅ | ❌ |
 | Cloud Run | ✅ | ❌ |
@@ -149,7 +150,7 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging"]
+            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS"]
         end
 
         subgraph REST ["REST services"]
@@ -179,7 +180,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 |---|---|
 | Object and document storage | Cloud Storage (GCS), Firestore, Datastore |
 | Messaging | Pub/Sub, Managed Kafka |
-| Security and identity | Secret Manager, IAM |
+| Security and identity | Secret Manager, Cloud KMS, IAM |
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Observability | Cloud Logging |
 
@@ -194,6 +195,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
 | **Secret Manager** | gRPC | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads |
+| **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane only, no runtime invocation |

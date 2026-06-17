@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go/datastore v1.22.0
 	cloud.google.com/go/firestore v1.21.0
+	cloud.google.com/go/kms v1.20.1
 	cloud.google.com/go/logging v1.18.0
 	cloud.google.com/go/pubsub v1.50.1
 	cloud.google.com/go/secretmanager v1.16.0

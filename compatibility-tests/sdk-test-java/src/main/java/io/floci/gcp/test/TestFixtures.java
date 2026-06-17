@@ -19,6 +19,8 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.google.cloud.logging.v2.LoggingClient;
 import com.google.cloud.logging.v2.LoggingSettings;
+import com.google.cloud.kms.v1.KeyManagementServiceClient;
+import com.google.cloud.kms.v1.KeyManagementServiceSettings;
 import com.google.cloud.tasks.v2.CloudTasksClient;
 import com.google.cloud.tasks.v2.CloudTasksSettings;
 import com.google.api.client.http.javanet.NetHttpTransport;
@@ -194,5 +196,26 @@ public final class TestFixtures {
                 .build();
 
         return LoggingClient.create(settings);
+    }
+
+    /**
+     * Creates a Cloud KMS client pointing at the emulator.
+     * No standard emulator env var exists; configure explicitly via plaintext gRPC channel.
+     */
+    public static KeyManagementServiceClient kmsClient() throws IOException {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+
+        KeyManagementServiceSettings settings = KeyManagementServiceSettings.newBuilder()
+                .setTransportChannelProvider(
+                        InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(host + ":" + port)
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+
+        return KeyManagementServiceClient.create(settings);
     }
 }

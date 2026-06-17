@@ -68,7 +68,28 @@ resource "google_sql_user" "compat" {
   password = "floci-compat-password"
 }
 
+# ── Cloud KMS ─────────────────────────────────────────────────────────────────
+resource "google_kms_key_ring" "compat" {
+  name     = "floci-compat-keyring-tofu"
+  location = var.region
+  project  = var.project
+}
+
+resource "google_kms_crypto_key" "compat" {
+  name     = "floci-compat-key-tofu"
+  key_ring = google_kms_key_ring.compat.id
+  purpose  = "ENCRYPT_DECRYPT"
+}
+
 # ── Outputs ───────────────────────────────────────────────────────────────────
+output "key_ring_name" {
+  value = google_kms_key_ring.compat.name
+}
+
+output "crypto_key_name" {
+  value = google_kms_crypto_key.compat.name
+}
+
 output "bucket_name" {
   value = google_storage_bucket.compat.name
 }

@@ -175,9 +175,29 @@ setup() {
     assert_output --partial '"name":"app"'
 }
 
+# ── Cloud KMS Spot Checks ─────────────────────────────────────────────────────
+
+@test "OpenTofu: KMS key ring created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-keyring-tofu'
+}
+
+@test "OpenTofu: KMS crypto key created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring-tofu/cryptoKeys/floci-compat-key-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-key-tofu'
+    assert_output --partial '"purpose":"ENCRYPT_DECRYPT"'
+}
+
+@test "OpenTofu: KMS crypto key has a primary version" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/locations/${FLOCI_REGION:-us-central1}/keyRings/floci-compat-keyring-tofu/cryptoKeys/floci-compat-key-tofu/cryptoKeyVersions")
+    [[ "$result" == *'"state":"ENABLED"'* ]]
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "OpenTofu: all eight resources tracked in state" {
+@test "OpenTofu: all ten resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 8 ]
+    [ "$count" -ge 10 ]
 }

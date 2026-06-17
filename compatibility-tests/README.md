@@ -43,7 +43,7 @@ just test-all-iac
 
 ## Test Coverage
 
-### SDK tests — 204 tests total
+### SDK tests — 226 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
@@ -51,19 +51,20 @@ just test-all-iac
 | `PubSubTest` | Pub/Sub | 6 | 4 | 8 | 7 |
 | `SecretManagerTest` | Secret Manager | 5 | 5 | 6 | 7 |
 | `LoggingTest` | Cloud Logging | 5 | 3 | 3 | 3 |
+| `KmsTest` | Cloud KMS | 8 | 6 | 4 | 4 |
 | `FirestoreTest` | Firestore | 5 | 5 | 6 | 5 |
 | `DatastoreTest` | Datastore | 5 | 5 | 5 | 5 |
 | `IamTest` | IAM | 7 | 5 | 7 | 7 |
 | `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
 | `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
-| **Total** | | **53** | **42** | **55** | **54** |
+| **Total** | | **61** | **48** | **59** | **58** |
 
 ### IaC tests
 
 | Suite | Resources tested |
 |---|---|
-| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user |
-| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user |
+| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
+| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
 
 Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 
@@ -101,7 +102,7 @@ SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 | `STORAGE_EMULATOR_HOST` | Cloud Storage | `http://host:port` |
 | `SECRET_MANAGER_EMULATOR_HOST` | Secret Manager | `host:port` |
 
-IAM, Cloud Logging, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging may optionally be overridden with `LOGGING_EMULATOR_HOST`).
+IAM, Cloud Logging, Cloud KMS, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging and Cloud KMS may optionally be overridden with `LOGGING_EMULATOR_HOST` and `KMS_EMULATOR_HOST` respectively).
 
 ## Running with Docker
 

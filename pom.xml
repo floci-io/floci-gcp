@@ -100,6 +100,12 @@
             <artifactId>grpc-google-cloud-secretmanager-v1</artifactId>
         </dependency>
 
+        <!-- Cloud Logging gRPC stubs (LoggingServiceV2Grpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-logging-v2</artifactId>
+        </dependency>
+
         <!-- Cloud Tasks gRPC stubs (CloudTasksGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

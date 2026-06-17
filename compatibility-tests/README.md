@@ -43,19 +43,20 @@ just test-all-iac
 
 ## Test Coverage
 
-### SDK tests — 190 tests total
+### SDK tests — 204 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
 | `GcsTest` | Cloud Storage | 5 | 6 | 9 | 9 |
 | `PubSubTest` | Pub/Sub | 6 | 4 | 8 | 7 |
 | `SecretManagerTest` | Secret Manager | 5 | 5 | 6 | 7 |
+| `LoggingTest` | Cloud Logging | 5 | 3 | 3 | 3 |
 | `FirestoreTest` | Firestore | 5 | 5 | 6 | 5 |
 | `DatastoreTest` | Datastore | 5 | 5 | 5 | 5 |
 | `IamTest` | IAM | 7 | 5 | 7 | 7 |
 | `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
 | `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
-| **Total** | | **48** | **39** | **52** | **51** |
+| **Total** | | **53** | **42** | **55** | **54** |
 
 ### IaC tests
 
@@ -100,7 +101,7 @@ SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 | `STORAGE_EMULATOR_HOST` | Cloud Storage | `http://host:port` |
 | `SECRET_MANAGER_EMULATOR_HOST` | Secret Manager | `host:port` |
 
-IAM and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly.
+IAM, Cloud Logging, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging may optionally be overridden with `LOGGING_EMULATOR_HOST`).
 
 ## Running with Docker
 

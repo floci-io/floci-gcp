@@ -14,6 +14,7 @@ ENV FIRESTORE_EMULATOR_HOST=floci-gcp:4588
 ENV DATASTORE_EMULATOR_HOST=floci-gcp:4588
 ENV STORAGE_EMULATOR_HOST=http://floci-gcp:4588
 ENV SECRET_MANAGER_EMULATOR_HOST=floci-gcp:4588
+ENV LOGGING_EMULATOR_HOST=floci-gcp:4588
 
 RUN mkdir -p /results
 ENTRYPOINT ["pytest", "tests/", "-v", "--junit-xml=/results/junit.xml"]

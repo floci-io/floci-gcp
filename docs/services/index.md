@@ -11,6 +11,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Firestore](firestore.md) | gRPC | `google.firestore.v1.Firestore` |
 | [Datastore](datastore.md) | HTTP/protobuf | `/v1/projects/{project}:{method}` |
 | [Secret Manager](secret-manager.md) | gRPC | `google.cloud.secretmanager.v1.SecretManagerService` |
+| [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, `/v2/entries:write`, `/v2/entries:list` |
 | [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts` |
 | [Managed Kafka](managed-kafka.md) | REST JSON | `/v1/projects/{project}/locations/{location}/clusters` |
 | [Cloud SQL for PostgreSQL](cloud-sql-postgres.md) | REST JSON | `/v1/projects/{project}/instances` |

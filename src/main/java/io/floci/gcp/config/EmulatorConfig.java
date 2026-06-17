@@ -84,6 +84,8 @@ public interface EmulatorConfig {
 
         SecretManagerServiceConfig secretmanager();
 
+        LoggingServiceConfig logging();
+
         KafkaServiceConfig kafka();
 
         CloudSqlServiceConfig cloudsql();
@@ -121,6 +123,11 @@ public interface EmulatorConfig {
     }
 
     interface SecretManagerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LoggingServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

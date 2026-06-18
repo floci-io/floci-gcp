@@ -75,7 +75,7 @@ test: build
 
 COMPAT_NET     = floci_gcp_default
 COMPAT_RESULTS = /tmp/floci-gcp-compat-results
-COMPAT_SUITES  = sdk-test-java sdk-test-node sdk-test-python sdk-test-go compat-terraform compat-opentofu
+COMPAT_SUITES  = sdk-test-java sdk-test-node sdk-test-python sdk-test-go sdk-test-gcloud compat-terraform compat-opentofu
 
 compat-docker:
 	@echo "==> Building test images..."

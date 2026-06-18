@@ -224,6 +224,7 @@ Each subdirectory is a self-contained suite with its own `Dockerfile`:
 - `sdk-test-node` — GCP SDK for Node.js
 - `sdk-test-python` — GCP SDK for Python
 - `sdk-test-go` — GCP SDK for Go
+- `sdk-test-gcloud` — gcloud CLI (bats-based)
 - `compat-terraform` — Terraform `hashicorp/google` provider (bats-based)
 - `compat-opentofu` — OpenTofu `hashicorp/google` provider (bats-based)
 

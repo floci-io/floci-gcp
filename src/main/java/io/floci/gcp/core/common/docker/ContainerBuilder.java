@@ -170,12 +170,20 @@ public class ContainerBuilder {
         }
 
         public Builder withNamedVolume(String volumeName, String containerPath, boolean readOnly) {
-            this.mounts.add(new Mount()
+            Mount mount = new Mount()
                     .withType(MountType.VOLUME)
                     .withSource(volumeName)
                     .withTarget(containerPath)
-                    .withReadOnly(readOnly)
-                    .withVolumeOptions(new VolumeOptions().withNoCopy(true)));
+                    .withReadOnly(readOnly);
+            // Read-only volumes are pre-populated (e.g. Cloud Run GCS snapshots), so don't
+            // seed them from the image. Read-write data volumes (Kafka, Cloud SQL) instead
+            // need the image's initialized directory and ownership, so they must be seeded:
+            // a non-root image cannot write to an empty root-owned volume and crashes on
+            // startup otherwise.
+            if (readOnly) {
+                mount.withVolumeOptions(new VolumeOptions().withNoCopy(true));
+            }
+            this.mounts.add(mount);
             return this;
         }
 

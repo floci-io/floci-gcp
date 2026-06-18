@@ -325,6 +325,19 @@ When adding functionality:
 7. Add tests
 8. Update documentation
 
+### Services with container sidecars
+
+If the service launches real Docker containers (sidecars / data planes), it
+**must** expose a single root-level `mock` flag on its `*ServiceConfig`
+(`boolean mock();`) that keeps the service metadata-only without Docker —
+mirroring `kafka.mock`, `cloudsql.mock`, and `cloudrun.mock` (env var
+`FLOCI_GCP_SERVICES_<SVC>_MOCK`). Gate every container interaction in the
+service layer on `!mock()` (keep the Docker driver/manager class free of the
+flag). Do not add a separate `enabled`-style opt-in for the container path — the
+`mock` flag is the only toggle, defaulting to `false` (`kafka.mock`,
+`cloudsql.mock`, `cloudrun.mock` all default `false`). Always set `mock: true`
+in `src/test/resources/application.yml` so the suite never starts containers.
+
 ---
 
 ## Code Style

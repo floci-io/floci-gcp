@@ -62,7 +62,7 @@ public class CloudSqlService {
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
         this.dataPlane = dataPlane;
-        this.dataPlaneEnabled = config.services().cloudsql().dataPlaneEnabled();
+        this.dataPlaneEnabled = !config.services().cloudsql().mock();
     }
 
     CloudSqlService(StorageBackend<String, Map<String, Object>> instanceStore,

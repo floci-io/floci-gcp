@@ -621,8 +621,7 @@ class CloudRunServiceTest {
 
     private static EmulatorConfig cloudRunConfig(boolean executionEnabled, Duration operationTimeout, boolean mockMode) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().cloudrun().execution().enabled()).thenReturn(executionEnabled);
-        when(config.services().cloudrun().execution().mock()).thenReturn(mockMode);
+        when(config.services().cloudrun().mock()).thenReturn(!executionEnabled || mockMode);
         when(config.services().cloudrun().execution().operationTimeout()).thenReturn(operationTimeout);
         when(config.services().cloudrun().execution().cleanupTimeout()).thenReturn(Duration.ofSeconds(15));
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4588");

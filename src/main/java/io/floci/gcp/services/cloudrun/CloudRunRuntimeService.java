@@ -99,7 +99,7 @@ public class CloudRunRuntimeService {
                                          com.google.cloud.run.v2.Service service,
                                          Revision revision) {
         validateSupported(revision);
-        if (config.services().cloudrun().execution().mock()) {
+        if (config.services().cloudrun().mock()) {
             throw GcpException.unimplemented("Cloud Run execution mock mode does not start runtime containers");
         }
 

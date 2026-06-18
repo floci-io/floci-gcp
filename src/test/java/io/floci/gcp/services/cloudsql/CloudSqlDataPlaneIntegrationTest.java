@@ -138,7 +138,7 @@ class CloudSqlDataPlaneIntegrationTest {
     public static class DataPlaneProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.cloudsql.data-plane-enabled", "true");
+            return Map.of("floci-gcp.services.cloudsql.mock", "false");
         }
     }
 }

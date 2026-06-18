@@ -6,7 +6,7 @@ data-plane instances in Docker-backed `postgres` containers.
 | Config | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Enable/disable Cloud SQL for PostgreSQL |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_DATA_PLANE_ENABLED` | `true` | Start Docker-backed PostgreSQL instances for Cloud SQL resources |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode — emulate Cloud SQL resources without Docker-backed PostgreSQL instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES15_IMAGE` | `postgres:15.18-alpine` | Docker image for `POSTGRES_15` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` | Docker image for `POSTGRES_16` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` | Docker image for `POSTGRES_17` instances |

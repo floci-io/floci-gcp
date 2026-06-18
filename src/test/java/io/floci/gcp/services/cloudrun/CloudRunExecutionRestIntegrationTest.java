@@ -402,7 +402,7 @@ class CloudRunExecutionRestIntegrationTest {
         @Override
         public Map<String, String> getConfigOverrides() {
             return Map.of(
-                    "floci-gcp.services.cloudrun.execution.enabled", "true",
+                    "floci-gcp.services.cloudrun.mock", "false",
                     "floci-gcp.services.cloudrun.execution.startup-timeout", "60s");
         }
     }

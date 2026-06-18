@@ -111,6 +111,16 @@ public class ProjectAwareStorageBackend<V> implements StorageBackend<String, V> 
         return result;
     }
 
+    public List<V> scanAllProjects(Predicate<String> keyFilter) {
+        return delegate.keys().stream()
+                .filter(rawKey -> {
+                    int slash = rawKey.indexOf('/');
+                    return slash >= 0 && keyFilter.test(rawKey.substring(slash + 1));
+                })
+                .flatMap(rawKey -> delegate.get(rawKey).stream())
+                .toList();
+    }
+
     // ---
 
     private String projectId() {

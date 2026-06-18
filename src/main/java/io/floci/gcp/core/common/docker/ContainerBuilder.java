@@ -7,6 +7,7 @@ import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
+import com.github.dockerjava.api.model.VolumeOptions;
 import com.github.dockerjava.api.model.Volume;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -63,6 +64,7 @@ public class ContainerBuilder {
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
+        private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
         private boolean privileged;
         private final List<String> dnsServers = new ArrayList<>();
@@ -164,10 +166,16 @@ public class ContainerBuilder {
         }
 
         public Builder withNamedVolume(String volumeName, String containerPath) {
+            return withNamedVolume(volumeName, containerPath, false);
+        }
+
+        public Builder withNamedVolume(String volumeName, String containerPath, boolean readOnly) {
             this.mounts.add(new Mount()
                     .withType(MountType.VOLUME)
                     .withSource(volumeName)
-                    .withTarget(containerPath));
+                    .withTarget(containerPath)
+                    .withReadOnly(readOnly)
+                    .withVolumeOptions(new VolumeOptions().withNoCopy(true)));
             return this;
         }
 
@@ -185,6 +193,16 @@ public class ContainerBuilder {
 
         public Builder withExtraHost(String hostname, String ip) {
             this.extraHosts.add(hostname + ":" + ip);
+            return this;
+        }
+
+        public Builder withLabel(String key, String value) {
+            this.labels.put(key, value);
+            return this;
+        }
+
+        public Builder withLabels(Map<String, String> labels) {
+            this.labels.putAll(labels);
             return this;
         }
 
@@ -228,6 +246,7 @@ public class ContainerBuilder {
                     List.copyOf(mounts),
                     List.copyOf(binds),
                     List.copyOf(extraHosts),
+                    Map.copyOf(labels),
                     logConfig,
                     privileged,
                     List.copyOf(dnsServers),

@@ -22,6 +22,26 @@ variable "region" {
   default = "us-central1"
 }
 
+variable "cloud_run_label" {
+  type    = string
+  default = "compat-test"
+}
+
+variable "cloud_run_name" {
+  type    = string
+  default = "floci-compat-run"
+}
+
+variable "cloud_run_env_value" {
+  type    = string
+  default = "initial"
+}
+
+variable "cloud_run_replace_token" {
+  type    = string
+  default = "initial"
+}
+
 # Credentials are provided via GOOGLE_OAUTH_ACCESS_TOKEN env var (fake value —
 # floci-gcp ignores auth headers unconditionally).
 #
@@ -38,6 +58,8 @@ provider "google" {
   iam_custom_endpoint            = "${var.endpoint}/"
   iam_beta_custom_endpoint       = "${var.endpoint}/v1/"
   secret_manager_custom_endpoint = "${var.endpoint}/v1/"
+  cloud_run_custom_endpoint      = "${var.endpoint}/v2/"
+  cloud_run_v2_custom_endpoint   = "${var.endpoint}/v2/"
   sql_custom_endpoint            = "${var.endpoint}/sql/v1beta4/"
   kms_custom_endpoint            = "${var.endpoint}/v1/"
 }

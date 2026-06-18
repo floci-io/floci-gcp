@@ -1,6 +1,7 @@
 package io.floci.gcp.test;
 
 import com.google.cloud.run.v2.Container;
+import com.google.cloud.run.v2.ContainerPort;
 import com.google.cloud.run.v2.CreateServiceRequest;
 import com.google.cloud.run.v2.DeleteServiceRequest;
 import com.google.cloud.run.v2.GetRevisionRequest;
@@ -26,6 +27,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -35,11 +40,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CloudRunTest {
 
+    static {
+        System.setProperty("jdk.httpclient.allowRestrictedHeaders", "host");
+    }
+
     private static final String PROJECT_ID = TestFixtures.projectId();
     private static final String LOCATION = "us-central1";
     private static final String SERVICE_ID = TestFixtures.uniqueName("run-svc");
     private static final String PARENT = "projects/" + PROJECT_ID + "/locations/" + LOCATION;
     private static final String SERVICE_NAME = PARENT + "/services/" + SERVICE_ID;
+    private static final boolean EXECUTION_ENABLED = Boolean.parseBoolean(
+            System.getenv().getOrDefault("FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED", "false"));
 
     private static ServicesClient servicesClient;
     private static RevisionsClient revisionsClient;
@@ -67,7 +78,8 @@ class CloudRunTest {
         Service service = Service.newBuilder()
                 .setTemplate(RevisionTemplate.newBuilder()
                         .addContainers(Container.newBuilder()
-                                .setImage("gcr.io/" + PROJECT_ID + "/" + SERVICE_ID + ":latest")
+                                .setImage("nginx:latest")
+                                .addPorts(ContainerPort.newBuilder().setContainerPort(80))
                                 .build())
                         .build())
                 .build();
@@ -77,10 +89,18 @@ class CloudRunTest {
                         .setServiceId(SERVICE_ID)
                         .setService(service)
                         .build())
-                .get(10, TimeUnit.SECONDS);
+                .get(120, TimeUnit.SECONDS);
 
         assertThat(created.getName()).isEqualTo(SERVICE_NAME);
-        assertThat(created.getUri()).startsWith("https://" + SERVICE_ID + "-");
+        if (EXECUTION_ENABLED) {
+            assertThat(created.getUri())
+                    .startsWith("http://" + SERVICE_ID + "-")
+                    .contains("." + LOCATION + ".run.floci-gcp:4588");
+            assertThat(created.getUrlsList()).contains(created.getUri());
+            assertThat(created.getTrafficStatuses(0).getUri()).isEqualTo(created.getUri());
+        } else {
+            assertThat(created.getUri()).startsWith("https://" + SERVICE_ID + "-");
+        }
         assertThat(created.getLatestReadyRevision()).contains("/revisions/");
         assertThat(created.getTerminalCondition().getType()).isEqualTo("Ready");
         assertThat(created.getTrafficStatuses(0).getPercent()).isEqualTo(100);
@@ -89,6 +109,30 @@ class CloudRunTest {
 
     @Test
     @Order(2)
+    void invokeServiceWhenExecutionEnabled() throws Exception {
+        if (!EXECUTION_ENABLED) {
+            return;
+        }
+
+        Service service = servicesClient.getService(GetServiceRequest.newBuilder()
+                .setName(SERVICE_NAME)
+                .build());
+        URI serviceUri = URI.create(service.getUri());
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(TestFixtures.endpoint() + "/?compat=java"))
+                .header("Host", serviceUri.getAuthority())
+                .header("X-Compat-Test", "cloud-run")
+                .GET()
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("Welcome to nginx");
+    }
+
+    @Test
+    @Order(3)
     void getService() {
         Service service = servicesClient.getService(GetServiceRequest.newBuilder()
                 .setName(SERVICE_NAME)
@@ -99,7 +143,7 @@ class CloudRunTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void listServices() {
         List<Service> services = new ArrayList<>();
         servicesClient.listServices(ListServicesRequest.newBuilder()
@@ -112,7 +156,7 @@ class CloudRunTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void setGetAndTestIamPolicy() {
         Policy policy = Policy.newBuilder()
                 .addBindings(Binding.newBuilder()
@@ -142,7 +186,7 @@ class CloudRunTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void listAndGetRevision() {
         List<Revision> revisions = new ArrayList<>();
         revisionsClient.listRevisions(ListRevisionsRequest.newBuilder()
@@ -156,16 +200,16 @@ class CloudRunTest {
                 .setName(revisionName)
                 .build());
         assertThat(revision.getService()).isEqualTo(SERVICE_NAME);
-        assertThat(revision.getContainers(0).getImage()).isEqualTo("gcr.io/" + PROJECT_ID + "/" + SERVICE_ID + ":latest");
+        assertThat(revision.getContainers(0).getImage()).isEqualTo("nginx:latest");
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void deleteServiceWithLro() throws Exception {
         servicesClient.deleteServiceAsync(DeleteServiceRequest.newBuilder()
                         .setName(SERVICE_NAME)
                         .build())
-                .get(10, TimeUnit.SECONDS);
+                .get(60, TimeUnit.SECONDS);
 
         List<Service> services = new ArrayList<>();
         servicesClient.listServices(ListServicesRequest.newBuilder()

@@ -12,35 +12,56 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @ApplicationScoped
 public class ContainerLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ContainerLifecycleManager.class);
+    private static final AtomicInteger DOCKER_API_THREAD = new AtomicInteger();
 
-    private final DockerClient dockerClient;
+    private final DockerClientProducer dockerClients;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final ImageCacheService imageCacheService;
+    private final ExecutorService dockerApiExecutor = Executors.newCachedThreadPool(r -> {
+        Thread thread = new Thread(r, "floci-docker-api-" + DOCKER_API_THREAD.incrementAndGet());
+        thread.setDaemon(true);
+        return thread;
+    });
 
     @Inject
-    public ContainerLifecycleManager(DockerClient dockerClient,
+    public ContainerLifecycleManager(DockerClientProducer dockerClients,
                                      ContainerDetector containerDetector,
                                      PortAllocator portAllocator,
                                      ImageCacheService imageCacheService) {
-        this.dockerClient = dockerClient;
+        this.dockerClients = dockerClients;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.imageCacheService = imageCacheService;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        dockerApiExecutor.shutdownNow();
     }
 
     public ContainerInfo createAndStart(ContainerSpec spec) {
@@ -55,7 +76,7 @@ public class ContainerLifecycleManager {
 
         HostConfig hostConfig = buildHostConfig(spec);
 
-        CreateContainerCmd createCmd = dockerClient.createContainerCmd(spec.image())
+        CreateContainerCmd createCmd = dockerClient().createContainerCmd(spec.image())
                 .withHostConfig(hostConfig);
 
         if (spec.name() != null) {
@@ -79,23 +100,32 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
+        if (spec.labels() != null && !spec.labels().isEmpty()) {
+            createCmd.withLabels(spec.labels());
+        }
 
-        CreateContainerResponse response = createCmd.exec();
+        CreateContainerResponse response = dockerApi("create container " + spec.name(), createCmd::exec);
         String containerId = response.getId();
         LOG.infov("Created container {0} (name={1})", containerId, spec.name());
         return containerId;
     }
 
     public ContainerInfo startCreated(String containerId, ContainerSpec spec) {
-        dockerClient.startContainerCmd(containerId).exec();
+        dockerApi("start container " + containerId, () -> {
+            dockerClient().startContainerCmd(containerId).exec();
+            return null;
+        });
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
             try {
-                dockerClient.connectToNetworkCmd()
-                        .withContainerId(containerId)
-                        .withNetworkId(spec.networkMode())
-                        .exec();
+                dockerApi("connect container " + containerId + " to network " + spec.networkMode(), () -> {
+                    dockerClient().connectToNetworkCmd()
+                            .withContainerId(containerId)
+                            .withNetworkId(spec.networkMode())
+                            .exec();
+                    return null;
+                });
                 LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
             } catch (Exception e) {
                 LOG.warnv("Could not connect container {0} to network {1}: {2}",
@@ -110,16 +140,13 @@ public class ContainerLifecycleManager {
     public void stopAndRemove(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
 
-        if (logStream != null) {
-            try {
-                logStream.close();
-            } catch (Exception e) {
-                LOG.debugv("Error closing log stream: {0}", e.getMessage());
-            }
-        }
+        closeLogStream(logStream);
 
         try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+            dockerApi("stop container " + containerId, () -> {
+                dockerClient().stopContainerCmd(containerId).withTimeout(5).exec();
+                return null;
+            });
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
             return;
@@ -128,7 +155,10 @@ public class ContainerLifecycleManager {
         }
 
         try {
-            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            dockerApi("remove container " + containerId, () -> {
+                dockerClient().removeContainerCmd(containerId).withForce(true).exec();
+                return null;
+            });
             LOG.debugv("Removed container {0}", containerId);
         } catch (NotFoundException e) {
             // Already gone
@@ -137,20 +167,57 @@ public class ContainerLifecycleManager {
         }
     }
 
+    public void forceRemove(String containerId, Closeable logStream) {
+        LOG.infov("Force-removing container {0}", containerId);
+
+        closeLogStream(logStream);
+
+        try {
+            dockerApi("force-remove container " + containerId, () -> {
+                dockerClient().removeContainerCmd(containerId).withForce(true).exec();
+                return null;
+            });
+            LOG.debugv("Force-removed container {0}", containerId);
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} not found (already removed)", containerId);
+        } catch (Exception e) {
+            LOG.warnv("Error force-removing container {0}: {1}", containerId, e.getMessage());
+        }
+    }
+
+    private void closeLogStream(Closeable logStream) {
+        if (logStream == null) {
+            return;
+        }
+        try {
+            logStream.close();
+        } catch (Exception e) {
+            LOG.debugv("Error closing log stream: {0}", e.getMessage());
+        }
+    }
+
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {
-            dockerClient.createVolumeCmd()
-                    .withName(volumeName)
-                    .withLabels(Map.of("floci-gcp", "true"))
-                    .exec();
-            LOG.debugv("Created volume {0}", volumeName);
+            LOG.infov("Creating Docker volume {0}", volumeName);
+            dockerApi("create Docker volume " + volumeName, () -> {
+                dockerClient().createVolumeCmd()
+                        .withName(volumeName)
+                        .withLabels(Map.of("floci-gcp", "true"))
+                        .exec();
+                return null;
+            });
+            LOG.infov("Created Docker volume {0}", volumeName);
         }
     }
 
     public void removeVolume(String volumeName) {
         try {
-            dockerClient.removeVolumeCmd(volumeName).exec();
-            LOG.debugv("Removed volume {0}", volumeName);
+            LOG.infov("Removing Docker volume {0}", volumeName);
+            dockerApi("remove Docker volume " + volumeName, () -> {
+                dockerClient().removeVolumeCmd(volumeName).exec();
+                return null;
+            });
+            LOG.infov("Removed Docker volume {0}", volumeName);
         } catch (NotFoundException e) {
             // Already gone
         } catch (Exception e) {
@@ -160,9 +227,10 @@ public class ContainerLifecycleManager {
 
     public Optional<Container> findByName(String name) {
         try {
-            List<Container> containers = dockerClient.listContainersCmd()
-                    .withShowAll(true)
-                    .exec();
+            List<Container> containers = dockerApi("list containers while searching for " + name,
+                    () -> dockerClient().listContainersCmd()
+                            .withShowAll(true)
+                            .exec());
 
             for (Container c : containers) {
                 String[] names = c.getNames();
@@ -184,13 +252,18 @@ public class ContainerLifecycleManager {
     public ContainerInfo adopt(String containerId, List<Integer> ports) {
         LOG.infov("Adopting existing container {0}", containerId);
 
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        InspectContainerResponse inspect = dockerApi("inspect container " + containerId,
+                () -> dockerClient().inspectContainerCmd(containerId).exec());
         boolean running = Boolean.TRUE.equals(inspect.getState().getRunning());
 
         if (!running) {
-            dockerClient.startContainerCmd(containerId).exec();
+            dockerApi("start adopted container " + containerId, () -> {
+                dockerClient().startContainerCmd(containerId).exec();
+                return null;
+            });
             LOG.infov("Started adopted container {0}", containerId);
-            inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            inspect = dockerApi("inspect adopted container " + containerId,
+                    () -> dockerClient().inspectContainerCmd(containerId).exec());
         }
 
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
@@ -203,7 +276,10 @@ public class ContainerLifecycleManager {
 
     public void removeIfExists(String name) {
         try {
-            dockerClient.removeContainerCmd(name).withForce(true).exec();
+            dockerApi("remove stale container " + name, () -> {
+                dockerClient().removeContainerCmd(name).withForce(true).exec();
+                return null;
+            });
             LOG.infov("Removed stale container {0}", name);
         } catch (NotFoundException e) {
             // Not found - normal case
@@ -214,23 +290,35 @@ public class ContainerLifecycleManager {
 
     public boolean isContainerRunning(String containerId) {
         try {
-            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            InspectContainerResponse inspect = dockerApi("inspect container " + containerId,
+                    () -> dockerClient().inspectContainerCmd(containerId).exec());
             return Boolean.TRUE.equals(inspect.getState().getRunning());
         } catch (NotFoundException e) {
             return false;
         } catch (Exception e) {
             LOG.warnv("Liveness check failed for container {0}: {1}", containerId, e.getMessage());
-            return true;
+            return false;
         }
     }
 
     public EndpointInfo resolveEndpoint(String containerId, int containerPort) {
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        InspectContainerResponse inspect = dockerApi("inspect container " + containerId,
+                () -> dockerClient().inspectContainerCmd(containerId).exec());
         return resolveEndpoint(inspect, containerPort);
     }
 
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerApi("inspect container " + containerId,
+                () -> dockerClient().inspectContainerCmd(containerId).exec());
+        return resolveEndpoint(inspect, containerPort, preferredNetwork);
+    }
+
     public DockerClient getDockerClient() {
-        return dockerClient;
+        return dockerClient();
+    }
+
+    public <T> T runDockerApi(String description, Callable<T> action) {
+        return dockerApi(description, action);
     }
 
     public boolean volumeExists(String name) {
@@ -245,9 +333,15 @@ public class ContainerLifecycleManager {
             return false;
         }
         try {
-            dockerClient.inspectVolumeCmd(name).exec();
+            LOG.infov("Inspecting Docker volume {0}", name);
+            dockerApi("inspect Docker volume " + name, () -> {
+                dockerClient().inspectVolumeCmd(name).exec();
+                return null;
+            });
+            LOG.infov("Docker volume {0} exists", name);
             return true;
         } catch (NotFoundException e) {
+            LOG.infov("Docker volume {0} does not exist", name);
             return false;
         } catch (DockerException e) {
             LOG.warnv("Failed to inspect volume ''{0}'': {1}", name, e.getMessage());
@@ -303,7 +397,8 @@ public class ContainerLifecycleManager {
             return Map.of();
         }
 
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        InspectContainerResponse inspect = dockerApi("inspect container " + containerId,
+                () -> dockerClient().inspectContainerCmd(containerId).exec());
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
 
         for (int containerPort : spec.exposedPorts()) {
@@ -350,6 +445,42 @@ public class ContainerLifecycleManager {
             }
         }
         return inspect.getNetworkSettings().getIpAddress();
+    }
+
+    private DockerClient dockerClient() {
+        return dockerClients.client();
+    }
+
+    private <T> T dockerApi(String description, Callable<T> action) {
+        Duration timeout = dockerClients.apiTimeout();
+        Future<T> future = dockerApiExecutor.submit(action);
+        try {
+            return future.get(Math.max(1L, timeout.toMillis()), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            dockerClients.reset("Docker API timed out during " + description + " after " + timeout);
+            throw new DockerApiTimeoutException(description, timeout, e);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            dockerClients.reset("Docker API interrupted during " + description);
+            throw new DockerApiTimeoutException(description, timeout, e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new RuntimeException("Docker API call failed during " + description, cause);
+        }
+    }
+
+    public static class DockerApiTimeoutException extends RuntimeException {
+        DockerApiTimeoutException(String description, Duration timeout, Throwable cause) {
+            super("Docker API timed out during " + description + " after " + timeout, cause);
+        }
     }
 
     public record ContainerInfo(

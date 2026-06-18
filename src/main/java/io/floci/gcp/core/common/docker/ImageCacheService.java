@@ -1,6 +1,5 @@
 package io.floci.gcp.core.common.docker;
 
-import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.PullImageResultCallback;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,13 +14,13 @@ public class ImageCacheService {
 
     private static final Logger LOG = Logger.getLogger(ImageCacheService.class);
 
-    private final DockerClient dockerClient;
+    private final DockerClientProducer dockerClients;
     private final Set<String> pulledImages = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
-    public ImageCacheService(DockerClient dockerClient) {
-        this.dockerClient = dockerClient;
+    public ImageCacheService(DockerClientProducer dockerClients) {
+        this.dockerClients = dockerClients;
     }
 
     public void ensureImageExists(String image) {
@@ -40,7 +39,7 @@ public class ImageCacheService {
             }
             LOG.infov("Pulling image: {0}", image);
             try {
-                dockerClient.pullImageCmd(image)
+                dockerClients.client().pullImageCmd(image)
                         .exec(new PullImageResultCallback())
                         .awaitCompletion(10, TimeUnit.MINUTES);
                 pulledImages.add(image);
@@ -54,7 +53,7 @@ public class ImageCacheService {
 
     private boolean isLocalImagePresent(String image) {
         try {
-            dockerClient.inspectImageCmd(image).exec();
+            dockerClients.client().inspectImageCmd(image).exec();
             return true;
         } catch (com.github.dockerjava.api.exception.NotFoundException e) {
             return false;

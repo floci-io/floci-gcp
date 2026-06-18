@@ -21,7 +21,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Secret Manager** | gRPC | Secrets, versions, access, disable/enable/destroy, IAM bindings |
 | **IAM** | REST | Service accounts, RSA-2048 keys, policy bindings, SignBlob (V4 signed URLs) |
 | **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed or mock mode) |
-| **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; control plane only |
+| **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; control plane by default, experimental Docker-backed invocation and GCS volume mounts when enabled |
 | **Cloud Functions** | REST | Function create/get/list/delete, upload URL generation, LRO polling; control plane only |
 
 ## Why floci-gcp?

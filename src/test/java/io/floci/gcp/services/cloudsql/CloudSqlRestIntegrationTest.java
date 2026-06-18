@@ -22,7 +22,7 @@ class CloudSqlRestIntegrationTest {
                 .body("""
                         {
                           "name": "pg-main",
-                          "databaseVersion": "POSTGRES_15",
+                          "databaseVersion": "POSTGRES_18",
                           "region": "us-central1",
                           "settings": {"tier": "db-custom-1-3840"}
                         }
@@ -51,7 +51,7 @@ class CloudSqlRestIntegrationTest {
                 .statusCode(200)
                 .body("kind", equalTo("sql#instance"))
                 .body("name", equalTo(instance))
-                .body("databaseVersion", equalTo("POSTGRES_15"))
+                .body("databaseVersion", equalTo("POSTGRES_18"))
                 .body("state", equalTo("RUNNABLE"))
                 .body("connectionName", equalTo(project + ":us-central1:" + instance))
                 .body("settings.tier", equalTo("db-custom-1-3840"));
@@ -91,6 +91,12 @@ class CloudSqlRestIntegrationTest {
                 .statusCode(200)
                 .body("kind", equalTo("sql#databasesList"))
                 .body("items.name", hasItem("postgres"));
+
+        given()
+                .when().delete(base + "/instances/" + instance + "/databases/postgres")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("FAILED_PRECONDITION"));
 
         given()
                 .contentType("application/json")
@@ -136,6 +142,14 @@ class CloudSqlRestIntegrationTest {
                 .statusCode(200)
                 .body("kind", equalTo("sql#operation"))
                 .body("operationType", equalTo("CREATE_USER"));
+
+        given()
+                .contentType("application/json")
+                .body("{\"name\":\"hosted\",\"host\":\"%\",\"password\":\"secret\"}")
+                .when().post(base + "/instances/" + instance + "/users")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
 
         given()
                 .when().get(base + "/instances/" + instance + "/users")
@@ -249,7 +263,7 @@ class CloudSqlRestIntegrationTest {
     void cloudSqlScopesInstancesByProject() {
         given()
                 .contentType("application/json")
-                .body("{\"name\":\"pg-shared\",\"databaseVersion\":\"POSTGRES_15\"}")
+                .body("{\"name\":\"pg-shared\",\"databaseVersion\":\"POSTGRES_18\"}")
                 .when().post("/v1/projects/sql-project-a/instances")
                 .then()
                 .statusCode(200);
@@ -266,7 +280,7 @@ class CloudSqlRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("project", equalTo("sql-project-a"))
-                .body("databaseVersion", equalTo("POSTGRES_15"));
+                .body("databaseVersion", equalTo("POSTGRES_18"));
 
         given()
                 .when().get("/v1/projects/sql-project-b/instances/pg-shared")

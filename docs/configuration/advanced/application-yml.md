@@ -56,6 +56,7 @@ floci-gcp:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    api-timeout: 30s
     docker-config-path: ""
 
   services:
@@ -84,12 +85,28 @@ floci-gcp:
 
     cloudsql:
       enabled: true
+      data-plane-enabled: true
+      postgres15-image: "postgres:15.18-alpine"
+      postgres16-image: "postgres:16.14-alpine"
+      postgres17-image: "postgres:17.10-alpine"
+      postgres18-image: "postgres:18.4-alpine"
+      startup-timeout-seconds: 90
 
     cloudtasks:
       enabled: true
 
     cloudrun:
       enabled: true
+      execution:
+        enabled: false
+        mock: false
+        default-port: 8080
+        startup-timeout: 240s
+        request-timeout: 300s
+        operation-timeout: 300s
+        cleanup-timeout: 15s
+        container-name-prefix: floci-cloudrun
+        url-host-suffix:              # Optional; defaults to hostname, then localhost.floci.io
 
     cloudfunctions:
       enabled: true

@@ -1,6 +1,5 @@
 package io.floci.gcp.core.common.docker;
 
-import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,14 +21,14 @@ public class CurrentContainerNetworkResolver {
     private static final Logger LOG = Logger.getLogger(CurrentContainerNetworkResolver.class);
     private static final String HOSTNAME_FILE = "/etc/hostname";
 
-    private final DockerClient dockerClient;
+    private final DockerClientProducer dockerClients;
     private final ContainerDetector containerDetector;
 
     private volatile Optional<CurrentContainerNetwork> cachedNetwork;
 
     @Inject
-    public CurrentContainerNetworkResolver(DockerClient dockerClient, ContainerDetector containerDetector) {
-        this.dockerClient = dockerClient;
+    public CurrentContainerNetworkResolver(DockerClientProducer dockerClients, ContainerDetector containerDetector) {
+        this.dockerClients = dockerClients;
         this.containerDetector = containerDetector;
     }
 
@@ -62,7 +61,7 @@ public class CurrentContainerNetworkResolver {
         }
 
         try {
-            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            InspectContainerResponse inspect = dockerClients.client().inspectContainerCmd(containerId).exec();
             Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
             if (networks == null || networks.isEmpty()) {
                 return Optional.empty();

@@ -141,6 +141,92 @@ setup() {
     assert_output --partial 'floci-compat-secret-tofu'
 }
 
+# ── Cloud Run Spot Checks ────────────────────────────────────────────────────
+
+@test "OpenTofu: Cloud Run service created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-run-tofu'
+    assert_output --partial '"latestReadyRevision"'
+}
+
+@test "OpenTofu: Cloud Run service URI is in state" {
+    uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
+    [[ "$uri" == http* ]]
+}
+
+@test "OpenTofu: Cloud Run service URI is invokable when execution is enabled" {
+    if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
+        skip "Cloud Run execution is not enabled"
+    fi
+
+    uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
+    [ -n "$uri" ]
+    run cloud_run_curl "$uri"
+    assert_success
+    assert_output --partial "floci-gcp opentofu cloud run gcs volume"
+}
+
+@test "OpenTofu: Cloud Run service update uses provider patch path" {
+    run tofu apply \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="cloud_run_label=compat-updated" \
+        -var="cloud_run_env_value=updated" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu")
+    [[ "$result" == *'"env":"compat-updated"'* ]]
+    [[ "$result" == *'floci-compat-run-tofu/revisions/floci-compat-run-tofu-00002'* ]]
+}
+
+@test "OpenTofu: Cloud Run same-name service replacement destroy completes" {
+    if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
+        skip "Cloud Run execution is not enabled"
+    fi
+
+    run tofu apply \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="cloud_run_label=compat-same-name-replaced" \
+        -var="cloud_run_env_value=same-name-replaced" \
+        -var="cloud_run_replace_token=same-name-replaced" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu"
+    assert_success
+    assert_output --partial 'compat-same-name-replaced'
+
+    uri=$(tofu output -raw cloud_run_uri 2>/dev/null)
+    run cloud_run_curl "$uri"
+    assert_success
+    assert_output --partial "floci-gcp opentofu cloud run gcs volume"
+}
+
+@test "OpenTofu: Cloud Run service replacement destroy completes" {
+    if [ "${FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED:-false}" != "true" ]; then
+        skip "Cloud Run execution is not enabled"
+    fi
+
+    run tofu apply \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="cloud_run_name=floci-compat-run-tofu-replaced" \
+        -var="cloud_run_label=compat-replaced" \
+        -var="cloud_run_env_value=replaced" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu"
+    assert_failure
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/services/floci-compat-run-tofu-replaced"
+    assert_success
+    assert_output --partial 'floci-compat-run-tofu-replaced'
+}
+
 # ── Cloud SQL Spot Checks ────────────────────────────────────────────────────
 
 @test "OpenTofu: Cloud SQL PostgreSQL instance created" {
@@ -149,7 +235,7 @@ setup() {
     run gcp_curl "${FLOCI_ENDPOINT}/sql/v1beta4/projects/${FLOCI_PROJECT}/instances/${instance}"
     assert_success
     assert_output --partial '"kind":"sql#instance"'
-    assert_output --partial '"databaseVersion":"POSTGRES_15"'
+    assert_output --partial '"databaseVersion":"POSTGRES_18"'
     assert_output --partial '"state":"RUNNABLE"'
 }
 
@@ -197,7 +283,7 @@ setup() {
 
 # ── State Integrity ───────────────────────────────────────────────────────────
 
-@test "OpenTofu: all ten resources tracked in state" {
+@test "OpenTofu: all managed resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 10 ]
+    [ "$count" -ge 13 ]
 }

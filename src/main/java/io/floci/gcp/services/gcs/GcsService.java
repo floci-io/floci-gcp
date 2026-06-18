@@ -31,6 +31,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,9 +47,9 @@ public class GcsService {
 
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
+    private final StorageBackend<String, byte[]> objectDataStore;
     private final StorageBackend<String, StoredAcl> aclStore;
     private final StorageBackend<String, StoredNotification> notificationStore;
-    private final ConcurrentHashMap<String, byte[]> objectData = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
 
     private final ServiceRegistry serviceRegistry;
@@ -69,6 +70,8 @@ public class GcsService {
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
+        this.objectDataStore = storageFactory.createGlobal("gcs-object-data", "gcs-object-data.json",
+                new TypeReference<Map<String, byte[]>>() {});
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
         this.notificationStore = storageFactory.createGlobal("gcs-notifications", "gcs-notifications.json",
@@ -79,8 +82,18 @@ public class GcsService {
             StorageBackend<String, GcsObjectMeta> objectMetaStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
+        this(bucketStore, objectMetaStore, new io.floci.gcp.core.storage.InMemoryStorage<>(),
+                aclStore, defaultProjectId);
+    }
+
+    GcsService(StorageBackend<String, GcsBucket> bucketStore,
+            StorageBackend<String, GcsObjectMeta> objectMetaStore,
+            StorageBackend<String, byte[]> objectDataStore,
+            StorageBackend<String, StoredAcl> aclStore,
+            String defaultProjectId) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
+        this.objectDataStore = objectDataStore;
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
         this.notificationStore = new io.floci.gcp.core.storage.InMemoryStorage<>();
@@ -216,7 +229,7 @@ public class GcsService {
         String now = nowTimestamp();
         String encodedName = urlEncode(objectName);
 
-        GcsObjectMeta existing = objectMetaStore.get(key).orElse(null);
+        GcsObjectMeta existing = getLiveObjectMeta(bucket, objectName).orElse(null);
         if (existing != null && existing.getTimeDeleted() == null) {
             checkObjectMutable(existing);
         }
@@ -226,11 +239,8 @@ public class GcsService {
                 String archiveKey = key + "\0" + existing.getGeneration();
                 GcsObjectMeta archived = cloneMeta(existing);
                 archived.setIsLatest(false);
+                objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
                 objectMetaStore.put(archiveKey, archived);
-                byte[] oldData = objectData.get(key);
-                if (oldData != null) {
-                    objectData.put(archiveKey, oldData);
-                }
             }
         }
 
@@ -263,19 +273,20 @@ public class GcsService {
             meta.setEventBasedHold(true);
         }
 
+        objectDataStore.put(key, data);
         objectMetaStore.put(key, meta);
-        objectData.put(key, data);
         publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
         return meta;
     }
 
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), baseUrl);
+    }
+
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
         LOG.debugf("getObjectMeta bucket=%s name=%s", bucket, objectName);
-        GcsObjectMeta meta = objectMetaStore.get(objectKey(bucket, objectName))
+        GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
-        if (meta.getTimeDeleted() != null) {
-            throw GcpException.notFound("Object not found: " + objectName);
-        }
         return meta;
     }
 
@@ -284,6 +295,9 @@ public class GcsService {
         String liveKey = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
+            if (!isReadableLiveObject(liveKey, live)) {
+                throw GcpException.notFound("Object not found: " + objectName);
+            }
             return live;
         }
         String archiveKey = liveKey + "\0" + generation;
@@ -295,17 +309,19 @@ public class GcsService {
     public byte[] getObjectData(String bucket, String objectName, GcsCustomerEncryption customerEncryption) {
         LOG.debugf("getObjectData bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
-        GcsObjectMeta meta = objectMetaStore.get(key).orElse(null);
-        if (meta != null && meta.getTimeDeleted() != null) {
-            throw GcpException.notFound("Object not found: " + objectName);
-        }
+        GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
+                .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
         checkCustomerEncryption(meta, customerEncryption);
-        byte[] data = objectData.get(key);
+        byte[] data = objectDataStore.get(key).orElse(null);
         if (data == null) {
             LOG.warnf("getObjectData failed: object not found bucket=%s name=%s", bucket, objectName);
             throw GcpException.notFound("Object not found: " + objectName);
         }
         return data;
+    }
+
+    public byte[] getObjectData(String bucket, String objectName) {
+        return getObjectData(bucket, objectName, GcsCustomerEncryption.none());
     }
 
     public byte[] getObjectData(String bucket, String objectName, String generation,
@@ -314,15 +330,18 @@ public class GcsService {
         String liveKey = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
+            if (!isReadableLiveObject(liveKey, live)) {
+                throw GcpException.notFound("Object not found: " + objectName);
+            }
             checkCustomerEncryption(live, customerEncryption);
-            byte[] data = objectData.get(liveKey);
+            byte[] data = objectDataStore.get(liveKey).orElse(null);
             if (data != null) {
                 return data;
             }
         }
         String archiveKey = liveKey + "\0" + generation;
         checkCustomerEncryption(objectMetaStore.get(archiveKey).orElse(null), customerEncryption);
-        byte[] data = objectData.get(archiveKey);
+        byte[] data = objectDataStore.get(archiveKey).orElse(null);
         if (data == null) {
             throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
         }
@@ -342,7 +361,7 @@ public class GcsService {
     public boolean deleteObject(String bucket, String objectName) {
         LOG.debugf("deleteObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
-        GcsObjectMeta live = objectMetaStore.get(key).orElse(null);
+        GcsObjectMeta live = getLiveObjectMeta(bucket, objectName).orElse(null);
         if (live == null) {
             LOG.debugf("deleteObject: object metadata not found bucket=%s name=%s", bucket, objectName);
             return false;
@@ -354,11 +373,8 @@ public class GcsService {
             String archiveKey = key + "\0" + live.getGeneration();
             GcsObjectMeta archived = cloneMeta(live);
             archived.setIsLatest(false);
+            objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
             objectMetaStore.put(archiveKey, archived);
-            byte[] oldData = objectData.get(key);
-            if (oldData != null) {
-                objectData.put(archiveKey, oldData);
-            }
             long markerGen = System.currentTimeMillis() + 1;
             GcsObjectMeta marker = new GcsObjectMeta();
             marker.setName(objectName);
@@ -373,7 +389,7 @@ public class GcsService {
         }
         GcsObjectMeta deletedMeta = live;
         objectMetaStore.delete(key);
-        objectData.remove(key);
+        objectDataStore.delete(key);
         if (deletedMeta != null) {
             publishNotificationEvent(bucket, objectName, deletedMeta, "OBJECT_DELETE");
         }
@@ -386,7 +402,7 @@ public class GcsService {
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
             objectMetaStore.delete(liveKey);
-            objectData.remove(liveKey);
+            objectDataStore.delete(liveKey);
             return;
         }
         String archiveKey = liveKey + "\0" + generation;
@@ -394,13 +410,13 @@ public class GcsService {
             throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
         }
         objectMetaStore.delete(archiveKey);
-        objectData.remove(archiveKey);
+        objectDataStore.delete(archiveKey);
     }
 
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch) {
         LOG.debugf("patchObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
-        GcsObjectMeta meta = objectMetaStore.get(key)
+        GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
 
         if (patch.containsKey("contentType")) {
@@ -463,7 +479,7 @@ public class GcsService {
                 && ifMetagenerationMatch == null && ifMetagenerationNotMatch == null) {
             return;
         }
-        Optional<GcsObjectMeta> metaOpt = objectMetaStore.get(objectKey(bucket, objectName));
+        Optional<GcsObjectMeta> metaOpt = getLiveObjectMeta(bucket, objectName);
         if (metaOpt.isEmpty()) {
             if (ifGenerationMatch != null && ifGenerationMatch != 0) {
                 throw GcpException.conditionNotMet("ifGenerationMatch: object does not exist");
@@ -511,9 +527,15 @@ public class GcsService {
         }
         String prefix = bucket + "\0";
         int prefixLen = prefix.length();
-        List<GcsObjectMeta> objects = objectMetaStore.scan(k ->
-                k.startsWith(prefix) && k.indexOf('\0', prefixLen) == -1
-                        && (objectMetaStore.get(k).map(m -> m.getTimeDeleted() == null).orElse(true)));
+        List<GcsObjectMeta> objects = new ArrayList<>();
+        for (String key : objectMetaStore.keys()) {
+            if (!key.startsWith(prefix) || key.indexOf('\0', prefixLen) != -1) {
+                continue;
+            }
+            objectMetaStore.get(key)
+                    .filter(meta -> isReadableLiveObject(key, meta))
+                    .ifPresent(objects::add);
+        }
         LOG.debugf("listObjects bucket=%s count=%d", bucket, objects.size());
         return objects;
     }
@@ -880,6 +902,25 @@ public class GcsService {
                     return Boolean.TRUE.equals(enabled);
                 })
                 .orElse(false);
+    }
+
+    private Optional<GcsObjectMeta> getLiveObjectMeta(String bucket, String objectName) {
+        String key = objectKey(bucket, objectName);
+        return objectMetaStore.get(key)
+                .filter(meta -> isReadableLiveObject(key, meta));
+    }
+
+    private boolean isReadableLiveObject(String key, GcsObjectMeta meta) {
+        if (meta.getTimeDeleted() != null) {
+            return false;
+        }
+        if (objectDataStore.get(key).isPresent()) {
+            return true;
+        }
+        LOG.warnf("Removing stale GCS object metadata without data bucket=%s name=%s generation=%s",
+                meta.getBucket(), meta.getName(), meta.getGeneration());
+        objectMetaStore.delete(key);
+        return false;
     }
 
     private static GcsObjectMeta cloneMeta(GcsObjectMeta src) {

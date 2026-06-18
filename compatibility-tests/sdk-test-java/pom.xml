@@ -85,6 +85,11 @@
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-kms</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.7</version>
+        </dependency>
 
         <!-- JSON parsing for plain-HTTP tests -->
         <dependency>
@@ -116,7 +121,7 @@
                 <version>${surefire.version}</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
-                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true</argLine>
+                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true -Djdk.httpclient.allowRestrictedHeaders=host</argLine>
                 </configuration>
                 <dependencies>
                     <dependency>

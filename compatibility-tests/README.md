@@ -63,8 +63,8 @@ just test-all-iac
 
 | Suite | Resources tested |
 |---|---|
-| `compat-terraform` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
-| `compat-opentofu` | GCS bucket (with labels), GCS object, IAM service account, Secret Manager secret/version, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
+| `compat-terraform` | GCS bucket (with labels), GCS objects, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke with GCS volume mount, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
+| `compat-opentofu` | GCS bucket (with labels), GCS objects, IAM service account, Secret Manager secret/version, Cloud Run v2 service create/update/invoke with GCS volume mount, Cloud SQL PostgreSQL instance/database/user, KMS key ring + crypto key |
 
 Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-checks → `destroy`.
 
@@ -79,6 +79,7 @@ Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-
 - **terraform** — for `compat-terraform` BATS tests; use a CLI compatible with `hashicorp/google` v7.36
 - **tofu** — for `compat-opentofu` BATS tests; use a CLI compatible with `hashicorp/google` v7.36
 - **bats-core** — for IaC BATS tests (`brew install bats-core`)
+- **Docker** — for Cloud Run execution checks when `FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true`
 
 ## Configuration
 

@@ -20,6 +20,13 @@ resource "google_storage_bucket_object" "readme" {
   content_type = "text/plain"
 }
 
+resource "google_storage_bucket_object" "cloud_run_index" {
+  bucket       = google_storage_bucket.compat.name
+  name         = "index.html"
+  content      = "floci-gcp terraform cloud run gcs volume"
+  content_type = "text/html"
+}
+
 # ── IAM Service Account ───────────────────────────────────────────────────────
 resource "google_service_account" "compat" {
   account_id   = "floci-compat-sa"
@@ -41,12 +48,85 @@ resource "google_secret_manager_secret_version" "compat" {
   secret_data = "floci-gcp-compat-test-secret-value"
 }
 
+# ── Cloud Run ────────────────────────────────────────────────────────────────
+resource "terraform_data" "cloud_run_replacement" {
+  input = var.cloud_run_replace_token
+}
+
+resource "google_cloud_run_v2_service" "compat" {
+  name                = var.cloud_run_name
+  location            = var.region
+  deletion_protection = false
+  ingress             = "INGRESS_TRAFFIC_ALL"
+
+  labels = {
+    env = var.cloud_run_label
+  }
+
+  template {
+    service_account                  = google_service_account.compat.email
+    timeout                          = "30s"
+    max_instance_request_concurrency = 8
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+
+    volumes {
+      name = "site"
+
+      gcs {
+        bucket    = google_storage_bucket.compat.name
+        read_only = true
+      }
+    }
+
+    containers {
+      image = "nginx:latest"
+
+      ports {
+        container_port = 80
+      }
+
+      env {
+        name  = "FLOCI_COMPAT"
+        value = var.cloud_run_env_value
+      }
+
+      volume_mounts {
+        name       = "site"
+        mount_path = "/usr/share/nginx/html"
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "128Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+    }
+  }
+
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.cloud_run_replacement
+    ]
+  }
+
+  depends_on = [
+    google_storage_bucket_object.cloud_run_index
+  ]
+}
+
 # ── Cloud SQL for PostgreSQL ─────────────────────────────────────────────────
 resource "google_sql_database_instance" "compat" {
   name             = "floci-compat-postgres"
   project          = var.project
   region           = var.region
-  database_version = "POSTGRES_15"
+  database_version = "POSTGRES_18"
 
   deletion_protection = false
 
@@ -108,6 +188,14 @@ output "secret_name" {
 
 output "secret_version_name" {
   value = google_secret_manager_secret_version.compat.name
+}
+
+output "cloud_run_service_name" {
+  value = google_cloud_run_v2_service.compat.name
+}
+
+output "cloud_run_uri" {
+  value = google_cloud_run_v2_service.compat.uri
 }
 
 output "sql_instance_name" {

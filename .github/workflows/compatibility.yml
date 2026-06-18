@@ -59,7 +59,7 @@ jobs:
     name: ${{ matrix.test }}
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +87,10 @@ jobs:
       - name: Start floci-gcp
         run: |
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+          KAFKA_MOCK=false
+          case "${{ matrix.test }}" in
+            sdk-test-*) KAFKA_MOCK=true ;;
+          esac
           docker run -d --name floci-gcp --network compat-net \
             -p 4588:4588 \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -94,6 +98,8 @@ jobs:
             -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 \
             -e FLOCI_GCP_HOSTNAME=floci-gcp \
             -e FLOCI_GCP_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_GCP_SERVICES_KAFKA_MOCK="$KAFKA_MOCK" \
+            -e FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED=true \
             floci-gcp:test
 
       - name: Wait for floci-gcp to be ready
@@ -117,6 +123,7 @@ jobs:
 
       - name: Run tests
         id: tests
+        timeout-minutes: 30
         run: |
           mkdir -p test-results
           docker run --rm --network compat-net \
@@ -124,6 +131,7 @@ jobs:
             -e FLOCI_ENDPOINT=http://floci-gcp:4588 \
             -e FLOCI_HOST=floci-gcp:4588 \
             -e FLOCI_PROJECT=test-project \
+            -e FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true \
             -v "$(pwd)/test-results:/results" \
             compat-${{ matrix.test }}
 
@@ -134,5 +142,5 @@ jobs:
           paths: test-results/*.xml
 
       - name: Dump floci-gcp logs
-        if: failure()
+        if: failure() || cancelled()
         run: docker logs floci-gcp

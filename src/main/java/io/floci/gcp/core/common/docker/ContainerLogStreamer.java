@@ -1,6 +1,5 @@
 package io.floci.gcp.core.common.docker;
 
-import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,11 +17,11 @@ public class ContainerLogStreamer {
 
     private static final Logger LOG = Logger.getLogger(ContainerLogStreamer.class);
 
-    private final DockerClient dockerClient;
+    private final DockerClientProducer dockerClients;
 
     @Inject
-    public ContainerLogStreamer(DockerClient dockerClient) {
-        this.dockerClient = dockerClient;
+    public ContainerLogStreamer(DockerClientProducer dockerClients) {
+        this.dockerClients = dockerClients;
     }
 
     /**
@@ -31,7 +30,7 @@ public class ContainerLogStreamer {
      */
     public Closeable attach(String containerId, String logPrefix) {
         try {
-            return dockerClient.logContainerCmd(containerId)
+            return dockerClients.client().logContainerCmd(containerId)
                     .withStdOut(true)
                     .withStdErr(true)
                     .withFollowStream(true)

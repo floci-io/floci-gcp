@@ -181,8 +181,10 @@ public class RedpandaManager {
 
     private String getAdminBaseUrl(StoredCluster cluster) {
         if (!containerDetector.isRunningInContainer()) {
-            var dockerClient = lifecycleManager.getDockerClient();
-            var inspect = dockerClient.inspectContainerCmd(cluster.getContainerId()).exec();
+            var inspect = lifecycleManager.runDockerApi("inspect Redpanda container " + cluster.getContainerId(),
+                    () -> lifecycleManager.getDockerClient()
+                            .inspectContainerCmd(cluster.getContainerId())
+                            .exec());
             var bindings = inspect.getNetworkSettings().getPorts().getBindings();
             var binding = bindings.get(com.github.dockerjava.api.model.ExposedPort.tcp(ADMIN_PORT));
             if (binding != null && binding.length > 0) {

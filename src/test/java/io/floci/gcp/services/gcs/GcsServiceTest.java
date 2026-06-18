@@ -1,14 +1,19 @@
 package io.floci.gcp.services.gcs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.PersistentStorage;
+import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +24,9 @@ class GcsServiceTest {
 
     private static final String BASE_URL = "http://localhost:4588";
     private GcsService service;
+
+    @TempDir
+    Path tempDir;
 
     @BeforeEach
     void setUp() {
@@ -95,6 +103,43 @@ class GcsServiceTest {
     }
 
     @Test
+    void objectDataSurvivesPersistentStoreReload() {
+        GcsService first = persistentService(tempDir);
+        first.createBucket("bucket", "p1", BASE_URL, Map.of());
+        byte[] data = "mounted volume smoke".getBytes(StandardCharsets.UTF_8);
+
+        first.putObject("bucket", "mounted/smoke.txt", "text/plain", data,
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcsService restarted = persistentService(tempDir);
+
+        assertEquals("mounted/smoke.txt",
+                restarted.getObjectMeta("bucket", "mounted/smoke.txt").getName());
+        assertArrayEquals(data, restarted.getObjectData("bucket", "mounted/smoke.txt"));
+    }
+
+    @Test
+    void stalePersistedObjectMetadataWithoutDataIsIgnoredAndCleaned() {
+        StorageBackend<String, GcsBucket> bucketStore = new InMemoryStorage<>();
+        StorageBackend<String, GcsObjectMeta> objectMetaStore = new InMemoryStorage<>();
+        GcsService staleService = new GcsService(bucketStore, objectMetaStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        staleService.createBucket("bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta staleMeta = new GcsObjectMeta();
+        staleMeta.setBucket("bucket");
+        staleMeta.setName("mounted/smoke.txt");
+        staleMeta.setGeneration("1");
+        objectMetaStore.put("bucket\0mounted/smoke.txt", staleMeta);
+
+        assertTrue(staleService.listObjects("bucket").isEmpty());
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> staleService.getObjectMeta("bucket", "mounted/smoke.txt"));
+        assertEquals("NOT_FOUND", ex.getGcpStatus());
+        assertTrue(objectMetaStore.get("bucket\0mounted/smoke.txt").isEmpty());
+    }
+
+    @Test
     void getObjectMetaMissingThrowsNotFound() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
 
@@ -136,5 +181,21 @@ class GcsServiceTest {
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.getBucket("bucket"));
         assertEquals("NOT_FOUND", ex.getGcpStatus());
+    }
+
+    private static GcsService persistentService(Path root) {
+        return new GcsService(
+                persistent(root.resolve("gcs-buckets.json"), new TypeReference<Map<String, GcsBucket>>() {}),
+                persistent(root.resolve("gcs-objects.json"), new TypeReference<Map<String, GcsObjectMeta>>() {}),
+                persistent(root.resolve("gcs-object-data.json"), new TypeReference<Map<String, byte[]>>() {}),
+                persistent(root.resolve("gcs-acls.json"), new TypeReference<Map<String, StoredAcl>>() {}),
+                "test-project");
+    }
+
+    private static <V> StorageBackend<String, V> persistent(Path path,
+            TypeReference<Map<String, V>> typeReference) {
+        PersistentStorage<String, V> storage = new PersistentStorage<>(path, typeReference);
+        storage.load();
+        return storage;
     }
 }

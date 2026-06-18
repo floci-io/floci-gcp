@@ -42,6 +42,8 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
             case "PERMISSION_DENIED" -> "forbidden";
             case "RESOURCE_EXHAUSTED" -> "rateLimitExceeded";
             case "UNIMPLEMENTED" -> "notImplemented";
+            case "DEADLINE_EXCEEDED" -> "deadlineExceeded";
+            case "UNAVAILABLE" -> "backendError";
             case "INTERNAL" -> "internalError";
             default -> "backendError";
         };

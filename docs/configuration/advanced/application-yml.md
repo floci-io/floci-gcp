@@ -85,6 +85,12 @@ floci-gcp:
 
     cloudsql:
       enabled: true
+      data-plane-enabled: true
+      postgres15-image: "postgres:15.18-alpine"
+      postgres16-image: "postgres:16.14-alpine"
+      postgres17-image: "postgres:17.10-alpine"
+      postgres18-image: "postgres:18.4-alpine"
+      startup-timeout-seconds: 90
 
     cloudtasks:
       enabled: true

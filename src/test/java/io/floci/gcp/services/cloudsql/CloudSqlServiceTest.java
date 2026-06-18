@@ -55,7 +55,7 @@ class CloudSqlServiceTest {
         withProject("project-a");
         service.createInstance("project-a", Map.of(
                 "name", "pg-main",
-                "databaseVersion", "POSTGRES_15"));
+                "databaseVersion", "POSTGRES_18"));
 
         withProject("project-b");
         assertThrows(GcpException.class, () -> service.getInstance("project-b", "pg-main"));
@@ -67,7 +67,7 @@ class CloudSqlServiceTest {
         assertEquals("POSTGRES_16", service.getInstance("project-b", "pg-main").get("databaseVersion"));
 
         withProject("project-a");
-        assertEquals("POSTGRES_15", service.getInstance("project-a", "pg-main").get("databaseVersion"));
+        assertEquals("POSTGRES_18", service.getInstance("project-a", "pg-main").get("databaseVersion"));
     }
 
     @Test
@@ -75,7 +75,7 @@ class CloudSqlServiceTest {
         withProject("project-a");
         service.createInstance("project-a", Map.of(
                 "name", "pg-main",
-                "databaseVersion", "POSTGRES_15"));
+                "databaseVersion", "POSTGRES_18"));
         service.createDatabase("project-a", "pg-main", Map.of("name", "appdb"));
         service.createUser("project-a", "pg-main", Map.of("name", "app", "password", "secret"));
 
@@ -91,7 +91,7 @@ class CloudSqlServiceTest {
         withProject("project-a");
         service.createInstance("project-a", Map.of(
                 "name", "pg-main",
-                "databaseVersion", "POSTGRES_15",
+                "databaseVersion", "POSTGRES_18",
                 "settings", Map.of("tier", "db-custom-1-3840")));
         service.createDatabase("project-a", "pg-main", Map.of("name", "appdb"));
 
@@ -121,5 +121,173 @@ class CloudSqlServiceTest {
         Map<String, Object> flags = service.listFlags();
         assertEquals("sql#flagsList", flags.get("kind"));
         assertFalse(((List<?>) flags.get("items")).isEmpty());
+    }
+
+    @Test
+    void dataPlaneReceivesInstanceDatabaseAndUserLifecycleEvents() {
+        withProject("project-a");
+        RecordingDataPlane dataPlane = new RecordingDataPlane();
+        CloudSqlService dataPlaneService = new CloudSqlService(
+                projectAwareStore(),
+                projectAwareStore(),
+                projectAwareStore(),
+                projectAwareStore(),
+                new ObjectMapper(),
+                "http://localhost:4588",
+                dataPlane,
+                true);
+
+        dataPlaneService.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18"));
+        dataPlaneService.createDatabase("project-a", "pg-main", Map.of("name", "appdb"));
+        dataPlaneService.createUser("project-a", "pg-main", Map.of("name", "app", "password", "secret"));
+        dataPlaneService.updateUser("project-a", "pg-main", "app", null, Map.of("password", "new-secret"));
+        dataPlaneService.deleteUser("project-a", "pg-main", "app", null);
+        dataPlaneService.deleteDatabase("project-a", "pg-main", "appdb");
+        dataPlaneService.deleteInstance("project-a", "pg-main");
+
+        assertEquals(List.of(
+                "start:project-a/pg-main",
+                "create-db:appdb",
+                "create-user:app:secret",
+                "grant:postgres:app",
+                "grant:appdb:app",
+                "create-user:app:new-secret",
+                "grant:postgres:app",
+                "grant:appdb:app",
+                "delete-user:app:postgres,appdb",
+                "delete-db:appdb",
+                "stop:project-a/pg-main:true"), dataPlane.events);
+    }
+
+    @Test
+    void dataPlaneShutdownStopsSameInstanceNameAcrossProjects() {
+        RecordingDataPlane dataPlane = new RecordingDataPlane();
+        CloudSqlService dataPlaneService = new CloudSqlService(
+                projectAwareStore(),
+                projectAwareStore(),
+                projectAwareStore(),
+                projectAwareStore(),
+                new ObjectMapper(),
+                "http://localhost:4588",
+                dataPlane,
+                true);
+
+        withProject("project-a");
+        dataPlaneService.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18"));
+        withProject("project-b");
+        dataPlaneService.createInstance("project-b", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18"));
+
+        dataPlane.events.clear();
+        dataPlaneService.shutdown();
+
+        assertEquals(2, dataPlane.events.size());
+        assertTrue(dataPlane.events.containsAll(List.of(
+                "stop:project-a/pg-main:false",
+                "stop:project-b/pg-main:false")));
+    }
+
+    @Test
+    void deleteDefaultPostgresDatabaseIsRejected() {
+        withProject("project-a");
+        service.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18"));
+
+        GcpException error = assertThrows(GcpException.class,
+                () -> service.deleteDatabase("project-a", "pg-main", "postgres"));
+
+        assertEquals("FAILED_PRECONDITION", error.getGcpStatus());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("postgres", service.getDatabase("project-a", "pg-main", "postgres").get("name"));
+    }
+
+    @Test
+    void deleteDefaultPostgresDatabaseOnMissingInstanceReturnsNotFound() {
+        withProject("project-a");
+
+        GcpException error = assertThrows(GcpException.class,
+                () -> service.deleteDatabase("project-a", "missing", "postgres"));
+
+        assertEquals("NOT_FOUND", error.getGcpStatus());
+    }
+
+    @Test
+    void hostQualifiedPostgresUsersAreRejected() {
+        withProject("project-a");
+        service.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18"));
+
+        GcpException createError = assertThrows(GcpException.class,
+                () -> service.createUser("project-a", "pg-main",
+                        Map.of("name", "app", "host", "%", "password", "secret")));
+        assertEquals("INVALID_ARGUMENT", createError.getGcpStatus());
+
+        service.createUser("project-a", "pg-main", Map.of("name", "app", "password", "secret"));
+
+        GcpException getError = assertThrows(GcpException.class,
+                () -> service.getUser("project-a", "pg-main", "app", "%"));
+        assertEquals("INVALID_ARGUMENT", getError.getGcpStatus());
+
+        GcpException updateError = assertThrows(GcpException.class,
+                () -> service.updateUser("project-a", "pg-main", "app", "%",
+                        Map.of("password", "new-secret")));
+        assertEquals("INVALID_ARGUMENT", updateError.getGcpStatus());
+
+        GcpException deleteError = assertThrows(GcpException.class,
+                () -> service.deleteUser("project-a", "pg-main", "app", "%"));
+        assertEquals("INVALID_ARGUMENT", deleteError.getGcpStatus());
+    }
+
+    private static class RecordingDataPlane implements CloudSqlDataPlane {
+        private final List<String> events = new java.util.ArrayList<>();
+
+        @Override
+        public Map<String, Object> startInstance(String project, String instance, Map<String, Object> metadata) {
+            events.add("start:" + project + "/" + instance);
+            return metadata;
+        }
+
+        @Override
+        public Map<String, Object> ensureInstance(String project, String instance, Map<String, Object> metadata) {
+            events.add("ensure:" + project + "/" + instance);
+            return metadata;
+        }
+
+        @Override
+        public void stopInstance(String project, String instance, Map<String, Object> metadata, boolean removeStorage) {
+            events.add("stop:" + project + "/" + instance + ":" + removeStorage);
+        }
+
+        @Override
+        public void createDatabase(Map<String, Object> instanceMetadata, String database) {
+            events.add("create-db:" + database);
+        }
+
+        @Override
+        public void deleteDatabase(Map<String, Object> instanceMetadata, String database) {
+            events.add("delete-db:" + database);
+        }
+
+        @Override
+        public void createOrUpdateUser(Map<String, Object> instanceMetadata, String user, String password) {
+            events.add("create-user:" + user + ":" + password);
+        }
+
+        @Override
+        public void deleteUser(Map<String, Object> instanceMetadata, String user, Iterable<String> databases) {
+            events.add("delete-user:" + user + ":" + String.join(",", databases));
+        }
+
+        @Override
+        public void grantDatabaseAccess(Map<String, Object> instanceMetadata, String database, String user) {
+            events.add("grant:" + database + ":" + user);
+        }
     }
 }

@@ -235,7 +235,7 @@ setup() {
     run gcp_curl "${FLOCI_ENDPOINT}/sql/v1beta4/projects/${FLOCI_PROJECT}/instances/${instance}"
     assert_success
     assert_output --partial '"kind":"sql#instance"'
-    assert_output --partial '"databaseVersion":"POSTGRES_15"'
+    assert_output --partial '"databaseVersion":"POSTGRES_18"'
     assert_output --partial '"state":"RUNNABLE"'
 }
 

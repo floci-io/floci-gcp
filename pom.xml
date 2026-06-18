@@ -194,6 +194,13 @@
             <artifactId>dec</artifactId>
             <version>0.1.2</version>
         </dependency>
+
+        <!-- PostgreSQL wire-protocol client for Cloud SQL data-plane synchronization -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.7</version>
+        </dependency>
     </dependencies>
 
     <build>

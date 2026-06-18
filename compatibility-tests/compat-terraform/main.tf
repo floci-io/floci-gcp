@@ -126,7 +126,7 @@ resource "google_sql_database_instance" "compat" {
   name             = "floci-compat-postgres"
   project          = var.project
   region           = var.region
-  database_version = "POSTGRES_15"
+  database_version = "POSTGRES_18"
 
   deletion_protection = false
 

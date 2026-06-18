@@ -156,6 +156,24 @@ public interface EmulatorConfig {
     interface CloudSqlServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("true")
+        boolean dataPlaneEnabled();
+
+        @WithDefault("postgres:15.18-alpine")
+        String postgres15Image();
+
+        @WithDefault("postgres:16.14-alpine")
+        String postgres16Image();
+
+        @WithDefault("postgres:17.10-alpine")
+        String postgres17Image();
+
+        @WithDefault("postgres:18.4-alpine")
+        String postgres18Image();
+
+        @WithDefault("90")
+        int startupTimeoutSeconds();
     }
 
     interface CloudTasksServiceConfig {

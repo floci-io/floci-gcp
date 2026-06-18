@@ -180,4 +180,23 @@ class ProjectAwareStorageBackendTest {
         Map<String, String> all = backend.scanAllProjectsAsMap();
         assertTrue(all.isEmpty());
     }
+
+    @Test
+    void scanAllProjectsPreservesValuesWithSameLogicalKeyAcrossProjects() {
+        delegate.put("proj-a/instances/pg-main", "a");
+        delegate.put("proj-b/instances/pg-main", "b");
+        delegate.put("proj-b/topics/t1", "topic");
+
+        List<String> all = backend.scanAllProjects(k -> k.startsWith("instances/"));
+
+        assertEquals(2, all.size());
+        assertTrue(all.containsAll(List.of("a", "b")));
+    }
+
+    @Test
+    void scanAllProjectsSkipsKeysWithoutSlash() {
+        delegate.put("badkey", "v");
+
+        assertTrue(backend.scanAllProjects(k -> true).isEmpty());
+    }
 }

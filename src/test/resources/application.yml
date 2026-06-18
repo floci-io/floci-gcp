@@ -18,6 +18,7 @@ floci-gcp:
       mock: true
     cloudsql:
       enabled: true
+      data-plane-enabled: false
     cloudtasks:
       enabled: true
     cloudrun:

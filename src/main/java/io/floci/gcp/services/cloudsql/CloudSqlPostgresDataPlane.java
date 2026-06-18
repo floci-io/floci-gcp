@@ -32,7 +32,8 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
     private static final int POSTGRES_PORT = 5432;
     private static final String ADMIN_USER = "postgres";
     private static final String ADMIN_PASSWORD = "postgres";
-    private static final String POSTGRES_DATA_PARENT = "/var/lib/postgresql";
+    private static final String POSTGRES_DATA_PARENT_V18 = "/var/lib/postgresql";
+    private static final String POSTGRES_DATA_PARENT_LEGACY = "/var/lib/postgresql/data";
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final ContainerBuilder containerBuilder;
@@ -77,14 +78,15 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
             specBuilder.withExposedPort(POSTGRES_PORT);
         }
 
+        String internalMountPath = getInternalMountPath(stringValue(updated.get("databaseVersion")));
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
             ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
-                    "cloudsql", volumeId, fallbackId, POSTGRES_DATA_PARENT);
+                    "cloudsql", volumeId, fallbackId, internalMountPath);
         } else {
             String hostDataPath = Path.of(config.storage().hostPersistentPath(), "cloudsql",
                     sanitize(project), sanitize(instance)).toAbsolutePath().toString();
             ContainerStorageHelper.ensureHostDir(hostDataPath);
-            specBuilder.withBind(hostDataPath, POSTGRES_DATA_PARENT);
+            specBuilder.withBind(hostDataPath, internalMountPath);
         }
 
         ContainerSpec spec = specBuilder.build();
@@ -294,6 +296,13 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
                 "port", endpoint.port(),
                 "volumeId", volumeId,
                 "status", "RUNNING"));
+    }
+
+    private String getInternalMountPath(String databaseVersion) {
+        if ("POSTGRES_18".equals(databaseVersion)) {
+            return POSTGRES_DATA_PARENT_V18;
+        }
+        return POSTGRES_DATA_PARENT_LEGACY;
     }
 
     private String imageFor(String databaseVersion) {

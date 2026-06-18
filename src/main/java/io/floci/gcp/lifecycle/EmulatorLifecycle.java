@@ -61,7 +61,6 @@ public class EmulatorLifecycle {
         }
         initLifecycleState.markBootCompleted();
 
-        serviceRegistry.logEnabledServices();
         storageFactory.loadAll();
 
         boolean hasStart = hooksRunner.hasHooks(InitializationHook.START);
@@ -77,6 +76,7 @@ public class EmulatorLifecycle {
         if (event.options().getPort() != config.port()) {
             return;
         }
+        serviceRegistry.logEnabledServices();
         boolean hasStart = hooksRunner.hasHooks(InitializationHook.START);
         boolean hasReady = hooksRunner.hasHooks(InitializationHook.READY);
         if (!hasStart && !hasReady) {

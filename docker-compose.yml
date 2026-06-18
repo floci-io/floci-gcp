@@ -12,6 +12,7 @@ services:
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      FLOCI_GCP_SERVICES_DOCKER_NETWORK: floci_gcp_default
     networks:
       floci_gcp_default:
         aliases:

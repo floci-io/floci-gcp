@@ -68,10 +68,12 @@ test: build
 	$(MAKE) stop
 
 # ── Docker-based compat tests (requires: docker compose up -d) ────────────────
-# Mirrors .github/workflows/compatibility.yml: each suite runs as its own
-# container on the emulator's compose network. Per-service *_EMULATOR_HOST values
-# are baked into each suite Dockerfile, so only the shared endpoint vars are
-# passed here — new services stay in sync automatically via their Dockerfile.
+# Runs every suite against the single shared compose emulator with ALL mocks off
+# (real Redpanda / Postgres / Cloud Run). The emulator's
+# FLOCI_GCP_SERVICES_DOCKER_NETWORK (set in docker-compose.yml) attaches spawned
+# sidecars to the compose network so they are reachable. Per-service
+# *_EMULATOR_HOST values are baked into each suite Dockerfile, so only the shared
+# endpoint vars + the Cloud Run execution gate are passed here.
 
 COMPAT_NET     = floci_gcp_default
 COMPAT_RESULTS = /tmp/floci-gcp-compat-results
@@ -92,6 +94,7 @@ compat-docker:
 			-e FLOCI_ENDPOINT=http://floci-gcp:4588 \
 			-e FLOCI_HOST=floci-gcp:4588 \
 			-e FLOCI_PROJECT=test-project \
+			-e FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true \
 			-v $(COMPAT_RESULTS)/$$suite:/results \
 			compat-$$suite || fail=1; \
 	done; \

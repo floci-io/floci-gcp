@@ -23,6 +23,8 @@ import com.google.cloud.kms.v1.KeyManagementServiceClient;
 import com.google.cloud.kms.v1.KeyManagementServiceSettings;
 import com.google.cloud.tasks.v2.CloudTasksClient;
 import com.google.cloud.tasks.v2.CloudTasksSettings;
+import com.google.cloud.scheduler.v1.CloudSchedulerClient;
+import com.google.cloud.scheduler.v1.CloudSchedulerSettings;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.sqladmin.SQLAdmin;
@@ -237,5 +239,26 @@ public final class TestFixtures {
                 .build();
 
         return com.google.cloud.monitoring.v3.MetricServiceClient.create(settings);
+    }
+
+    /**
+     * Creates a Cloud Scheduler client pointing at the emulator.
+     * No standard emulator env var exists; configure explicitly via plaintext gRPC channel.
+     */
+    public static CloudSchedulerClient cloudSchedulerClient() throws IOException {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+
+        CloudSchedulerSettings settings = CloudSchedulerSettings.newBuilder()
+                .setTransportChannelProvider(
+                        InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(host + ":" + port)
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+
+        return CloudSchedulerClient.create(settings);
     }
 }

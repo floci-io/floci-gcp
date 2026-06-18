@@ -100,6 +100,8 @@ public interface EmulatorConfig {
         CloudFunctionsServiceConfig cloudfunctions();
 
         MonitoringServiceConfig monitoring();
+
+        SchedulerServiceConfig scheduler();
     }
 
     interface GcsServiceConfig {
@@ -226,6 +228,19 @@ public interface EmulatorConfig {
     interface MonitoringServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface SchedulerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When false, the background dispatcher does not fire due jobs (RunJob still works). */
+        @WithDefault("true")
+        boolean invocationEnabled();
+
+        /** Interval between scheduler dispatcher ticks. */
+        @WithDefault("10")
+        long tickIntervalSeconds();
     }
 
     interface DockerConfig {

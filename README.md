@@ -140,6 +140,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud Functions | ✅ | ❌ |
 | Cloud SQL for PostgreSQL | ✅ | ❌ |
 | Cloud Tasks | ✅ | ❌ |
+| Cloud Scheduler | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
@@ -184,7 +185,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Messaging | Pub/Sub, Managed Kafka |
 | Security and identity | Secret Manager, Cloud KMS, IAM |
 | Serverless control planes | Cloud Run, Cloud Functions |
-| Task scheduling | Cloud Tasks |
+| Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
 | Observability | Cloud Logging |
 
@@ -206,6 +207,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 | **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
+| **Cloud Scheduler** | gRPC + REST JSON | Cron jobs with Pub/Sub, HTTP, and App Engine targets; `Pause`/`Resume`/`RunJob`; unix-cron + time zones; background tick fires due jobs (Pub/Sub publishes into the local backend) |
 
 </details>
 

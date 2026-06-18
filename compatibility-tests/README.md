@@ -43,7 +43,7 @@ just test-all-iac
 
 ## Test Coverage
 
-### SDK tests — 226 tests total
+### SDK tests — 233 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
@@ -57,7 +57,8 @@ just test-all-iac
 | `IamTest` | IAM | 7 | 5 | 7 | 7 |
 | `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
 | `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
-| **Total** | | **61** | **48** | **59** | **58** |
+| `SchedulerTest` | Cloud Scheduler | 7 | 0 | 0 | 0 |
+| **Total** | | **68** | **48** | **59** | **58** |
 
 ### IaC tests
 

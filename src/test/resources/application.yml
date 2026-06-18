@@ -37,5 +37,9 @@ floci-gcp:
       enabled: true
     monitoring:
       enabled: true
+    scheduler:
+      enabled: true
+      invocation-enabled: true
+      tick-interval-seconds: 1
   docker:
     api-timeout: 30s

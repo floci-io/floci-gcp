@@ -81,4 +81,5 @@ nav:
     - Cloud Run: services/cloud-run.md
     - Cloud Functions: services/cloud-functions.md
     - Cloud Tasks: services/cloud-tasks.md
+    - Cloud Scheduler: services/scheduler.md
   - Contributing: contributing.md

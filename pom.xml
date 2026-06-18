@@ -124,6 +124,12 @@
             <artifactId>grpc-google-cloud-tasks-v2</artifactId>
         </dependency>
 
+        <!-- Cloud Scheduler gRPC stubs (CloudSchedulerGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-scheduler-v1</artifactId>
+        </dependency>
+
         <!-- Firestore gRPC stubs (FirestoreGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>
@@ -134,6 +140,13 @@
         <dependency>
             <groupId>com.google.api.grpc</groupId>
             <artifactId>proto-google-cloud-datastore-v1</artifactId>
+        </dependency>
+
+        <!-- cron-utils for Cloud Scheduler unix-cron schedule parsing -->
+        <dependency>
+            <groupId>com.cronutils</groupId>
+            <artifactId>cron-utils</artifactId>
+            <version>9.2.1</version>
         </dependency>
 
         <!-- Jackson -->

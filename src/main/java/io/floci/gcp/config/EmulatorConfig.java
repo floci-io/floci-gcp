@@ -98,6 +98,8 @@ public interface EmulatorConfig {
         CloudRunServiceConfig cloudrun();
 
         CloudFunctionsServiceConfig cloudfunctions();
+
+        MonitoringServiceConfig monitoring();
     }
 
     interface GcsServiceConfig {
@@ -217,6 +219,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudFunctionsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface MonitoringServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

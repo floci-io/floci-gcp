@@ -218,4 +218,24 @@ public final class TestFixtures {
 
         return KeyManagementServiceClient.create(settings);
     }
+
+    /**
+     * Creates a Cloud Monitoring client pointing at the emulator.
+     */
+    public static com.google.cloud.monitoring.v3.MetricServiceClient monitoringClient() throws IOException {
+        URI uri = URI.create(endpoint());
+        String host = uri.getHost();
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+
+        com.google.cloud.monitoring.v3.MetricServiceSettings settings = com.google.cloud.monitoring.v3.MetricServiceSettings.newBuilder()
+                .setTransportChannelProvider(
+                        InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(host + ":" + port)
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+
+        return com.google.cloud.monitoring.v3.MetricServiceClient.create(settings);
+    }
 }

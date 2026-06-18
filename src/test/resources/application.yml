@@ -35,5 +35,7 @@ floci-gcp:
         url-host-suffix:
     cloudfunctions:
       enabled: true
+    monitoring:
+      enabled: true
   docker:
     api-timeout: 30s

@@ -34,6 +34,12 @@ just test-all-iac
 | [`sdk-test-node`](sdk-test-node/) | Node.js / TypeScript | vitest | `just test-node` |
 | [`sdk-test-go`](sdk-test-go/) | Go | go test | `just test-go` |
 
+### CLI suites
+
+| Module | Tool | Framework | Command |
+|---|---|---|---|
+| [`sdk-test-gcloud`](sdk-test-gcloud/) | gcloud CLI | BATS | `just test-gcloud` |
+
 ### IaC suites
 
 | Module | Tool | Framework | Command |

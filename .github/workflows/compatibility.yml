@@ -68,6 +68,7 @@ jobs:
           - sdk-test-node
           - sdk-test-python
           - sdk-test-go
+          - sdk-test-gcloud
           - compat-terraform
           - compat-opentofu
 

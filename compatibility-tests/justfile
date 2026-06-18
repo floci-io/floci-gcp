@@ -68,6 +68,14 @@ test-go:
 setup-go:
     go mod tidy
 
+# ── gcloud CLI ───────────────────────────────────────────────────────────────
+
+[working-directory: 'sdk-test-gcloud']
+test-gcloud:
+    FLOCI_GCP_ENDPOINT="{{FLOCI_GCP_ENDPOINT}}" \
+    FLOCI_GCP_PROJECT="{{FLOCI_GCP_PROJECT}}" \
+    bats test/
+
 # ── Terraform ────────────────────────────────────────────────────────────────
 
 [working-directory: 'compat-terraform']

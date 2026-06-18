@@ -68,53 +68,34 @@ test: build
 	$(MAKE) stop
 
 # ── Docker-based compat tests (requires: docker compose up -d) ────────────────
+# Mirrors .github/workflows/compatibility.yml: each suite runs as its own
+# container on the emulator's compose network. Per-service *_EMULATOR_HOST values
+# are baked into each suite Dockerfile, so only the shared endpoint vars are
+# passed here — new services stay in sync automatically via their Dockerfile.
+
+COMPAT_NET     = floci_gcp_default
+COMPAT_RESULTS = /tmp/floci-gcp-compat-results
+COMPAT_SUITES  = sdk-test-java sdk-test-node sdk-test-python sdk-test-go compat-terraform compat-opentofu
 
 compat-docker:
 	@echo "==> Building test images..."
-	@docker build -q -t floci-gcp-compat-java   -f $(JAVA_DIR)/Dockerfile   $(JAVA_DIR)/
-	@docker build -q -t floci-gcp-compat-python -f $(PYTHON_DIR)/Dockerfile $(PYTHON_DIR)/
-	@docker build -q -t floci-gcp-compat-node   -f $(NODE_DIR)/Dockerfile   $(NODE_DIR)/
-	@docker build -q -t floci-gcp-compat-go     -f $(GO_DIR)/Dockerfile     $(GO_DIR)/
-	@echo "==> Java SDK tests"
-	docker run --rm --network floci_gcp_default \
-		-e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
-		-e FLOCI_GCP_PROJECT=test-project \
-		-e PUBSUB_EMULATOR_HOST=floci-gcp:4588 \
-		-e FIRESTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e DATASTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e STORAGE_EMULATOR_HOST=http://floci-gcp:4588 \
-		-e SECRET_MANAGER_EMULATOR_HOST=floci-gcp:4588 \
-		floci-gcp-compat-java
-	@echo "==> Python SDK tests"
-	docker run --rm --network floci_gcp_default \
-		-e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
-		-e FLOCI_GCP_PROJECT=test-project \
-		-e PUBSUB_EMULATOR_HOST=floci-gcp:4588 \
-		-e FIRESTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e DATASTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e STORAGE_EMULATOR_HOST=http://floci-gcp:4588 \
-		-e SECRET_MANAGER_EMULATOR_HOST=floci-gcp:4588 \
-		floci-gcp-compat-python
-	@echo "==> Node.js SDK tests"
-	docker run --rm --network floci_gcp_default \
-		-e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
-		-e FLOCI_GCP_PROJECT=test-project \
-		-e PUBSUB_EMULATOR_HOST=floci-gcp:4588 \
-		-e FIRESTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e DATASTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e STORAGE_EMULATOR_HOST=http://floci-gcp:4588 \
-		-e SECRET_MANAGER_EMULATOR_HOST=floci-gcp:4588 \
-		floci-gcp-compat-node
-	@echo "==> Go SDK tests"
-	docker run --rm --network floci_gcp_default \
-		-e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
-		-e FLOCI_GCP_PROJECT=test-project \
-		-e PUBSUB_EMULATOR_HOST=floci-gcp:4588 \
-		-e FIRESTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e DATASTORE_EMULATOR_HOST=floci-gcp:4588 \
-		-e STORAGE_EMULATOR_HOST=http://floci-gcp:4588 \
-		-e SECRET_MANAGER_EMULATOR_HOST=floci-gcp:4588 \
-		floci-gcp-compat-go
+	@for suite in $(COMPAT_SUITES); do \
+		echo "    compat-$$suite"; \
+		docker build -q -t compat-$$suite compatibility-tests/$$suite/ > /dev/null; \
+	done
+	@fail=0; \
+	for suite in $(COMPAT_SUITES); do \
+		echo "==> $$suite"; \
+		mkdir -p $(COMPAT_RESULTS)/$$suite; \
+		docker run --rm --network $(COMPAT_NET) \
+			-e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
+			-e FLOCI_ENDPOINT=http://floci-gcp:4588 \
+			-e FLOCI_HOST=floci-gcp:4588 \
+			-e FLOCI_PROJECT=test-project \
+			-v $(COMPAT_RESULTS)/$$suite:/results \
+			compat-$$suite || fail=1; \
+	done; \
+	exit $$fail
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 

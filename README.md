@@ -581,13 +581,12 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Enable/disable Secret Manager |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Enable/disable Cloud Run |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED` | `false` | Enable experimental Docker-backed Cloud Run execution |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MOCK` | `false` | Keep Cloud Run execution metadata-only without Docker |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Use mock mode (no Docker; Cloud Run control plane only, no execution containers) |
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Enable/disable Cloud Functions |
 | `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Enable/disable Cloud Tasks |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Enable/disable Cloud SQL for PostgreSQL |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_DATA_PLANE_ENABLED` | `true` | Start Docker-backed PostgreSQL instances for Cloud SQL |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Use mock mode (no Docker; Cloud SQL control plane only, no PostgreSQL containers) |
 | `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; returns `ACTIVE` immediately) |
 | `FLOCI_GCP_DNS_EXTRA_SUFFIXES` | *(unset)* | Extra DNS suffixes for embedded DNS (comma-separated) |
 

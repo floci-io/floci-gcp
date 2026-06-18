@@ -61,10 +61,9 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Cloud Tasks |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Managed Service for Apache Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Cloud SQL for PostgreSQL |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_DATA_PLANE_ENABLED` | `true` | Start Docker-backed PostgreSQL data-plane instances |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode — no Docker-backed PostgreSQL data-plane instances |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Cloud Run |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED` | `false` | Experimental Cloud Run service execution |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MOCK` | `false` | Keep execution-mode services metadata-only without starting Docker containers |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Mock mode — control plane only, no Docker-backed execution containers |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_DEFAULT_PORT` | `8080` | Default Cloud Run runtime container port |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT` | `240s` | Cloud Run runtime startup timeout |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_REQUEST_TIMEOUT` | `300s` | Cloud Run invocation proxy timeout |
@@ -94,7 +93,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_SERVICES_CLOUDSQL_DATA_PLANE_ENABLED` | `true` | When `true`, Cloud SQL instances start Docker-backed PostgreSQL containers |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | When `true`, emulate the Cloud SQL control plane only — no Docker-backed PostgreSQL containers are started |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES15_IMAGE` | `postgres:15.18-alpine` | Docker image used for `POSTGRES_15` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` | Docker image used for `POSTGRES_16` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` | Docker image used for `POSTGRES_17` instances |

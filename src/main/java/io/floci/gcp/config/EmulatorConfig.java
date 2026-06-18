@@ -161,8 +161,8 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("true")
-        boolean dataPlaneEnabled();
+        @WithDefault("false")
+        boolean mock();
 
         @WithDefault("postgres:15.18-alpine")
         String postgres15Image();
@@ -189,15 +189,12 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        @WithDefault("false")
+        boolean mock();
+
         ExecutionConfig execution();
 
         interface ExecutionConfig {
-            @WithDefault("false")
-            boolean enabled();
-
-            @WithDefault("false")
-            boolean mock();
-
             @WithDefault("8080")
             int defaultPort();
 

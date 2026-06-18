@@ -47,7 +47,7 @@ class CloudRunRuntimeServiceTest {
     void setUp() {
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().dockerNetwork()).thenReturn(Optional.empty());
-        when(config.services().cloudrun().execution().mock()).thenReturn(false);
+        when(config.services().cloudrun().mock()).thenReturn(false);
         when(config.services().cloudrun().execution().defaultPort()).thenReturn(8080);
         when(config.services().cloudrun().execution().startupTimeout()).thenReturn(Duration.ofSeconds(1));
         when(config.services().cloudrun().execution().requestTimeout()).thenReturn(Duration.ofSeconds(300));

@@ -18,14 +18,13 @@ floci-gcp:
       mock: true
     cloudsql:
       enabled: true
-      data-plane-enabled: false
+      mock: true
     cloudtasks:
       enabled: true
     cloudrun:
       enabled: true
+      mock: true
       execution:
-        enabled: false
-        mock: false
         default-port: 8080
         startup-timeout: 240s
         request-timeout: 300s

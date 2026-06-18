@@ -738,8 +738,7 @@ public class CloudRunService {
     private boolean executionEnabled() {
         return config != null
                 && runtimeService != null
-                && config.services().cloudrun().execution().enabled()
-                && !config.services().cloudrun().execution().mock();
+                && !config.services().cloudrun().mock();
     }
 
     private Duration operationTimeout() {

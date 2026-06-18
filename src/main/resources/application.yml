@@ -27,6 +27,8 @@ quarkus:
       - --allow-incomplete-classpath
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
+      - --initialize-at-run-time=io.floci.gcp.services.cloudkms.KmsCrypto
+      - --initialize-at-run-time=io.floci.gcp.services.cloudsql.CloudSqlPostgresDataPlane
 
 floci-gcp:
   port: 4588

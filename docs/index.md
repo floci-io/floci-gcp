@@ -19,10 +19,14 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Firestore** | gRPC | Documents, collections, queries, field transforms, aggregation, transactions, real-time listeners |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation, transactions |
 | **Secret Manager** | gRPC | Secrets, versions, access, disable/enable/destroy, IAM bindings |
+| **Cloud Logging** | gRPC + REST | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with filter subset, `ListLogs`, `DeleteLog` |
+| **Cloud KMS** | gRPC + REST | Key rings, crypto keys, versions, symmetric encrypt/decrypt, asymmetric sign/decrypt, `GenerateRandomBytes` |
 | **IAM** | REST | Service accounts, RSA-2048 keys, policy bindings, SignBlob (V4 signed URLs) |
 | **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed or mock mode) |
 | **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; control plane by default, experimental Docker-backed invocation and GCS volume mounts when enabled |
 | **Cloud Functions** | REST | Function create/get/list/delete, upload URL generation, LRO polling; control plane only |
+| **Cloud SQL for PostgreSQL** | REST | Instance lifecycle (Postgres), LRO polling; control plane only |
+| **Cloud Tasks** | gRPC | Queues (rate limits, retry, pause/resume/purge), tasks (HTTP/App Engine targets), `RunTask`; control plane only |
 
 ## Why floci-gcp?
 

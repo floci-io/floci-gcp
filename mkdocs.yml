@@ -80,4 +80,5 @@ nav:
     - Cloud SQL for PostgreSQL: services/cloud-sql-postgres.md
     - Cloud Run: services/cloud-run.md
     - Cloud Functions: services/cloud-functions.md
+    - Cloud Tasks: services/cloud-tasks.md
   - Contributing: contributing.md

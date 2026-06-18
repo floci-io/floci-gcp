@@ -138,6 +138,8 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Managed Kafka | ✅ | ❌ |
 | Cloud Run | ✅ | ❌ |
 | Cloud Functions | ✅ | ❌ |
+| Cloud SQL for PostgreSQL | ✅ | ❌ |
+| Cloud Tasks | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
@@ -150,11 +152,11 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS"]
+            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks"]
         end
 
         subgraph REST ["REST services"]
-            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions"]
+            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL"]
         end
 
         subgraph Docker ["Docker-backed"]
@@ -182,6 +184,8 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Messaging | Pub/Sub, Managed Kafka |
 | Security and identity | Secret Manager, Cloud KMS, IAM |
 | Serverless control planes | Cloud Run, Cloud Functions |
+| Task scheduling | Cloud Tasks |
+| Databases | Cloud SQL for PostgreSQL |
 | Observability | Cloud Logging |
 
 <details>
@@ -200,6 +204,8 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane by default, experimental Docker-backed invocation when enabled |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
+| **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |
+| **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
 
 </details>
 
@@ -576,6 +582,7 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_ENABLED` | `false` | Enable experimental Docker-backed Cloud Run execution |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MOCK` | `false` | Keep Cloud Run execution metadata-only without Docker |
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Enable/disable Cloud Functions |
+| `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Enable/disable Cloud Tasks |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Enable/disable Cloud SQL for PostgreSQL |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_DATA_PLANE_ENABLED` | `true` | Start Docker-backed PostgreSQL instances for Cloud SQL |

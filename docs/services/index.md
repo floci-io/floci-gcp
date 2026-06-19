@@ -20,6 +20,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Cloud Functions](cloud-functions.md) | REST JSON | `/v2/projects/{project}/locations/{location}/functions` |
 | [Cloud Tasks](cloud-tasks.md) | gRPC | `google.cloud.tasks.v2.CloudTasks` |
 | [Cloud Scheduler](scheduler.md) | gRPC + REST JSON | `google.cloud.scheduler.v1.CloudScheduler`, `/v1/projects/{project}/locations/{location}/jobs` |
+| [Cloud Monitoring](cloud-monitoring.md) | gRPC + REST JSON | `google.monitoring.v3.MetricService`, `/v3/projects/{project}` |
 
 ## Single-Port Design
 

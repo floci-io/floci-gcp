@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="floci-gcp-black.svg#gh-light-mode-only" alt="floci-gcp" width="500" />
-  <img src="floci-gcp-white.svg#gh-dark-mode-only" alt="floci-gcp" width="500" />
+  <img src="docs/assets/floci-gcp-black.svg#gh-light-mode-only" alt="floci-gcp" width="500" />
+  <img src="docs/assets/floci-gcp-white.svg#gh-dark-mode-only" alt="floci-gcp" width="500" />
 </p>
 
 <p align="center">
@@ -141,6 +141,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud SQL for PostgreSQL | ✅ | ❌ |
 | Cloud Tasks | ✅ | ❌ |
 | Cloud Scheduler | ✅ | ❌ |
+| Cloud Monitoring | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
@@ -153,7 +154,7 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks"]
+            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring"]
         end
 
         subgraph REST ["REST services"]
@@ -187,7 +188,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
-| Observability | Cloud Logging |
+| Observability | Cloud Logging, Cloud Monitoring |
 
 <details>
 <summary>Detailed service notes</summary>
@@ -208,10 +209,40 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
 | **Cloud Scheduler** | gRPC + REST JSON | Cron jobs with Pub/Sub, HTTP, and App Engine targets; `Pause`/`Resume`/`RunJob`; unix-cron + time zones; background tick fires due jobs (Pub/Sub publishes into the local backend) |
+| **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries`) and read (`ListTimeSeries`) |
 
 </details>
 
-## Persistence & Storage Modes
+## Real Docker Integration
+
+floci-gcp uses real Docker containers when in-process emulation would reduce fidelity — stateful databases, connection-heavy protocols, and image-based runtimes. These services spawn sidecar containers via the host Docker daemon. Each is gated by a per-service `mock` flag: set it to `true` to keep the service metadata-only without Docker.
+
+| Service | Default image | What is real | Mock flag |
+|---|---|---|---|
+| Managed Kafka | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
+| Cloud SQL for PostgreSQL | `postgres:15.18-alpine` (15–18) | PostgreSQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
+| Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
+
+Docker-backed services require the Docker socket:
+
+```bash
+docker run -d --name floci-gcp \
+  -p 4588:4588 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  floci/floci-gcp:latest
+```
+
+### Overriding default images
+
+| Variable | Default |
+|---|---|
+| `FLOCI_GCP_SERVICES_KAFKA_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES15_IMAGE` | `postgres:15.18-alpine` |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES18_IMAGE` | `postgres:18.4-alpine` |
+
+## Persistence and Storage Modes
 
 floci-gcp supports flexible storage modes. Configure globally via `FLOCI_GCP_STORAGE_MODE`.
 
@@ -527,6 +558,7 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates floci-gc
 | `sdk-test-node` | Node.js | `@google-cloud/*` |
 | `sdk-test-python` | Python | `google-cloud-*` |
 | `sdk-test-go` | Go | `cloud.google.com/go/*` |
+| `sdk-test-gcloud` | gcloud CLI | `gcloud` (bats) |
 | `compat-terraform` | Terraform | Google provider |
 | `compat-opentofu` | OpenTofu | Google provider |
 
@@ -537,6 +569,20 @@ cd compatibility-tests && just test-java
 cd compatibility-tests && just test-go
 cd compatibility-tests && just test-terraform
 ```
+
+## Migrating from gcloud emulators
+
+Google ships a separate emulator per service (`gcloud beta emulators pubsub | firestore | datastore | bigtable | spanner`), each its own process on its own port. floci-gcp replaces all of them with one binary on a single port (`4588`), reusing the same `*_EMULATOR_HOST` environment variables the GCP SDKs already honor — just point them at floci-gcp.
+
+| gcloud emulator | floci-gcp |
+|---|---|
+| `gcloud beta emulators pubsub start` → `PUBSUB_EMULATOR_HOST=localhost:8085` | `PUBSUB_EMULATOR_HOST=localhost:4588` |
+| `gcloud beta emulators firestore start` → `FIRESTORE_EMULATOR_HOST=localhost:8080` | `FIRESTORE_EMULATOR_HOST=localhost:4588` |
+| `gcloud beta emulators datastore start` → `DATASTORE_EMULATOR_HOST=localhost:8081` | `DATASTORE_EMULATOR_HOST=localhost:4588` |
+| _(no official emulator)_ | `STORAGE_EMULATOR_HOST=http://localhost:4588` |
+| _(no official emulator)_ | `SECRET_MANAGER_EMULATOR_HOST=localhost:4588` |
+
+The GCP SDKs skip credential checks automatically when these variables are set, so no code changes are needed — one container replaces the fragmented per-service emulator processes.
 
 ## Image Tags
 
@@ -574,21 +620,10 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_HOSTNAME` | *(unset)* | Hostname to use in returned URLs when running inside Docker Compose |
 | `FLOCI_GCP_STORAGE_MODE` | `memory` | Storage mode: `memory` · `persistent` · `hybrid` · `wal` |
 | `FLOCI_GCP_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persisted state |
-| `FLOCI_GCP_SERVICES_GCS_ENABLED` | `true` | Enable/disable Cloud Storage |
-| `FLOCI_GCP_SERVICES_PUBSUB_ENABLED` | `true` | Enable/disable Pub/Sub |
-| `FLOCI_GCP_SERVICES_FIRESTORE_ENABLED` | `true` | Enable/disable Firestore |
-| `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Enable/disable Datastore |
-| `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
-| `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Enable/disable Secret Manager |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Enable/disable Cloud Run |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Use mock mode (no Docker; Cloud Run control plane only, no execution containers) |
-| `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Enable/disable Cloud Functions |
-| `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Enable/disable Cloud Tasks |
-| `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Enable/disable Cloud SQL for PostgreSQL |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Use mock mode (no Docker; Cloud SQL control plane only, no PostgreSQL containers) |
-| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; returns `ACTIVE` immediately) |
-| `FLOCI_GCP_DNS_EXTRA_SUFFIXES` | *(unset)* | Extra DNS suffixes for embedded DNS (comma-separated) |
+
+Per-service enable flags (`FLOCI_GCP_SERVICES_<SERVICE>_ENABLED`), mock flags (`*_MOCK`), sidecar images, Docker networking, and DNS suffixes are documented in the full reference.
+
+Full reference: [configuration docs](https://floci.io/floci-gcp/configuration/environment-variables/)
 
 ### Multi-container Docker Compose
 
@@ -612,6 +647,22 @@ services:
     depends_on:
       - floci-gcp
 ```
+
+## Community
+
+Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
+
+## Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=floci-io%2Ffloci-gcp&type=date&legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=floci-io/floci-gcp&type=date&theme=dark&legend=top-left" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=floci-io/floci-gcp&type=date&legend=top-left" />
+      <img width="600" alt="Star History Chart" src="https://api.star-history.com/chart?repos=floci-io/floci-gcp&type=date&legend=top-left" />
+    </picture>
+  </a>
+</p>
 
 ---
 

@@ -58,7 +58,11 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Datastore |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Secret Manager |
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | IAM |
+| `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Cloud Logging |
+| `FLOCI_GCP_SERVICES_KMS_ENABLED` | `true` | Cloud KMS |
+| `FLOCI_GCP_SERVICES_MONITORING_ENABLED` | `true` | Cloud Monitoring |
 | `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Cloud Tasks |
+| `FLOCI_GCP_SERVICES_SCHEDULER_ENABLED` | `true` | Cloud Scheduler |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Managed Service for Apache Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Cloud SQL for PostgreSQL |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode — no Docker-backed PostgreSQL data-plane instances |

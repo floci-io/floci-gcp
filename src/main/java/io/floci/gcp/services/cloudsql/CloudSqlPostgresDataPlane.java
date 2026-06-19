@@ -7,6 +7,7 @@ import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager.EndpointInfo;
+import io.floci.gcp.core.common.docker.ContainerLifecycleManager.ExecResult;
 import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -15,11 +16,6 @@ import org.jboss.logging.Logger;
 
 import java.nio.file.Path;
 import java.security.SecureRandom;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -93,7 +89,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
             containerId = lifecycleManager.create(spec);
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo endpoint = info.getEndpoint(POSTGRES_PORT);
-            awaitReady(endpoint, Duration.ofSeconds(config.services().cloudsql().startupTimeoutSeconds()));
+            awaitReady(info.containerId(), Duration.ofSeconds(config.services().cloudsql().startupTimeoutSeconds()));
             applyEndpoint(updated, image, volumeId, info.containerId(), endpoint);
             return updated;
         } catch (RuntimeException e) {
@@ -141,16 +137,11 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         if ("postgres".equals(database)) {
             return;
         }
-        try (Connection connection = connect(instanceMetadata, "postgres")) {
-            if (databaseExists(connection, database)) {
-                return;
-            }
-            try (Statement statement = connection.createStatement()) {
-                statement.execute("CREATE DATABASE " + quoteIdentifier(database));
-            }
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not create PostgreSQL database " + database + ": " + e.getMessage());
+        if (databaseExists(instanceMetadata, database)) {
+            return;
         }
+        runSql(instanceMetadata, "postgres", "CREATE DATABASE " + quoteIdentifier(database),
+                "Could not create PostgreSQL database " + database);
     }
 
     @Override
@@ -158,126 +149,111 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         if ("postgres".equals(database)) {
             return;
         }
-        try (Connection connection = connect(instanceMetadata, "postgres");
-             Statement statement = connection.createStatement()) {
-            statement.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    + "WHERE datname = " + quoteLiteral(database) + " AND pid <> pg_backend_pid()");
-            statement.execute("DROP DATABASE IF EXISTS " + quoteIdentifier(database));
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not delete PostgreSQL database " + database + ": " + e.getMessage());
-        }
+        runSql(instanceMetadata, "postgres", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        + "WHERE datname = " + quoteLiteral(database) + " AND pid <> pg_backend_pid()",
+                "Could not delete PostgreSQL database " + database);
+        runSql(instanceMetadata, "postgres", "DROP DATABASE IF EXISTS " + quoteIdentifier(database),
+                "Could not delete PostgreSQL database " + database);
     }
 
     @Override
     public void createOrUpdateUser(Map<String, Object> instanceMetadata, String user, String password) {
-        try (Connection connection = connect(instanceMetadata, "postgres");
-             Statement statement = connection.createStatement()) {
-            String secret = password == null || password.isBlank() ? ADMIN_PASSWORD : password;
-            if (roleExists(connection, user)) {
-                statement.execute("ALTER ROLE " + quoteIdentifier(user)
-                        + " WITH LOGIN PASSWORD " + quoteLiteral(secret));
-            } else {
-                statement.execute("CREATE ROLE " + quoteIdentifier(user)
-                        + " WITH LOGIN PASSWORD " + quoteLiteral(secret));
-            }
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not create PostgreSQL user " + user + ": " + e.getMessage());
-        }
+        String secret = password == null || password.isBlank() ? ADMIN_PASSWORD : password;
+        String verb = roleExists(instanceMetadata, user) ? "ALTER ROLE " : "CREATE ROLE ";
+        runSql(instanceMetadata, "postgres",
+                verb + quoteIdentifier(user) + " WITH LOGIN PASSWORD " + quoteLiteral(secret),
+                "Could not create PostgreSQL user " + user);
     }
 
     @Override
     public void deleteUser(Map<String, Object> instanceMetadata, String user, Iterable<String> databases) {
-        try {
-            for (String database : databases) {
-                try (Connection connection = connect(instanceMetadata, database);
-                     Statement statement = connection.createStatement()) {
-                    statement.execute("DROP OWNED BY " + quoteIdentifier(user));
-                } catch (SQLException e) {
-                    LOG.debugv("Could not drop objects owned by {0} in database {1}: {2}",
-                            user, database, e.getMessage());
-                }
+        for (String database : databases) {
+            ExecResult result = psql(instanceMetadata, database, "DROP OWNED BY " + quoteIdentifier(user));
+            if (result.exitCode() != 0) {
+                LOG.debugv("Could not drop objects owned by {0} in database {1}: {2}",
+                        user, database, errorOf(result));
             }
-            try (Connection connection = connect(instanceMetadata, "postgres");
-                 Statement statement = connection.createStatement()) {
-                statement.execute("DROP ROLE IF EXISTS " + quoteIdentifier(user));
-            }
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not delete PostgreSQL user " + user + ": " + e.getMessage());
         }
+        runSql(instanceMetadata, "postgres", "DROP ROLE IF EXISTS " + quoteIdentifier(user),
+                "Could not delete PostgreSQL user " + user);
     }
 
     @Override
     public void grantDatabaseAccess(Map<String, Object> instanceMetadata, String database, String user) {
-        try (Connection postgres = connect(instanceMetadata, "postgres");
-             Statement statement = postgres.createStatement()) {
-            statement.execute("GRANT CONNECT, CREATE ON DATABASE " + quoteIdentifier(database)
-                    + " TO " + quoteIdentifier(user));
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not grant PostgreSQL database access: " + e.getMessage());
-        }
-
-        try (Connection databaseConnection = connect(instanceMetadata, database);
-             Statement statement = databaseConnection.createStatement()) {
-            statement.execute("GRANT USAGE, CREATE ON SCHEMA public TO " + quoteIdentifier(user));
-        } catch (SQLException e) {
-            throw GcpException.unavailable("Could not grant PostgreSQL schema access: " + e.getMessage());
-        }
+        runSql(instanceMetadata, "postgres",
+                "GRANT CONNECT, CREATE ON DATABASE " + quoteIdentifier(database) + " TO " + quoteIdentifier(user),
+                "Could not grant PostgreSQL database access");
+        runSql(instanceMetadata, database,
+                "GRANT USAGE, CREATE ON SCHEMA public TO " + quoteIdentifier(user),
+                "Could not grant PostgreSQL schema access");
     }
 
-    private void awaitReady(EndpointInfo endpoint, Duration timeout) {
+    private void awaitReady(String containerId, Duration timeout) {
         long deadline = System.nanoTime() + timeout.toNanos();
-        SQLException last = null;
+        String last = "no response";
         while (System.nanoTime() < deadline) {
-            try (Connection ignored = connect(endpoint, "postgres")) {
+            ExecResult result = lifecycleManager.exec(containerId, List.of(),
+                    List.of("pg_isready", "-h", "127.0.0.1", "-p", String.valueOf(POSTGRES_PORT),
+                            "-U", ADMIN_USER, "-d", "postgres"));
+            if (result.exitCode() == 0) {
                 return;
-            } catch (SQLException e) {
-                last = e;
-                try {
-                    Thread.sleep(250);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw GcpException.unavailable("Interrupted while waiting for PostgreSQL startup");
-                }
+            }
+            last = errorOf(result);
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw GcpException.unavailable("Interrupted while waiting for PostgreSQL startup");
             }
         }
-        String message = last == null ? "unknown error" : last.getMessage();
-        throw GcpException.unavailable("PostgreSQL data plane did not become ready: " + message);
+        throw GcpException.unavailable("PostgreSQL data plane did not become ready: " + last);
     }
 
-    private Connection connect(Map<String, Object> instanceMetadata, String database) throws SQLException {
-        Map<String, Object> dataPlane = dataPlane(instanceMetadata);
-        String host = stringValue(dataPlane.get("host"));
-        Object port = dataPlane.get("port");
-        if (host == null || port == null) {
-            throw GcpException.failedPrecondition("Cloud SQL instance has no running PostgreSQL endpoint");
-        }
-        return connect(new EndpointInfo(host, Integer.parseInt(port.toString())), database);
-    }
-
-    private Connection connect(EndpointInfo endpoint, String database) throws SQLException {
-        return DriverManager.getConnection(jdbcUrl(endpoint, database), ADMIN_USER, ADMIN_PASSWORD);
-    }
-
-    private String jdbcUrl(EndpointInfo endpoint, String database) {
-        return "jdbc:postgresql://" + endpoint.host() + ":" + endpoint.port() + "/" + database;
-    }
-
-    private boolean databaseExists(Connection connection, String database) throws SQLException {
-        try (var statement = connection.prepareStatement("SELECT 1 FROM pg_database WHERE datname = ?")) {
-            statement.setString(1, database);
-            try (ResultSet result = statement.executeQuery()) {
-                return result.next();
-            }
+    /** Runs a SQL statement via {@code psql} inside the instance container; throws on failure. */
+    private void runSql(Map<String, Object> instanceMetadata, String database, String sql, String errorMessage) {
+        ExecResult result = psql(instanceMetadata, database, sql);
+        if (result.exitCode() != 0) {
+            throw GcpException.unavailable(errorMessage + ": " + errorOf(result));
         }
     }
 
-    private boolean roleExists(Connection connection, String user) throws SQLException {
-        try (var statement = connection.prepareStatement("SELECT 1 FROM pg_roles WHERE rolname = ?")) {
-            statement.setString(1, user);
-            try (ResultSet result = statement.executeQuery()) {
-                return result.next();
-            }
+    /** Runs a scalar query via {@code psql}; returns the trimmed output (empty when no rows match). */
+    private String querySql(Map<String, Object> instanceMetadata, String database, String sql) {
+        ExecResult result = psql(instanceMetadata, database, sql);
+        if (result.exitCode() != 0) {
+            throw GcpException.unavailable("PostgreSQL query failed: " + errorOf(result));
         }
+        return result.stdout().strip();
+    }
+
+    private ExecResult psql(Map<String, Object> instanceMetadata, String database, String sql) {
+        return lifecycleManager.exec(requireContainerId(instanceMetadata),
+                List.of("PGPASSWORD=" + ADMIN_PASSWORD),
+                List.of("psql", "-h", "127.0.0.1", "-p", String.valueOf(POSTGRES_PORT),
+                        "-U", ADMIN_USER, "-d", database, "-v", "ON_ERROR_STOP=1", "-tAqc", sql));
+    }
+
+    private String requireContainerId(Map<String, Object> instanceMetadata) {
+        String containerId = stringValue(dataPlane(instanceMetadata).get("containerId"));
+        if (containerId == null || containerId.isBlank()) {
+            throw GcpException.failedPrecondition("Cloud SQL instance has no running PostgreSQL container");
+        }
+        return containerId;
+    }
+
+    private static String errorOf(ExecResult result) {
+        String message = result.stderr().isBlank() ? result.stdout() : result.stderr();
+        return message.strip().replace('\n', ' ');
+    }
+
+    private boolean databaseExists(Map<String, Object> instanceMetadata, String database) {
+        return !querySql(instanceMetadata, "postgres",
+                "SELECT 1 FROM pg_database WHERE datname = " + quoteLiteral(database)).isEmpty();
+    }
+
+    private boolean roleExists(Map<String, Object> instanceMetadata, String user) {
+        return !querySql(instanceMetadata, "postgres",
+                "SELECT 1 FROM pg_roles WHERE rolname = " + quoteLiteral(user)).isEmpty();
     }
 
     private void applyEndpoint(Map<String, Object> metadata, String image, String volumeId,

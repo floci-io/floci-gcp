@@ -1,6 +1,7 @@
 package io.floci.gcp.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -10,14 +11,20 @@ import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.model.StreamType;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -447,6 +454,46 @@ public class ContainerLifecycleManager {
         return inspect.getNetworkSettings().getIpAddress();
     }
 
+    /**
+     * Runs a command inside a running container and returns its exit code and output.
+     * Used to drive in-container CLIs (e.g. {@code psql}) without opening a network
+     * connection from the emulator to the sidecar.
+     */
+    public ExecResult exec(String containerId, List<String> env, List<String> command) {
+        return dockerApi("exec in container " + containerId, () -> {
+            var createCmd = dockerClient().execCreateCmd(containerId)
+                    .withAttachStdout(true)
+                    .withAttachStderr(true)
+                    .withCmd(command.toArray(new String[0]));
+            if (env != null && !env.isEmpty()) {
+                createCmd.withEnv(env);
+            }
+            String execId = createCmd.exec().getId();
+            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+            dockerClient().execStartCmd(execId)
+                    .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            try {
+                                if (frame.getStreamType() == StreamType.STDERR) {
+                                    stderr.write(frame.getPayload());
+                                } else {
+                                    stdout.write(frame.getPayload());
+                                }
+                            } catch (IOException e) {
+                                throw new UncheckedIOException(e);
+                            }
+                        }
+                    })
+                    .awaitCompletion();
+            Long exitCode = dockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
+            return new ExecResult(exitCode == null ? -1 : exitCode.intValue(),
+                    stdout.toString(StandardCharsets.UTF_8),
+                    stderr.toString(StandardCharsets.UTF_8));
+        });
+    }
+
     private DockerClient dockerClient() {
         return dockerClients.client();
     }
@@ -497,5 +544,8 @@ public class ContainerLifecycleManager {
         public String toString() {
             return host + ":" + port;
         }
+    }
+
+    public record ExecResult(int exitCode, String stdout, String stderr) {
     }
 }

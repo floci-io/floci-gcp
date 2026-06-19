@@ -27,6 +27,8 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Cloud Functions** | REST | Function create/get/list/delete, upload URL generation, LRO polling; control plane only |
 | **Cloud SQL for PostgreSQL** | REST | Instance lifecycle (Postgres), LRO polling; control plane only |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry, pause/resume/purge), tasks (HTTP/App Engine targets), `RunTask`; control plane only |
+| **Cloud Scheduler** | gRPC + REST | Cron jobs (Pub/Sub, HTTP, App Engine targets), `Pause`/`Resume`/`RunJob`, unix-cron + time zones; background dispatcher fires due jobs |
+| **Cloud Monitoring** | gRPC + REST | Metric descriptors, monitored resource descriptors, time series write (`CreateTimeSeries`) and read (`ListTimeSeries`) |
 
 ## Why floci-gcp?
 

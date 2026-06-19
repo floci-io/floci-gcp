@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-19
+
+### Added
+
+- **cloudrun:** Cloud Run control plane — service create/get/list/delete, IAM policy operations, revisions, and LRO polling; plus experimental Docker-backed service execution and GCS volume mounts
+- **cloudfunctions:** Cloud Functions control plane — function create/get/list/delete, upload URL generation, and LRO polling
+- **cloudsql:** Cloud SQL for PostgreSQL — instance lifecycle control plane and a Docker-backed PostgreSQL data plane exposing reachable endpoints across Postgres 15–18 (data-plane SQL is run via in-container `psql`, so no JDBC driver is bundled)
+- **logging:** Cloud Logging (gRPC + REST) — `WriteLogEntries`, `ListLogEntries` with a filter subset, `ListLogs`, and `DeleteLog`
+- **kms:** Cloud KMS (gRPC + REST) — key rings, crypto keys, versions, symmetric encrypt/decrypt, asymmetric sign/decrypt, and `GenerateRandomBytes`
+- **monitoring:** Cloud Monitoring (gRPC + REST) — metric and monitored-resource descriptors, `CreateTimeSeries`, and `ListTimeSeries`
+- **scheduler:** Cloud Scheduler (gRPC + REST) — cron jobs (Pub/Sub, HTTP, App Engine targets), `Pause`/`Resume`/`RunJob`, unix-cron with time zones, and a background dispatcher that fires due jobs
+- **compat:** gcloud CLI compatibility test suite
+
+### Changed
+
+- **config:** **BREAKING** — standardized a single root-level `mock` flag across container-backed services. Cloud SQL's `floci-gcp.services.cloudsql.data-plane-enabled` is replaced by `floci-gcp.services.cloudsql.mock` (inverted meaning: `mock: false` runs the real Docker-backed data plane), and Cloud Run's execution toggle moves to `floci-gcp.services.cloudrun.mock` (the previous `execution.enabled` flag is removed). Both default to `mock: false` (real containers). Update `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` and `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` accordingly.
+
+### Fixed
+
+- **native:** native-image build support for Cloud Run, Cloud Functions, KMS, and Cloud SQL
+- **native:** registered Cloud Scheduler and Cloud Monitoring protos for native-image reflection
+- **kafka:** seed read-write data volumes from the image (drop `nocopy`) so the Redpanda broker starts on a fresh volume
+- **cloudsql:** set the PostgreSQL data mount path dynamically based on the instance's Postgres major version
+- **core:** log the enabled-services summary after all services have registered
+
 ## [0.2.1] - 2026-06-03
 
 ### Fixed
@@ -70,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci-gcp/compare/0.2.1...HEAD
+[Unreleased]: https://github.com/floci-io/floci-gcp/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/floci-io/floci-gcp/compare/0.2.1...0.3.0
 [0.2.1]: https://github.com/floci-io/floci-gcp/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/floci-io/floci-gcp/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/floci-io/floci-gcp/releases/tag/0.1.0

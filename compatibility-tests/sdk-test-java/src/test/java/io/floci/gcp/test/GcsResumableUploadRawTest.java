@@ -156,4 +156,46 @@ class GcsResumableUploadRawTest {
         assertThat(download.statusCode()).isEqualTo(200);
         assertThat(download.body()).containsExactly(data);
     }
+
+    @Test
+    void resumableUploadWithCustomEndpointUrlPath() throws Exception {
+        String objectName = "custom-endpoint-path.bin";
+        byte[] data = "custom-endpoint-path-data".getBytes(StandardCharsets.UTF_8);
+        HttpResponse<String> init = CLIENT.send(
+                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                                + "/storage/v1/b/" + BUCKET
+                                + "/o?uploadType=resumable&name=" + objectName))
+                        .header("X-Upload-Content-Type", "application/octet-stream")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(init.statusCode()).isEqualTo(200);
+        URI uploadUri = URI.create(init.headers().firstValue("Location").orElseThrow());
+
+        // Rewrite uploadUri's path to /storage/v1/b/... to test the PUT path rewrite too
+        URI customUploadUri = URI.create(uploadUri.toString().replace("/upload/storage/v1/b/", "/storage/v1/b/"));
+
+        HttpResponse<String> upload = CLIENT.send(
+                HttpRequest.newBuilder(customUploadUri)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", "bytes 0-*/*")
+                        .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(upload.statusCode()).isEqualTo(200);
+        assertThat(upload.body()).contains("\"size\":\"" + data.length + "\"");
+
+        HttpResponse<byte[]> download = CLIENT.send(
+                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                                + "/storage/v1/b/" + BUCKET + "/o/" + objectName + "?alt=media"))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+
+        assertThat(download.statusCode()).isEqualTo(200);
+        assertThat(download.body()).containsExactly(data);
+    }
 }

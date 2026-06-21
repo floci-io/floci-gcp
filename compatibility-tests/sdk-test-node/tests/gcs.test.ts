@@ -41,6 +41,17 @@ describe('Cloud Storage (GCS)', () => {
     });
   });
 
+  it('should upload a large object (>8MB) using resumable upload', async () => {
+    const largeContent = Buffer.alloc(9 * 1024 * 1024, 'x');
+    const largeObjectName = 'large-test-object.bin';
+    await storage.bucket(bucketName).file(largeObjectName).save(largeContent, {
+      contentType: 'application/octet-stream',
+    });
+    const [downloaded] = await storage.bucket(bucketName).file(largeObjectName).download();
+    expect(downloaded.length).toBe(largeContent.length);
+    await storage.bucket(bucketName).file(largeObjectName).delete();
+  });
+
   it('should download and verify object content', async () => {
     const [content] = await storage.bucket(bucketName).file(objectName).download();
     expect(content.toString()).toBe(objectContent);

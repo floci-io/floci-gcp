@@ -29,7 +29,16 @@ public class GcsPathRewriteFilter implements ContainerRequestFilter {
             newPath = "/storage/v1" + path;
         }
 
-        if (newPath != null) {
+        if (newPath == null) {
+            newPath = path;
+        }
+
+        if (("POST".equalsIgnoreCase(ctx.getMethod()) || "PUT".equalsIgnoreCase(ctx.getMethod()))
+                && (newPath.startsWith("/storage/v1/b/") && (newPath.endsWith("/o") || newPath.endsWith("/o/")))) {
+            newPath = "/upload" + newPath;
+        }
+
+        if (!newPath.equals(path)) {
             URI original = ctx.getUriInfo().getRequestUri();
             URI rewritten = URI.create(
                     original.getScheme() + "://" + original.getAuthority()

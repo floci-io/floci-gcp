@@ -35,6 +35,10 @@ public class GrpcServerManager {
         grpcServer = GrpcIoServer.server(vertx);
         services.stream().forEach(svc -> GrpcIoServiceBridge.bridge(svc).bind(grpcServer));
         router.route().order(Integer.MIN_VALUE).handler(ctx -> {
+            String method = ctx.request().method().name();
+            String uri = ctx.request().uri();
+            String contentType = ctx.request().getHeader("Content-Type");
+            LOG.infof("Incoming request: %s %s, content-type=%s", method, uri, contentType);
             String ct = ctx.request().getHeader("Content-Type");
             if (ct != null && ct.startsWith("application/grpc")) {
                 long start = System.currentTimeMillis();

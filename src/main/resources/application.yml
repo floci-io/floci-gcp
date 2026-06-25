@@ -93,6 +93,8 @@ floci-gcp:
       enabled: true
       invocation-enabled: true
       tick-interval-seconds: 10
+    eventarc:
+      enabled: true
   dns:
     extra-suffixes:
   docker:

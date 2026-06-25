@@ -102,6 +102,8 @@ public interface EmulatorConfig {
         MonitoringServiceConfig monitoring();
 
         SchedulerServiceConfig scheduler();
+
+        EventarcServiceConfig eventarc();
     }
 
     interface GcsServiceConfig {
@@ -223,6 +225,11 @@ public interface EmulatorConfig {
     }
 
     interface MonitoringServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface EventarcServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

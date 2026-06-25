@@ -40,5 +40,7 @@ floci-gcp:
       enabled: true
       invocation-enabled: true
       tick-interval-seconds: 1
+    eventarc:
+      enabled: true
   docker:
     api-timeout: 30s

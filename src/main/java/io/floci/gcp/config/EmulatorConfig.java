@@ -102,6 +102,33 @@ public interface EmulatorConfig {
         MonitoringServiceConfig monitoring();
 
         SchedulerServiceConfig scheduler();
+
+        GkeServiceConfig gke();
+    }
+
+    interface GkeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        @WithDefault("rancher/k3s:latest")
+        String defaultImage();
+
+        @WithDefault("6550")
+        int apiServerBasePort();
+
+        @WithDefault("6599")
+        int apiServerMaxPort();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        @WithDefault("host")
+        String endpointMode();
+
+        Optional<String> dockerNetwork();
     }
 
     interface GcsServiceConfig {

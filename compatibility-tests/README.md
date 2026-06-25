@@ -49,7 +49,7 @@ just test-all-iac
 
 ## Test Coverage
 
-### SDK tests — 233 tests total
+### SDK tests — 237 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
@@ -62,9 +62,16 @@ just test-all-iac
 | `DatastoreTest` | Datastore | 5 | 5 | 5 | 5 |
 | `IamTest` | IAM | 7 | 5 | 7 | 7 |
 | `KafkaTest` | Managed Kafka | 11 | 9 | 11 | 11 |
+| `GkeTest` | GKE (Kubernetes Engine) | 4 | 0 | 0 | 0 |
 | `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
 | `SchedulerTest` | Cloud Scheduler | 7 | 0 | 0 | 0 |
-| **Total** | | **68** | **48** | **59** | **58** |
+| **Total** | | **72** | **48** | **59** | **58** |
+
+GKE uses the HttpJson transport (the Cloud SDK defaults to gRPC, which the REST-only
+emulator does not serve for GKE) and reaches the service via host-based routing
+(`container.*`). The gcloud suite also covers GKE (`container.bats`). The
+Terraform/OpenTofu `google_container_cluster` resource is not covered — the google provider
+expects a richer cluster surface than the emulator implements.
 
 ### IaC tests
 

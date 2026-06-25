@@ -78,6 +78,7 @@ nav:
     - Cloud KMS: services/kms.md
     - IAM: services/iam.md
     - Managed Kafka: services/managed-kafka.md
+    - GKE (Kubernetes Engine): services/gke.md
     - Cloud SQL for PostgreSQL: services/cloud-sql-postgres.md
     - Cloud Run: services/cloud-run.md
     - Cloud Functions: services/cloud-functions.md

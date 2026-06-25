@@ -93,6 +93,15 @@ floci-gcp:
       enabled: true
       invocation-enabled: true
       tick-interval-seconds: 10
+    gke:
+      enabled: true
+      mock: false
+      default-image: "rancher/k3s:latest"
+      api-server-base-port: 6550
+      api-server-max-port: 6599
+      keep-running-on-shutdown: false
+      endpoint-mode: host
+      docker-network:
   dns:
     extra-suffixes:
   docker:

@@ -136,6 +136,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud KMS | ✅ | ❌ |
 | IAM | ✅ | ❌ |
 | Managed Kafka | ✅ | ❌ |
+| GKE (Kubernetes Engine) | ✅ | ❌ |
 | Cloud Run | ✅ | ❌ |
 | Cloud Functions | ✅ | ❌ |
 | Cloud SQL for PostgreSQL | ✅ | ❌ |
@@ -158,7 +159,7 @@ flowchart LR
         end
 
         subgraph REST ["REST services"]
-            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL"]
+            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE"]
         end
 
         subgraph Docker ["Docker-backed"]
@@ -185,6 +186,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Object and document storage | Cloud Storage (GCS), Firestore, Datastore |
 | Messaging | Pub/Sub, Managed Kafka |
 | Security and identity | Secret Manager, Cloud KMS, IAM |
+| Container orchestration | GKE (Kubernetes Engine) |
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
@@ -204,6 +206,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
+| **GKE (Kubernetes Engine)** | REST JSON | Clusters and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. Reached by SDKs/gcloud through host-based routing (`container.*`) or the `/container/v1` path prefix |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane by default, experimental Docker-backed invocation when enabled |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 | **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |

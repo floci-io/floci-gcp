@@ -14,6 +14,9 @@ or a lightweight mock mode.
 | `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` | Image used for real clusters |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT` | `6550` | Start of the host port range for k3s API servers |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | End of the host port range |
+| `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl` (`host` for a reachable `host:port`) |
+| `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave spawned k3s containers running after floci-gcp shuts down |
+| `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
 
 ## Routing: how clients reach GKE
 
@@ -65,6 +68,25 @@ everything on one port, where that path also belongs to Managed Kafka, so GKE mo
     gcloud container clusters create my-cluster --region=us-central1 --async
     gcloud container clusters list --region=us-central1
     ```
+
+## kubectl Access
+
+Real (non-mock) clusters run an actual k3s API server, so the native
+`gcloud container clusters get-credentials` + `kubectl` flow works end to end:
+
+```bash
+gcloud container clusters get-credentials my-cluster --region=us-central1
+kubectl get nodes
+```
+
+`get-credentials` writes a kubeconfig that authenticates with the GCP access token produced by
+the `gke-gcloud-auth-plugin`. k3s forwards any bearer token it does not recognise to floci-gcp's
+token-authentication webhook, which — since floci-gcp does not validate credentials — accepts any
+non-empty token and maps it to `cluster-admin`. The cluster endpoint is advertised as a reachable
+`host:port` (`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so the kubeconfig server URL
+resolves correctly.
+
+This flow requires a real cluster — it does not apply in mock mode, where no API server is started.
 
 ## Mock Mode
 

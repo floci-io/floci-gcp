@@ -78,6 +78,12 @@ floci-gcp:
     iam:
       enabled: true
 
+    logging:
+      enabled: true
+
+    kms:
+      enabled: true
+
     kafka:
       enabled: true
       mock: false
@@ -97,9 +103,8 @@ floci-gcp:
 
     cloudrun:
       enabled: true
+      mock: false                     # false runs Docker-backed service execution
       execution:
-        enabled: false
-        mock: false
         default-port: 8080
         startup-timeout: 240s
         request-timeout: 300s
@@ -110,6 +115,24 @@ floci-gcp:
 
     cloudfunctions:
       enabled: true
+
+    monitoring:
+      enabled: true
+
+    scheduler:
+      enabled: true
+      invocation-enabled: true        # background dispatcher fires due jobs
+      tick-interval-seconds: 10
+
+    gke:
+      enabled: true
+      mock: false                     # false starts real rancher/k3s clusters
+      default-image: "rancher/k3s:latest"
+      api-server-base-port: 6550
+      api-server-max-port: 6599
+      keep-running-on-shutdown: false
+      endpoint-mode: host
+      docker-network:                 # overrides services.docker-network for k3s sidecars
 ```
 
 ## Disabling Services

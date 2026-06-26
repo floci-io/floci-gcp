@@ -151,6 +151,27 @@ public final class TestFixtures {
         return ServicesClient.create(settings);
     }
 
+    /**
+     * GKE (container.googleapis.com) endpoint. The Cloud Client SDK defaults to gRPC, which the
+     * REST-only emulator cannot serve, so GKE tests use the HttpJson transport. The host's first
+     * DNS label must be {@code container} so the emulator's ServiceRoutingFilter rewrites the
+     * canonical {@code /v1/...} path onto the {@code /container} prefix (host-mode routing).
+     * Defaults to {@code container.localhost} (resolves to 127.0.0.1 on the host); the Docker
+     * compat run sets {@code GKE_EMULATOR_ENDPOINT=http://container.localhost.floci.io:4588}.
+     */
+    public static String gkeEndpoint() {
+        return System.getenv().getOrDefault("GKE_EMULATOR_ENDPOINT", "http://container.localhost:4588");
+    }
+
+    public static com.google.cloud.container.v1.ClusterManagerClient gkeClient() throws IOException {
+        com.google.cloud.container.v1.ClusterManagerSettings settings =
+                com.google.cloud.container.v1.ClusterManagerSettings.newHttpJsonBuilder()
+                        .setEndpoint(gkeEndpoint())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build();
+        return com.google.cloud.container.v1.ClusterManagerClient.create(settings);
+    }
+
     public static RevisionsClient cloudRunRevisionsClient() throws IOException {
         RevisionsSettings settings = RevisionsSettings.newHttpJsonBuilder()
                 .setEndpoint(endpoint())

@@ -93,6 +93,7 @@ jobs:
             sdk-test-*) KAFKA_MOCK=true ;;
           esac
           docker run -d --name floci-gcp --network compat-net \
+            --network-alias container.localhost.floci.io \
             -p 4588:4588 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             --group-add "$DOCKER_GID" \

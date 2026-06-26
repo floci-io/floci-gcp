@@ -104,6 +104,18 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES18_IMAGE` | `postgres:18.4-alpine` | Docker image used for `POSTGRES_18` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_STARTUP_TIMEOUT_SECONDS` | `90` | Max time to wait for PostgreSQL readiness after container start |
 
+### GKE (Kubernetes Engine)
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_SERVICES_GKE_MOCK` | `false` | When `true`, emulate the GKE control plane only — no real `k3s` clusters are started |
+| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` | Image used for spawned k3s control-plane containers |
+| `FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT` | `6550` | Lowest host port assigned to a cluster's Kubernetes API server |
+| `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | Highest host port assigned to a cluster's Kubernetes API server |
+| `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | When `true`, leave spawned k3s containers running after floci-gcp shuts down |
+| `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl` (`host` for a reachable `host:port`) |
+| `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
+
 ---
 
 ## Initialization Hooks

@@ -42,5 +42,8 @@ floci-gcp:
       tick-interval-seconds: 1
     eventarc:
       enabled: true
+    gke:
+      enabled: true
+      mock: true
   docker:
     api-timeout: 30s

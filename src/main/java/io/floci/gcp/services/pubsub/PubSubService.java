@@ -25,6 +25,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -82,7 +83,8 @@ public class PubSubService {
                 .enabled(config.services().pubsub().enabled())
                 .storageKey("pubsub")
                 .protocol(ServiceProtocol.GRPC)
-                .resourceClasses(PubSubPublisherController.class, PubSubSubscriberController.class)
+                .resourceClasses(PubSubPublisherController.class, PubSubSubscriberController.class,
+                        PubSubRestController.class)
                 .build());
         grpcServerManager.bind(new PubSubPublisherController(this));
         grpcServerManager.bind(new PubSubSubscriberController(this));
@@ -91,12 +93,18 @@ public class PubSubService {
     // ── Topics ─────────────────────────────────────────────────────────────────
 
     public StoredTopic createTopic(String name) {
+        return createTopic(name, null, null);
+    }
+
+    public StoredTopic createTopic(String name, Map<String, String> labels, String messageRetentionDuration) {
         LOG.infof("createTopic name=%s", name);
         if (topicStore.get(name).isPresent()) {
             LOG.warnf("createTopic failed: topic already exists name=%s", name);
             throw GcpException.alreadyExists("Topic already exists: " + name);
         }
         StoredTopic topic = new StoredTopic(name);
+        topic.setLabels(emptyToNull(labels));
+        topic.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
         topicStore.put(name, topic);
         return topic;
     }
@@ -135,6 +143,21 @@ public class PubSubService {
         return stored;
     }
 
+    public StoredTopic updateTopic(String name, Map<String, String> labels,
+            String messageRetentionDuration, List<String> updateMaskPaths) {
+        LOG.infof("updateTopic name=%s", name);
+        StoredTopic stored = getTopic(name);
+        boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
+        if (replaceAll || masked(updateMaskPaths, "labels")) {
+            stored.setLabels(emptyToNull(labels));
+        }
+        if (replaceAll || masked(updateMaskPaths, "message_retention_duration")) {
+            stored.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
+        }
+        topicStore.put(name, stored);
+        return stored;
+    }
+
     public void deleteTopic(String name) {
         LOG.infof("deleteTopic name=%s", name);
         if (topicStore.get(name).isEmpty()) {
@@ -147,6 +170,25 @@ public class PubSubService {
     // ── Subscriptions ──────────────────────────────────────────────────────────
 
     public StoredSubscription createSubscription(String name, String topicName, int ackDeadlineSeconds) {
+        return createSubscription(name, topicName, ackDeadlineSeconds, null, false, null,
+                null, null, null, null, null, null, 0, false, false);
+    }
+
+    public StoredSubscription createSubscription(String name,
+            String topicName,
+            int ackDeadlineSeconds,
+            Map<String, String> labels,
+            boolean retainAckedMessages,
+            String messageRetentionDuration,
+            String filter,
+            String pushEndpoint,
+            Map<String, Object> bigQueryConfig,
+            Map<String, Object> expirationPolicy,
+            Map<String, Object> retryPolicy,
+            String deadLetterTopic,
+            int maxDeliveryAttempts,
+            boolean enableMessageOrdering,
+            boolean enableExactlyOnceDelivery) {
         LOG.infof("createSubscription name=%s topic=%s ackDeadline=%d", name, topicName, ackDeadlineSeconds);
         if (subStore.get(name).isPresent()) {
             LOG.warnf("createSubscription failed: subscription already exists name=%s", name);
@@ -158,6 +200,18 @@ public class PubSubService {
         }
         int deadline = ackDeadlineSeconds > 0 ? ackDeadlineSeconds : 10;
         StoredSubscription sub = new StoredSubscription(name, topicName, deadline);
+        sub.setLabels(emptyToNull(labels));
+        sub.setRetainAckedMessages(retainAckedMessages);
+        sub.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
+        sub.setFilter(blankToNull(filter));
+        sub.setPushEndpoint(blankToNull(pushEndpoint));
+        sub.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
+        sub.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
+        sub.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
+        sub.setDeadLetterTopic(blankToNull(deadLetterTopic));
+        sub.setMaxDeliveryAttempts(maxDeliveryAttempts);
+        sub.setEnableMessageOrdering(enableMessageOrdering);
+        sub.setEnableExactlyOnceDelivery(enableExactlyOnceDelivery);
         subStore.put(name, sub);
         queues.put(name, new ConcurrentLinkedDeque<>());
         delivered.put(name, new ConcurrentHashMap<>());
@@ -185,6 +239,8 @@ public class PubSubService {
         for (String path : updateMask.getPathsList()) {
             switch (path) {
                 case "ack_deadline_seconds" -> stored.setAckDeadlineSeconds(subProto.getAckDeadlineSeconds());
+                case "labels" -> stored.setLabels(subProto.getLabelsMap().isEmpty() ? null
+                        : new java.util.HashMap<>(subProto.getLabelsMap()));
                 case "filter" -> stored.setFilter(subProto.getFilter().isEmpty() ? null : subProto.getFilter());
                 case "retain_acked_messages" -> stored.setRetainAckedMessages(subProto.getRetainAckedMessages());
                 case "message_retention_duration" -> {
@@ -193,6 +249,10 @@ public class PubSubService {
                                 subProto.getMessageRetentionDuration().getSeconds() + "s");
                     }
                 }
+                case "enable_message_ordering" -> stored.setEnableMessageOrdering(
+                        subProto.getEnableMessageOrdering());
+                case "enable_exactly_once_delivery" -> stored.setEnableExactlyOnceDelivery(
+                        subProto.getEnableExactlyOnceDelivery());
                 case "push_config" -> stored.setPushEndpoint(
                         subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
                                 : subProto.getPushConfig().getPushEndpoint());
@@ -205,6 +265,75 @@ public class PubSubService {
             }
         }
         subStore.put(subProto.getName(), stored);
+        return stored;
+    }
+
+    public StoredSubscription updateSubscription(String name,
+            int ackDeadlineSeconds,
+            Map<String, String> labels,
+            Boolean retainAckedMessages,
+            String messageRetentionDuration,
+            String filter,
+            String pushEndpoint,
+            Map<String, Object> bigQueryConfig,
+            Map<String, Object> expirationPolicy,
+            Map<String, Object> retryPolicy,
+            String deadLetterTopic,
+            Integer maxDeliveryAttempts,
+            Boolean enableMessageOrdering,
+            Boolean enableExactlyOnceDelivery,
+            List<String> updateMaskPaths) {
+        LOG.infof("updateSubscription name=%s", name);
+        StoredSubscription stored = getSubscription(name);
+        boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
+
+        if (replaceAll || masked(updateMaskPaths, "ack_deadline_seconds")) {
+            if (ackDeadlineSeconds > 0) {
+                stored.setAckDeadlineSeconds(ackDeadlineSeconds);
+            }
+        }
+        if (replaceAll || masked(updateMaskPaths, "labels")) {
+            stored.setLabels(emptyToNull(labels));
+        }
+        if (replaceAll || masked(updateMaskPaths, "retain_acked_messages")) {
+            if (retainAckedMessages != null) {
+                stored.setRetainAckedMessages(retainAckedMessages);
+            }
+        }
+        if (replaceAll || masked(updateMaskPaths, "message_retention_duration")) {
+            stored.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
+        }
+        if (replaceAll || masked(updateMaskPaths, "filter")) {
+            stored.setFilter(blankToNull(filter));
+        }
+        if (replaceAll || masked(updateMaskPaths, "push_config")) {
+            stored.setPushEndpoint(blankToNull(pushEndpoint));
+        }
+        if (replaceAll || masked(updateMaskPaths, "bigquery_config")) {
+            stored.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
+        }
+        if (replaceAll || masked(updateMaskPaths, "expiration_policy")) {
+            stored.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
+        }
+        if (replaceAll || masked(updateMaskPaths, "retry_policy")) {
+            stored.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
+        }
+        if (replaceAll || masked(updateMaskPaths, "dead_letter_policy")) {
+            stored.setDeadLetterTopic(blankToNull(deadLetterTopic));
+            stored.setMaxDeliveryAttempts(maxDeliveryAttempts == null ? 0 : maxDeliveryAttempts);
+        }
+        if (replaceAll || masked(updateMaskPaths, "enable_message_ordering")) {
+            if (enableMessageOrdering != null) {
+                stored.setEnableMessageOrdering(enableMessageOrdering);
+            }
+        }
+        if (replaceAll || masked(updateMaskPaths, "enable_exactly_once_delivery")) {
+            if (enableExactlyOnceDelivery != null) {
+                stored.setEnableExactlyOnceDelivery(enableExactlyOnceDelivery);
+            }
+        }
+
+        subStore.put(name, stored);
         return stored;
     }
 
@@ -423,5 +552,42 @@ public class PubSubService {
         } catch (Exception e) {
             return Timestamp.getDefaultInstance();
         }
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static Map<String, String> emptyToNull(Map<String, String> value) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        return new LinkedHashMap<>(value);
+    }
+
+    private static Map<String, Object> emptyObjectMapToNull(Map<String, Object> value) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        return new LinkedHashMap<>(value);
+    }
+
+    private static boolean masked(List<String> updateMaskPaths, String path) {
+        return updateMaskPaths.stream()
+                .map(PubSubService::jsonMaskToProtoMask)
+                .anyMatch(mask -> mask.equals(path) || mask.startsWith(path + "."));
+    }
+
+    private static String jsonMaskToProtoMask(String path) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (Character.isUpperCase(c)) {
+                out.append('_').append(Character.toLowerCase(c));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 }

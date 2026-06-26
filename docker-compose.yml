@@ -17,6 +17,7 @@ services:
       floci_gcp_default:
         aliases:
           - localhost.floci.io
+          - container.localhost.floci.io
 
 networks:
   floci_gcp_default:

@@ -34,6 +34,14 @@ export CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER="${FLOCI_GCP_ENDPOINT}/"
 export CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDKMS="${FLOCI_GCP_ENDPOINT}/"
 export CLOUDSDK_API_ENDPOINT_OVERRIDES_IAM="${FLOCI_GCP_ENDPOINT}/"
 export CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDSCHEDULER="${FLOCI_GCP_ENDPOINT}/"
+# GKE lives under the /container prefix (it shares the canonical /v1/.../clusters path with
+# Managed Kafka). gcloud appends "v1/...", so the override base must end in /container/.
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER="${FLOCI_GCP_ENDPOINT}/container/"
+# `gcloud container` preflights an API-enablement check against serviceusage.googleapis.com,
+# which the fake token can't satisfy. Point serviceusage at the emulator (it 404s the check)
+# and disable the enable-API prompt so the command proceeds. floci-gcp ignores auth anyway.
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_SERVICEUSAGE="${FLOCI_GCP_ENDPOINT}/"
+export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
 
 # Run a gcloud command (stderr folded into stdout so asserts can match either).
 gcloud_cmd() {

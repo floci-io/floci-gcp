@@ -17,5 +17,8 @@ ENV PUBSUB_EMULATOR_HOST=floci-gcp:4588
 ENV FIRESTORE_EMULATOR_HOST=floci-gcp:4588
 ENV DATASTORE_EMULATOR_HOST=floci-gcp:4588
 ENV STORAGE_EMULATOR_HOST=http://floci-gcp:4588
+# GKE uses host-mode routing: the "container." first label triggers the emulator's
+# ServiceRoutingFilter. container.localhost.floci.io is a docker-compose network alias.
+ENV GKE_EMULATOR_ENDPOINT=http://container.localhost.floci.io:4588
 
 ENTRYPOINT ["/bin/bash", "-c", "mvn test; status=$?; mkdir -p /results && cp -r target/surefire-reports/*.xml /results/ 2>/dev/null || true; exit $status"]

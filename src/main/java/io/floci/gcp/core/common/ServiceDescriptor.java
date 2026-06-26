@@ -9,7 +9,9 @@ public record ServiceDescriptor(
         String storageMode,
         long storageFlushIntervalMs,
         ServiceProtocol protocol,
-        Set<Class<?>> resourceClasses
+        Set<Class<?>> resourceClasses,
+        String hostToken,
+        String pathPrefix
 ) {
 
     public static Builder builder(String name) {
@@ -24,6 +26,8 @@ public record ServiceDescriptor(
         private long storageFlushIntervalMs = 5000;
         private ServiceProtocol protocol = ServiceProtocol.REST;
         private Set<Class<?>> resourceClasses = Set.of();
+        private String hostToken;
+        private String pathPrefix;
 
         private Builder(String name) {
             this.name = name;
@@ -35,10 +39,12 @@ public record ServiceDescriptor(
         public Builder flushInterval(long ms) { this.storageFlushIntervalMs = ms; return this; }
         public Builder protocol(ServiceProtocol protocol) { this.protocol = protocol; return this; }
         public Builder resourceClasses(Class<?>... classes) { this.resourceClasses = Set.of(classes); return this; }
+        public Builder hostToken(String hostToken) { this.hostToken = hostToken; return this; }
+        public Builder pathPrefix(String pathPrefix) { this.pathPrefix = pathPrefix; return this; }
 
         public ServiceDescriptor build() {
             return new ServiceDescriptor(name, enabled, storageKey, storageMode,
-                    storageFlushIntervalMs, protocol, resourceClasses);
+                    storageFlushIntervalMs, protocol, resourceClasses, hostToken, pathPrefix);
         }
     }
 }

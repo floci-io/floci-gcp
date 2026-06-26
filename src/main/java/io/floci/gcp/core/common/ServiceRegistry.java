@@ -28,6 +28,18 @@ public class ServiceRegistry {
         return Optional.ofNullable(byResourceClass.get(clazz));
     }
 
+    /**
+     * Returns enabled services that declare a routing {@code pathPrefix} (and usually a
+     * {@code hostToken}). Used by the single-port {@code ServiceRoutingFilter} to map
+     * canonical/host-based REST requests onto a prefixed controller.
+     */
+    public List<ServiceDescriptor> getRoutableServices() {
+        return descriptors.stream()
+                .filter(ServiceDescriptor::enabled)
+                .filter(d -> d.pathPrefix() != null && !d.pathPrefix().isBlank())
+                .toList();
+    }
+
     public boolean isEnabled(String name) {
         return descriptors.stream()
                 .filter(d -> d.name().equals(name))

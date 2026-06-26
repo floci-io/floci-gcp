@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **gke:** GKE control plane (`container.googleapis.com`, ClusterManager v1) — cluster and operation lifecycle backed by real `rancher/k3s` clusters via the docker-java API (with a `gke.mock` synthetic fast path), responses following the `google.container.v1` `Cluster`/`Operation` shapes. Reached through a single-port host+path routing filter (`container.*` host for SDKs, `/container/v1` prefix for gcloud/Terraform). Native `kubectl` auth via a token webhook so `gcloud container clusters get-credentials` plus the `gke-gcloud-auth-plugin` work end to end
+
+### Fixed
+
+- **gcs:** resolved `405 Method Not Allowed` during resumable uploads when using a custom endpoint
+
 ## [0.3.0] - 2026-06-19
 
 ### Added

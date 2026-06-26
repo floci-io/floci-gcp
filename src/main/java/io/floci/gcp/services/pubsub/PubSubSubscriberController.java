@@ -325,12 +325,39 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     }
 
     private static Subscription buildSubscription(StoredSubscription stored) {
-        return Subscription.newBuilder()
+        Subscription.Builder builder = Subscription.newBuilder()
                 .setName(stored.getName())
                 .setTopic(stored.getTopic())
                 .setAckDeadlineSeconds(stored.getAckDeadlineSeconds())
-                .setDetached(stored.isDetached())
-                .build();
+                .setRetainAckedMessages(stored.isRetainAckedMessages())
+                .setEnableMessageOrdering(stored.isEnableMessageOrdering())
+                .setEnableExactlyOnceDelivery(stored.isEnableExactlyOnceDelivery())
+                .setDetached(stored.isDetached());
+        if (stored.getLabels() != null) {
+            builder.putAllLabels(stored.getLabels());
+        }
+        if (stored.getFilter() != null) {
+            builder.setFilter(stored.getFilter());
+        }
+        if (stored.getPushEndpoint() != null) {
+            builder.setPushConfig(PushConfig.newBuilder().setPushEndpoint(stored.getPushEndpoint()).build());
+        }
+        if (stored.getMessageRetentionDuration() != null
+                && stored.getMessageRetentionDuration().endsWith("s")) {
+            try {
+                long seconds = Long.parseLong(stored.getMessageRetentionDuration()
+                        .substring(0, stored.getMessageRetentionDuration().length() - 1));
+                builder.setMessageRetentionDuration(
+                        com.google.protobuf.Duration.newBuilder().setSeconds(seconds).build());
+            } catch (NumberFormatException ignored) {}
+        }
+        if (stored.getDeadLetterTopic() != null) {
+            builder.setDeadLetterPolicy(DeadLetterPolicy.newBuilder()
+                    .setDeadLetterTopic(stored.getDeadLetterTopic())
+                    .setMaxDeliveryAttempts(stored.getMaxDeliveryAttempts())
+                    .build());
+        }
+        return builder.build();
     }
 
     private static String extractProjectId(String parent) {

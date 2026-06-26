@@ -1,6 +1,7 @@
 # Pub/Sub
 
 floci-gcp emulates Google Cloud Pub/Sub over gRPC using the real `google.pubsub.v1` protocol.
+It also exposes the Pub/Sub REST v1 JSON surface used by tools such as Terraform.
 
 ## Configuration
 
@@ -15,6 +16,32 @@ export PUBSUB_EMULATOR_HOST=localhost:4588
 ```
 
 GCP Pub/Sub SDK clients use this variable to route requests to floci-gcp instead of `pubsub.googleapis.com`.
+
+## REST / Terraform Endpoint
+
+Terraform's Google provider can use the REST endpoint with:
+
+```hcl
+provider "google" {
+  pubsub_custom_endpoint = "http://localhost:4588/v1/"
+}
+```
+
+The REST surface supports topic and subscription create/read/list/update/delete, publish, pull, and acknowledge:
+
+- `PUT /v1/projects/{project}/topics/{topic}`
+- `GET /v1/projects/{project}/topics/{topic}`
+- `GET /v1/projects/{project}/topics`
+- `PATCH /v1/projects/{project}/topics/{topic}?updateMask=...`
+- `DELETE /v1/projects/{project}/topics/{topic}`
+- `POST /v1/projects/{project}/topics/{topic}:publish`
+- `PUT /v1/projects/{project}/subscriptions/{subscription}`
+- `GET /v1/projects/{project}/subscriptions/{subscription}`
+- `GET /v1/projects/{project}/subscriptions`
+- `PATCH /v1/projects/{project}/subscriptions/{subscription}?updateMask=...`
+- `DELETE /v1/projects/{project}/subscriptions/{subscription}`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:pull`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:acknowledge`
 
 ## Quick Start
 

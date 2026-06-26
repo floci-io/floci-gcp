@@ -5,7 +5,8 @@ on:
     paths:
       - 'src/**'
       - 'pom.xml'
-      - 'docker/Dockerfile.jvm-package'
+      - 'docker/Dockerfile.native-package'
+      - 'docker/entrypoint.sh'
       - 'compatibility-tests/**'
       - '.github/workflows/compatibility.yml'
 
@@ -17,48 +18,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build floci-gcp image
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  build-native:
+    name: Build native floci-gcp image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-java@v5
+      - uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1
         with:
           java-version: '25'
-          distribution: 'temurin'
+          distribution: 'mandrel'
           cache: maven
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build JVM artifact
-        run: mvn clean package -DskipTests -q
+      - name: Build native executable (quick build)
+        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob"
+
+      - name: Stage native binary for packaging
+        run: |
+          mkdir -p native/arm64
+          cp target/*-runner native/arm64/
+          cp target/*.so native/arm64/ 2>/dev/null || true
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      - name: Build Docker image
+      - name: Build native Docker image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
-          file: docker/Dockerfile.jvm-package
-          tags: floci-gcp:test
-          outputs: type=docker,dest=/tmp/floci-gcp-image.tar
-          cache-from: type=gha,scope=floci-gcp
-          cache-to: type=gha,scope=floci-gcp,mode=max
+          file: docker/Dockerfile.native-package
+          tags: floci-gcp:test-native
+          outputs: type=docker,dest=/tmp/floci-gcp-native-image.tar
+          cache-from: type=gha,scope=floci-gcp-native
+          cache-to: type=gha,scope=floci-gcp-native,mode=max
 
-      - name: Compress image
-        run: gzip /tmp/floci-gcp-image.tar
+      - name: Compress native image
+        run: gzip /tmp/floci-gcp-native-image.tar
 
-      - name: Upload floci-gcp image
+      - name: Upload native floci-gcp image
         uses: actions/upload-artifact@v7
         with:
-          name: floci-gcp-image
-          path: /tmp/floci-gcp-image.tar.gz
+          name: floci-gcp-native-image
+          path: /tmp/floci-gcp-native-image.tar.gz
           retention-days: 1
 
-  compat-test:
-    name: ${{ matrix.test }}
-    needs: build
-    runs-on: ubuntu-latest
+  native-compat-test:
+    name: native / ${{ matrix.test }}
+    needs: build-native
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -73,14 +81,14 @@ jobs:
           - compat-opentofu
 
     steps:
-      - name: Download floci-gcp image
+      - name: Download native floci-gcp image
         uses: actions/download-artifact@v8
         with:
-          name: floci-gcp-image
+          name: floci-gcp-native-image
           path: /tmp
 
-      - name: Load floci-gcp image
-        run: gunzip -c /tmp/floci-gcp-image.tar.gz | docker load
+      - name: Load native floci-gcp image
+        run: gunzip -c /tmp/floci-gcp-native-image.tar.gz | docker load
 
       - name: Create Docker network
         run: docker network create compat-net
@@ -102,7 +110,7 @@ jobs:
             -e FLOCI_GCP_SERVICES_DOCKER_NETWORK=compat-net \
             -e FLOCI_GCP_SERVICES_KAFKA_MOCK="$KAFKA_MOCK" \
             -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false \
-            floci-gcp:test
+            floci-gcp:test-native
 
       - name: Wait for floci-gcp to be ready
         run: timeout 60 bash -c 'until curl -sf http://localhost:4588/health >/dev/null 2>&1; do sleep 1; done'
@@ -120,8 +128,8 @@ jobs:
           context: compatibility-tests/${{ matrix.test }}
           load: true
           tags: compat-${{ matrix.test }}
-          cache-from: type=gha,scope=${{ matrix.test }}
-          cache-to: type=gha,scope=${{ matrix.test }},mode=max
+          cache-from: type=gha,scope=${{ runner.os }}-${{ runner.arch }}-${{ matrix.test }}
+          cache-to: type=gha,scope=${{ runner.os }}-${{ runner.arch }}-${{ matrix.test }},mode=max
 
       - name: Run tests
         id: tests

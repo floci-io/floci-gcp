@@ -1,4 +1,4 @@
-FROM google/cloud-sdk:slim
+FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git jq \

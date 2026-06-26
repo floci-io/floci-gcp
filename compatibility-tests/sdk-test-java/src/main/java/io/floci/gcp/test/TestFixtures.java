@@ -282,4 +282,13 @@ public final class TestFixtures {
 
         return CloudSchedulerClient.create(settings);
     }
+
+    public static com.google.cloud.eventarc.v1.EventarcClient eventarcClient() throws IOException {
+        com.google.cloud.eventarc.v1.EventarcSettings settings =
+                com.google.cloud.eventarc.v1.EventarcSettings.newHttpJsonBuilder()
+                        .setEndpoint(endpoint())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build();
+        return com.google.cloud.eventarc.v1.EventarcClient.create(settings);
+    }
 }

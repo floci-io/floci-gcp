@@ -57,6 +57,9 @@ public class GcsService {
     private final String defaultProjectId;
     private final PubSubService pubSubService;
 
+    @Inject
+    jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Inject
@@ -276,6 +279,13 @@ public class GcsService {
         objectDataStore.put(key, data);
         objectMetaStore.put(key, meta);
         publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
+        if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
+            try {
+                eventarcServiceInstance.get().onGcsEvent(bucket, objectName, meta, "google.cloud.storage.object.v1.finalized");
+            } catch (Exception e) {
+                LOG.warnf(e, "Eventarc GCS object finalize event dispatch failed bucket=%s object=%s", bucket, objectName);
+            }
+        }
         return meta;
     }
 
@@ -392,6 +402,13 @@ public class GcsService {
         objectDataStore.delete(key);
         if (deletedMeta != null) {
             publishNotificationEvent(bucket, objectName, deletedMeta, "OBJECT_DELETE");
+            if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
+                try {
+                    eventarcServiceInstance.get().onGcsEvent(bucket, objectName, deletedMeta, "google.cloud.storage.object.v1.deleted");
+                } catch (Exception e) {
+                    LOG.warnf(e, "Eventarc GCS object delete event dispatch failed bucket=%s object=%s", bucket, objectName);
+                }
+            }
         }
         return true;
     }

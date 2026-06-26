@@ -87,6 +87,12 @@
             <artifactId>proto-google-cloud-functions-v2</artifactId>
         </dependency>
 
+        <!-- Eventarc v1 proto types for REST JSON control-plane emulation -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>proto-google-cloud-eventarc-v1</artifactId>
+        </dependency>
+
         <!-- Pub/Sub gRPC stubs (PublisherGrpc, SubscriberGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

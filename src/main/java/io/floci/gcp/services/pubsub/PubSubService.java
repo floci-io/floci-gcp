@@ -51,6 +51,9 @@ public class PubSubService {
     private final GrpcServerManager grpcServerManager;
 
     @Inject
+    jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
+
+    @Inject
     public PubSubService(ServiceRegistry serviceRegistry, EmulatorConfig config,
             StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
         this.serviceRegistry = serviceRegistry;
@@ -404,6 +407,13 @@ public class PubSubService {
                 }
             }
             LOG.debugf("publish messageId=%s topic=%s fanOut=%d", messageId, topicName, fanOut);
+            if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
+                try {
+                    eventarcServiceInstance.get().onPubSubPublish(topicName, stored);
+                } catch (Exception e) {
+                    LOG.warnf(e, "Eventarc publish dispatch failed for topic=%s messageId=%s", topicName, messageId);
+                }
+            }
         }
         return messageIds;
     }

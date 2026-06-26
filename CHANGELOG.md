@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-26
+
 ### Added
 
+- **pubsub:** Pub/Sub REST API (`/v1/projects/{project}/...`) alongside the existing gRPC surface — topics (create/get/list/patch/delete/`:publish`) and subscriptions (create/get/list/patch/delete/`:pull`/`:acknowledge`), so the REST-based Pub/Sub clients and `gcloud pubsub` work against the emulator
 - **gke:** GKE control plane (`container.googleapis.com`, ClusterManager v1) — cluster and operation lifecycle backed by real `rancher/k3s` clusters via the docker-java API (with a `gke.mock` synthetic fast path), responses following the `google.container.v1` `Cluster`/`Operation` shapes. Reached through a single-port host+path routing filter (`container.*` host for SDKs, `/container/v1` prefix for gcloud/Terraform). Native `kubectl` auth via a token webhook so `gcloud container clusters get-credentials` plus the `gke-gcloud-auth-plugin` work end to end
 
 ### Fixed

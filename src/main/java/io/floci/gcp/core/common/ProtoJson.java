@@ -23,6 +23,8 @@ public final class ProtoJson {
             .add(com.google.cloud.run.v2.Revision.getDescriptor())
             .add(com.google.cloud.functions.v2.Function.getDescriptor())
             .add(com.google.cloud.functions.v2.OperationMetadata.getDescriptor())
+            .add(com.google.cloud.eventarc.v1.Trigger.getDescriptor())
+            .add(com.google.cloud.eventarc.v1.OperationMetadata.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()

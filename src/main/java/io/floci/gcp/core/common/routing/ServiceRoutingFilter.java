@@ -48,6 +48,14 @@ public class ServiceRoutingFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
+        String methodOverride = ctx.getHeaderString("X-HTTP-Method-Override");
+        if (methodOverride == null || methodOverride.isBlank()) {
+            methodOverride = ctx.getUriInfo().getQueryParameters().getFirst("$method");
+        }
+        if (methodOverride != null && !methodOverride.isBlank()) {
+            ctx.setMethod(methodOverride.toUpperCase());
+        }
+
         URI original = ctx.getUriInfo().getRequestUri();
         String path = original.getRawPath();
         if (path == null || !path.startsWith("/v1/")) {

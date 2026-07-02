@@ -758,16 +758,16 @@ public class GcsService {
         StoredNotification notif = new StoredNotification();
         notif.setId(id);
         notif.setTopic((String) body.get("topic"));
-        String fmt = (String) body.get("payloadFormat");
+        String fmt = (String) body.get("payload_format");
         if (fmt != null) notif.setPayloadFormat(fmt);
-        if (body.containsKey("eventTypes")) {
-            notif.setEventTypes((List<String>) body.get("eventTypes"));
+        if (body.containsKey("event_types")) {
+            notif.setEventTypes((List<String>) body.get("event_types"));
         }
-        if (body.containsKey("customAttributes")) {
-            notif.setCustomAttributes((Map<String, String>) body.get("customAttributes"));
+        if (body.containsKey("custom_attributes")) {
+            notif.setCustomAttributes((Map<String, String>) body.get("custom_attributes"));
         }
-        if (body.containsKey("objectNamePrefix")) {
-            notif.setObjectNamePrefix((String) body.get("objectNamePrefix"));
+        if (body.containsKey("object_name_prefix")) {
+            notif.setObjectNamePrefix((String) body.get("object_name_prefix"));
         }
         notif.setSelfLink(config != null
                 ? config.baseUrl() + "/storage/v1/b/" + bucket + "/notificationConfigs/" + id

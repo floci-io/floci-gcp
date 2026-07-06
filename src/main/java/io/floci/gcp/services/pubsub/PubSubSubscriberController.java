@@ -190,25 +190,20 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     deliverStreamingMessages(sub, responseObserver, closed, deliveryLock);
                 } catch (Exception e) {
                     LOG.warnf("streamingPull error: %s", e.getMessage());
-                    closeStreamingPull(unregisterRef, closed);
-                    responseObserver.onError(GcpGrpcController.grpcException(e));
+                    failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
                 }
             }
 
             @Override
             public void onError(Throwable t) {
                 LOG.debugf("streamingPull stream closed by client: %s", t.getMessage());
-                closeStreamingPull(unregisterRef, closed);
-                try {
-                    responseObserver.onCompleted();
-                } catch (Exception ignored) {}
+                completeStreamingPull(responseObserver, unregisterRef, closed, deliveryLock);
             }
 
             @Override
             public void onCompleted() {
                 LOG.debugf("streamingPull stream completed subscription=%s", subscriptionRef.get());
-                closeStreamingPull(unregisterRef, closed);
-                responseObserver.onCompleted();
+                completeStreamingPull(responseObserver, unregisterRef, closed, deliveryLock);
             }
         };
     }
@@ -232,13 +227,38 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         }
     }
 
-    private void closeStreamingPull(AtomicReference<Runnable> unregisterRef, AtomicBoolean closed) {
-        if (closed.compareAndSet(false, true)) {
-            Runnable unregister = unregisterRef.getAndSet(null);
-            if (unregister != null) {
-                unregister.run();
+    private void completeStreamingPull(StreamObserver<StreamingPullResponse> responseObserver,
+            AtomicReference<Runnable> unregisterRef,
+            AtomicBoolean closed,
+            Object deliveryLock) {
+        synchronized (deliveryLock) {
+            if (closeStreamingPull(unregisterRef, closed)) {
+                responseObserver.onCompleted();
             }
         }
+    }
+
+    private void failStreamingPull(StreamObserver<StreamingPullResponse> responseObserver,
+            AtomicReference<Runnable> unregisterRef,
+            AtomicBoolean closed,
+            Object deliveryLock,
+            Exception e) {
+        synchronized (deliveryLock) {
+            if (closeStreamingPull(unregisterRef, closed)) {
+                responseObserver.onError(GcpGrpcController.grpcException(e));
+            }
+        }
+    }
+
+    private boolean closeStreamingPull(AtomicReference<Runnable> unregisterRef, AtomicBoolean closed) {
+        if (!closed.compareAndSet(false, true)) {
+            return false;
+        }
+        Runnable unregister = unregisterRef.getAndSet(null);
+        if (unregister != null) {
+            unregister.run();
+        }
+        return true;
     }
 
     @Override

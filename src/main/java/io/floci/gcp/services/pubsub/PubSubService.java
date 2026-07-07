@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
@@ -44,6 +45,7 @@ public class PubSubService {
 
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<StoredMessage>> queues = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, StoredMessage>> delivered = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<MessageListener>> listeners = new ConcurrentHashMap<>();
     private final AtomicLong messageIdCounter = new AtomicLong(0);
 
     private final ServiceRegistry serviceRegistry;
@@ -215,6 +217,7 @@ public class PubSubService {
         subStore.put(name, sub);
         queues.put(name, new ConcurrentLinkedDeque<>());
         delivered.put(name, new ConcurrentHashMap<>());
+        listeners.put(name, new CopyOnWriteArrayList<>());
         return sub;
     }
 
@@ -353,6 +356,7 @@ public class PubSubService {
         subStore.delete(name);
         queues.remove(name);
         delivered.remove(name);
+        listeners.remove(name);
     }
 
     public void detachSubscription(String name) {
@@ -363,6 +367,7 @@ public class PubSubService {
         subStore.put(name, sub);
         queues.remove(name);
         delivered.remove(name);
+        listeners.remove(name);
     }
 
     public List<String> listTopicSubscriptions(String topicName) {
@@ -403,6 +408,7 @@ public class PubSubService {
                 StoredSubscription sub = subStore.get(entry).orElse(null);
                 if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())) {
                     queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
+                    notifyListeners(entry);
                     fanOut++;
                 }
             }
@@ -473,6 +479,33 @@ public class PubSubService {
         for (String ackId : ackIds) {
             deliveredMap.remove(ackId);
         }
+    }
+
+    Runnable registerMessageListener(String subName, MessageListener listener) {
+        getSubscription(subName);
+        CopyOnWriteArrayList<MessageListener> subscriptionListeners =
+                listeners.computeIfAbsent(subName, k -> new CopyOnWriteArrayList<>());
+        subscriptionListeners.add(listener);
+        return () -> subscriptionListeners.remove(listener);
+    }
+
+    private void notifyListeners(String subName) {
+        CopyOnWriteArrayList<MessageListener> subscriptionListeners = listeners.get(subName);
+        if (subscriptionListeners == null) {
+            return;
+        }
+        for (MessageListener listener : subscriptionListeners) {
+            try {
+                listener.onMessagesAvailable();
+            } catch (Exception e) {
+                LOG.warnf("message listener failed for subscription=%s: %s", subName, e.getMessage());
+            }
+        }
+    }
+
+    @FunctionalInterface
+    interface MessageListener {
+        void onMessagesAvailable();
     }
 
     // ── Snapshots ──────────────────────────────────────────────────────────────

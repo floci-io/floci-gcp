@@ -76,6 +76,40 @@ describe('Pub/Sub', () => {
     });
   });
 
+  it('should stream messages published after the listener starts', async () => {
+    const streamingTopicName = uniqueName('test-stream-topic');
+    const streamingSubscriptionName = uniqueName('test-stream-sub');
+    const [topic] = await pubsub.createTopic(streamingTopicName);
+    const [subscription] = await topic.createSubscription(streamingSubscriptionName);
+
+    try {
+      const received = new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('No streaming message received')), 10000);
+        subscription.on('message', (message) => {
+          clearTimeout(timer);
+          message.ack();
+          resolve(message.data.toString());
+        });
+        subscription.on('error', (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+
+      await sleep(200);
+      await topic.publishMessage({
+        data: Buffer.from('StreamingPull message'),
+        attributes: { source: 'node-streaming-test' },
+      });
+
+      await expect(received).resolves.toBe('StreamingPull message');
+    } finally {
+      await subscription.close().catch(() => {});
+      await subscription.delete().catch(() => {});
+      await topic.delete().catch(() => {});
+    }
+  });
+
   it('should delete subscription', async () => {
     await pubsub.subscription(subscriptionName).delete();
     const [subscriptions] = await pubsub.getSubscriptions();

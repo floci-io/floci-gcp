@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBase {
@@ -157,6 +158,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     public StreamObserver<StreamingPullRequest> streamingPull(
             StreamObserver<StreamingPullResponse> responseObserver) {
         AtomicReference<String> subscriptionRef = new AtomicReference<>();
+        AtomicReference<Runnable> unregisterRef = new AtomicReference<>();
+        AtomicBoolean closed = new AtomicBoolean(false);
+        Object deliveryLock = new Object();
 
         return new StreamObserver<>() {
             @Override
@@ -165,6 +169,14 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     if (!request.getSubscription().isEmpty()) {
                         String sub = request.getSubscription();
                         subscriptionRef.set(sub);
+                        Runnable previous = unregisterRef.getAndSet(
+                                service.registerMessageListener(
+                                        sub,
+                                        () -> deliverStreamingMessages(
+                                                sub, responseObserver, closed, deliveryLock)));
+                        if (previous != null) {
+                            previous.run();
+                        }
                         LOG.infof("streamingPull opened subscription=%s", sub);
                     }
                     String sub = subscriptionRef.get();
@@ -175,34 +187,78 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                         LOG.debugf("streamingPull ack subscription=%s ackIds=%d", sub, request.getAckIdsCount());
                         service.acknowledge(sub, request.getAckIdsList());
                     }
-                    List<ReceivedMessage> messages = service.pull(sub, 1000);
-                    if (!messages.isEmpty()) {
-                        LOG.debugf("streamingPull deliver subscription=%s messages=%d", sub, messages.size());
-                        responseObserver.onNext(
-                                StreamingPullResponse.newBuilder()
-                                        .addAllReceivedMessages(messages)
-                                        .build());
-                    }
+                    deliverStreamingMessages(sub, responseObserver, closed, deliveryLock);
                 } catch (Exception e) {
                     LOG.warnf("streamingPull error: %s", e.getMessage());
-                    responseObserver.onError(GcpGrpcController.grpcException(e));
+                    failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
                 }
             }
 
             @Override
             public void onError(Throwable t) {
                 LOG.debugf("streamingPull stream closed by client: %s", t.getMessage());
-                try {
-                    responseObserver.onCompleted();
-                } catch (Exception ignored) {}
+                completeStreamingPull(responseObserver, unregisterRef, closed, deliveryLock);
             }
 
             @Override
             public void onCompleted() {
                 LOG.debugf("streamingPull stream completed subscription=%s", subscriptionRef.get());
-                responseObserver.onCompleted();
+                completeStreamingPull(responseObserver, unregisterRef, closed, deliveryLock);
             }
         };
+    }
+
+    private void deliverStreamingMessages(String sub,
+            StreamObserver<StreamingPullResponse> responseObserver,
+            AtomicBoolean closed,
+            Object deliveryLock) {
+        synchronized (deliveryLock) {
+            if (closed.get()) {
+                return;
+            }
+            List<ReceivedMessage> messages = service.pull(sub, 1000);
+            if (!messages.isEmpty()) {
+                LOG.debugf("streamingPull deliver subscription=%s messages=%d", sub, messages.size());
+                responseObserver.onNext(
+                        StreamingPullResponse.newBuilder()
+                                .addAllReceivedMessages(messages)
+                                .build());
+            }
+        }
+    }
+
+    private void completeStreamingPull(StreamObserver<StreamingPullResponse> responseObserver,
+            AtomicReference<Runnable> unregisterRef,
+            AtomicBoolean closed,
+            Object deliveryLock) {
+        synchronized (deliveryLock) {
+            if (closeStreamingPull(unregisterRef, closed)) {
+                responseObserver.onCompleted();
+            }
+        }
+    }
+
+    private void failStreamingPull(StreamObserver<StreamingPullResponse> responseObserver,
+            AtomicReference<Runnable> unregisterRef,
+            AtomicBoolean closed,
+            Object deliveryLock,
+            Exception e) {
+        synchronized (deliveryLock) {
+            if (closeStreamingPull(unregisterRef, closed)) {
+                responseObserver.onError(GcpGrpcController.grpcException(e));
+            }
+        }
+    }
+
+    private boolean closeStreamingPull(AtomicReference<Runnable> unregisterRef, AtomicBoolean closed) {
+        if (!closed.compareAndSet(false, true)) {
+            return false;
+        }
+        Runnable unregister = unregisterRef.getAndSet(null);
+        if (unregister != null) {
+            unregister.run();
+        }
+        return true;
     }
 
     @Override

@@ -291,4 +291,13 @@ public final class TestFixtures {
                         .build();
         return com.google.cloud.eventarc.v1.EventarcClient.create(settings);
     }
+
+    public static com.google.api.serviceusage.v1.ServiceUsageClient serviceUsageClient() throws IOException {
+        com.google.api.serviceusage.v1.ServiceUsageSettings settings =
+                com.google.api.serviceusage.v1.ServiceUsageSettings.newHttpJsonBuilder()
+                        .setEndpoint(endpoint())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build();
+        return com.google.api.serviceusage.v1.ServiceUsageClient.create(settings);
+    }
 }

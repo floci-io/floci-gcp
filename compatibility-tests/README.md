@@ -49,7 +49,7 @@ just test-all-iac
 
 ## Test Coverage
 
-### SDK tests — 244 tests total
+### SDK tests — 250 tests total
 
 | Test class | GCP service | Java | Python | Node | Go |
 |---|---|:---:|:---:|:---:|:---:|
@@ -66,7 +66,8 @@ just test-all-iac
 | `CloudSqlAdminTest` | Cloud SQL for PostgreSQL | 4 | 0 | 0 | 0 |
 | `SchedulerTest` | Cloud Scheduler | 7 | 0 | 0 | 0 |
 | `EventarcTest` | Eventarc | 7 | 0 | 0 | 0 |
-| **Total** | | **79** | **48** | **59** | **58** |
+| `ServiceUsageTest` | Service Usage | 6 | 0 | 0 | 0 |
+| **Total** | | **85** | **48** | **59** | **58** |
 
 GKE uses the HttpJson transport (the Cloud SDK defaults to gRPC, which the REST-only
 emulator does not serve for GKE) and reaches the service via host-based routing

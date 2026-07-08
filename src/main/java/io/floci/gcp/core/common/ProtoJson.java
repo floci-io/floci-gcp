@@ -25,6 +25,11 @@ public final class ProtoJson {
             .add(com.google.cloud.functions.v2.OperationMetadata.getDescriptor())
             .add(com.google.cloud.eventarc.v1.Trigger.getDescriptor())
             .add(com.google.cloud.eventarc.v1.OperationMetadata.getDescriptor())
+            .add(com.google.api.serviceusage.v1.Service.getDescriptor())
+            .add(com.google.api.serviceusage.v1.EnableServiceResponse.getDescriptor())
+            .add(com.google.api.serviceusage.v1.DisableServiceResponse.getDescriptor())
+            .add(com.google.api.serviceusage.v1.BatchEnableServicesResponse.getDescriptor())
+            .add(com.google.api.serviceusage.v1.OperationMetadata.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()

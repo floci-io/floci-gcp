@@ -172,17 +172,16 @@ public class FirebaseAuthController {
     }
 
     static void requirePrivileged(String authorization) {
-        if (authorization == null) {
+        if (authorization == null || !isPrivileged(authorization)) {
             throw FirebaseAuthException.unauthenticated(
                     "Request is missing required authentication credential. Expected OAuth 2 "
                             + "access token, login cookie or other valid authentication credential.");
         }
-        isPrivileged(authorization);
     }
 
     private static boolean requireClientOrPrivileged(String authorization, String apiKey, String apiKeyHeader) {
-        if (authorization != null) {
-            return isPrivileged(authorization);
+        if (authorization != null && isPrivileged(authorization)) {
+            return true;
         }
         boolean hasKey = (apiKey != null && !apiKey.isEmpty())
                 || (apiKeyHeader != null && !apiKeyHeader.isEmpty());

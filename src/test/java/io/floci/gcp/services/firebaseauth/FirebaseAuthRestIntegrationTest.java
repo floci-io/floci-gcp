@@ -284,6 +284,48 @@ class FirebaseAuthRestIntegrationTest {
     }
 
     @Test
+    void nonBearerAuthorizationIsRejectedOnAdminAndClientEndpoints() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Basic abc")
+                .body(Map.of("localId", "whoever"))
+                .when().post(ADMIN + ":lookup")
+                .then()
+                .statusCode(401)
+                .body("error.status", equalTo("UNAUTHENTICATED"));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(Map.of("localId", "whoever"))
+                .when().post(ADMIN + ":lookup")
+                .then()
+                .statusCode(401);
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Basic abc")
+                .body(Map.of("email", "x@example.com", "password", "secret123"))
+                .when().post(CLIENT + ":signUp")
+                .then()
+                .statusCode(403)
+                .body("error.message", equalTo("The request is missing a valid API key."));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer not-owner")
+                .queryParam("key", "fake-api-key")
+                .body(Map.of("email", "x@example.com", "password", "secret123"))
+                .when().post(CLIENT + ":signUp")
+                .then()
+                .statusCode(401)
+                .body("error.status", equalTo("UNAUTHENTICATED"));
+    }
+
+    @Test
     void anonymousSignUpSetsAnonymousProvider() throws Exception {
         String idToken = given()
                 .urlEncodingEnabled(false)

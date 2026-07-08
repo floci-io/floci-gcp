@@ -283,6 +283,22 @@ setup() {
     [[ "$result" == *'"state":"ENABLED"'* ]]
 }
 
+# ── Service Usage Spot Checks ─────────────────────────────────────────────────
+
+@test "Terraform: Service Usage project service enabled" {
+    service=$(terraform output -raw enabled_service 2>/dev/null)
+    [ "$service" = "run.googleapis.com" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/services/run.googleapis.com"
+    assert_success
+    assert_output --partial '"state":"ENABLED"'
+}
+
+@test "Terraform: Service Usage enabled services list includes run.googleapis.com" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/services?filter=state:ENABLED"
+    assert_success
+    assert_output --partial 'run.googleapis.com'
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
 @test "Terraform: all managed resources tracked in state" {

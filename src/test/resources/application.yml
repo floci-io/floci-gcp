@@ -45,5 +45,9 @@ floci-gcp:
     gke:
       enabled: true
       mock: true
+    serviceusage:
+      enabled: true
+    resourcemanager:
+      enabled: true
   docker:
     api-timeout: 30s

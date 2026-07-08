@@ -59,6 +59,18 @@ class LongRunningOperationsServiceTest {
     }
 
     @Test
+    void emptyParentProducesGloballyNamedOperations() {
+        Operation created = service.done("", service("global"), service("global"));
+
+        assertTrue(created.getName().startsWith("operations/"));
+        assertEquals(created.getName(), service.get(created.getName()).getName());
+
+        ListOperationsResponse listed = service.list("", 0, null);
+        assertEquals(1, listed.getOperationsCount());
+        assertEquals(created.getName(), listed.getOperations(0).getName());
+    }
+
+    @Test
     void deleteOperationRemovesStoredRecord() {
         Operation operation = service.done("projects/p1/locations/us-central1", service("a"), service("a"));
 

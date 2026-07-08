@@ -209,3 +209,15 @@ output "sql_database_name" {
 output "sql_user_name" {
   value = google_sql_user.compat.name
 }
+
+# ── Service Usage ─────────────────────────────────────────────────────────────
+resource "google_project_service" "run_api" {
+  project = var.project
+  service = "run.googleapis.com"
+
+  disable_on_destroy = true
+}
+
+output "enabled_service" {
+  value = google_project_service.run_api.service
+}

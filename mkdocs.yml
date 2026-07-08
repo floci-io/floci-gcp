@@ -85,4 +85,5 @@ nav:
     - Cloud Tasks: services/cloud-tasks.md
     - Cloud Scheduler: services/scheduler.md
     - Cloud Monitoring: services/cloud-monitoring.md
+    - Service Usage: services/service-usage.md
   - Contributing: contributing.md

@@ -48,7 +48,7 @@ public class LongRunningOperationsService {
 
     public Operation pending(String parent, Message metadata) {
         Operation.Builder builder = Operation.newBuilder()
-                .setName(parent + "/operations/" + UUID.randomUUID())
+                .setName(operationsPrefix(parent) + UUID.randomUUID())
                 .setDone(false);
         if (metadata != null) {
             builder.setMetadata(Any.pack(metadata));
@@ -103,7 +103,7 @@ public class LongRunningOperationsService {
 
     private Operation completed(String parent, Message response, Message metadata) {
         Operation.Builder builder = Operation.newBuilder()
-                .setName(parent + "/operations/" + UUID.randomUUID())
+                .setName(operationsPrefix(parent) + UUID.randomUUID())
                 .setDone(true);
         if (response != null) {
             builder.setResponse(Any.pack(response));
@@ -121,7 +121,7 @@ public class LongRunningOperationsService {
     }
 
     public ListOperationsResponse list(String parent, int pageSize, String pageToken) {
-        String prefix = parent + "/operations/";
+        String prefix = operationsPrefix(parent);
         List<Operation> operations = operationStore.scan(k -> k.startsWith(prefix)).stream()
                 .map(this::parse)
                 .sorted(Comparator.comparing(Operation::getName))
@@ -141,6 +141,11 @@ public class LongRunningOperationsService {
 
     private Operation parse(String json) {
         return ProtoJson.merge(json, Operation.newBuilder()).build();
+    }
+
+    /** Globally-named operations (e.g. Service Usage's {@code operations/{id}}) use an empty parent. */
+    private static String operationsPrefix(String parent) {
+        return parent == null || parent.isEmpty() ? "operations/" : parent + "/operations/";
     }
 
     private static java.time.Duration toJavaDuration(Duration timeout) {

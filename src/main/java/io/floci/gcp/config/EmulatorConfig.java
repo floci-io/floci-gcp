@@ -106,6 +106,20 @@ public interface EmulatorConfig {
         EventarcServiceConfig eventarc();
 
         GkeServiceConfig gke();
+
+        ServiceUsageServiceConfig serviceusage();
+
+        ResourceManagerServiceConfig resourcemanager();
+    }
+
+    interface ServiceUsageServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ResourceManagerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface GkeServiceConfig {

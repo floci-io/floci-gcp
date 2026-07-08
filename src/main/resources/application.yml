@@ -104,6 +104,10 @@ floci-gcp:
       keep-running-on-shutdown: false
       endpoint-mode: host
       docker-network:
+    serviceusage:
+      enabled: true
+    resourcemanager:
+      enabled: true
   dns:
     extra-suffixes:
   docker:

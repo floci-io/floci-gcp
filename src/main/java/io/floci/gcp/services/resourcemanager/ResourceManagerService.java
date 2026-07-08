@@ -11,7 +11,6 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -28,7 +27,6 @@ public class ResourceManagerService {
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
-    private final String createTime = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString();
 
     @Inject
     public ResourceManagerService(ServiceRegistry serviceRegistry, EmulatorConfig config) {
@@ -58,11 +56,17 @@ public class ResourceManagerService {
         project.put("projectId", projectId);
         project.put("lifecycleState", "ACTIVE");
         project.put("name", projectId);
-        project.put("createTime", createTime);
+        project.put("createTime", createTime(projectId));
         return project;
     }
 
     static String projectNumber(String projectId) {
         return String.valueOf(100_000_000_000L + Math.floorMod((long) projectId.hashCode(), 900_000_000_000L));
+    }
+
+    /** Stable per-project timestamp, like the deterministic projectNumber — real project createTimes are immutable. */
+    static String createTime(String projectId) {
+        long secondsSinceEpoch = 1_000_000_000L + Math.floorMod((long) projectId.hashCode(), 500_000_000L);
+        return Instant.ofEpochSecond(secondsSinceEpoch).toString();
     }
 }

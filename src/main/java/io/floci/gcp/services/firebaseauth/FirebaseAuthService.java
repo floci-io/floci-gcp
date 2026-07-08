@@ -329,10 +329,12 @@ public class FirebaseAuthService {
             signInProvider = "password";
             revokesTokens = true;
         }
+        // Any caller may trigger revocation (validSince = now); only privileged callers
+        // may copy a literal validSince value — mirrors the emulator's fieldsToCopy split.
         if (body.get("validSince") != null) {
-            user.setValidSince(str(body.get("validSince")));
             revokesTokens = true;
-        } else if (revokesTokens) {
+        }
+        if (revokesTokens) {
             user.setValidSince(String.valueOf(Instant.now().getEpochSecond()));
         }
         if (body.get("displayName") != null) {
@@ -359,6 +361,9 @@ public class FirebaseAuthService {
                 StoredUser byPhone = findByPhoneNumber(project, phoneNumber);
                 check(byPhone == null || byPhone.getLocalId().equals(user.getLocalId()), "PHONE_NUMBER_EXISTS");
                 user.setPhoneNumber(phoneNumber);
+            }
+            if (body.get("validSince") != null) {
+                user.setValidSince(str(body.get("validSince")));
             }
         }
         for (String attribute : strList(body.get("deleteAttribute"))) {
@@ -490,7 +495,8 @@ public class FirebaseAuthService {
 
         Map<String, Object> record;
         try {
-            record = MAPPER.readValue(Base64.getDecoder().decode(refreshToken),
+            // Space is never valid Base64; restore '+' mangled by unescaped form transport.
+            record = MAPPER.readValue(Base64.getDecoder().decode(refreshToken.replace(' ', '+')),
                     new TypeReference<Map<String, Object>>() {});
         } catch (Exception e) {
             throw badRequest("INVALID_REFRESH_TOKEN");

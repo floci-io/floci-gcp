@@ -284,6 +284,61 @@ class FirebaseAuthRestIntegrationTest {
     }
 
     @Test
+    void clientValidSinceTriggersRevocationButCannotSetLiteralValue() {
+        String idToken = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .queryParam("key", "fake-api-key")
+                .body(Map.of("email", "validsince@example.com", "password", "secret123"))
+                .when().post(CLIENT + ":signUp")
+                .then().statusCode(200)
+                .extract().path("idToken");
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .queryParam("key", "fake-api-key")
+                .body(Map.of("idToken", idToken, "validSince", "9999999999"))
+                .when().post(CLIENT + ":update")
+                .then().statusCode(200);
+
+        String storedValidSince = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("email", new String[]{"validsince@example.com"}))
+                .when().post(ADMIN + ":lookup")
+                .then().statusCode(200)
+                .extract().path("users[0].validSince");
+        org.junit.jupiter.api.Assertions.assertNotEquals("9999999999", storedValidSince);
+
+        // privileged callers may copy a literal validSince
+        String localId = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("email", new String[]{"validsince@example.com"}))
+                .when().post(ADMIN + ":lookup")
+                .then().statusCode(200)
+                .extract().path("users[0].localId");
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("localId", localId, "validSince", "1234567890"))
+                .when().post(ADMIN + ":update")
+                .then().statusCode(200);
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("localId", new String[]{localId}))
+                .when().post(ADMIN + ":lookup")
+                .then().statusCode(200)
+                .body("users[0].validSince", equalTo("1234567890"));
+    }
+
+    @Test
     void nonBearerAuthorizationIsRejectedOnAdminAndClientEndpoints() {
         given()
                 .urlEncodingEnabled(false)

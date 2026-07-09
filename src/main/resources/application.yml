@@ -28,6 +28,7 @@ quarkus:
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
       - --initialize-at-run-time=io.floci.gcp.services.cloudkms.KmsCrypto
+      - --initialize-at-run-time=io.floci.gcp.services.firebaseauth.FirebaseAuthService
       - --initialize-at-run-time=io.floci.gcp.services.cloudsql.CloudSqlPostgresDataPlane
       - --initialize-at-run-time=io.floci.gcp.services.scheduler.SchedulerExpressionParser
 
@@ -107,6 +108,8 @@ floci-gcp:
     serviceusage:
       enabled: true
     resourcemanager:
+      enabled: true
+    firebaseauth:
       enabled: true
   dns:
     extra-suffixes:

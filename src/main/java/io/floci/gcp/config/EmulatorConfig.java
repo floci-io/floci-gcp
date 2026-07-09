@@ -110,9 +110,16 @@ public interface EmulatorConfig {
         ServiceUsageServiceConfig serviceusage();
 
         ResourceManagerServiceConfig resourcemanager();
+
+        FirebaseAuthServiceConfig firebaseauth();
     }
 
     interface ServiceUsageServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface FirebaseAuthServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

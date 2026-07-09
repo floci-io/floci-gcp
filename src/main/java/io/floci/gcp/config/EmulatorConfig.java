@@ -112,6 +112,8 @@ public interface EmulatorConfig {
         ResourceManagerServiceConfig resourcemanager();
 
         FirebaseAuthServiceConfig firebaseauth();
+
+        BigQueryServiceConfig bigquery();
     }
 
     interface ServiceUsageServiceConfig {
@@ -120,6 +122,11 @@ public interface EmulatorConfig {
     }
 
     interface FirebaseAuthServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BigQueryServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

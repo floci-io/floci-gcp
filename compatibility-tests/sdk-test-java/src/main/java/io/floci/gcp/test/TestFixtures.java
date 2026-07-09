@@ -188,6 +188,21 @@ public final class TestFixtures {
         return FunctionServiceClient.create(settings);
     }
 
+    /**
+     * Creates a BigQuery client pointing at the emulator. The java-bigquery SDK has no
+     * emulator env-var support; setHost() routes the Apiary client to the emulator, which
+     * serves under /bigquery/v2/.
+     */
+    public static com.google.cloud.bigquery.BigQuery bigQueryClient() {
+        return com.google.cloud.bigquery.BigQueryOptions.newBuilder()
+                .setHost(endpoint())
+                .setLocation("US")
+                .setProjectId(projectId())
+                .setCredentials(NoCredentials.getInstance())
+                .build()
+                .getService();
+    }
+
     public static SQLAdmin sqlAdminClient() {
         return new SQLAdmin.Builder(new NetHttpTransport(), GsonFactory.getDefaultInstance(), request -> {
         })

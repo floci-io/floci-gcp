@@ -188,6 +188,23 @@ class BigQueryRestIntegrationTest {
                 .statusCode(200)
                 .body("status.state", equalTo("DONE"))
                 .body("status.errorResult.reason", equalTo("invalidQuery"));
+
+        // getQueryResults on the failed job → HTTP 200, jobComplete with embedded errors
+        String failedJobId = given()
+                .contentType("application/json")
+                .body("""
+                        {"configuration": {"query": {"query": "SELECT name FROM ds1.t1 ORDER BY name"}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then()
+                .statusCode(200)
+                .extract().path("jobReference.jobId");
+        given()
+                .when().get(BASE + "/queries/" + failedJobId)
+                .then()
+                .statusCode(200)
+                .body("jobComplete", equalTo(true))
+                .body("errors[0].reason", equalTo("invalidQuery"));
     }
 
     @Test

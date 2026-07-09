@@ -93,7 +93,7 @@ final class RowCodec {
                 continue;
             }
             try {
-                out.put(field.getName(), coerce(field, raw));
+                out.put(field.getName(), coerce(field, raw, ignoreUnknownValues));
             } catch (IllegalArgumentException e) {
                 errors.add(error("invalid", field.getName(), e.getMessage()));
             }
@@ -111,7 +111,7 @@ final class RowCodec {
                 .findFirst().orElse(null);
     }
 
-    private static Object coerce(TableFieldSchema field, Object raw) {
+    private static Object coerce(TableFieldSchema field, Object raw, boolean ignoreUnknownValues) {
         if ("REPEATED".equals(field.getMode())) {
             if (!(raw instanceof List<?> list)) {
                 throw new IllegalArgumentException(
@@ -119,15 +119,15 @@ final class RowCodec {
             }
             List<Object> coerced = new ArrayList<>(list.size());
             for (Object element : list) {
-                coerced.add(coerceScalar(field, element));
+                coerced.add(coerceScalar(field, element, ignoreUnknownValues));
             }
             return coerced;
         }
-        return coerceScalar(field, raw);
+        return coerceScalar(field, raw, ignoreUnknownValues);
     }
 
     @SuppressWarnings("unchecked")
-    private static Object coerceScalar(TableFieldSchema field, Object raw) {
+    private static Object coerceScalar(TableFieldSchema field, Object raw, boolean ignoreUnknownValues) {
         String type = field.getType();
         switch (type) {
             case "INTEGER" -> {
@@ -171,7 +171,7 @@ final class RowCodec {
                     TableSchema subSchema = new TableSchema(field.getFields() != null
                             ? field.getFields() : List.of());
                     List<ErrorProto> nestedErrors =
-                            normalizeRow(subSchema, (Map<String, Object>) map, true, nested);
+                            normalizeRow(subSchema, (Map<String, Object>) map, ignoreUnknownValues, nested);
                     if (!nestedErrors.isEmpty()) {
                         throw new IllegalArgumentException(nestedErrors.get(0).getMessage());
                     }

@@ -342,6 +342,12 @@ public class BigQueryController {
         QueryResponse resp = new QueryResponse();
         resp.setJobReference(new JobReference(job.getProjectId(), job.getJobId(), job.getLocation()));
         resp.setJobComplete(true);
+        if (job.failed()) {
+            // Failed jobs surface as a completed 200 response with embedded errors; the
+            // Java SDK's Job.getQueryResults() then reads the failure from job status.
+            resp.setErrors(List.of(new ErrorProto(job.getErrorReason(), null, job.getErrorMessage())));
+            return resp;
+        }
         resp.setCacheHit(false);
         resp.setTotalBytesProcessed("0");
 

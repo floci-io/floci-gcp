@@ -153,6 +153,30 @@ class BigQueryServiceTest {
         assertEquals("duplicate", ex.getReason());
     }
 
+    @Test
+    void insertAllRejectsUnknownNestedFieldWhenNotIgnoringUnknownValues() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        TableFieldSchema sub = new TableFieldSchema();
+        sub.setName("city");
+        sub.setType("STRING");
+        TableFieldSchema address = new TableFieldSchema();
+        address.setName("address");
+        address.setType("RECORD");
+        address.setFields(java.util.List.of(sub));
+        Table table = new Table();
+        table.setTableReference(new TableReference(PROJECT, DATASET, TABLE));
+        table.setSchema(new TableSchema(java.util.List.of(address)));
+        service.createTable(PROJECT, DATASET, table);
+
+        var rows = java.util.List.of(new BigQueryService.InsertRow(0,
+                java.util.Map.of("address", java.util.Map.of("city", "SD", "zip", "00000"))));
+        var strictErrors = service.insertAll(PROJECT, DATASET, TABLE, rows, false, false);
+        assertEquals(1, strictErrors.size());
+
+        var lenientErrors = service.insertAll(PROJECT, DATASET, TABLE, rows, false, true);
+        assertEquals(0, lenientErrors.size());
+    }
+
     // ── insertAll ──
 
     @Test

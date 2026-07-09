@@ -336,6 +336,24 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void duplicateExplicitJobIdConflictsEvenWhenQueryFails() {
+        seedTwoRows();
+        // First insert with an explicit ID against a missing table → stored as a failed job.
+        GcpException missing = assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "US", "dup-job", "SELECT * FROM ds1.nope", null));
+        StoredJob failed = service.failedJob(PROJECT, "US", "dup-job", "SELECT * FROM ds1.nope", missing);
+        assertTrue(failed.failed());
+
+        // Re-submitting the same explicit ID must 409, not silently overwrite.
+        GcpException viaQuery = assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "US", "dup-job", "SELECT * FROM ds1.t1", null));
+        assertEquals(409, viaQuery.getHttpStatus());
+        GcpException viaFailed = assertThrows(GcpException.class,
+                () -> service.failedJob(PROJECT, "US", "dup-job", "SELECT * FROM ds1.nope", missing));
+        assertEquals(409, viaFailed.getHttpStatus());
+    }
+
+    @Test
     void unsupportedSqlThrowsInvalidQueryReason() {
         seedTwoRows();
         GcpException ex = assertThrows(GcpException.class,

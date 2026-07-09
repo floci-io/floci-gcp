@@ -316,6 +316,9 @@ public class BigQueryService {
      */
     public StoredJob query(String projectId, String location, String jobId,
             String sql, String defaultDatasetId) {
+        // Reserve the ID before any parsing/lookup so a duplicate explicit jobId always
+        // 409s — even when the query would otherwise fail — matching failedJob's path.
+        String resolvedJobId = reserveJobId(projectId, jobId);
         QueryEngine.ParsedQuery parsed = QueryEngine.parse(sql);
 
         QueryEngine.TableRef ref = parsed.table();
@@ -337,12 +340,7 @@ public class BigQueryService {
         QueryEngine.Result result = QueryEngine.evaluate(parsed, table.getSchema(), data.getRows());
 
         StoredJob job = new StoredJob();
-        job.setJobId(jobId != null && !jobId.isBlank()
-                ? jobId : "job_" + UUID.randomUUID().toString().replace("-", ""));
-        if (jobStore.get(job.getJobId()).isPresent()) {
-            throw GcpException.alreadyExists("Already Exists: Job " + projectId + ":" + job.getJobId())
-                    .withReason("duplicate");
-        }
+        job.setJobId(resolvedJobId);
         job.setProjectId(projectId);
         job.setLocation(location != null && !location.isBlank() ? location : "US");
         job.setQuery(sql);
@@ -357,12 +355,12 @@ public class BigQueryService {
         return job;
     }
 
-    /** Persists a failed query job (used by {@code jobs.insert}, which must not throw). */
+    /** Persists a failed query job (used by {@code jobs.insert}, which must not throw for SQL errors). */
     public StoredJob failedJob(String projectId, String location, String jobId,
             String sql, GcpException cause) {
+        String resolvedJobId = reserveJobId(projectId, jobId);
         StoredJob job = new StoredJob();
-        job.setJobId(jobId != null && !jobId.isBlank()
-                ? jobId : "job_" + UUID.randomUUID().toString().replace("-", ""));
+        job.setJobId(resolvedJobId);
         job.setProjectId(projectId);
         job.setLocation(location != null && !location.isBlank() ? location : "US");
         job.setQuery(sql);
@@ -372,6 +370,18 @@ public class BigQueryService {
         job.setErrorMessage(cause.getMessage());
         jobStore.put(job.getJobId(), job);
         return job;
+    }
+
+    /** Resolves a job ID (generating one when blank) and rejects an already-used explicit ID with 409. */
+    private String reserveJobId(String projectId, String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return "job_" + UUID.randomUUID().toString().replace("-", "");
+        }
+        if (jobStore.get(jobId).isPresent()) {
+            throw GcpException.alreadyExists("Already Exists: Job " + projectId + ":" + jobId)
+                    .withReason("duplicate");
+        }
+        return jobId;
     }
 
     private void materializeResult(String projectId, StoredJob job, QueryEngine.Result result) {

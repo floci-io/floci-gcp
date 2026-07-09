@@ -23,10 +23,12 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
 
     @Override
     public Response toResponse(GcpException ex) {
+        String reason = ex.getReason() != null ? ex.getReason() : reasonFor(ex.getGcpStatus());
         return Response.status(ex.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)
-                .entity(new ErrorWrapper(
-                        ErrorDetail.of(ex.getHttpStatus(), ex.getMessage(), ex.getGcpStatus())))
+                .entity(new ErrorWrapper(new ErrorDetail(
+                        ex.getHttpStatus(), ex.getMessage(), ex.getGcpStatus(),
+                        List.of(new ErrorItem(ex.getMessage(), "global", reason)))))
                 .build();
     }
 

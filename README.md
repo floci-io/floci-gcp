@@ -145,6 +145,7 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Cloud Monitoring | ✅ | ❌ |
 | Service Usage | ✅ | ❌ |
 | Identity Platform / Firebase Auth | ✅ | ❌ |
+| BigQuery (Phase 1) | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
@@ -161,7 +162,7 @@ flowchart LR
         end
 
         subgraph REST ["REST services"]
-            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE"]
+            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE\nBigQuery"]
         end
 
         subgraph Docker ["Docker-backed"]
@@ -192,6 +193,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
+| Analytics | BigQuery (Phase 1) |
 | Observability | Cloud Logging, Cloud Monitoring |
 
 <details>
@@ -217,6 +219,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries` with GCP validation rules) and read (`ListTimeSeries` with alignment/reduction subset and pagination) |
 | **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services`; includes a minimal Cloud Resource Manager v1 `projects.get` for provider project lookups |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
+| **BigQuery (Phase 1)** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) over a SQL subset (`SELECT *`/columns/`COUNT(*)`, `WHERE =`, `LIMIT`) |
 
 </details>
 

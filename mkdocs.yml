@@ -87,4 +87,5 @@ nav:
     - Cloud Monitoring: services/cloud-monitoring.md
     - Service Usage: services/service-usage.md
     - Firebase Auth: services/firebase-auth.md
+    - BigQuery: services/bigquery.md
   - Contributing: contributing.md

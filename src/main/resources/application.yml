@@ -96,6 +96,8 @@ floci-gcp:
       tick-interval-seconds: 10
     eventarc:
       enabled: true
+    bigquery:
+      enabled: true
     gke:
       enabled: true
       mock: false

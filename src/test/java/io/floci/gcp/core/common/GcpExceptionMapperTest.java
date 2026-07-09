@@ -49,6 +49,36 @@ class GcpExceptionMapperTest {
     }
 
     @Test
+    void explicitReasonOverridesDerivedReason() {
+        GcpException ex = GcpException.invalidArgument("bad sql").withReason("invalidQuery");
+        var response = new GcpExceptionMapper().toResponse(ex);
+        var wrapper = (GcpExceptionMapper.ErrorWrapper) response.getEntity();
+
+        assertEquals(400, wrapper.error().code());
+        assertEquals("INVALID_ARGUMENT", wrapper.error().status());
+        assertEquals("invalidQuery", wrapper.error().errors().get(0).reason());
+    }
+
+    @Test
+    void mapperDerivesReasonWhenNoneSet() {
+        GcpException ex = GcpException.alreadyExists("exists");
+        var response = new GcpExceptionMapper().toResponse(ex);
+        var wrapper = (GcpExceptionMapper.ErrorWrapper) response.getEntity();
+
+        assertEquals("alreadyExists", wrapper.error().errors().get(0).reason());
+        assertNull(ex.getReason());
+    }
+
+    @Test
+    void withReasonPreservesStatusAndMessage() {
+        GcpException ex = GcpException.alreadyExists("Already Exists: Dataset p:d").withReason("duplicate");
+        assertEquals(409, ex.getHttpStatus());
+        assertEquals("ALREADY_EXISTS", ex.getGcpStatus());
+        assertEquals("Already Exists: Dataset p:d", ex.getMessage());
+        assertEquals("duplicate", ex.getReason());
+    }
+
+    @Test
     void reasonIsDerivedFromStatus() {
         assertEquals("alreadyExists",
                 GcpExceptionMapper.ErrorDetail.of(409, "x", "ALREADY_EXISTS").errors().get(0).reason());

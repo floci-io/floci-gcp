@@ -11,12 +11,19 @@ public class GcpException extends RuntimeException {
     private final int httpStatus;
     private final String gcpStatus;
     private final Status.Code grpcCode;
+    private final String reason;
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message) {
+        this(httpStatus, gcpStatus, grpcCode, message, null);
+    }
+
+    private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message,
+                         String reason) {
         super(message);
         this.httpStatus = httpStatus;
         this.gcpStatus = gcpStatus;
         this.grpcCode = grpcCode;
+        this.reason = reason;
     }
 
     public int getHttpStatus() {
@@ -29,6 +36,15 @@ public class GcpException extends RuntimeException {
 
     public Status.Code getGrpcCode() {
         return grpcCode;
+    }
+
+    /** Legacy Google JSON API {@code errors[].reason} override; null derives it from the status. */
+    public String getReason() {
+        return reason;
+    }
+
+    public GcpException withReason(String reason) {
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason);
     }
 
     public static GcpException notFound(String message) {

@@ -392,6 +392,10 @@ public class CloudMonitoringService {
                     "TimeSeries valueType %s does not match the point value type %s for %s",
                     ts.getValueType(), inferred, metricType));
         }
+        if (inferred == MetricDescriptor.ValueType.BOOL && kind != MetricDescriptor.MetricKind.GAUGE) {
+            throw GcpException.invalidArgument(
+                    "BOOL and STRING value types are only valid with GAUGE metric kind");
+        }
         return MetricDescriptor.newBuilder()
                 .setName(parentProject + "/metricDescriptors/" + metricType)
                 .setType(metricType)

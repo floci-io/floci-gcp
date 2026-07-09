@@ -246,6 +246,23 @@ class CloudMonitoringServiceTest {
         assertEquals("INVALID_ARGUMENT", deltaEx.getGcpStatus());
     }
 
+    @Test
+    void autoCreateRejectsBoolValueWithCumulativeKind() {
+        TimeSeries boolCumulative = cumulativePoint(METRIC, 1, NOW.minusSeconds(120), NOW.minusSeconds(60)).toBuilder()
+                .setPoints(0, Point.newBuilder()
+                        .setInterval(TimeInterval.newBuilder()
+                                .setStartTime(ts(NOW.minusSeconds(120)))
+                                .setEndTime(ts(NOW.minusSeconds(60))))
+                        .setValue(TypedValue.newBuilder().setBoolValue(true)))
+                .build();
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.createTimeSeries(PROJECT, List.of(boolCumulative)));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertThrows(GcpException.class,
+                () -> service.getMetricDescriptor(PROJECT + "/metricDescriptors/" + METRIC));
+    }
+
     // ── ListTimeSeries validation ────────────────────────────────────────────
 
     @Test

@@ -55,6 +55,35 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void updateDatasetReplacesEntireResource() {
+        Dataset created = newDataset(DATASET);
+        created.setDescription("to be cleared");
+        created.setFriendlyName("old name");
+        service.createDataset(PROJECT, created);
+
+        Dataset replacement = new Dataset();
+        replacement.setFriendlyName("new name");
+        Dataset updated = service.updateDataset(PROJECT, DATASET, replacement);
+
+        assertEquals("new name", updated.getFriendlyName());
+        assertNull(updated.getDescription());
+    }
+
+    @Test
+    void patchDatasetPreservesOmittedFields() {
+        Dataset created = newDataset(DATASET);
+        created.setDescription("kept");
+        service.createDataset(PROJECT, created);
+
+        Dataset patch = new Dataset();
+        patch.setFriendlyName("patched");
+        Dataset patched = service.patchDataset(PROJECT, DATASET, patch);
+
+        assertEquals("patched", patched.getFriendlyName());
+        assertEquals("kept", patched.getDescription());
+    }
+
+    @Test
     void getDatasetMissingThrowsNotFound() {
         GcpException ex = assertThrows(GcpException.class, () -> service.getDataset(PROJECT, "nope"));
         assertEquals("NOT_FOUND", ex.getGcpStatus());

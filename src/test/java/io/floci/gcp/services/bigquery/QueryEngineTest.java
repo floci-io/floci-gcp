@@ -144,6 +144,12 @@ class QueryEngineTest {
     }
 
     @Test
+    void countStarRespectsLimitZero() {
+        QueryEngine.Result result = evaluate("SELECT COUNT(*) FROM t LIMIT 0");
+        assertEquals(0, result.rows().size());
+    }
+
+    @Test
     void nullStoredValuesNeverMatch() {
         List<Map<String, Object>> rows = List.of(row(null, null, null, null, null));
         QueryEngine.ParsedQuery query = QueryEngine.parse("SELECT * FROM t WHERE age = 1");

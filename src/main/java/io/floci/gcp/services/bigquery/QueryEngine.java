@@ -125,7 +125,9 @@ final class QueryEngine {
             countField.setMode("NULLABLE");
             Map<String, Object> countRow = new LinkedHashMap<>();
             countRow.put("f0_", (long) filtered.size());
-            return new Result(new TableSchema(List.of(countField)), List.of(countRow));
+            List<Map<String, Object>> countRows = query.limit() != null && query.limit() < 1
+                    ? List.of() : List.of(countRow);
+            return new Result(new TableSchema(List.of(countField)), countRows);
         }
 
         if (query.limit() != null && filtered.size() > query.limit()) {

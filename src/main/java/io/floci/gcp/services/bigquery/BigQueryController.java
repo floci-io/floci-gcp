@@ -96,7 +96,7 @@ public class BigQueryController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateDataset(@PathParam("projectId") String projectId,
             @PathParam("datasetId") String datasetId, Dataset body) {
-        return Response.ok(service.patchDataset(projectId, datasetId, body != null ? body : new Dataset())).build();
+        return Response.ok(service.updateDataset(projectId, datasetId, body != null ? body : new Dataset())).build();
     }
 
     @POST
@@ -170,7 +170,7 @@ public class BigQueryController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateTable(@PathParam("projectId") String projectId,
             @PathParam("datasetId") String datasetId, @PathParam("tableId") String tableId, Table body) {
-        return Response.ok(service.patchTable(projectId, datasetId, tableId, body != null ? body : new Table())).build();
+        return Response.ok(service.updateTable(projectId, datasetId, tableId, body != null ? body : new Table())).build();
     }
 
     @POST
@@ -431,12 +431,14 @@ public class BigQueryController {
             return result;
         }
         for (int i = 0; i < list.size(); i++) {
-            if (list.get(i) instanceof Map<?, ?> rowMap) {
-                Object json = ((Map<String, Object>) rowMap).get("json");
-                if (json instanceof Map) {
-                    result.add(new BigQueryService.InsertRow(i, (Map<String, Object>) json));
-                }
+            Object json = list.get(i) instanceof Map<?, ?> rowMap
+                    ? ((Map<String, Object>) rowMap).get("json") : null;
+            if (!(json instanceof Map)) {
+                throw GcpException.invalidArgument(
+                        "Insert entry at index " + i + " is missing the required json row payload")
+                        .withReason("invalid");
             }
+            result.add(new BigQueryService.InsertRow(i, (Map<String, Object>) json));
         }
         return result;
     }

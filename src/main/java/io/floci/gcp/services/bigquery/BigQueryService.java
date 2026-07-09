@@ -133,6 +133,18 @@ public class BigQueryService {
         return existing;
     }
 
+    /** datasets.update (PUT): full replacement — mutable fields absent from the body are cleared. */
+    public Dataset updateDataset(String projectId, String datasetId, Dataset update) {
+        Dataset existing = getDataset(projectId, datasetId);
+        existing.setFriendlyName(update.getFriendlyName());
+        existing.setDescription(update.getDescription());
+        existing.setLabels(update.getLabels());
+        existing.setLastModifiedTime(nowMillis());
+        existing.setEtag(etag());
+        datasetStore.put(datasetId, existing);
+        return existing;
+    }
+
     public void deleteDataset(String projectId, String datasetId, boolean deleteContents) {
         getDataset(projectId, datasetId);
         List<Table> tables = listTables(projectId, datasetId);
@@ -204,6 +216,19 @@ public class BigQueryService {
         if (patch.getLabels() != null) {
             existing.setLabels(patch.getLabels());
         }
+        existing.setLastModifiedTime(nowMillis());
+        existing.setEtag(etag());
+        tableStore.put(tableKey(datasetId, tableId), existing);
+        return existing;
+    }
+
+    /** tables.update (PUT): full replacement — mutable fields absent from the body are cleared. */
+    public Table updateTable(String projectId, String datasetId, String tableId, Table update) {
+        Table existing = getTable(projectId, datasetId, tableId);
+        existing.setFriendlyName(update.getFriendlyName());
+        existing.setDescription(update.getDescription());
+        existing.setSchema(update.getSchema() != null ? RowCodec.normalizeSchema(update.getSchema()) : null);
+        existing.setLabels(update.getLabels());
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         tableStore.put(tableKey(datasetId, tableId), existing);

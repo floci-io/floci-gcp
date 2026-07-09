@@ -5,10 +5,9 @@ import com.google.api.MonitoredResourceDescriptor;
 import com.google.monitoring.v3.*;
 import com.google.protobuf.Empty;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.PageToken;
 import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
-
-import java.util.List;
 
 public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceImplBase {
 
@@ -48,12 +47,14 @@ public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceIm
     public void listMetricDescriptors(ListMetricDescriptorsRequest request, StreamObserver<ListMetricDescriptorsResponse> responseObserver) {
         LOG.debugf("listMetricDescriptors name=%s filter=%s", request.getName(), request.getFilter());
         try {
-            List<MetricDescriptor> descriptors = service.listMetricDescriptors(
+            PageToken.Page<MetricDescriptor> page = service.listMetricDescriptors(
                     request.getName(), request.getFilter(), request.getPageSize(), request.getPageToken());
-            ListMetricDescriptorsResponse response = ListMetricDescriptorsResponse.newBuilder()
-                    .addAllMetricDescriptors(descriptors)
-                    .build();
-            responseObserver.onNext(response);
+            ListMetricDescriptorsResponse.Builder response = ListMetricDescriptorsResponse.newBuilder()
+                    .addAllMetricDescriptors(page.items());
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
+            }
+            responseObserver.onNext(response.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             GcpGrpcController.grpcError(responseObserver, e);
@@ -77,11 +78,14 @@ public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceIm
                                                  StreamObserver<ListMonitoredResourceDescriptorsResponse> responseObserver) {
         LOG.debugf("listMonitoredResourceDescriptors name=%s", request.getName());
         try {
-            List<MonitoredResourceDescriptor> list = service.listMonitoredResourceDescriptors(request.getName());
-            ListMonitoredResourceDescriptorsResponse response = ListMonitoredResourceDescriptorsResponse.newBuilder()
-                    .addAllResourceDescriptors(list)
-                    .build();
-            responseObserver.onNext(response);
+            PageToken.Page<MonitoredResourceDescriptor> page = service.listMonitoredResourceDescriptors(
+                    request.getName(), request.getPageSize(), request.getPageToken());
+            ListMonitoredResourceDescriptorsResponse.Builder response = ListMonitoredResourceDescriptorsResponse.newBuilder()
+                    .addAllResourceDescriptors(page.items());
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
+            }
+            responseObserver.onNext(response.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             GcpGrpcController.grpcError(responseObserver, e);
@@ -117,7 +121,7 @@ public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceIm
     public void listTimeSeries(ListTimeSeriesRequest request, StreamObserver<ListTimeSeriesResponse> responseObserver) {
         LOG.debugf("listTimeSeries name=%s filter=%s", request.getName(), request.getFilter());
         try {
-            List<TimeSeries> list = service.listTimeSeries(
+            PageToken.Page<TimeSeries> page = service.listTimeSeries(
                     request.getName(),
                     request.getFilter(),
                     request.getInterval(),
@@ -126,10 +130,12 @@ public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceIm
                     request.getPageSize(),
                     request.getPageToken()
             );
-            ListTimeSeriesResponse response = ListTimeSeriesResponse.newBuilder()
-                    .addAllTimeSeries(list)
-                    .build();
-            responseObserver.onNext(response);
+            ListTimeSeriesResponse.Builder response = ListTimeSeriesResponse.newBuilder()
+                    .addAllTimeSeries(page.items());
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
+            }
+            responseObserver.onNext(response.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             GcpGrpcController.grpcError(responseObserver, e);

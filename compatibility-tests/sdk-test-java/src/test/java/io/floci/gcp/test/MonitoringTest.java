@@ -5,7 +5,10 @@ import com.google.api.Metric;
 import com.google.api.MetricDescriptor;
 import com.google.api.MonitoredResource;
 import com.google.api.MonitoredResourceDescriptor;
+import com.google.api.gax.rpc.InvalidArgumentException;
 import com.google.cloud.monitoring.v3.MetricServiceClient;
+import com.google.cloud.monitoring.v3.MetricServiceClient.ListMetricDescriptorsPagedResponse;
+import com.google.monitoring.v3.Aggregation;
 import com.google.monitoring.v3.CreateMetricDescriptorRequest;
 import com.google.monitoring.v3.CreateTimeSeriesRequest;
 import com.google.monitoring.v3.ListMetricDescriptorsRequest;
@@ -15,6 +18,7 @@ import com.google.monitoring.v3.Point;
 import com.google.monitoring.v3.TimeInterval;
 import com.google.monitoring.v3.TimeSeries;
 import com.google.monitoring.v3.TypedValue;
+import com.google.protobuf.Duration;
 import com.google.protobuf.Timestamp;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class MonitoringTest {
@@ -37,6 +42,8 @@ class MonitoringTest {
     private static final String PROJECT_NAME = "projects/" + PROJECT_ID;
     private static final String METRIC_TYPE = "custom.googleapis.com/" + TestFixtures.uniqueName("test-metric");
     private static final String METRIC_NAME = PROJECT_NAME + "/metricDescriptors/" + METRIC_TYPE;
+    private static final String AGG_METRIC_TYPE = "custom.googleapis.com/" + TestFixtures.uniqueName("agg-metric");
+    private static final String AGG_METRIC_NAME = PROJECT_NAME + "/metricDescriptors/" + AGG_METRIC_TYPE;
 
     private static MetricServiceClient client;
 
@@ -198,8 +205,86 @@ class MonitoringTest {
 
     @Test
     @Order(6)
+    void aggregatedTimeSeriesQuery() {
+        Instant now = Instant.now();
+
+        // Two series (env=a, env=b) of the same auto-created metric
+        client.createTimeSeries(CreateTimeSeriesRequest.newBuilder()
+                .setName(PROJECT_NAME)
+                .addTimeSeries(gaugeSeries(AGG_METRIC_TYPE, "a", 5.0, now.minusSeconds(30)))
+                .addTimeSeries(gaugeSeries(AGG_METRIC_TYPE, "b", 7.0, now.minusSeconds(20)))
+                .build());
+
+        TimeInterval interval = TimeInterval.newBuilder()
+                .setStartTime(toTimestamp(now.minusSeconds(600)))
+                .setEndTime(toTimestamp(now))
+                .build();
+
+        List<TimeSeries> reduced = new ArrayList<>();
+        client.listTimeSeries(ListTimeSeriesRequest.newBuilder()
+                        .setName(PROJECT_NAME)
+                        .setFilter("metric.type = \"" + AGG_METRIC_TYPE + "\"")
+                        .setInterval(interval)
+                        .setAggregation(Aggregation.newBuilder()
+                                .setAlignmentPeriod(Duration.newBuilder().setSeconds(3600))
+                                .setPerSeriesAligner(Aggregation.Aligner.ALIGN_SUM)
+                                .setCrossSeriesReducer(Aggregation.Reducer.REDUCE_SUM))
+                        .build())
+                .iterateAll().forEach(reduced::add);
+
+        assertThat(reduced).hasSize(1);
+        assertThat(reduced.get(0).getPointsCount()).isEqualTo(1);
+        assertThat(reduced.get(0).getPoints(0).getValue().getDoubleValue()).isEqualTo(12.0);
+
+        // alignment_period below the 60s minimum is rejected
+        assertThatThrownBy(() -> client.listTimeSeries(ListTimeSeriesRequest.newBuilder()
+                        .setName(PROJECT_NAME)
+                        .setFilter("metric.type = \"" + AGG_METRIC_TYPE + "\"")
+                        .setInterval(interval)
+                        .setAggregation(Aggregation.newBuilder()
+                                .setAlignmentPeriod(Duration.newBuilder().setSeconds(30))
+                                .setPerSeriesAligner(Aggregation.Aligner.ALIGN_SUM))
+                        .build())
+                .iterateAll().forEach(ts -> {}))
+                .isInstanceOf(InvalidArgumentException.class);
+    }
+
+    @Test
+    @Order(7)
+    void listMetricDescriptorsPagination() {
+        ListMetricDescriptorsPagedResponse response = client.listMetricDescriptors(
+                ListMetricDescriptorsRequest.newBuilder()
+                        .setName(PROJECT_NAME)
+                        .setFilter("metric.type = starts_with(\"custom.googleapis.com\")")
+                        .setPageSize(1)
+                        .build());
+
+        assertThat(response.getPage().getValues()).hasSize(1);
+        assertThat(response.getPage().getNextPageToken()).isNotEmpty();
+
+        // SDK auto-paging follows the token and sees both descriptors
+        List<MetricDescriptor> all = new ArrayList<>();
+        response.iterateAll().forEach(all::add);
+        assertThat(all.stream().map(MetricDescriptor::getType))
+                .contains(METRIC_TYPE, AGG_METRIC_TYPE);
+    }
+
+    @Test
+    @Order(8)
+    void stalePointRejected() {
+        Instant stale = Instant.now().minusSeconds(600);
+        assertThatThrownBy(() -> client.createTimeSeries(CreateTimeSeriesRequest.newBuilder()
+                .setName(PROJECT_NAME)
+                .addTimeSeries(gaugeSeries(AGG_METRIC_TYPE, "a", 1.0, stale))
+                .build()))
+                .isInstanceOf(InvalidArgumentException.class);
+    }
+
+    @Test
+    @Order(9)
     void deleteMetricDescriptor() {
         client.deleteMetricDescriptor(METRIC_NAME);
+        client.deleteMetricDescriptor(AGG_METRIC_NAME);
 
         // Retrieve should now fail or not show in list
         List<MetricDescriptor> list = new ArrayList<>();
@@ -210,6 +295,22 @@ class MonitoringTest {
                 .iterateAll().forEach(list::add);
 
         assertThat(list).noneMatch(d -> d.getType().equals(METRIC_TYPE));
+    }
+
+    private static TimeSeries gaugeSeries(String metricType, String env, double value, Instant end) {
+        return TimeSeries.newBuilder()
+                .setMetric(Metric.newBuilder()
+                        .setType(metricType)
+                        .putLabels("env", env)
+                        .build())
+                .setResource(MonitoredResource.newBuilder()
+                        .setType("global")
+                        .build())
+                .addPoints(Point.newBuilder()
+                        .setInterval(TimeInterval.newBuilder().setEndTime(toTimestamp(end)).build())
+                        .setValue(TypedValue.newBuilder().setDoubleValue(value).build())
+                        .build())
+                .build();
     }
 
     private static Timestamp toTimestamp(Instant instant) {

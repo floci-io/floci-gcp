@@ -4,6 +4,8 @@ import com.google.api.MetricDescriptor;
 import com.google.api.MonitoredResourceDescriptor;
 import com.google.monitoring.v3.*;
 import com.google.protobuf.Empty;
+import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -31,13 +33,18 @@ public class CloudMonitoringHttpController {
 
     @GET
     @Path("/monitoredResourceDescriptors")
-    public Response listMonitoredResourceDescriptors(@PathParam("project") String project) {
+    public Response listMonitoredResourceDescriptors(@PathParam("project") String project,
+                                                     @QueryParam("pageSize") @DefaultValue("0") int pageSize,
+                                                     @QueryParam("pageToken") String pageToken) {
         LOG.debugf("HTTP GET listMonitoredResourceDescriptors project=%s", project);
-        List<MonitoredResourceDescriptor> list = service.listMonitoredResourceDescriptors("projects/" + project);
-        ListMonitoredResourceDescriptorsResponse response = ListMonitoredResourceDescriptorsResponse.newBuilder()
-                .addAllResourceDescriptors(list)
-                .build();
-        return json(ProtoJson.print(response));
+        PageToken.Page<MonitoredResourceDescriptor> page = service.listMonitoredResourceDescriptors(
+                "projects/" + project, pageSize, pageToken);
+        ListMonitoredResourceDescriptorsResponse.Builder response = ListMonitoredResourceDescriptorsResponse.newBuilder()
+                .addAllResourceDescriptors(page.items());
+        if (page.nextPageToken() != null) {
+            response.setNextPageToken(page.nextPageToken());
+        }
+        return json(ProtoJson.print(response.build()));
     }
 
     @GET
@@ -57,12 +64,14 @@ public class CloudMonitoringHttpController {
                                           @QueryParam("pageSize") @DefaultValue("0") int pageSize,
                                           @QueryParam("pageToken") String pageToken) {
         LOG.debugf("HTTP GET listMetricDescriptors project=%s filter=%s", project, filter);
-        List<MetricDescriptor> list = service.listMetricDescriptors(
+        PageToken.Page<MetricDescriptor> page = service.listMetricDescriptors(
                 "projects/" + project, filter, pageSize, pageToken);
-        ListMetricDescriptorsResponse response = ListMetricDescriptorsResponse.newBuilder()
-                .addAllMetricDescriptors(list)
-                .build();
-        return json(ProtoJson.print(response));
+        ListMetricDescriptorsResponse.Builder response = ListMetricDescriptorsResponse.newBuilder()
+                .addAllMetricDescriptors(page.items());
+        if (page.nextPageToken() != null) {
+            response.setNextPageToken(page.nextPageToken());
+        }
+        return json(ProtoJson.print(response.build()));
     }
 
     @POST
@@ -108,6 +117,10 @@ public class CloudMonitoringHttpController {
                                    @QueryParam("filter") String filter,
                                    @QueryParam("interval.startTime") String intervalStartTime,
                                    @QueryParam("interval.endTime") String intervalEndTime,
+                                   @QueryParam("aggregation.alignmentPeriod") String alignmentPeriod,
+                                   @QueryParam("aggregation.perSeriesAligner") String perSeriesAligner,
+                                   @QueryParam("aggregation.crossSeriesReducer") String crossSeriesReducer,
+                                   @QueryParam("aggregation.groupByFields") List<String> groupByFields,
                                    @QueryParam("view") @DefaultValue("FULL") String view,
                                    @QueryParam("pageSize") @DefaultValue("0") int pageSize,
                                    @QueryParam("pageToken") String pageToken) {
@@ -121,20 +134,61 @@ public class CloudMonitoringHttpController {
             interval.setEndTime(fromIso(intervalEndTime));
         }
 
-        List<TimeSeries> list = service.listTimeSeries(
+        PageToken.Page<TimeSeries> page = service.listTimeSeries(
                 "projects/" + project,
                 filter,
                 interval.build(),
-                Aggregation.getDefaultInstance(),
+                aggregation(alignmentPeriod, perSeriesAligner, crossSeriesReducer, groupByFields),
                 view,
                 pageSize,
                 pageToken
         );
 
-        ListTimeSeriesResponse response = ListTimeSeriesResponse.newBuilder()
-                .addAllTimeSeries(list)
-                .build();
-        return json(ProtoJson.print(response));
+        ListTimeSeriesResponse.Builder response = ListTimeSeriesResponse.newBuilder()
+                .addAllTimeSeries(page.items());
+        if (page.nextPageToken() != null) {
+            response.setNextPageToken(page.nextPageToken());
+        }
+        return json(ProtoJson.print(response.build()));
+    }
+
+    private static Aggregation aggregation(String alignmentPeriod, String perSeriesAligner,
+                                           String crossSeriesReducer, List<String> groupByFields) {
+        Aggregation.Builder builder = Aggregation.newBuilder();
+        if (alignmentPeriod != null && !alignmentPeriod.isBlank()) {
+            builder.setAlignmentPeriod(parseDuration(alignmentPeriod));
+        }
+        if (perSeriesAligner != null && !perSeriesAligner.isBlank()) {
+            builder.setPerSeriesAligner(parseEnum(Aggregation.Aligner.class, perSeriesAligner,
+                    "aggregation.perSeriesAligner"));
+        }
+        if (crossSeriesReducer != null && !crossSeriesReducer.isBlank()) {
+            builder.setCrossSeriesReducer(parseEnum(Aggregation.Reducer.class, crossSeriesReducer,
+                    "aggregation.crossSeriesReducer"));
+        }
+        if (groupByFields != null) {
+            builder.addAllGroupByFields(groupByFields);
+        }
+        return builder.build();
+    }
+
+    private static <E extends Enum<E>> E parseEnum(Class<E> type, String value, String param) {
+        try {
+            return Enum.valueOf(type, value);
+        } catch (IllegalArgumentException e) {
+            throw GcpException.invalidArgument("Invalid " + param + ": " + value);
+        }
+    }
+
+    private static com.google.protobuf.Duration parseDuration(String value) {
+        try {
+            String seconds = value.endsWith("s") ? value.substring(0, value.length() - 1) : value;
+            return com.google.protobuf.Duration.newBuilder()
+                    .setSeconds(Long.parseLong(seconds))
+                    .build();
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("Invalid aggregation.alignmentPeriod: " + value);
+        }
     }
 
     private static Response json(String json) {

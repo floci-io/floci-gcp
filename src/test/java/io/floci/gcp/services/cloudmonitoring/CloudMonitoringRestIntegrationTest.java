@@ -121,6 +121,19 @@ class CloudMonitoringRestIntegrationTest {
     }
 
     @Test
+    void fractionalAlignmentPeriodIsAccepted() {
+        given()
+                .queryParam("filter", "metric.type = \"custom.googleapis.com/fractional\"")
+                .queryParam("interval.startTime", Instant.now().minusSeconds(600).toString())
+                .queryParam("interval.endTime", Instant.now().toString())
+                .queryParam("aggregation.alignmentPeriod", "60.5s")
+                .queryParam("aggregation.perSeriesAligner", "ALIGN_SUM")
+                .when().get(BASE + "/timeSeries")
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
     void listTimeSeriesWithoutFilterReturnsInvalidArgument() {
         given()
                 .queryParam("interval.endTime", Instant.now().toString())

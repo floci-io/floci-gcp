@@ -182,11 +182,9 @@ public class CloudMonitoringHttpController {
 
     private static com.google.protobuf.Duration parseDuration(String value) {
         try {
-            String seconds = value.endsWith("s") ? value.substring(0, value.length() - 1) : value;
-            return com.google.protobuf.Duration.newBuilder()
-                    .setSeconds(Long.parseLong(seconds))
-                    .build();
-        } catch (NumberFormatException e) {
+            // Proto Duration JSON allows fractional seconds ("60.5s"); Durations.parse handles both.
+            return com.google.protobuf.util.Durations.parse(value.endsWith("s") ? value : value + "s");
+        } catch (java.text.ParseException e) {
             throw GcpException.invalidArgument("Invalid aggregation.alignmentPeriod: " + value);
         }
     }

@@ -37,6 +37,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -246,8 +247,14 @@ public class CloudMonitoringService {
         }
 
         Instant now = clock.instant();
+        Set<String> batchMetricTypes = timeSeriesList.stream()
+                .map(ts -> ts.getMetric().getType())
+                .collect(Collectors.toSet());
         Map<String, Instant> latestByIdentity = new HashMap<>();
-        for (StoredTimeSeriesPoint pt : timeSeriesStore.scan(k -> true)) {
+        for (StoredTimeSeriesPoint pt : timeSeriesStore.scan(k -> {
+            int idx = k.indexOf('#');
+            return idx > 0 && batchMetricTypes.contains(k.substring(0, idx));
+        })) {
             latestByIdentity.merge(SeriesKey.of(pt).identityString(),
                     Instant.parse(pt.getEndTime()), (a, b) -> a.isAfter(b) ? a : b);
         }

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-09
+
+### Added
+
+- **serviceusage:** Service Usage REST API (`serviceusage.googleapis.com` v1) — `services.enable`/`disable`/`get`/`list` (with `state:` filters)/`batchEnable`/`batchGet`, returning already-done long-running operations; project-namespaced accept-and-succeed state that unblocks Terraform `google_project_service`, Pulumi, and `gcloud services`
+- **resourcemanager:** minimal Cloud Resource Manager v1 `projects.get` endpoint — the Terraform/Pulumi Google providers call it on every `google_project_service` read; every project resolves to `ACTIVE` with a stable synthetic project number
+- **firebaseauth:** Identity Platform / Firebase Auth REST API (`identitytoolkit.googleapis.com` v1) — wire-compatible with the official Firebase Auth emulator: email/password, anonymous, and custom-token sign-in, admin user CRUD + `batchGet`/`batchDelete`, unsigned emulator-style ID tokens that `firebase-admin` verifies, and `securetoken` refresh with `validSince`-based revocation via `FIREBASE_AUTH_EMULATOR_HOST`
+- **bigquery:** BigQuery Phase 1 REST API (`bigquery/v2`) — dataset and table CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, and query jobs (`jobs.query`, `jobs.insert`, `jobs.get`, `getQueryResults`) over a SQL subset (`SELECT *`/columns/`COUNT(*)`, `WHERE` equality, `LIMIT`, projection) with reason-coded errors and anonymous destination tables
+- **eventarc:** Eventarc REST service — trigger CRUD and Cloud Run / Pub/Sub event routing
+
+### Changed
+
+- **monitoring:** closed Cloud Monitoring time-series parity gaps — `ListTimeSeries` aggregation (per-series alignment + cross-series reduction) with pagination, `CreateTimeSeries` GCP validation rules (metric kind/value-type consistency, label and interval checks), extended filter grammar, and gating/point-sequence fixes
+
+### Fixed
+
+- **pubsub:** deliver published messages to already-open `StreamingPull` streams
+
 ## [0.4.0] - 2026-06-26
 
 ### Added
@@ -106,7 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci-gcp/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/floci-io/floci-gcp/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/floci-io/floci-gcp/compare/0.4.0...0.5.0
+[0.4.0]: https://github.com/floci-io/floci-gcp/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/floci-io/floci-gcp/compare/0.2.1...0.3.0
 [0.2.1]: https://github.com/floci-io/floci-gcp/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/floci-io/floci-gcp/compare/0.1.0...0.2.0

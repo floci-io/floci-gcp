@@ -22,10 +22,65 @@ the API endpoint / transport channel and disabling credentials:
 
 ## Scope
 
-- Metric descriptors: `CreateMetricDescriptor`, `GetMetricDescriptor`, `ListMetricDescriptors`, `DeleteMetricDescriptor`.
+- Metric descriptors: `CreateMetricDescriptor` (upsert), `GetMetricDescriptor`, `ListMetricDescriptors`, `DeleteMetricDescriptor`.
 - Monitored resource descriptors: `ListMonitoredResourceDescriptors`, `GetMonitoredResourceDescriptor`.
-- Time series: `CreateTimeSeries` (write points) and `ListTimeSeries` (read back over a time interval).
+- Time series: `CreateTimeSeries` (write points) and `ListTimeSeries` (read back over a time interval,
+  raw or aggregated).
 - `TypedValue` point values (`bool`, `int64`, `double`, `string`, `distribution`) are preserved round-trip.
+- Pagination (`pageSize` / `pageToken` / `nextPageToken`) on all list methods. `ListMetricDescriptors`
+  clamps the page size to 10,000; `ListTimeSeries` clamps to 100,000, where under the `FULL` view the
+  page size limits the total number of points (a series may span pages) and under `HEADERS` it limits
+  the number of series.
+
+## Aggregation
+
+`ListTimeSeries` supports a subset of the real API's alignment/reduction:
+
+- **Per-series aligners**: `ALIGN_NONE`, `ALIGN_SUM`, `ALIGN_MEAN`, `ALIGN_MIN`, `ALIGN_MAX`,
+  `ALIGN_COUNT`, `ALIGN_DELTA`, `ALIGN_RATE`. Output kinds/types follow the proto:
+  `ALIGN_MEAN`/`ALIGN_RATE` → `DOUBLE`, `ALIGN_COUNT` → `INT64`, `ALIGN_DELTA` → kind `DELTA`,
+  `ALIGN_RATE` → kind `GAUGE`.
+- **Cross-series reducers**: `REDUCE_NONE`, `REDUCE_SUM`, `REDUCE_MEAN`, `REDUCE_MIN`, `REDUCE_MAX`,
+  `REDUCE_COUNT`, with `group_by_fields` (`resource.type`, `resource.label.<key>`, `metric.label.<key>`).
+- `alignment_period` must be at least 60 seconds and is required whenever an aligner other than
+  `ALIGN_NONE` is set; a reducer requires an aligner. Unsupported aligners/reducers are rejected with
+  `INVALID_ARGUMENT` rather than silently ignored.
+- Alignment buckets are anchored to the request interval's end time: each aligned point's `endTime`
+  falls on `interval.endTime - k * alignment_period`.
+- Over REST, pass `aggregation.alignmentPeriod` (e.g. `60s`), `aggregation.perSeriesAligner`,
+  `aggregation.crossSeriesReducer` and repeated `aggregation.groupByFields` query parameters.
+
+## Validation semantics
+
+Write-path rules matching the documented API behavior:
+
+- `CreateTimeSeries`: at most 200 `TimeSeries` per request; each series carries exactly one point;
+  the point's `endTime` must be at most 25 hours in the past and 5 minutes in the future, and must be
+  strictly newer than the most recent stored point of the same series (metric type + labels +
+  monitored resource). `GAUGE` intervals are point-in-time (`startTime` absent or equal to `endTime`);
+  `DELTA`/`CUMULATIVE` intervals require `startTime < endTime`.
+- Writing to a nonexistent metric auto-creates its descriptor: the kind must be `GAUGE` (default) or
+  `CUMULATIVE`, and the value type is inferred from the point (`BOOL`, `INT64`, `DOUBLE` or
+  `DISTRIBUTION`).
+- `CreateMetricDescriptor` is an upsert: re-creating an existing type updates it, but labels are
+  unioned — existing label keys are never removed. `BOOL`/`STRING` value types are only valid with
+  `GAUGE`. The metric type must be domain-prefixed (e.g. `custom.googleapis.com/...`).
+- `DeleteMetricDescriptor` only accepts user-created metrics (`custom.googleapis.com/` or
+  `external.googleapis.com/` prefixes).
+- `ListTimeSeries` requires a filter naming a single metric type (`metric.type = "..."`) and an
+  `interval.endTime`; the read interval is half-open `(startTime, endTime]`.
+
+### Documented deviations from real GCP
+
+- `CreateTimeSeries` is all-or-nothing: on any invalid series the whole request fails with
+  `INVALID_ARGUMENT` and nothing is written (real GCP writes the valid subset and reports partial
+  failures via `CreateTimeSeriesSummary` error details).
+- Alignment emits points only for buckets that contain data — no interpolation of empty periods for
+  `ALIGN_DELTA`/`ALIGN_RATE`.
+- `DISTRIBUTION` and `STRING` values cannot be aggregated.
+- A missing read `interval.startTime` is treated as unbounded (real GCP defaults it to the end time).
+- A single `CreateTimeSeries` request may carry multiple chronologically ordered points for the same
+  series across `TimeSeries` entries (real GCP rejects duplicate series identities per request).
 
 ## Quick Start
 

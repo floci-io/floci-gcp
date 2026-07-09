@@ -3,6 +3,7 @@ package io.floci.gcp.services.cloudmonitoring;
 import io.floci.gcp.services.cloudmonitoring.model.StoredTimeSeriesPoint;
 import org.jboss.logging.Logger;
 
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -13,52 +14,86 @@ public final class TimeSeriesFilter {
 
     private static final Pattern CLAUSE =
             Pattern.compile("^(\\S+?)\\s*(=)\\s*(.+)$");
+    private static final Pattern STARTS_WITH =
+            Pattern.compile("^starts_with\\(\\s*\"(.*)\"\\s*\\)$");
+
+    public record ParsedFilter(Predicate<StoredTimeSeriesPoint> predicate, String metricTypeEquality) {}
 
     private TimeSeriesFilter() {}
 
     public static Predicate<StoredTimeSeriesPoint> parse(String filter) {
+        return parseFilter(filter).predicate();
+    }
+
+    public static ParsedFilter parseFilter(String filter) {
         if (filter == null || filter.isBlank()) {
-            return point -> true;
+            return new ParsedFilter(point -> true, null);
         }
         Predicate<StoredTimeSeriesPoint> predicate = point -> true;
+        String metricTypeEquality = null;
         // Split by AND, keeping in mind case insensitivity
         for (String clause : filter.split("(?i)\\s+AND\\s+")) {
             String trimmed = clause.trim();
             if (trimmed.isEmpty()) {
                 continue;
             }
-            predicate = predicate.and(parseClause(trimmed));
+            ParsedClause parsed = parseClause(trimmed);
+            predicate = predicate.and(parsed.predicate());
+            if (parsed.metricTypeEquality() != null) {
+                metricTypeEquality = parsed.metricTypeEquality();
+            }
         }
-        return predicate;
+        return new ParsedFilter(predicate, metricTypeEquality);
     }
 
-    private static Predicate<StoredTimeSeriesPoint> parseClause(String clause) {
+    private record ParsedClause(Predicate<StoredTimeSeriesPoint> predicate, String metricTypeEquality) {}
+
+    private static ParsedClause parseClause(String clause) {
         Matcher m = CLAUSE.matcher(clause);
         if (!m.matches()) {
             LOG.debugf("Ignoring unrecognized monitoring filter clause: %s", clause);
-            return point -> true;
+            return new ParsedClause(point -> true, null);
         }
         String field = m.group(1);
-        String op = m.group(2);
-        String value = unquote(m.group(3).trim());
+        String rawValue = m.group(3).trim();
 
+        Matcher sw = STARTS_WITH.matcher(rawValue);
+        boolean startsWith = sw.matches();
+        String value = startsWith ? sw.group(1) : unquote(rawValue);
+
+        Function<StoredTimeSeriesPoint, String> extractor = extractor(field);
+        if (extractor == null) {
+            LOG.debugf("Ignoring unsupported monitoring filter field: %s", field);
+            return new ParsedClause(point -> true, null);
+        }
+
+        Predicate<StoredTimeSeriesPoint> predicate = startsWith
+                ? point -> {
+                    String actual = extractor.apply(point);
+                    return actual != null && actual.startsWith(value);
+                }
+                : point -> value.equals(extractor.apply(point));
+
+        String metricTypeEquality = !startsWith && field.equalsIgnoreCase("metric.type") ? value : null;
+        return new ParsedClause(predicate, metricTypeEquality);
+    }
+
+    private static Function<StoredTimeSeriesPoint, String> extractor(String field) {
         if (field.equalsIgnoreCase("metric.type")) {
-            return point -> value.equals(point.getMetricType());
+            return StoredTimeSeriesPoint::getMetricType;
         }
         if (field.equalsIgnoreCase("resource.type")) {
-            return point -> value.equals(point.getResourceType());
+            return StoredTimeSeriesPoint::getResourceType;
         }
         if (field.startsWith("metric.labels.")) {
             String labelKey = field.substring("metric.labels.".length());
-            return point -> point.getMetricLabels() != null && value.equals(point.getMetricLabels().get(labelKey));
+            return point -> point.getMetricLabels() != null ? point.getMetricLabels().get(labelKey) : null;
         }
         if (field.startsWith("resource.labels.")) {
             String labelKey = field.substring("resource.labels.".length());
-            return point -> point.getResourceLabels() != null && value.equals(point.getResourceLabels().get(labelKey));
+            return point -> point.getResourceLabels() != null ? point.getResourceLabels().get(labelKey) : null;
         }
-
-        LOG.debugf("Ignoring unsupported monitoring filter field: %s", field);
-        return point -> true;
+        return null;
     }
 
     private static String unquote(String s) {

@@ -14,10 +14,33 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"cloud.google.com/go/storage"
+	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+const defaultCTFToken = "fake-token-floci-gcp"
+
+// AccessToken returns the CTF operator Bearer token for local/CI runs.
+func AccessToken() string {
+	if t := os.Getenv("GOOGLE_OAUTH_ACCESS_TOKEN"); t != "" {
+		return t
+	}
+	if t := os.Getenv("FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN"); t != "" {
+		return t
+	}
+	return defaultCTFToken
+}
+
+func tokenSource() oauth2.TokenSource {
+	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: AccessToken()})
+}
+
+func clientOpts(extra ...option.ClientOption) []option.ClientOption {
+	opts := []option.ClientOption{option.WithTokenSource(tokenSource())}
+	return append(opts, extra...)
+}
 
 // ProjectID returns the GCP project ID from the environment or a default.
 func ProjectID() string {
@@ -35,7 +58,7 @@ func SecretParent() string {
 // StorageClient returns a GCS client configured for the emulator.
 // Reads STORAGE_EMULATOR_HOST (e.g. http://localhost:4588).
 func StorageClient(ctx context.Context) *storage.Client {
-	client, err := storage.NewClient(ctx, option.WithoutAuthentication())
+	client, err := storage.NewClient(ctx, clientOpts()...)
 	if err != nil {
 		panic("failed to create storage client: " + err.Error())
 	}
@@ -45,7 +68,7 @@ func StorageClient(ctx context.Context) *storage.Client {
 // PubSubClient returns a Pub/Sub client configured for the emulator.
 // Reads PUBSUB_EMULATOR_HOST (e.g. localhost:4588).
 func PubSubClient(ctx context.Context) *pubsub.Client {
-	client, err := pubsub.NewClient(ctx, ProjectID())
+	client, err := pubsub.NewClient(ctx, ProjectID(), clientOpts()...)
 	if err != nil {
 		panic("failed to create pubsub client: " + err.Error())
 	}
@@ -55,7 +78,7 @@ func PubSubClient(ctx context.Context) *pubsub.Client {
 // FirestoreClient returns a Firestore client configured for the emulator.
 // Reads FIRESTORE_EMULATOR_HOST (e.g. localhost:4588).
 func FirestoreClient(ctx context.Context) *firestore.Client {
-	client, err := firestore.NewClient(ctx, ProjectID())
+	client, err := firestore.NewClient(ctx, ProjectID(), clientOpts()...)
 	if err != nil {
 		panic("failed to create firestore client: " + err.Error())
 	}
@@ -65,7 +88,7 @@ func FirestoreClient(ctx context.Context) *firestore.Client {
 // DatastoreClient returns a Datastore client configured for the emulator.
 // Reads DATASTORE_EMULATOR_HOST (e.g. localhost:4588).
 func DatastoreClient(ctx context.Context) *datastore.Client {
-	client, err := datastore.NewClient(ctx, ProjectID())
+	client, err := datastore.NewClient(ctx, ProjectID(), clientOpts()...)
 	if err != nil {
 		panic("failed to create datastore client: " + err.Error())
 	}
@@ -83,7 +106,7 @@ func SecretManagerClient(ctx context.Context) *secretmanager.Client {
 	if err != nil {
 		panic("failed to create gRPC connection: " + err.Error())
 	}
-	client, err := secretmanager.NewClient(ctx, option.WithGRPCConn(conn))
+	client, err := secretmanager.NewClient(ctx, clientOpts(option.WithGRPCConn(conn))...)
 	if err != nil {
 		panic("failed to create secret manager client: " + err.Error())
 	}
@@ -101,7 +124,7 @@ func LoggingClient(ctx context.Context) *logging.Client {
 	if err != nil {
 		panic("failed to create gRPC connection: " + err.Error())
 	}
-	client, err := logging.NewClient(ctx, option.WithGRPCConn(conn))
+	client, err := logging.NewClient(ctx, clientOpts(option.WithGRPCConn(conn))...)
 	if err != nil {
 		panic("failed to create logging client: " + err.Error())
 	}
@@ -119,7 +142,7 @@ func KMSClient(ctx context.Context) *kms.KeyManagementClient {
 	if err != nil {
 		panic("failed to create gRPC connection: " + err.Error())
 	}
-	client, err := kms.NewKeyManagementClient(ctx, option.WithGRPCConn(conn))
+	client, err := kms.NewKeyManagementClient(ctx, clientOpts(option.WithGRPCConn(conn))...)
 	if err != nil {
 		panic("failed to create kms client: " + err.Error())
 	}

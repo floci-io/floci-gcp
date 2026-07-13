@@ -2,6 +2,7 @@ target/
 data/
 *.class
 *.jar
+!vendor/maven/**/*.jar
 *.war
 .idea/
 *.iml
@@ -28,4 +29,21 @@ package-lock.json
 test-results.xml
 
 *.log
+test-results
+.env
+.cursor/
+FLOCI.md
+scripts/node_modules/
+.local/
 
+# Fuzz harness build and local findings
+tools/fuzz/target/
+tools/fuzz/findings/*
+!tools/fuzz/findings/.gitignore
+!tools/fuzz/findings/fixtures/
+!tools/fuzz/findings/fixtures/**
+tools/fuzz/.jqwik-database
+
+# Python tooling caches
+__pycache__/
+*.pyc

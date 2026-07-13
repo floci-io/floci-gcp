@@ -1,6 +1,7 @@
 package io.floci.gcp.core.common.docker;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerEnvHardening;
 import io.floci.gcp.core.common.dns.EmbeddedDnsServer;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
@@ -85,12 +86,14 @@ public class ContainerBuilder {
         }
 
         public Builder withEnv(String key, String value) {
-            this.env.add(key + "=" + value);
+            if (!ContainerEnvHardening.isBlocked(key)) {
+                this.env.add(key + "=" + value);
+            }
             return this;
         }
 
         public Builder withEnv(List<String> env) {
-            this.env.addAll(env);
+            this.env.addAll(ContainerEnvHardening.filterEnvList(env));
             return this;
         }
 

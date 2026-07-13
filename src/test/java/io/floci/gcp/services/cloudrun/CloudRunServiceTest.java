@@ -137,7 +137,7 @@ class CloudRunServiceTest {
         assertTrue(operation.getDone());
         Service created = gated.getService("projects/p1/locations/us-central1/services/svc");
         assertEquals(created.getLatestCreatedRevision(), created.getLatestReadyRevision());
-        assertTrue(created.getUri().startsWith("https://svc-"));
+        assertEquals("http://svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588", created.getUri());
         verifyNoInteractions(runtime);
     }
 

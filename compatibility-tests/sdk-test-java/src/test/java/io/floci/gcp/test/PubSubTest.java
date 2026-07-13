@@ -1,6 +1,6 @@
 package io.floci.gcp.test;
 
-import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.TransportChannelProvider;
@@ -49,7 +49,7 @@ class PubSubTest {
 
     private static ManagedChannel channel;
     private static TransportChannelProvider channelProvider;
-    private static NoCredentialsProvider credentialsProvider;
+    private static CredentialsProvider credentialsProvider;
     private static TopicAdminClient topicAdminClient;
     private static SubscriptionAdminClient subscriptionAdminClient;
 
@@ -63,7 +63,7 @@ class PubSubTest {
 
         channelProvider = FixedTransportChannelProvider.create(
                 GrpcTransportChannel.create(channel));
-        credentialsProvider = NoCredentialsProvider.create();
+        credentialsProvider = TestFixtures.credentialsProvider();
 
         topicAdminClient = TopicAdminClient.create(
                 TopicAdminSettings.newBuilder()

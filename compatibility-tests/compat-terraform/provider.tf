@@ -42,12 +42,13 @@ variable "cloud_run_replace_token" {
   default = "initial"
 }
 
-# Credentials are provided via GOOGLE_OAUTH_ACCESS_TOKEN env var (fake value —
-# floci-gcp ignores auth headers unconditionally).
+# Credentials via GOOGLE_OAUTH_ACCESS_TOKEN (CTF operator token, default
+# fake-token-floci-gcp). The emulator validates it against
+# FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN when FLOCI_GCP_AUTH_VALIDATE_TOKENS is on.
 #
 # Custom endpoints redirect each service API to the local emulator.
 # Services that only expose gRPC (Pub/Sub, Firestore, Datastore) are not
-# reachable via Terraform custom endpoints — they need REST transcoding.
+# reachable via Terraform custom endpoints and need REST transcoding.
 provider "google" {
   project = var.project
   region  = var.region

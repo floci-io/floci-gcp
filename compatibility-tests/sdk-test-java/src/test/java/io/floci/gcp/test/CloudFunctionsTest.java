@@ -111,9 +111,9 @@ class CloudFunctionsTest {
         assertThat(response.getStorageSource().getBucket()).startsWith("gcf-v2-sources-");
         assertThat(response.getStorageSource().getObject()).startsWith("source-");
 
-        HttpRequest put = HttpRequest.newBuilder(URI.create(response.getUploadUrl()))
+        HttpRequest put = TestFixtures.authorize(HttpRequest.newBuilder(URI.create(response.getUploadUrl()))
                 .header("Content-Type", "application/zip")
-                .PUT(HttpRequest.BodyPublishers.ofString("fake source zip", StandardCharsets.UTF_8))
+                .PUT(HttpRequest.BodyPublishers.ofString("fake source zip", StandardCharsets.UTF_8)))
                 .build();
         HttpResponse<String> putResponse = HttpClient.newHttpClient().send(put, HttpResponse.BodyHandlers.ofString());
         assertThat(putResponse.statusCode()).isEqualTo(200);

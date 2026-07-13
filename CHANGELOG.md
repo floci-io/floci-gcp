@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (CTF security)
+
+- **iam:** Fail-closed when IAM enforcement is on and the request has no authenticated principal (REST and gRPC). Missing identity is denied without requiring strict mode.
+- **gke:** Token webhook least privilege. Operator root still gets `system:masters`. Registered player tokens get `system:authenticated` only (not cluster-admin).
+- **auth / containers:** `ContainerEnvHardening` also blocks `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, and Cloud SDK override families (`CLOUDSDK_CORE_*`, `CLOUDSDK_API_ENDPOINT_OVERRIDES_*`, plus existing `CLOUDSDK_AUTH_*`).
+- **gcs:** Object `PATCH` maps to `storage.objects.update` (not create).
+- **cloudrun:** `roles/run.developer` no longer includes `run.routes.invoke` or `run.jobs.run`. Invoke requires `roles/run.invoker` (or admin).
+- **iam:** Service account key routes and `signBlob` map to `iam.serviceAccountKeys.*` / `iam.serviceAccounts.signBlob`.
+- **auth:** Operator root access token is not registered in `TokenRegistry`. Root identity is resolved only via `OperatorRootAuth`.
+- **iam / gRPC:** Project for policy evaluation is taken from `x-goog-request-params` (`project=` / `project_id=` or resource-name fields) before the default project fallback.
+- **docker:** On Windows, the default Docker host resolves to `npipe:////./pipe/docker_engine` when the configured path is the Unix socket default.
+
+### Added (CTF fork)
+
+- **CTF Waves 1-3:** Stage 0 auth gates (Bearer validation, IAM enforcement and strict mode, operator root, internal endpoint hide, container env hardening), then REST IAM permission mapping and `*IamEnforcement*` / `Ctf*` regression coverage across core services, then Wave 3 Datastore / Eventarc / Resource Manager IAM surfaces
+- **auth / iam:** Stage 0 CTF auth gates: IAM enforcement and strict mode (`IamEnforcementFilter`), Bearer token validation (`TokenValidationFilter`, `TokenRegistry`), operator root bypass (`OperatorRootAuth` via `FLOCI_GCP_AUTH_ROOT_*`), internal endpoint hide (`CtfInternalEndpointFilter`), and container env hardening (`ContainerEnvHardening`)
+- **iam / gRPC:** All ten CTF gRPC services (Firestore, Datastore, Pub/Sub, Secret Manager, Cloud Tasks, Cloud KMS including `GenerateRandomBytes` -> `cloudkms.locations.generateRandomBytes`, Cloud Scheduler, Cloud Logging, Cloud Monitoring) gated by `IamEnforcementGrpcInterceptor` + `IamGrpcPermissionMapper` (including Pub/Sub snapshot/detach and Secret Manager `TestIamPermissions`)
+- **iam / Cloud Run:** Host-routed invoke (`*.run.*` Host header) and legacy `/run/v2/...` paths both map to `run.routes.invoke`
+- **ci:** Compatibility workflow injects `FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` and `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`
+- **iam:** Stage 0 permission mapping for `iam.serviceAccounts.list`, `iam.serviceAccounts.create`, and `iam.serviceAccounts.get`
+- **compose / docs:** CTF defaults in `docker-compose.yml` plus README, AGENTS, environment-variables, and IAM docs for the hardening profile
+- **docs:** Eventarc service page (`docs/services/eventarc.md`) and CTF gap-closure pass (services index protocols, GKE strict unmapped control plane, KMS `GenerateRandomBytes` gRPC vs REST, gRPC interceptor docs, regression `-Dtest` wildcards, Pub/Sub REST clarifications)
+
 ## [0.5.0] - 2026-07-09
 
 ### Added

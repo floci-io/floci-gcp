@@ -6,6 +6,7 @@ import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.Volume;
 import com.google.cloud.run.v2.VolumeMount;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerEnvHardening;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
@@ -218,12 +219,13 @@ public class CloudRunRuntimeService {
                             List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
         Map<String, String> env = new LinkedHashMap<>();
         for (EnvVar envVar : container.getEnvList()) {
-            env.put(envVar.getName(), envVar.getValue());
+            ContainerEnvHardening.putIfAllowed(env, envVar.getName(), envVar.getValue());
         }
         env.put("PORT", Integer.toString(containerPort));
         env.put("K_SERVICE", lastSegment(service.getName()));
         env.put("K_REVISION", lastSegment(revision.getName()));
         env.put("K_CONFIGURATION", lastSegment(service.getName()));
+        ContainerEnvHardening.removeBlockedKeys(env);
 
         ContainerBuilder.Builder builder = containerBuilder.newContainer(container.getImage())
                 .withName(containerName)

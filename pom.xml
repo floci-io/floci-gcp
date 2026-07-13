@@ -154,6 +154,12 @@
             <artifactId>proto-google-cloud-datastore-v1</artifactId>
         </dependency>
 
+        <!-- Datastore gRPC stubs (DatastoreGrpc) for CTF IAM integration tests -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-datastore-v1</artifactId>
+        </dependency>
+
         <!-- cron-utils for Cloud Scheduler unix-cron schedule parsing -->
         <dependency>
             <groupId>com.cronutils</groupId>

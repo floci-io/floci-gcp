@@ -1,6 +1,65 @@
-Guidance for AI coding agents working in the floci-gcp repository.
+Guidance for AI coding agents working in the floci-gcp-ctf repository.
+
+**floci-gcp-ctf** is a security-hardened fork of [floci-gcp](https://github.com/floci-io/floci-gcp) for CTF and security exercises. It is not stock upstream `floci/floci-gcp:latest`.
+
+Human-readable fork summary: [README.md](./README.md). IAM detail: [docs/services/iam.md](./docs/services/iam.md#ctf-hardening).
 
 This file defines repository-specific operating rules for autonomous or semi-autonomous coding agents. Follow these instructions unless a maintainer explicitly tells you otherwise.
+
+---
+
+## CTF fork overview
+
+| Item | Value |
+|---|---|
+| Language | Java 25 |
+| Framework | Quarkus 3.34.6 |
+| Port | 4588 (gRPC + REST, single port) |
+| Config prefix | `floci-gcp.*` / `FLOCI_GCP_*` |
+| Image tag (local) | build from this repo |
+
+**First principles (override upstream defaults when they conflict):**
+
+1. Preserve CTF hardening on upstream merges: IAM enforcement, strict mode, Bearer token validation, hide internal endpoints.
+2. Match GCP semantics where floci-gcp can model them (auth, IAM allow policies, service account APIs).
+3. Keep diffs narrow; reuse `GcpException`, `StorageFactory`, protocol controllers.
+4. Ship docs and tests with behavior changes (`README.md`, this file, `docs/services/iam.md` when IAM changes).
+5. Prioritize Stage 0 CTF surface: token validation, IAM enforcement, operator root, internal route hide.
+
+**Fork-only types:** `TokenValidationFilter`, `IamEnforcementFilter`, `CtfInternalEndpointFilter`, `ContainerEnvHardening`, `TokenRegistry`, `OperatorRootAuth`.
+
+### Wave 3 IAM surface (Firestore / Datastore / Eventarc / Resource Manager / gRPC)
+
+| Service | REST IAM | Notes |
+|---------|----------|-------|
+| Firestore | gRPC via `IamEnforcementGrpcInterceptor` → `datastore.entities.*` | Same Datastore entity roles (`roles/datastore.viewer` / `user`) |
+| Datastore | HTTP `POST /v1/projects/{p}:{method}` and gRPC via interceptor → `datastore.entities.*` | HTTP and gRPC both gated |
+| Pub/Sub | REST + gRPC (`Publisher` / `Subscriber`) via interceptor → `pubsub.topics.*` / `pubsub.subscriptions.*` / `pubsub.snapshots.*` | Same roles as REST (`publisher` / `subscriber` / `admin`) |
+| Secret Manager | REST + gRPC (`SecretManagerService`) via interceptor → `secretmanager.secrets.*` / `versions.*` | Same roles as REST (`secretAccessor` / `admin`) |
+| Eventarc | triggers / channels / providers → `eventarc.*` | `roles/eventarc.viewer`, `roles/eventarc.admin` |
+| Resource Manager | `GET /v1/projects/{p}` → `resourcemanager.projects.get`, plus `:getIamPolicy` / `:setIamPolicy` mapped | getIamPolicy/setIamPolicy not fully implemented |
+| GKE control plane | `/container/v1` unmapped under strict | Non-operator denied when strict enforcement is on. kubectl webhook: operator root -> `system:masters`, players -> `system:authenticated` only |
+
+See [docs/services/firestore.md](./docs/services/firestore.md#ctf-fork), [datastore.md](./docs/services/datastore.md#ctf-fork), [pubsub.md](./docs/services/pubsub.md#ctf-fork), [secret-manager.md](./docs/services/secret-manager.md#ctf-fork), [eventarc.md](./docs/services/eventarc.md#ctf-fork), [gke.md](./docs/services/gke.md#ctf-fork), and Resource Manager notes in [service-usage.md](./docs/services/service-usage.md#ctf-fork-resource-manager). Regression tests: `DatastoreIamEnforcementIntegrationTest`, `DatastoreGrpcIamEnforcementIntegrationTest`, `FirestoreIamEnforcementIntegrationTest`, `PubSubIamEnforcementIntegrationTest`, `PubSubGrpcIamEnforcementIntegrationTest`, `SecretManagerIamEnforcementIntegrationTest`, `SecretManagerGrpcIamEnforcementIntegrationTest`, `EventarcIamEnforcementIntegrationTest`, `ResourceManagerIamEnforcementIntegrationTest`, `GkeTokenWebhookCtfIntegrationTest`.
+
+### Operator vs participant
+
+| Role | Credentials | Behavior |
+|------|-------------|----------|
+| **Operator** | `FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` + `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` | Bypasses IAM enforcement for provisioning. Must present matching Bearer token. Resolved via `OperatorRootAuth` only (root token is not in `TokenRegistry`). On GKE webhook: `system:masters`. Never give to players. |
+| **Participant** | Token registered in `TokenRegistry` with IAM allow bindings | Subject to Bearer validation + IAM. Missing or unregistered tokens fail when validation is on. On GKE webhook: `system:authenticated` only (not masters). |
+
+**Fail-closed IAM:** When `FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, requests without an authenticated principal are denied (REST and gRPC). Strict mode additionally denies unmapped permissions.
+
+**ContainerEnvHardening:** Strips credential and operator bypass keys from participant container env before Docker launch. Blocked set includes `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_API_KEY`, `GCLOUD_ACCESS_TOKEN`, `FLOCI_GCP_AUTH_*`, and Cloud SDK override prefixes (`CLOUDSDK_AUTH_*`, `CLOUDSDK_CORE_*`, `CLOUDSDK_API_ENDPOINT_OVERRIDES_*`).
+
+Compose enables (do not turn off for CTF): `FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED`, `FLOCI_GCP_SERVICES_IAM_STRICT_ENFORCEMENT_ENABLED`, `FLOCI_GCP_AUTH_VALIDATE_TOKENS`, `FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS` (use `all` to hide `/health` from players).
+
+```bash
+export FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT="operator@floci-local.iam.gserviceaccount.com"
+export FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="..."
+docker compose up -d
+```
 
 ---
 
@@ -10,7 +69,7 @@ floci-gcp is a Java-based local GCP emulator built on Quarkus.
 
 Its goal is full GCP SDK and gcloud CLI compatibility through real GCP wire protocols, not convenience APIs or simplified abstractions.
 
-floci-gcp acts as an open-source alternative to the GCP-provided emulators, unified under a single port.
+floci-gcp acts as an open-source alternative to the GCP-provided emulators, unified under a single port. This fork adds Stage 0 auth gates on top of that surface.
 
 - Port: 4588
 - Stack:
@@ -27,11 +86,12 @@ floci-gcp acts as an open-source alternative to the GCP-provided emulators, unif
 
 When making changes, follow these priorities:
 
-1. Preserve GCP protocol compatibility
-2. Match GCP SDK and gcloud CLI behavior
-3. Reuse existing floci-gcp patterns
-4. Prefer correctness over convenience
-5. Keep changes narrow and testable
+1. Preserve CTF hardening (see CTF fork overview above)
+2. Preserve GCP protocol compatibility
+3. Match GCP SDK and gcloud CLI behavior
+4. Reuse existing floci-gcp patterns
+5. Prefer correctness over convenience
+6. Keep changes narrow and testable
 
 Critical rules:
 
@@ -39,6 +99,7 @@ Critical rules:
 - Do not change request or response formats for convenience
 - Do not perform broad refactors unless the task explicitly requires them
 - Keep behavior aligned with GCP expectations and existing floci-gcp conventions
+- Do not weaken Compose CTF defaults without an explicit maintainer request
 
 ---
 
@@ -111,9 +172,11 @@ Both gRPC and REST are served on port **4588** via ALPN negotiation:
 - `quarkus.http.http2=true`
 - `quarkus.grpc.server.use-separate-server=false`
 
-### Auth bypass
+### Auth and CTF gates
 
-GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. floci-gcp does not validate credentials; it accepts all requests unconditionally.
+GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. Upstream
+floci-gcp does not validate credentials. This CTF fork validates Bearer tokens and enforces IAM
+when `FLOCI_GCP_AUTH_VALIDATE_TOKENS` / `FLOCI_GCP_SERVICES_IAM_*` are enabled (Compose defaults).
 
 ### Project ID as multi-tenancy key
 
@@ -210,6 +273,17 @@ Critical areas:
     ./mvnw test -Dtest=GcsIntegrationTest
     ./mvnw test -Dtest=PubSubIntegrationTest#publishMessage
 
+### CTF regression tests
+
+Run Stage 0 auth and IAM enforcement coverage (wildcards pick up new classes):
+
+```bash
+./mvnw test -Dtest=*IamEnforcement*,*Grpc*Iam*,Ctf*,Token*,GkeTokenWebhookCtf*,ContainerEnvHardening*,HealthIntegrationTest
+```
+
+That set includes all `*IamEnforcement*` (REST and gRPC), `Ctf*`, `Token*`,
+`GkeTokenWebhookCtf*`, `ContainerEnvHardening*`, and `HealthIntegrationTest`.
+
 ---
 
 ## Compatibility Project
@@ -250,8 +324,8 @@ The endpoint is passed via env: `FLOCI_GCP_ENDPOINT` for the SDK suites; `FLOCI_
 ### IaC suites (Terraform / OpenTofu)
 
 - Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version** — e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
-- Auth is bypassed with a fake `GOOGLE_OAUTH_ACCESS_TOKEN`; the emulator ignores it.
-- Only REST-exposed services are reachable via Terraform custom endpoints (GCS, IAM, Secret Manager). gRPC-only services (Pub/Sub, Firestore, Datastore) are not, without REST transcoding.
+- Auth uses `GOOGLE_OAUTH_ACCESS_TOKEN` (default `fake-token-floci-gcp`). The emulator validates it against `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` when `FLOCI_GCP_AUTH_VALIDATE_TOKENS` is on.
+- Only REST-exposed services are reachable via Terraform custom endpoints (GCS, IAM, Secret Manager, and others with `*_custom_endpoint`). Pub/Sub exposes REST and gRPC; Firestore remains gRPC-oriented for IaC unless REST transcoding is used.
 
 ### Guidelines
 

@@ -9,6 +9,8 @@ import (
 	"os"
 	"testing"
 
+	"floci-gcp-sdk-test-go/internal/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,11 +33,19 @@ func iamSABase(project string) string {
 	return fmt.Sprintf("%s/v1/projects/%s/serviceAccounts", iamEndpoint(), project)
 }
 
+func iamAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+testutil.AccessToken())
+}
+
 func iamPost(t *testing.T, url string, body interface{}) map[string]interface{} {
 	t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data)) //nolint:noctx
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	iamAuthHeader(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
@@ -48,7 +58,10 @@ func iamPost(t *testing.T, url string, body interface{}) map[string]interface{} 
 
 func iamGet(t *testing.T, url string) map[string]interface{} {
 	t.Helper()
-	resp, err := http.Get(url) //nolint:noctx
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	require.NoError(t, err)
+	iamAuthHeader(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
@@ -61,11 +74,13 @@ func iamGet(t *testing.T, url string) map[string]interface{} {
 
 func iamDelete(url string) {
 	req, _ := http.NewRequest(http.MethodDelete, url, nil) //nolint:noctx
+	iamAuthHeader(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}
 }
+
 
 func TestIAM(t *testing.T) {
 	project := iamProject()

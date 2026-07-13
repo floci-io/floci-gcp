@@ -177,7 +177,7 @@ public class CloudRunService {
 
         Timestamp now = timestampNow();
         String revisionName = name + "/revisions/" + id + "-00001";
-        String uri = executionEnabled()
+        String uri = urlService != null
                 ? invocationUri(project, location, id)
                 : "https://" + id + "-" + stableSuffix(project, location) + ".a.run.app";
 

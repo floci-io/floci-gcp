@@ -65,3 +65,21 @@ overriding the API endpoint / transport channel and disabling credentials:
   has passed. `PauseJob` stops auto-firing; `ResumeJob` re-enables it.
 - `PubsubTarget.topic_name` must reference an existing Pub/Sub topic in the same emulator.
 - `RetryConfig`/`attempt_deadline` are stored and returned but retries are not yet simulated.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Scheduler calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Cloud Scheduler (`google.cloud.scheduler.v1.CloudScheduler`) is gated by
+  `IamEnforcementGrpcInterceptor` with the same `cloudscheduler.jobs.*` permissions via
+  `IamGrpcPermissionMapper` (for example `ListJobs` → `cloudscheduler.jobs.list`,
+  `ResumeJob` → `cloudscheduler.jobs.enable`, `RunJob` → `cloudscheduler.jobs.run`).
+- `IamPermissionMapper` maps Scheduler REST paths to `cloudscheduler.jobs.*` permissions
+  (create, get, list, update, delete, pause, enable for resume, run).
+- `roles/cloudscheduler.viewer` grants get and list only.
+- `roles/cloudscheduler.admin` grants the full mapped Cloud Scheduler job surface.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `SchedulerIamEnforcementIntegrationTest`, `SchedulerGrpcIamEnforcementIntegrationTest`.

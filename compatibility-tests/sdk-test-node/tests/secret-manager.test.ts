@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import * as grpc from '@grpc/grpc-js';
-import { PROJECT_ID, SECRET_MANAGER_HOST, uniqueName } from './setup';
+import { PROJECT_ID, SECRET_MANAGER_HOST, authClient, uniqueName } from './setup';
 
 describe('Secret Manager', () => {
   let client: SecretManagerServiceClient;
@@ -15,6 +15,7 @@ describe('Secret Manager', () => {
       servicePath: host,
       port: port ? parseInt(port, 10) : 4588,
       sslCreds: grpc.credentials.createInsecure(),
+      authClient: authClient(),
     });
     secretId = uniqueName('test-secret');
     secretName = `projects/${PROJECT_ID}/secrets/${secretId}`;

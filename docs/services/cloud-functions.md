@@ -43,4 +43,16 @@ FunctionServiceSettings settings = FunctionServiceSettings.newHttpJsonBuilder()
 - Function updates
 - Download URL generation
 - Runtime listing
-- IAM
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Functions calls require a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps Cloud Functions v2 REST paths to `cloudfunctions.functions.*` permissions:
+  - create, get, list, delete
+  - `generateUploadUrl` maps to `cloudfunctions.functions.sourceCodeSet`
+- `roles/cloudfunctions.developer` and `roles/cloudfunctions.admin` both grant the Stage 0 mapped control-plane permissions above.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+
+Regression: `CloudFunctionsIamEnforcementIntegrationTest`.

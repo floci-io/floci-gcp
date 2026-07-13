@@ -1,8 +1,10 @@
 package io.floci.gcp.core.common;
 
 import io.floci.gcp.config.EmulatorConfig;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.ext.Provider;
@@ -21,6 +23,7 @@ import java.util.regex.Pattern;
  */
 @Provider
 @ApplicationScoped
+@Priority(Priorities.AUTHENTICATION - 10)
 public class ProjectContextFilter implements ContainerRequestFilter {
 
     private static final Pattern PATH_PROJECT = Pattern.compile("/projects/([^/]+)");
@@ -45,7 +48,10 @@ public class ProjectContextFilter implements ContainerRequestFilter {
         if (path != null) {
             Matcher m = PATH_PROJECT.matcher(path);
             if (m.find()) {
-                return m.group(1);
+                // Datastore REST uses /v1/projects/{projectId}:{method}; strip the custom method.
+                String projectId = m.group(1);
+                int colon = projectId.indexOf(':');
+                return colon >= 0 ? projectId.substring(0, colon) : projectId;
             }
         }
         String projectParam = ctx.getUriInfo().getQueryParameters().getFirst("project");

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { KeyManagementServiceClient } from '@google-cloud/kms';
 import * as grpc from '@grpc/grpc-js';
 import * as crypto from 'node:crypto';
-import { PROJECT_ID, KMS_HOST, uniqueName } from './setup';
+import { PROJECT_ID, KMS_HOST, authClient, uniqueName } from './setup';
 
 const LOCATION = 'us-central1';
 
@@ -16,6 +16,7 @@ describe('Cloud KMS', () => {
       servicePath: host,
       port: port ? parseInt(port, 10) : 4588,
       sslCreds: grpc.credentials.createInsecure(),
+      authClient: authClient(),
     });
     const locationPath = `projects/${PROJECT_ID}/locations/${LOCATION}`;
     const keyRingId = uniqueName('node-kr');

@@ -37,6 +37,10 @@ floci-gcp:
   max-request-size: 512
   base-url: "http://localhost:4588"
   default-project-id: floci-local
+  auth:
+    validate-tokens: false
+  ctf:
+    hide-internal-endpoints: false
   storage:
     mode: memory
     persistent-path: ./data
@@ -55,6 +59,8 @@ floci-gcp:
       enabled: true
     iam:
       enabled: true
+      enforcement-enabled: false
+      strict-enforcement-enabled: false
     secretmanager:
       enabled: true
     logging:

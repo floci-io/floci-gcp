@@ -171,3 +171,20 @@ Supported GQL syntax:
 - `Rollback`
 - `AllocateIds`
 - `ReserveIds`
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- Datastore **HTTP** (`POST /v1/projects/{project}:{method}` with protobuf) requires a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps custom methods to `datastore.entities.*`:
+  - `lookup`, `beginTransaction`, `rollback` → `datastore.entities.get`
+  - `runQuery`, `runAggregationQuery` → `datastore.entities.list`
+  - `commit` → `datastore.entities.create` (Stage 0 write gate for mutations)
+  - `allocateIds`, `reserveIds` → `datastore.entities.allocateIds`
+- `roles/datastore.viewer` grants get and list.
+- `roles/datastore.user` grants the entity permissions used by the CTF mapper (including create and allocateIds).
+- Datastore **gRPC** is gated by `IamEnforcementGrpcInterceptor` with the same `datastore.entities.*` permissions via `IamGrpcPermissionMapper` (for example `Lookup` → `datastore.entities.get`).
+- Operator root bypasses IAM evaluation on both HTTP and gRPC.
+
+Regression: `DatastoreIamEnforcementIntegrationTest` (HTTP), `DatastoreGrpcIamEnforcementIntegrationTest` (gRPC).

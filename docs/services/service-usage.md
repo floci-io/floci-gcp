@@ -48,6 +48,20 @@ Every project ID resolves to an `ACTIVE` project with a stable synthetic
 `projectNumber` (the emulator's multi-tenancy is keyed by project ID; projects are never
 created or deleted).
 
+### CTF fork (Resource Manager)
+
+When IAM enforcement is enabled:
+
+- `GET /v1/projects/{projectId}` maps to `resourcemanager.projects.get`.
+- Custom methods `getIamPolicy` / `setIamPolicy` on the project path map to
+  `resourcemanager.projects.getIamPolicy` / `resourcemanager.projects.setIamPolicy`
+  (mapped for CTF; full CRM IAM policy RPCs are not implemented on this controller).
+- `roles/browser` grants `resourcemanager.projects.get`.
+- `roles/resourcemanager.projectIamAdmin` grants getIamPolicy and setIamPolicy.
+- Operator root bypasses IAM evaluation.
+
+Regression: `ResourceManagerIamEnforcementIntegrationTest`.
+
 ## Quick Start
 
 === "Terraform"
@@ -110,3 +124,18 @@ created or deleted).
   is no dependency graph or usage tracking.
 - Batch limits match real GCP: 20 services per `batchEnable`, 30 names per `batchGet`,
   page size capped at 200.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- Service Usage REST calls require a registered Bearer token and a matching project
+  allow-policy binding.
+- `IamPermissionMapper` maps paths to `serviceusage.services.enable`, `disable`, `get`,
+  and `list` (`batchEnable` → enable, `batchGet` → get).
+- `roles/serviceusage.serviceUsageConsumer` grants get and list only.
+- `roles/serviceusage.serviceUsageAdmin` grants enable, disable, get, and list.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `ServiceUsageIamEnforcementIntegrationTest`.

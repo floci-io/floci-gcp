@@ -48,10 +48,10 @@ class GcsRangeDownloadRawTest {
     @Test
     void mediaDownloadReturnsRangeNotSatisfiablePastEnd() throws Exception {
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/storage/v1/b/" + BUCKET + "/o/" + OBJECT + "?alt=media"))
                         .header("Range", "bytes=16-20")
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).isEqualTo(416);
@@ -70,9 +70,9 @@ class GcsRangeDownloadRawTest {
 
     private static void assertRangeResponse(URI uri) throws Exception {
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(uri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uri)
                         .header("Range", "bytes=4-7")
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).isEqualTo(206);

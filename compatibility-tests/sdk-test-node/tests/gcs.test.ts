@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Storage } from '@google-cloud/storage';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authClient, uniqueName } from './setup';
 
 describe('Cloud Storage (GCS)', () => {
   let storage: Storage;
@@ -12,6 +12,7 @@ describe('Cloud Storage (GCS)', () => {
     storage = new Storage({
       apiEndpoint: ENDPOINT,
       projectId: PROJECT_ID,
+      authClient: authClient(),
     });
     bucketName = uniqueName('test-bucket');
   });

@@ -1,6 +1,7 @@
 package io.floci.gcp.services.firebaseauth;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.RequestContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -30,11 +31,15 @@ public class FirebaseAuthController {
 
     private final FirebaseAuthService service;
     private final EmulatorConfig config;
+    private final RequestContext requestContext;
 
     @Inject
-    public FirebaseAuthController(FirebaseAuthService service, EmulatorConfig config) {
+    public FirebaseAuthController(FirebaseAuthService service,
+                                  EmulatorConfig config,
+                                  RequestContext requestContext) {
         this.service = service;
         this.config = config;
+        this.requestContext = requestContext;
     }
 
     // ── client endpoints (project inferred from API key → default project) ────
@@ -158,7 +163,21 @@ public class FirebaseAuthController {
 
     // ── auth model (matches the Auth emulator) ────────────────────────────────
 
-    static boolean isPrivileged(String authorization) {
+    /**
+     * Emulator-compatible privileged tokens ({@code owner}, {@code ya29.*}), plus CTF principals
+     * that already passed {@code TokenValidationFilter}. IAM enforcement is the permission gate.
+     */
+    boolean isPrivileged(String authorization) {
+        if (config.auth().validateTokens()) {
+            String principal = requestContext.getPrincipalEmail();
+            if (principal != null && !principal.isBlank()) {
+                return true;
+            }
+        }
+        return isEmulatorPrivilegedToken(authorization);
+    }
+
+    static boolean isEmulatorPrivilegedToken(String authorization) {
         if (authorization == null || !authorization.regionMatches(true, 0, "bearer ", 0, 7)) {
             return false;
         }
@@ -171,7 +190,7 @@ public class FirebaseAuthController {
                         + "login cookie or other valid authentication credential.");
     }
 
-    static void requirePrivileged(String authorization) {
+    void requirePrivileged(String authorization) {
         if (authorization == null || !isPrivileged(authorization)) {
             throw FirebaseAuthException.unauthenticated(
                     "Request is missing required authentication credential. Expected OAuth 2 "
@@ -179,7 +198,7 @@ public class FirebaseAuthController {
         }
     }
 
-    private static boolean requireClientOrPrivileged(String authorization, String apiKey, String apiKeyHeader) {
+    private boolean requireClientOrPrivileged(String authorization, String apiKey, String apiKeyHeader) {
         if (authorization != null && isPrivileged(authorization)) {
             return true;
         }

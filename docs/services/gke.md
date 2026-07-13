@@ -81,12 +81,49 @@ kubectl get nodes
 
 `get-credentials` writes a kubeconfig that authenticates with the GCP access token produced by
 the `gke-gcloud-auth-plugin`. k3s forwards any bearer token it does not recognise to floci-gcp's
-token-authentication webhook, which — since floci-gcp does not validate credentials — accepts any
-non-empty token and maps it to `cluster-admin`. The cluster endpoint is advertised as a reachable
-`host:port` (`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so the kubeconfig server URL
-resolves correctly.
+token-authentication webhook. With CTF auth gates off, any non-empty token maps to
+`cluster-admin`. With gates on, see [CTF fork](#ctf-fork) below. The cluster endpoint is
+advertised as a reachable `host:port` (`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so
+the kubeconfig server URL resolves correctly.
 
-This flow requires a real cluster — it does not apply in mock mode, where no API server is started.
+This flow requires a real cluster. It does not apply in mock mode, where no API server is started.
+
+## CTF fork
+
+When `FLOCI_GCP_AUTH_VALIDATE_TOKENS=true` or IAM enforcement is enabled
+(`FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED=true`):
+
+- The GKE token-authentication webhook (`/_floci-gcp/gke/token-webhook`) rejects blank and
+  unregistered tokens (`TokenReview.status.authenticated=false`). Failures do not distinguish
+  timing or error detail beyond that boolean.
+- A token must match the operator root access token (`OperatorRootAuth`) or be registered in
+  `TokenRegistry`. The authenticated username is the service-account email.
+- **Least privilege groups:** operator root receives `system:masters` (cluster-admin). Registered
+  player tokens receive `system:authenticated` only (no `system:masters`). Bind RBAC in the
+  cluster if players need kubectl access beyond the default authenticated subject.
+- The webhook path stays reachable even when `FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS` hides other
+  `/_floci-gcp/*` routes, and it is not gated by the HTTP Bearer `TokenValidationFilter` (k3s
+  sends the credential in `TokenReview.spec.token`).
+
+### Residual token-oracle risk
+
+The webhook must remain callable from k3s for `get-credentials` / kubectl. Callers who can reach
+the emulator HTTP port can POST `TokenReview` bodies and learn whether a guessed bearer value is
+registered (`authenticated=true`) or not. Network-isolate the emulator from participants when
+possible. A shared-secret header gate (`floci-gcp.ctf.gke-webhook-shared-secret` /
+`X-Floci-Gke-Webhook-Token`) was considered, but wiring that into the auto-generated k3s webhook
+kubeconfig is non-trivial, so it is not implemented. Treat the open webhook as residual CTF risk.
+
+Control-plane REST under `/container/v1` (and host-routed `container.*` equivalents) is **not**
+mapped in `IamPermissionMapper`. With
+`FLOCI_GCP_SERVICES_IAM_STRICT_ENFORCEMENT_ENABLED=true`, unmapped actions are denied for
+non-operator principals. Provision cluster lifecycle APIs with the operator root pair, or turn
+strict mode off for local GKE control-plane drills.
+
+When both auth gates are off, behavior matches upstream: any non-empty token authenticates as
+`floci:gcp-iam` with `system:masters`.
+
+Regression: `GkeTokenWebhookCtfIntegrationTest`.
 
 ## Mock Mode
 

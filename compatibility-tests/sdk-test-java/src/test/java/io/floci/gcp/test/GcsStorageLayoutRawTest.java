@@ -45,7 +45,7 @@ class GcsStorageLayoutRawTest {
         URI uri = URI.create(TestFixtures.endpoint()
                 + "/storage/v1/b/" + BUCKET + "/storageLayout?alt=json");
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(uri).GET().build(),
+                TestFixtures.authorize(HttpRequest.newBuilder(uri).GET()).build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(200);
@@ -61,7 +61,7 @@ class GcsStorageLayoutRawTest {
         URI uri = URI.create(TestFixtures.endpoint()
                 + "/storage/v1/b/" + TestFixtures.uniqueName("no-such") + "/storageLayout?alt=json");
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(uri).GET().build(),
+                TestFixtures.authorize(HttpRequest.newBuilder(uri).GET()).build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(404);

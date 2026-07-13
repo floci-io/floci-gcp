@@ -61,7 +61,7 @@ public class CloudLoggingService {
                 .enabled(config.services().logging().enabled())
                 .storageKey("logging")
                 .protocol(ServiceProtocol.GRPC)
-                .resourceClasses(CloudLoggingController.class)
+                .resourceClasses(CloudLoggingController.class, CloudLoggingHttpController.class)
                 .build());
         grpcServerManager.bind(new CloudLoggingController(this));
     }

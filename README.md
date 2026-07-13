@@ -4,8 +4,8 @@
 </p>
 
 <p align="center">
-  <strong>Light, fluffy, and always free — GCP Local Emulator</strong><br />
-  No account. No auth token. No feature gates. Just <code>docker compose up</code>.
+  <strong>Light, fluffy, and always free - GCP Local Emulator (CTF fork)</strong><br />
+  Security-hardened local GCP on port <code>4588</code>. Operator root for provisioning. Participants need Bearer tokens and IAM.
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> ·
+  <a href="#quick-start-operators">Quick Start</a> ·
   <a href="#features">Features</a> ·
   <a href="#supported-services">Services</a> ·
   <a href="#sdk-integration">SDKs</a> ·
@@ -29,35 +29,38 @@
 
 ---
 
-## What is floci-gcp?
+# floci-gcp CTF
 
-floci-gcp is a free, open-source local GCP emulator for development, testing, and CI.
+A security-hardened fork of [floci-gcp](https://github.com/floci-io/floci-gcp) for capture-the-flag and security exercises. Same local GCP emulator on port **4588**, with IAM enforcement, strict policy mode, Bearer token validation, and CTF-specific controls so participants cannot rely on unsigned or unauthenticated requests or internal introspection routes.
 
-It gives you GCP-shaped services on your machine without requiring a cloud account, auth token, or paid feature gates. Point your GCP SDK, gcloud CLI, Terraform, or test suite at `http://localhost:4588` and keep your existing workflows.
+For service coverage, architecture, SDK examples, and general configuration, use the [upstream floci-gcp README](https://github.com/floci-io/floci-gcp/blob/main/README.md) and [docs](https://floci.io/floci-gcp/). For operators and agents, see [AGENTS.md](./AGENTS.md). IAM detail: [docs/services/iam.md](./docs/services/iam.md#ctf-hardening).
 
-floci-gcp is named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
+## What changed
 
-## Quick Start
+| Area | Upstream floci-gcp | This fork |
+|---|---|---|
+| IAM enforcement | Off by default | On in `docker-compose.yml` |
+| Strict IAM mode | Off by default | On: denies missing principals and unmapped actions |
+| Bearer token validation | Off by default | On: validates `Authorization: Bearer` against registered tokens |
+| Operator bypass | N/A | `FLOCI_GCP_AUTH_ROOT_*` pair bypasses enforcement for provisioning |
+| Internal introspection routes | `/_floci-gcp/*` open | Default `FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS=true` hides `/_floci-gcp/*`; `all` also hides `/health` |
 
-```yaml
-# docker-compose.yml
-services:
-  floci-gcp:
-    image: floci/floci-gcp:latest
-    ports:
-      - "4588:4588"
-    volumes:
-      - ./data:/app/data
-    environment:
-      FLOCI_GCP_HOSTNAME: floci-gcp
-      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
-```
+**Fork-only code (high level):** `TokenValidationFilter`, `IamEnforcementFilter`, `CtfInternalEndpointFilter`, `ContainerEnvHardening`, `TokenRegistry`, `OperatorRootAuth`. See [AGENTS.md](./AGENTS.md).
+
+## Quick Start (operators)
+
+Export operator secrets on the host, then start Compose:
 
 ```bash
+export FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT="operator@floci-local.iam.gserviceaccount.com"
+export FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="..."
+
 docker compose up -d
 ```
 
-Export the GCP emulator environment variables:
+Compose mounts the host Docker socket (`/var/run/docker.sock`) so Cloud Run, Cloud SQL, GKE, and Kafka sidecars can start. For a custom `docker run`, pass the same mount or set `DOCKER_HOST`.
+
+Export the GCP emulator environment variables for clients:
 
 ```bash
 export PUBSUB_EMULATOR_HOST=localhost:4588
@@ -68,7 +71,7 @@ export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are available at `http://localhost:4588`. Credentials are not validated.
+All GCP services listen on `http://localhost:4588`. Use the root Bearer token only for operator provisioning. Issue participant tokens via the token registry / IAM bindings and scoped policies.
 
 <details>
 <summary>Using Docker directly?</summary>
@@ -76,10 +79,24 @@ All GCP services are available at `http://localhost:4588`. Credentials are not v
 ```bash
 docker run -d --name floci-gcp \
   -p 4588:4588 \
+  -e FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED=true \
+  -e FLOCI_GCP_SERVICES_IAM_STRICT_ENFORCEMENT_ENABLED=true \
+  -e FLOCI_GCP_AUTH_VALIDATE_TOKENS=true \
+  -e FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS=true \
+  -e FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT="$FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT" \
+  -e FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="$FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN" \
   floci/floci-gcp:latest
 ```
 
 </details>
+
+## What is floci-gcp?
+
+floci-gcp is a free, open-source local GCP emulator for development, testing, and CI.
+
+This repository is the **CTF fork**: same wire protocols and service surface as upstream, with Stage 0 auth gates enabled by default in Compose. Point your GCP SDK, gcloud CLI, Terraform, or test suite at `http://localhost:4588` with a valid Bearer token.
+
+floci-gcp is named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
 
 ## Features
 

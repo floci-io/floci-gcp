@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Storage } from '@google-cloud/storage';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authClient, uniqueName } from './setup';
 
 // Regression coverage for issue #4: listing with a delimiter omitted the
 // top-level prefixes[] array. The third callback arg of getFiles() exposes the
@@ -10,7 +10,7 @@ describe('GCS list with delimiter', () => {
   let bucketName: string;
 
   beforeAll(async () => {
-    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID });
+    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID, authClient: authClient() });
     bucketName = uniqueName('prefixes-bucket');
     await storage.createBucket(bucketName);
   });

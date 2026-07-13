@@ -88,6 +88,10 @@ Each IaC suite runs: `init` → `validate` → `plan` → `apply` → BATS spot-
 ## Prerequisites
 
 - **floci-gcp running** on `http://localhost:4588` (or set `FLOCI_GCP_ENDPOINT`)
+- **CTF operator Bearer token** — local runs need a token that matches the
+  emulator's `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` (default `fake-token-floci-gcp`).
+  Set via `GOOGLE_OAUTH_ACCESS_TOKEN` or `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`
+  (gcloud also uses `CLOUDSDK_AUTH_ACCESS_TOKEN`). See `env.example`.
 - **Java 21+** and **Maven** — for `sdk-test-java`
 - **Python 3.9+** — for `sdk-test-python`
 - **Node.js 18+** — for `sdk-test-node`
@@ -110,6 +114,9 @@ FIRESTORE_EMULATOR_HOST=localhost:4588
 DATASTORE_EMULATOR_HOST=localhost:4588
 STORAGE_EMULATOR_HOST=http://localhost:4588
 SECRET_MANAGER_EMULATOR_HOST=localhost:4588
+GOOGLE_OAUTH_ACCESS_TOKEN=fake-token-floci-gcp
+FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN=fake-token-floci-gcp
+CLOUDSDK_AUTH_ACCESS_TOKEN=fake-token-floci-gcp
 ```
 
 | Variable | Service | Format |
@@ -119,6 +126,9 @@ SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 | `DATASTORE_EMULATOR_HOST` | Datastore | `host:port` |
 | `STORAGE_EMULATOR_HOST` | Cloud Storage | `http://host:port` |
 | `SECRET_MANAGER_EMULATOR_HOST` | Secret Manager | `host:port` |
+| `GOOGLE_OAUTH_ACCESS_TOKEN` | All suites | Bearer token (CTF root) |
+| `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` | All suites | Alias for the CTF root token |
+| `CLOUDSDK_AUTH_ACCESS_TOKEN` | gcloud | Same token for `gcloud` CLI |
 
 IAM, Cloud Logging, Cloud KMS, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging and Cloud KMS may optionally be overridden with `LOGGING_EMULATOR_HOST` and `KMS_EMULATOR_HOST` respectively).
 
@@ -157,9 +167,12 @@ provider "google" {
 }
 ```
 
-Auth is bypassed via `GOOGLE_OAUTH_ACCESS_TOKEN=fake-token-floci-gcp`.
+Auth uses the CTF operator Bearer token via `GOOGLE_OAUTH_ACCESS_TOKEN=fake-token-floci-gcp`
+(must match the emulator's `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`).
 
-Pub/Sub resources (`google_pubsub_topic`, `google_pubsub_subscription`) are not yet supported — the Terraform provider uses REST while our Pub/Sub is gRPC-only.
+Pub/Sub resources (`google_pubsub_topic`, `google_pubsub_subscription`) are not yet covered in
+these IaC suites. The emulator exposes Pub/Sub over gRPC and REST; wire
+`pubsub_custom_endpoint` when adding Terraform coverage.
 
 ## Exit Codes
 

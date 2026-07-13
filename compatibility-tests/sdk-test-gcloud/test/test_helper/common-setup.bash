@@ -20,9 +20,9 @@ export CLOUDSDK_CORE_PROJECT="${FLOCI_GCP_PROJECT:-${CLOUDSDK_CORE_PROJECT:-test
 export FLOCI_GCP_LOCATION="${FLOCI_GCP_LOCATION:-us-central1}"
 
 # Auth bypass: the gcloud CLI (unlike the GCP SDKs) requires *some* credential and
-# does not honour *_EMULATOR_HOST. A fake access token satisfies the active-account
-# check; floci-gcp ignores the token entirely.
-export CLOUDSDK_AUTH_ACCESS_TOKEN="${CLOUDSDK_AUTH_ACCESS_TOKEN:-floci-fake-token}"
+# does not honour *_EMULATOR_HOST. CLOUDSDK_AUTH_ACCESS_TOKEN must match the CTF
+# operator root token (FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN) when token validation is on.
+export CLOUDSDK_AUTH_ACCESS_TOKEN="${CLOUDSDK_AUTH_ACCESS_TOKEN:-${GOOGLE_OAUTH_ACCESS_TOKEN:-${FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN:-fake-token-floci-gcp}}}"
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
 # Per-service API endpoint overrides routing gcloud to the emulator. gcloud has no
@@ -38,8 +38,8 @@ export CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDSCHEDULER="${FLOCI_GCP_ENDPOINT}/"
 # Managed Kafka). gcloud appends "v1/...", so the override base must end in /container/.
 export CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER="${FLOCI_GCP_ENDPOINT}/container/"
 # `gcloud container` preflights an API-enablement check against serviceusage.googleapis.com,
-# which the fake token can't satisfy. Point serviceusage at the emulator (it 404s the check)
-# and disable the enable-API prompt so the command proceeds. floci-gcp ignores auth anyway.
+# which an unconfigured token can't satisfy. Point serviceusage at the emulator (it 404s the check)
+# and disable the enable-API prompt so the command proceeds.
 export CLOUDSDK_API_ENDPOINT_OVERRIDES_SERVICEUSAGE="${FLOCI_GCP_ENDPOINT}/"
 export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
 

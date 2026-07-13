@@ -13,6 +13,14 @@ services:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
       FLOCI_GCP_SERVICES_DOCKER_NETWORK: floci_gcp_default
+      # CTF security defaults: IAM enforcement + strict mode, Bearer token validation,
+      # hide /_floci-gcp internals, and operator root via FLOCI_GCP_AUTH_ROOT_* (export on host).
+      FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED: "true"
+      FLOCI_GCP_SERVICES_IAM_STRICT_ENFORCEMENT_ENABLED: "true"
+      FLOCI_GCP_AUTH_VALIDATE_TOKENS: "true"
+      FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS: "true"
+      FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT: ${FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT}
+      FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN: ${FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN}
     networks:
       floci_gcp_default:
         aliases:

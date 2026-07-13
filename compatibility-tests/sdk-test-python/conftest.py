@@ -5,7 +5,24 @@ import uuid
 import pytest
 
 from google.api_core.client_options import ClientOptions
-from google.auth.credentials import AnonymousCredentials
+from google.oauth2.credentials import Credentials
+
+
+DEFAULT_CTF_TOKEN = "fake-token-floci-gcp"
+
+
+def access_token() -> str:
+    """CTF operator Bearer token for local/CI runs against floci-gcp-ctf."""
+    return (
+        os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN")
+        or os.environ.get("FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN")
+        or DEFAULT_CTF_TOKEN
+    )
+
+
+@pytest.fixture(scope="session")
+def gcp_credentials():
+    return Credentials(token=access_token())
 
 
 @pytest.fixture(scope="session")
@@ -61,12 +78,12 @@ def unique_name():
 # ── GCP clients ──────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def storage_client(storage_emulator_host, project_id):
+def storage_client(storage_emulator_host, project_id, gcp_credentials):
     from google.cloud import storage
     os.environ["STORAGE_EMULATOR_HOST"] = storage_emulator_host
     return storage.Client(
         project=project_id,
-        credentials=AnonymousCredentials(),
+        credentials=gcp_credentials,
         client_options=ClientOptions(api_endpoint=storage_emulator_host),
     )
 

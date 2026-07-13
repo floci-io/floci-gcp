@@ -18,6 +18,23 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 
 ---
 
+## CTF hardening
+
+**floci-gcp-ctf** enables these in [docker-compose.yml](../../docker-compose.yml). Operator workflow: [README.md](../../README.md) and [AGENTS.md](../../AGENTS.md). IAM detail: [IAM CTF hardening](../services/iam.md#ctf-hardening).
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | When `true`, evaluate project IAM allow policies on mapped REST (`IamEnforcementFilter`) and gRPC (`IamEnforcementGrpcInterceptor`) calls. `true` in this fork's Compose profile |
+| `FLOCI_GCP_SERVICES_IAM_STRICT_ENFORCEMENT_ENABLED` | `false` | When `true` with enforcement enabled, deny missing principals and unmapped REST/gRPC actions instead of allowing them through. `true` in this fork's Compose profile |
+| `FLOCI_GCP_AUTH_VALIDATE_TOKENS` | `false` | When `true`, require `Authorization: Bearer` and validate the token against the operator root token or `TokenRegistry`. `true` in this fork's Compose profile |
+| `FLOCI_GCP_CTF_HIDE_INTERNAL_ENDPOINTS` | `false` | `false`: expose introspection routes. `true`: HTTP 404 for `/_floci-gcp/*`. `all`: also hide `/health`. Compose default is `true` |
+| `FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` | _(none)_ | Operator service account email. Paired with `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` for the operator bypass |
+| `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` | _(none)_ | Operator Bearer token. Must match the request token and be paired with a non-blank root service account for the bypass |
+
+Export root credentials on the host before `docker compose up`. Keep them private. Participants receive registered tokens with IAM allow bindings.
+
+---
+
 ## Storage
 
 | Variable | Default | Description |

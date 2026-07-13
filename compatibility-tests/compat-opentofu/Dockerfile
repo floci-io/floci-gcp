@@ -25,8 +25,10 @@ RUN git clone --depth 1 https://github.com/bats-core/bats-core.git /opt/bats-cor
 
 COPY . .
 
-# Defaults target the floci-gcp container on the compat-net Docker network;
-# override with -e at runtime for other endpoints.
+# Defaults target the floci-gcp container on the compat-net Docker network.
+# Override with -e at runtime for other endpoints.
+# GOOGLE_OAUTH_ACCESS_TOKEN must match the emulator FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN
+# when FLOCI_GCP_AUTH_VALIDATE_TOKENS is on.
 ENV FLOCI_ENDPOINT=http://floci-gcp:4588
 ENV FLOCI_HOST=floci-gcp:4588
 ENV FLOCI_PROJECT=test-project

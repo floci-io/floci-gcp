@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Datastore } from '@google-cloud/datastore';
-import { PROJECT_ID, DATASTORE_HOST, uniqueName } from './setup';
+import { PROJECT_ID, DATASTORE_HOST, authClient, uniqueName } from './setup';
 
 describe('Datastore', () => {
   let datastore: Datastore;
@@ -9,7 +9,7 @@ describe('Datastore', () => {
 
   beforeAll(() => {
     process.env.DATASTORE_EMULATOR_HOST = DATASTORE_HOST;
-    datastore = new Datastore({ projectId: PROJECT_ID });
+    datastore = new Datastore({ projectId: PROJECT_ID, authClient: authClient() });
     entityKey = datastore.key([kind, uniqueName('task')]);
   });
 

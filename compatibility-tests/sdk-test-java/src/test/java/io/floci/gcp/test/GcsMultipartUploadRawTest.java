@@ -57,9 +57,9 @@ class GcsMultipartUploadRawTest {
         URI uri = URI.create(TestFixtures.endpoint()
                 + "/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart");
         // Single-quoted boundary, exactly as gcloud / Python apitools sends it.
-        HttpRequest request = HttpRequest.newBuilder(uri)
+        HttpRequest request = TestFixtures.authorize(HttpRequest.newBuilder(uri)
                 .header("Content-Type", "multipart/related; boundary='" + boundary + "'")
-                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)))
                 .build();
         HttpResponse<String> response = CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
 

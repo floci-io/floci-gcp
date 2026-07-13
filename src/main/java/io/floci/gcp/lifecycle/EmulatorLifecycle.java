@@ -51,6 +51,12 @@ public class EmulatorLifecycle {
         LOG.infof("Project:   %s", config.defaultProjectId());
         LOG.infov("Storage:   {0}  Path: {1}", config.storage().mode(), config.storage().persistentPath());
 
+        if (config.services().iam().enforcementEnabled() && !config.auth().validateTokens()) {
+            LOG.warn("IAM enforcement is enabled while auth.validate-tokens is false. "
+                    + "Requests without an authenticated principal will be denied, "
+                    + "but bearer tokens are not validated. Enable validate-tokens for CTF.");
+        }
+
         try {
             hooksRunner.run(InitializationHook.BOOT);
         } catch (InterruptedException e) {

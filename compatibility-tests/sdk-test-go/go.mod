@@ -5,12 +5,13 @@ go 1.25.0
 require (
 	cloud.google.com/go/datastore v1.22.0
 	cloud.google.com/go/firestore v1.21.0
-	cloud.google.com/go/kms v1.20.1
+	cloud.google.com/go/kms v1.26.0
 	cloud.google.com/go/logging v1.18.0
 	cloud.google.com/go/pubsub v1.50.1
 	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/storage v1.62.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.274.0
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7
 	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9
@@ -58,7 +59,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect

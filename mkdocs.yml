@@ -85,6 +85,7 @@ nav:
     - Cloud Tasks: services/cloud-tasks.md
     - Cloud Scheduler: services/scheduler.md
     - Cloud Monitoring: services/cloud-monitoring.md
+    - Eventarc: services/eventarc.md
     - Service Usage: services/service-usage.md
     - Firebase Auth: services/firebase-auth.md
     - BigQuery: services/bigquery.md

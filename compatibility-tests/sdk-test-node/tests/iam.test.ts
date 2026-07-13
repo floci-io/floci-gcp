@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authHeaders, uniqueName } from './setup';
 
 const saBase = () => `${ENDPOINT}/v1/projects/${PROJECT_ID}/serviceAccounts`;
 
 async function post(url: string, body: unknown = {}): Promise<unknown> {
   const resp = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   expect(resp.status).toBe(200);
@@ -14,13 +14,13 @@ async function post(url: string, body: unknown = {}): Promise<unknown> {
 }
 
 async function get(url: string): Promise<unknown> {
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: authHeaders() });
   expect(resp.status).toBe(200);
   return resp.json();
 }
 
 async function del(url: string): Promise<void> {
-  await fetch(url, { method: 'DELETE' });
+  await fetch(url, { method: 'DELETE', headers: authHeaders() });
 }
 
 describe('IAM', () => {

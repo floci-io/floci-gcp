@@ -122,3 +122,25 @@ Write-path rules matching the documented API behavior:
   held in the configured storage backend, namespaced by project ID.
 - `ListTimeSeries` reads back data over the requested time interval; combine with the metric/resource
   filter to scope results.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Monitoring calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Cloud Monitoring (`google.monitoring.v3.MetricService`) is gated by `IamEnforcementGrpcInterceptor`
+  with the same `monitoring.timeSeries.*` / `monitoring.metricDescriptors.*` /
+  `monitoring.monitoredResourceDescriptors.*` permissions via `IamGrpcPermissionMapper`
+  (for example `CreateTimeSeries` → `monitoring.timeSeries.create`,
+  `ListTimeSeries` → `monitoring.timeSeries.list`,
+  `ListMetricDescriptors` → `monitoring.metricDescriptors.list`).
+- `IamPermissionMapper` maps Monitoring REST paths to `monitoring.timeSeries.*`,
+  `monitoring.metricDescriptors.*`, and `monitoring.monitoredResourceDescriptors.*`.
+- `roles/monitoring.viewer` grants list/get of time series and descriptors.
+- `roles/monitoring.metricWriter` grants create time series and descriptor catalog write/list
+  (not list time series), matching GCP Metric Writer.
+- `roles/monitoring.admin` grants the full Monitoring permission set used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `CloudMonitoringIamEnforcementIntegrationTest`, `CloudMonitoringGrpcIamEnforcementIntegrationTest`.

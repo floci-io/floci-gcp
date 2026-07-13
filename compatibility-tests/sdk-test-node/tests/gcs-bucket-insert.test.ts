@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authHeaders, uniqueName } from './setup';
 
 // Regression coverage for issue #5: bucket creation returned 415 when the
 // request did not declare Content-Type: application/json. Real GCS is lenient.
@@ -11,6 +11,7 @@ describe('GCS bucket insert content-type tolerance', () => {
     const name = uniqueName('raw-bucket');
     const response = await fetch(url, {
       method: 'POST',
+      headers: authHeaders(),
       body: JSON.stringify({ name }),
     });
     expect(response.status).toBe(200);
@@ -22,7 +23,7 @@ describe('GCS bucket insert content-type tolerance', () => {
     const name = uniqueName('raw-bucket-json');
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ name }),
     });
     expect(response.status).toBe(200);

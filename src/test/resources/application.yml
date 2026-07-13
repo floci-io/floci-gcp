@@ -8,11 +8,18 @@ quarkus:
 floci-gcp:
   port: 4588
   default-project-id: test-project
+  auth:
+    validate-tokens: false
+  ctf:
+    hide-internal-endpoints: false
   storage:
     mode: memory
   services:
     datastore:
       enabled: true
+    iam:
+      enforcement-enabled: false
+      strict-enforcement-enabled: false
     kafka:
       enabled: true
       mock: true

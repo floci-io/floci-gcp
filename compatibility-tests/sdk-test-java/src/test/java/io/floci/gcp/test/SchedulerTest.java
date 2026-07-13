@@ -1,6 +1,6 @@
 package io.floci.gcp.test;
 
-import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.TransportChannelProvider;
@@ -63,7 +63,7 @@ class SchedulerTest {
         String emulatorHost = System.getenv().getOrDefault("PUBSUB_EMULATOR_HOST", "localhost:4588");
         channel = ManagedChannelBuilder.forTarget(emulatorHost).usePlaintext().build();
         channelProvider = FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-        NoCredentialsProvider creds = NoCredentialsProvider.create();
+        CredentialsProvider creds = TestFixtures.credentialsProvider();
 
         schedulerClient = TestFixtures.cloudSchedulerClient();
         topicAdminClient = TopicAdminClient.create(TopicAdminSettings.newBuilder()
@@ -140,7 +140,7 @@ class SchedulerTest {
 
         SubscriberStubSettings settings = SubscriberStubSettings.newBuilder()
                 .setTransportChannelProvider(channelProvider)
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(TestFixtures.credentialsProvider())
                 .build();
         try (GrpcSubscriberStub stub = GrpcSubscriberStub.create(settings)) {
             String sub = ProjectSubscriptionName.of(PROJECT_ID, SUB_ID).toString();

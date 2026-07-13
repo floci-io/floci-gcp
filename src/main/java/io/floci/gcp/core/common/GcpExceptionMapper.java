@@ -42,6 +42,7 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
             case "FAILED_PRECONDITION" -> "failedPrecondition";
             case "CONDITION_NOT_MET" -> "conditionNotMet";
             case "PERMISSION_DENIED" -> "forbidden";
+            case "UNAUTHENTICATED" -> "authError";
             case "RESOURCE_EXHAUSTED" -> "rateLimitExceeded";
             case "UNIMPLEMENTED" -> "notImplemented";
             case "DEADLINE_EXCEEDED" -> "deadlineExceeded";

@@ -142,12 +142,33 @@ following fields are honored:
 - `ListQueues`, `GetQueue`, `CreateQueue`, `UpdateQueue`, `DeleteQueue`
 - `PurgeQueue`, `PauseQueue`, `ResumeQueue`
 - `ListTasks`, `GetTask`, `CreateTask`, `DeleteTask`, `RunTask`
-- `GetIamPolicy`, `SetIamPolicy`, `TestIamPermissions` (accepted but not persisted/enforced — see below)
+- `GetIamPolicy`, `SetIamPolicy`, `TestIamPermissions` (gRPC stubs only, not persisted)
+- REST JSON surface for queues/tasks under `/v2/projects/{project}/locations/{location}/queues`
+  (CTF IAM enforcement path)
 
 ## Not Yet Supported
 
 - **Actual task dispatch** — `RunTask` and queue processing do not deliver requests to HTTP or
   App Engine targets; tasks are tracked, not executed.
-- **IAM enforcement** — `GetIamPolicy` returns an empty policy, `SetIamPolicy` echoes the request,
-  and `TestIamPermissions` echoes the requested permissions; nothing is stored or enforced.
 - Automatic retry/backoff scheduling, `BufferTask`, and queue-level routing overrides.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Tasks calls (`/v2/projects/{project}/locations/{location}/queues...`) require a
+  registered Bearer token and a matching project allow-policy binding.
+- gRPC Cloud Tasks (`google.cloud.tasks.v2.CloudTasks`) is gated by `IamEnforcementGrpcInterceptor`
+  with the same `cloudtasks.queues.*` / `cloudtasks.tasks.*` permissions via `IamGrpcPermissionMapper`
+  (for example `ListQueues` → `cloudtasks.queues.list`, `CreateTask` → `cloudtasks.tasks.create`,
+  `RunTask` → `cloudtasks.tasks.run`).
+- `IamPermissionMapper` maps queue and task REST paths to `cloudtasks.queues.*` and
+  `cloudtasks.tasks.*` (create, get, list, update, delete, pause, resume, purge, run).
+- `roles/cloudtasks.viewer` grants get/list for queues and tasks.
+- `roles/cloudtasks.admin` grants the full Cloud Tasks permission set used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+- gRPC IAM stubs (`GetIamPolicy` / `SetIamPolicy` / `TestIamPermissions`) remain unmapped stubs.
+  Under strict enforcement they are denied as unmapped methods.
+
+Regression: `CloudTasksIamEnforcementIntegrationTest`, `CloudTasksGrpcIamEnforcementIntegrationTest`.

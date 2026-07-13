@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Storage } from '@google-cloud/storage';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authClient, uniqueName } from './setup';
 
 // Regression coverage for issue #3: copy/rewrite dropped custom object metadata
 // on the destination. The destination should inherit the source metadata.
@@ -9,7 +9,7 @@ describe('GCS copy/rewrite metadata', () => {
   let bucketName: string;
 
   beforeAll(async () => {
-    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID });
+    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID, authClient: authClient() });
     bucketName = uniqueName('copy-bucket');
     await storage.createBucket(bucketName);
   });

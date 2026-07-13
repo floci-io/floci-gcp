@@ -210,3 +210,18 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - `ifGenerationMatch` / `ifGenerationNotMatch`
 - `ifMetagenerationMatch` / `ifMetagenerationNotMatch`
 - Returns HTTP 412 on precondition failure
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST JSON and upload/download GCS calls require a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps GCS paths to `storage.buckets.*` and `storage.objects.*` permissions (create, get, list, getIamPolicy, setIamPolicy for buckets; create, get, list, update, delete for objects).
+- Object `PATCH` maps to `storage.objects.update` (create-only roles cannot mutate metadata via PATCH).
+- `roles/storage.objectViewer` grants `storage.objects.get` and `storage.objects.list`.
+- `roles/storage.objectAdmin` grants object create, get, list, update, and delete.
+- `roles/storage.admin` grants the broad bucket and object permissions used by the CTF mapper (including update).
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+- Signed URL note: V4 pre-signed URL generation still uses IAM `SignBlob` (stub signature for local use). Serving a signed URL still goes through the mapped GCS object paths when enforcement is on, so the caller or the signed request path must satisfy the same storage permissions unless operator root is used.
+
+Regression: `GcsIamEnforcementIntegrationTest`.

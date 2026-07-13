@@ -60,7 +60,7 @@ public class CloudTasksService {
                 .enabled(config.services().cloudtasks().enabled())
                 .storageKey("cloudtasks")
                 .protocol(ServiceProtocol.GRPC)
-                .resourceClasses(CloudTasksController.class)
+                .resourceClasses(CloudTasksController.class, CloudTasksHttpController.class)
                 .build());
         grpcServerManager.bind(new CloudTasksController(this));
     }

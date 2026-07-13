@@ -79,3 +79,18 @@ default. When `floci-gcp.storage.host-persistent-path` is absolute, instance dat
 
 - Backups, SSL cert operations, import/export, failover, replicas, and maintenance operations
 - IAM policy methods for Cloud SQL resources
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud SQL Admin calls (`/v1`, `/v1beta4`, and `/sql/v1beta4`) require a registered Bearer
+  token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps instance and database routes to `cloudsql.instances.*` and
+  `cloudsql.databases.*`, plus `cloudsql.users.*` for user Admin API routes.
+- `roles/cloudsql.viewer` grants get and list on instances, databases, and users.
+- `roles/cloudsql.admin` grants the full mapped Cloud SQL Admin surface.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `CloudSqlIamEnforcementIntegrationTest`.

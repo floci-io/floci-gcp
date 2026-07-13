@@ -48,7 +48,7 @@ class GcsListStartOffsetRawTest {
                 + "/storage/v1/b/" + BUCKET + "/o?prefix=" + encode(PREFIX)
                 + "&startOffset=" + encode(startOffset));
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(uri).GET().build(),
+                TestFixtures.authorize(HttpRequest.newBuilder(uri).GET()).build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(200);

@@ -24,9 +24,10 @@ export PUBSUB_EMULATOR_HOST="${FLOCI_HOST}"
 export STORAGE_EMULATOR_HOST="${FLOCI_ENDPOINT}"
 export GOOGLE_CLOUD_PROJECT="${FLOCI_PROJECT}"
 
-# Fake OAuth token — our emulator ignores auth, but OpenTofu needs some value
-# to avoid calling Google OAuth endpoints
-export GOOGLE_OAUTH_ACCESS_TOKEN="fake-token-floci-gcp"
+# CTF operator Bearer token. Must match the emulator FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN
+# when FLOCI_GCP_AUTH_VALIDATE_TOKENS is on. Also keeps the provider from calling
+# Google OAuth endpoints.
+export GOOGLE_OAUTH_ACCESS_TOKEN="${GOOGLE_OAUTH_ACCESS_TOKEN:-${FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN:-fake-token-floci-gcp}}"
 
 # OpenTofu variables
 export TF_VAR_endpoint="${FLOCI_ENDPOINT}"

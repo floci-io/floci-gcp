@@ -382,10 +382,10 @@ class CloudRunExecutionRestIntegrationTest {
     private static boolean dockerAvailable() {
         Process process = null;
         try {
-            process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
+            process = new ProcessBuilder("docker", "info", "--format", "{{.ServerVersion}}")
                     .redirectErrorStream(true)
                     .start();
-            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+            if (!process.waitFor(8, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 return false;
             }

@@ -164,3 +164,20 @@ registration.remove();
 - `Write` (streaming)
 - `Listen` (real-time change streams)
 - `ListCollectionIds`
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- Firestore in floci-gcp is **gRPC-only**. IAM is enforced by `IamEnforcementGrpcInterceptor` (wired in `GrpcServerManager` after Bearer token validation).
+- `IamGrpcPermissionMapper` maps Firestore RPCs to `datastore.entities.*` (native-mode style):
+  - `GetDocument`, `BatchGetDocuments`, `BeginTransaction`, `Rollback`, `Listen` → `datastore.entities.get`
+  - `RunQuery`, `RunAggregationQuery`, `ListDocuments`, `ListCollectionIds`, `PartitionQuery` → `datastore.entities.list`
+  - `Commit`, `BatchWrite`, `CreateDocument`, `Write` → `datastore.entities.create`
+  - `UpdateDocument` → `datastore.entities.update`
+  - `DeleteDocument` → `datastore.entities.delete`
+- `roles/datastore.viewer` grants get and list (enough for `GetDocument`).
+- `roles/datastore.user` grants the entity permissions used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+
+Regression: `FirestoreIamEnforcementIntegrationTest`.

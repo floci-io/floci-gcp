@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PubSub, v1 } from '@google-cloud/pubsub';
-import { PROJECT_ID, PUBSUB_HOST, uniqueName, sleep } from './setup';
+import { PROJECT_ID, PUBSUB_HOST, authClient, uniqueName, sleep } from './setup';
 
 describe('Pub/Sub', () => {
   let pubsub: PubSub;
@@ -10,11 +10,12 @@ describe('Pub/Sub', () => {
 
   beforeAll(() => {
     process.env.PUBSUB_EMULATOR_HOST = PUBSUB_HOST;
-    pubsub = new PubSub({ projectId: PROJECT_ID });
+    pubsub = new PubSub({ projectId: PROJECT_ID, authClient: authClient() });
     subscriberClient = new v1.SubscriberClient({
       servicePath: PUBSUB_HOST.split(':')[0],
       port: parseInt(PUBSUB_HOST.split(':')[1] || '4588'),
       sslCreds: require('@grpc/grpc-js').credentials.createInsecure(),
+      authClient: authClient(),
     });
     topicName = uniqueName('test-topic');
     subscriptionName = uniqueName('test-sub');

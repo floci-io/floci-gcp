@@ -32,11 +32,11 @@ class GcsCustomerEncryptionRawTest {
         storage = TestFixtures.storageClient();
         storage.create(BucketInfo.of(BUCKET));
         HttpResponse<String> response = CLIENT.send(
-                HttpRequest.newBuilder(objectUri())
+                TestFixtures.authorize(HttpRequest.newBuilder(objectUri())
                         .header("x-goog-encryption-algorithm", "AES256")
                         .header("x-goog-encryption-key", ENCODED_KEY)
                         .header("x-goog-encryption-key-sha256", KEY_SHA256)
-                        .PUT(HttpRequest.BodyPublishers.ofString("encrypted-data"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("encrypted-data")))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).isEqualTo(200);
@@ -52,16 +52,16 @@ class GcsCustomerEncryptionRawTest {
     @Test
     void encryptedObjectRequiresCustomerKeyForDownload() throws Exception {
         HttpResponse<String> missingKey = CLIENT.send(
-                HttpRequest.newBuilder(objectUri()).GET().build(),
+                TestFixtures.authorize(HttpRequest.newBuilder(objectUri()).GET()).build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(missingKey.statusCode()).isEqualTo(403);
 
         HttpResponse<String> withKey = CLIENT.send(
-                HttpRequest.newBuilder(objectUri())
+                TestFixtures.authorize(HttpRequest.newBuilder(objectUri())
                         .header("x-goog-encryption-algorithm", "AES256")
                         .header("x-goog-encryption-key", ENCODED_KEY)
                         .header("x-goog-encryption-key-sha256", KEY_SHA256)
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(withKey.statusCode()).isEqualTo(200);

@@ -70,6 +70,32 @@ ServicesSettings settings = ServicesSettings.newHttpJsonBuilder()
     .build();
 ```
 
+## CTF fork
+
+### Container env stripping
+
+Participant-supplied container `env` values are filtered before Docker launch. `ContainerEnvHardening` strips credential and operator bypass keys such as `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_API_KEY`, `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `GCLOUD_ACCESS_TOKEN`, `CLOUDSDK_AUTH_*`, `CLOUDSDK_CORE_*`, `CLOUDSDK_API_ENDPOINT_OVERRIDES_*`, and `FLOCI_GCP_AUTH_*`. Safe user vars and Cloud Run system vars (`PORT`, `K_SERVICE`, `K_REVISION`, `K_CONFIGURATION`) are kept. See [environment variables (CTF hardening)](../configuration/environment-variables.md#ctf-hardening).
+
+### IAM enforcement
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Run Admin API calls require a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps Cloud Run v2 REST paths to:
+  - `run.services.*` - create, get, list, update, delete, getIamPolicy, setIamPolicy
+  - `run.revisions.get` / `run.revisions.list`
+  - `run.jobs.*` - create, get, list, update, delete, getIamPolicy, setIamPolicy, run (jobs API not implemented yet, paths are mapped for strict mode)
+  - Legacy invoke path `/run/v2/projects/.../services/{service}` maps to `run.routes.invoke`
+  - Host-routed invoke (`*.run.*` Host header, including `/` and `/api/...`) maps to `run.routes.invoke`
+- Role grants used by the evaluator:
+  - `roles/run.admin` - full mapped surface including setIamPolicy and invoke
+  - `roles/run.developer` - manage services, jobs, and revisions, but not `setIamPolicy`, not `run.routes.invoke`, and not `run.jobs.run`
+  - `roles/run.invoker` - `run.routes.invoke` and `run.jobs.run`
+- Developers cannot invoke services. Bind `roles/run.invoker` (or admin) for host-routed or legacy invoke paths.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+
+Regression: `CloudRunIamEnforcementIntegrationTest`.
+
 ## Not Implemented
 
 - Source builds and buildpacks
@@ -79,4 +105,3 @@ ServicesSettings settings = ServicesSettings.newHttpJsonBuilder()
 - Autoscaling and scale-to-zero
 - Sidecars, non-GCS volumes, secrets, startup probes
 - Cloud Functions execution
-- IAM invocation enforcement

@@ -80,3 +80,18 @@ curl -X DELETE \
 - `GetConsumerGroup`
 - `ListConsumerGroups`
 - `DeleteConsumerGroup`
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Managed Kafka calls require a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps cluster, topic, and consumer group routes to
+  `managedkafka.clusters.*`, `managedkafka.topics.*`, and `managedkafka.consumerGroups.*`.
+- `roles/managedkafka.viewer` grants get and list only.
+- `roles/managedkafka.clusterEditor` grants cluster CRUD plus topic/consumer-group read (no topic write).
+- `roles/managedkafka.admin` grants the full mapped Managed Kafka surface.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `KafkaIamEnforcementIntegrationTest`.

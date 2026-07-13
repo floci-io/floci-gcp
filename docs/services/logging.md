@@ -144,3 +144,24 @@ regex, and nested parentheses are not supported; unrecognized clauses are ignore
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
 fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), sinks and
 buckets (`ConfigServiceV2`), advanced filter operators, and retention/dedup semantics.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud Logging calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Cloud Logging (`google.logging.v2.LoggingServiceV2`) is gated by `IamEnforcementGrpcInterceptor`
+  with the same `logging.logEntries.*` / `logging.logs.*` permissions via `IamGrpcPermissionMapper`
+  (for example `WriteLogEntries` → `logging.logEntries.create`, `ListLogEntries` → `logging.logEntries.list`,
+  `ListLogs` → `logging.logs.list`, `DeleteLog` → `logging.logs.delete`).
+- `IamPermissionMapper` maps Logging REST paths to `logging.logEntries.create`,
+  `logging.logEntries.list`, `logging.logs.list`, and `logging.logs.delete`.
+- `roles/logging.viewer` grants list entries and list logs.
+- `roles/logging.logWriter` grants `logging.logEntries.create` only.
+- `roles/logging.admin` grants the full Logging permission set used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+- gRPC `ListMonitoredResourceDescriptors` and `TailLogEntries` remain unmapped. Under strict
+  enforcement they are denied as unmapped methods.
+
+Regression: `CloudLoggingIamEnforcementIntegrationTest`, `CloudLoggingGrpcIamEnforcementIntegrationTest`.

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authHeaders, uniqueName } from './setup';
 
 const base = () =>
   `${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/us-central1`;
@@ -7,7 +7,7 @@ const base = () =>
 async function post(url: string, body: unknown = {}): Promise<unknown> {
   const resp = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   expect(resp.status).toBe(200);
@@ -15,7 +15,7 @@ async function post(url: string, body: unknown = {}): Promise<unknown> {
 }
 
 async function get(url: string): Promise<unknown> {
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: authHeaders() });
   expect(resp.status).toBe(200);
   return resp.json();
 }
@@ -23,7 +23,7 @@ async function get(url: string): Promise<unknown> {
 async function patch(url: string, body: unknown = {}): Promise<unknown> {
   const resp = await fetch(url, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   expect(resp.status).toBe(200);
@@ -31,7 +31,7 @@ async function patch(url: string, body: unknown = {}): Promise<unknown> {
 }
 
 async function del(url: string): Promise<void> {
-  await fetch(url, { method: 'DELETE' });
+  await fetch(url, { method: 'DELETE', headers: authHeaders() });
 }
 
 describe('Managed Kafka', () => {

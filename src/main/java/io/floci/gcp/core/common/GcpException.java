@@ -71,6 +71,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(403, "PERMISSION_DENIED", Status.Code.PERMISSION_DENIED, message);
     }
 
+    public static GcpException unauthenticated(String message) {
+        return new GcpException(401, "UNAUTHENTICATED", Status.Code.UNAUTHENTICATED, message);
+    }
+
     public static GcpException resourceExhausted(String message) {
         return new GcpException(429, "RESOURCE_EXHAUSTED", Status.Code.RESOURCE_EXHAUSTED, message);
     }

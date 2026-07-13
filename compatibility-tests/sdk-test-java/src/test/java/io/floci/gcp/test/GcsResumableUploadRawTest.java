@@ -42,13 +42,13 @@ class GcsResumableUploadRawTest {
     @Test
     void resumableUploadKeepsSessionOpenUntilFinalChunk() throws Exception {
         HttpResponse<String> init = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/upload/storage/v1/b/" + BUCKET
                                 + "/o?uploadType=resumable&name=" + OBJECT))
                         .header("X-Upload-Content-Type", "application/octet-stream")
                         .header("X-Upload-Content-Length", String.valueOf(TOTAL_SIZE))
                         .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .POST(HttpRequest.BodyPublishers.ofString("{}")))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -56,9 +56,9 @@ class GcsResumableUploadRawTest {
         URI uploadUri = URI.create(init.headers().firstValue("Location").orElseThrow());
 
         HttpResponse<String> emptyStatus = CLIENT.send(
-                HttpRequest.newBuilder(uploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uploadUri)
                         .header("Content-Range", "bytes */*")
-                        .PUT(HttpRequest.BodyPublishers.noBody())
+                        .PUT(HttpRequest.BodyPublishers.noBody()))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -71,10 +71,10 @@ class GcsResumableUploadRawTest {
         Arrays.fill(second, (byte) 'b');
 
         HttpResponse<String> firstChunk = CLIENT.send(
-                HttpRequest.newBuilder(uploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uploadUri)
                         .header("Content-Type", "application/octet-stream")
                         .header("Content-Range", "bytes 0-" + (FIRST_CHUNK_SIZE - 1) + "/*")
-                        .PUT(HttpRequest.BodyPublishers.ofByteArray(first))
+                        .PUT(HttpRequest.BodyPublishers.ofByteArray(first)))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -83,9 +83,9 @@ class GcsResumableUploadRawTest {
                 .contains("bytes=0-" + (FIRST_CHUNK_SIZE - 1));
 
         HttpResponse<String> status = CLIENT.send(
-                HttpRequest.newBuilder(uploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uploadUri)
                         .header("Content-Range", "bytes */" + TOTAL_SIZE)
-                        .PUT(HttpRequest.BodyPublishers.noBody())
+                        .PUT(HttpRequest.BodyPublishers.noBody()))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -94,11 +94,11 @@ class GcsResumableUploadRawTest {
                 .contains("bytes=0-" + (FIRST_CHUNK_SIZE - 1));
 
         HttpResponse<String> finalChunk = CLIENT.send(
-                HttpRequest.newBuilder(uploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uploadUri)
                         .header("Content-Type", "application/octet-stream")
                         .header("Content-Range", "bytes " + FIRST_CHUNK_SIZE + "-"
                                 + (TOTAL_SIZE - 1) + "/" + TOTAL_SIZE)
-                        .PUT(HttpRequest.BodyPublishers.ofByteArray(second))
+                        .PUT(HttpRequest.BodyPublishers.ofByteArray(second)))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -106,9 +106,9 @@ class GcsResumableUploadRawTest {
         assertThat(finalChunk.body()).contains("\"size\":\"" + TOTAL_SIZE + "\"");
 
         HttpResponse<byte[]> download = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/storage/v1/b/" + BUCKET + "/o/" + OBJECT + "?alt=media"))
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofByteArray());
 
@@ -123,12 +123,12 @@ class GcsResumableUploadRawTest {
         String objectName = "unknown-size.bin";
         byte[] data = "unknown-size-data".getBytes(StandardCharsets.UTF_8);
         HttpResponse<String> init = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/upload/storage/v1/b/" + BUCKET
                                 + "/o?uploadType=resumable&name=" + objectName))
                         .header("X-Upload-Content-Type", "application/octet-stream")
                         .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .POST(HttpRequest.BodyPublishers.ofString("{}")))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -136,10 +136,10 @@ class GcsResumableUploadRawTest {
         URI uploadUri = URI.create(init.headers().firstValue("Location").orElseThrow());
 
         HttpResponse<String> upload = CLIENT.send(
-                HttpRequest.newBuilder(uploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(uploadUri)
                         .header("Content-Type", "application/octet-stream")
                         .header("Content-Range", "bytes 0-*/*")
-                        .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
+                        .PUT(HttpRequest.BodyPublishers.ofByteArray(data)))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -147,9 +147,9 @@ class GcsResumableUploadRawTest {
         assertThat(upload.body()).contains("\"size\":\"" + data.length + "\"");
 
         HttpResponse<byte[]> download = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/storage/v1/b/" + BUCKET + "/o/" + objectName + "?alt=media"))
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofByteArray());
 
@@ -162,12 +162,12 @@ class GcsResumableUploadRawTest {
         String objectName = "custom-endpoint-path.bin";
         byte[] data = "custom-endpoint-path-data".getBytes(StandardCharsets.UTF_8);
         HttpResponse<String> init = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/storage/v1/b/" + BUCKET
                                 + "/o?uploadType=resumable&name=" + objectName))
                         .header("X-Upload-Content-Type", "application/octet-stream")
                         .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .POST(HttpRequest.BodyPublishers.ofString("{}")))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -178,10 +178,10 @@ class GcsResumableUploadRawTest {
         URI customUploadUri = URI.create(uploadUri.toString().replace("/upload/storage/v1/b/", "/storage/v1/b/"));
 
         HttpResponse<String> upload = CLIENT.send(
-                HttpRequest.newBuilder(customUploadUri)
+                TestFixtures.authorize(HttpRequest.newBuilder(customUploadUri)
                         .header("Content-Type", "application/octet-stream")
                         .header("Content-Range", "bytes 0-*/*")
-                        .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
+                        .PUT(HttpRequest.BodyPublishers.ofByteArray(data)))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -189,9 +189,9 @@ class GcsResumableUploadRawTest {
         assertThat(upload.body()).contains("\"size\":\"" + data.length + "\"");
 
         HttpResponse<byte[]> download = CLIENT.send(
-                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                TestFixtures.authorize(HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                                 + "/storage/v1/b/" + BUCKET + "/o/" + objectName + "?alt=media"))
-                        .GET()
+                        .GET())
                         .build(),
                 HttpResponse.BodyHandlers.ofByteArray());
 

@@ -102,3 +102,18 @@ curl -sX POST $B/datasets/ds1/tables/t1/insertAll -H 'Content-Type: application/
 curl -sX POST $B/queries -H 'Content-Type: application/json' \
   -d '{"query":"SELECT name FROM ds1.t1 WHERE age = 30"}'
 ```
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST BigQuery calls require a registered Bearer token and a matching project allow-policy binding.
+- `IamPermissionMapper` maps BigQuery REST paths to `bigquery.datasets.*`, `bigquery.tables.*`
+  (including `getData` / `updateData` for tabledata), and `bigquery.jobs.*`.
+- `roles/bigquery.dataViewer` grants dataset/table read and `getData` only.
+- `roles/bigquery.jobUser` grants `bigquery.jobs.create` only.
+- `roles/bigquery.admin` grants the broad BigQuery permissions used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `BigQueryIamEnforcementIntegrationTest`.

@@ -172,10 +172,10 @@ class KafkaTest {
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
     private static JsonNode patch(String path, String body) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest req = TestFixtures.authorize(HttpRequest.newBuilder()
                 .uri(URI.create(TestFixtures.endpoint() + path))
                 .header("Content-Type", "application/json")
-                .method("PATCH", HttpRequest.BodyPublishers.ofString(body))
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(body)))
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -183,10 +183,10 @@ class KafkaTest {
     }
 
     private static JsonNode post(String path, String body) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest req = TestFixtures.authorize(HttpRequest.newBuilder()
                 .uri(URI.create(TestFixtures.endpoint() + path))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .POST(HttpRequest.BodyPublishers.ofString(body)))
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -194,9 +194,9 @@ class KafkaTest {
     }
 
     private static JsonNode get(String path) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest req = TestFixtures.authorize(HttpRequest.newBuilder()
                 .uri(URI.create(TestFixtures.endpoint() + path))
-                .GET()
+                .GET())
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -207,9 +207,9 @@ class KafkaTest {
         if (path.contains("/null")) {
             return;
         }
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest req = TestFixtures.authorize(HttpRequest.newBuilder()
                 .uri(URI.create(TestFixtures.endpoint() + path))
-                .DELETE()
+                .DELETE())
                 .build();
         http.send(req, HttpResponse.BodyHandlers.ofString());
     }

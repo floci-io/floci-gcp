@@ -1,39 +1,47 @@
 package io.floci.gcp.test;
 
-import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
-import com.google.cloud.NoCredentials;
+import com.google.api.services.sqladmin.SQLAdmin;
+import com.google.auth.http.HttpCredentialsAdapter;
+import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.datastore.Datastore;
 import com.google.cloud.datastore.DatastoreOptions;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.FirestoreOptions;
 import com.google.cloud.functions.v2.FunctionServiceClient;
 import com.google.cloud.functions.v2.FunctionServiceSettings;
+import com.google.cloud.kms.v1.KeyManagementServiceClient;
+import com.google.cloud.kms.v1.KeyManagementServiceSettings;
+import com.google.cloud.logging.v2.LoggingClient;
+import com.google.cloud.logging.v2.LoggingSettings;
 import com.google.cloud.run.v2.RevisionsClient;
 import com.google.cloud.run.v2.RevisionsSettings;
 import com.google.cloud.run.v2.ServicesClient;
 import com.google.cloud.run.v2.ServicesSettings;
+import com.google.cloud.scheduler.v1.CloudSchedulerClient;
+import com.google.cloud.scheduler.v1.CloudSchedulerSettings;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceSettings;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
-import com.google.cloud.logging.v2.LoggingClient;
-import com.google.cloud.logging.v2.LoggingSettings;
-import com.google.cloud.kms.v1.KeyManagementServiceClient;
-import com.google.cloud.kms.v1.KeyManagementServiceSettings;
 import com.google.cloud.tasks.v2.CloudTasksClient;
 import com.google.cloud.tasks.v2.CloudTasksSettings;
-import com.google.cloud.scheduler.v1.CloudSchedulerClient;
-import com.google.cloud.scheduler.v1.CloudSchedulerSettings;
-import com.google.api.client.http.javanet.NetHttpTransport;
-import com.google.api.client.json.gson.GsonFactory;
-import com.google.api.services.sqladmin.SQLAdmin;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.http.HttpRequest;
+import java.util.Date;
+import java.util.Map;
 import java.util.UUID;
 
 public final class TestFixtures {
+
+    private static final String DEFAULT_ACCESS_TOKEN = "fake-token-floci-gcp";
 
     private TestFixtures() {
     }
@@ -51,15 +59,49 @@ public final class TestFixtures {
     }
 
     /**
+     * CTF operator Bearer token. Prefers {@code FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN},
+     * then {@code GOOGLE_OAUTH_ACCESS_TOKEN}, else the shared fake token.
+     */
+    public static String getAccessToken() {
+        String root = System.getenv("FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN");
+        if (root != null && !root.isBlank()) {
+            return root;
+        }
+        String oauth = System.getenv("GOOGLE_OAUTH_ACCESS_TOKEN");
+        if (oauth != null && !oauth.isBlank()) {
+            return oauth;
+        }
+        return DEFAULT_ACCESS_TOKEN;
+    }
+
+    public static GoogleCredentials googleCredentials() {
+        return GoogleCredentials.create(new AccessToken(
+                getAccessToken(),
+                new Date(System.currentTimeMillis() + 3_600_000L)));
+    }
+
+    public static FixedCredentialsProvider credentialsProvider() {
+        return FixedCredentialsProvider.create(googleCredentials());
+    }
+
+    public static Map<String, String> authorizedHeaders() {
+        return Map.of("Authorization", "Bearer " + getAccessToken());
+    }
+
+    public static HttpRequest.Builder authorize(HttpRequest.Builder builder) {
+        return builder.header("Authorization", "Bearer " + getAccessToken());
+    }
+
+    /**
      * Creates a GCS Storage client.
      * The STORAGE_EMULATOR_HOST env var is auto-detected by the GCP SDK.
-     * We also explicitly set the host and use NoCredentials for emulator use.
+     * We also explicitly set the host and use the CTF operator Bearer token.
      */
     public static Storage storageClient() {
         return StorageOptions.newBuilder()
                 .setHost(endpoint())
                 .setProjectId(projectId())
-                .setCredentials(NoCredentials.getInstance())
+                .setCredentials(googleCredentials())
                 .build()
                 .getService();
     }
@@ -75,7 +117,7 @@ public final class TestFixtures {
         return FirestoreOptions.newBuilder()
                 .setProjectId(projectId())
                 .setHost(host + ":" + port)
-                .setCredentials(NoCredentials.getInstance())
+                .setCredentials(googleCredentials())
                 .build()
                 .getService();
     }
@@ -96,7 +138,7 @@ public final class TestFixtures {
         return DatastoreOptions.newBuilder()
                 .setProjectId(projectId())
                 .setHost(datastoreHost)
-                .setCredentials(NoCredentials.getInstance())
+                .setCredentials(googleCredentials())
                 .build()
                 .getService();
     }
@@ -116,7 +158,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return SecretManagerServiceClient.create(settings);
@@ -137,7 +179,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return CloudTasksClient.create(settings);
@@ -146,7 +188,7 @@ public final class TestFixtures {
     public static ServicesClient cloudRunServicesClient() throws IOException {
         ServicesSettings settings = ServicesSettings.newHttpJsonBuilder()
                 .setEndpoint(endpoint())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
         return ServicesClient.create(settings);
     }
@@ -167,7 +209,7 @@ public final class TestFixtures {
         com.google.cloud.container.v1.ClusterManagerSettings settings =
                 com.google.cloud.container.v1.ClusterManagerSettings.newHttpJsonBuilder()
                         .setEndpoint(gkeEndpoint())
-                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .setCredentialsProvider(credentialsProvider())
                         .build();
         return com.google.cloud.container.v1.ClusterManagerClient.create(settings);
     }
@@ -175,7 +217,7 @@ public final class TestFixtures {
     public static RevisionsClient cloudRunRevisionsClient() throws IOException {
         RevisionsSettings settings = RevisionsSettings.newHttpJsonBuilder()
                 .setEndpoint(endpoint())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
         return RevisionsClient.create(settings);
     }
@@ -183,7 +225,7 @@ public final class TestFixtures {
     public static FunctionServiceClient cloudFunctionsClient() throws IOException {
         FunctionServiceSettings settings = FunctionServiceSettings.newHttpJsonBuilder()
                 .setEndpoint(endpoint())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
         return FunctionServiceClient.create(settings);
     }
@@ -198,14 +240,14 @@ public final class TestFixtures {
                 .setHost(endpoint())
                 .setLocation("US")
                 .setProjectId(projectId())
-                .setCredentials(NoCredentials.getInstance())
+                .setCredentials(googleCredentials())
                 .build()
                 .getService();
     }
 
     public static SQLAdmin sqlAdminClient() {
-        return new SQLAdmin.Builder(new NetHttpTransport(), GsonFactory.getDefaultInstance(), request -> {
-        })
+        HttpRequestInitializer credentials = new HttpCredentialsAdapter(googleCredentials());
+        return new SQLAdmin.Builder(new NetHttpTransport(), GsonFactory.getDefaultInstance(), credentials)
                 .setApplicationName("floci-gcp-compat")
                 .setRootUrl(endpoint() + "/")
                 // The generated v1beta4 request classes already include sql/v1beta4/
@@ -230,7 +272,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return LoggingClient.create(settings);
@@ -251,7 +293,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return KeyManagementServiceClient.create(settings);
@@ -271,7 +313,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return com.google.cloud.monitoring.v3.MetricServiceClient.create(settings);
@@ -292,7 +334,7 @@ public final class TestFixtures {
                                 .setEndpoint(host + ":" + port)
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
                                 .build())
-                .setCredentialsProvider(NoCredentialsProvider.create())
+                .setCredentialsProvider(credentialsProvider())
                 .build();
 
         return CloudSchedulerClient.create(settings);
@@ -302,7 +344,7 @@ public final class TestFixtures {
         com.google.cloud.eventarc.v1.EventarcSettings settings =
                 com.google.cloud.eventarc.v1.EventarcSettings.newHttpJsonBuilder()
                         .setEndpoint(endpoint())
-                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .setCredentialsProvider(credentialsProvider())
                         .build();
         return com.google.cloud.eventarc.v1.EventarcClient.create(settings);
     }
@@ -311,7 +353,7 @@ public final class TestFixtures {
         com.google.api.serviceusage.v1.ServiceUsageSettings settings =
                 com.google.api.serviceusage.v1.ServiceUsageSettings.newHttpJsonBuilder()
                         .setEndpoint(endpoint())
-                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .setCredentialsProvider(credentialsProvider())
                         .build();
         return com.google.api.serviceusage.v1.ServiceUsageClient.create(settings);
     }

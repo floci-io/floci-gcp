@@ -189,3 +189,17 @@ gcloud secrets add-iam-policy-binding my-secret \
 - `GetIamPolicy`
 - `SetIamPolicy`
 - `TestIamPermissions`
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Secret Manager calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Secret Manager (`google.cloud.secretmanager.v1.SecretManagerService`) is gated by `IamEnforcementGrpcInterceptor` with the same `secretmanager.secrets.*` / `secretmanager.versions.*` permissions via `IamGrpcPermissionMapper` (for example `AccessSecretVersion` → `secretmanager.versions.access`, `TestIamPermissions` → `secretmanager.secrets.getIamPolicy`).
+- `IamPermissionMapper` maps Secret Manager REST paths to `secretmanager.secrets.*` and `secretmanager.versions.*` permissions (create, get, list, update, delete, getIamPolicy, setIamPolicy, add, access, destroy, disable, enable, get, list versions).
+
+- `roles/secretmanager.secretAccessor` grants `secretmanager.versions.access` only.
+- `roles/secretmanager.admin` grants the broad Secret Manager permissions used by the CTF mapper.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+
+Regression: `SecretManagerIamEnforcementIntegrationTest`, `SecretManagerGrpcIamEnforcementIntegrationTest`.

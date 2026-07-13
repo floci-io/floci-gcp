@@ -13,7 +13,8 @@
     "@google-cloud/logging": "^11.0.0",
     "@google-cloud/pubsub": "^4.0.0",
     "@google-cloud/secret-manager": "^5.0.0",
-    "@google-cloud/storage": "^7.0.0"
+    "@google-cloud/storage": "^7.0.0",
+    "google-auth-library": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

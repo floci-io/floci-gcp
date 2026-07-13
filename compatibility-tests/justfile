@@ -74,6 +74,9 @@ setup-go:
 test-gcloud:
     FLOCI_GCP_ENDPOINT="{{FLOCI_GCP_ENDPOINT}}" \
     FLOCI_GCP_PROJECT="{{FLOCI_GCP_PROJECT}}" \
+    GOOGLE_OAUTH_ACCESS_TOKEN="{{env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp')}}" \
+    FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="{{env('FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN', env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp'))}}" \
+    CLOUDSDK_AUTH_ACCESS_TOKEN="{{env('CLOUDSDK_AUTH_ACCESS_TOKEN', env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp'))}}" \
     bats test/
 
 # ── Terraform ────────────────────────────────────────────────────────────────
@@ -85,7 +88,8 @@ test-terraform:
     FLOCI_PROJECT="{{FLOCI_PROJECT}}" \
     PUBSUB_EMULATOR_HOST="{{FLOCI_HOST}}" \
     STORAGE_EMULATOR_HOST="{{FLOCI_ENDPOINT}}" \
-    GOOGLE_OAUTH_ACCESS_TOKEN="fake-token-floci-gcp" \
+    GOOGLE_OAUTH_ACCESS_TOKEN="{{env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp')}}" \
+    FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="{{env('FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN', env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp'))}}" \
     bats test/terraform.bats
 
 [working-directory: 'compat-terraform']
@@ -101,7 +105,8 @@ test-opentofu:
     FLOCI_PROJECT="{{FLOCI_PROJECT}}" \
     PUBSUB_EMULATOR_HOST="{{FLOCI_HOST}}" \
     STORAGE_EMULATOR_HOST="{{FLOCI_ENDPOINT}}" \
-    GOOGLE_OAUTH_ACCESS_TOKEN="fake-token-floci-gcp" \
+    GOOGLE_OAUTH_ACCESS_TOKEN="{{env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp')}}" \
+    FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN="{{env('FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN', env('GOOGLE_OAUTH_ACCESS_TOKEN', 'fake-token-floci-gcp'))}}" \
     bats test/opentofu.bats
 
 [working-directory: 'compat-opentofu']

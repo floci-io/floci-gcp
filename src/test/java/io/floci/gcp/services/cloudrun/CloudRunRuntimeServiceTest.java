@@ -100,6 +100,38 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void buildSpecStripsBlockedCredentialEnvKeys() {
+        Service service = Service.newBuilder()
+                .setName("projects/p1/locations/us-central1/services/svc")
+                .build();
+        Revision revision = Revision.newBuilder()
+                .setName(service.getName() + "/revisions/svc-00001")
+                .addContainers(Container.newBuilder()
+                        .setImage("gcr.io/p1/svc:latest")
+                        .addEnv(EnvVar.newBuilder().setName("SAFE_VAR").setValue("ok"))
+                        .addEnv(EnvVar.newBuilder()
+                                .setName("GOOGLE_APPLICATION_CREDENTIALS")
+                                .setValue("/tmp/player.json"))
+                        .addEnv(EnvVar.newBuilder()
+                                .setName("FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN")
+                                .setValue("stolen-token"))
+                        .addEnv(EnvVar.newBuilder()
+                                .setName("GOOGLE_API_KEY")
+                                .setValue("player-key")))
+                .build();
+
+        ContainerSpec spec = runtimeService.buildSpec("p1", "us-central1", service, revision,
+                revision.getContainers(0), 8080, "container-name");
+
+        assertTrue(spec.env().contains("SAFE_VAR=ok"));
+        assertFalse(spec.env().stream().anyMatch(e -> e.startsWith("GOOGLE_APPLICATION_CREDENTIALS=")));
+        assertFalse(spec.env().stream().anyMatch(e -> e.startsWith("FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN=")));
+        assertFalse(spec.env().stream().anyMatch(e -> e.startsWith("GOOGLE_API_KEY=")));
+        assertTrue(spec.env().contains("PORT=8080"));
+        assertTrue(spec.env().contains("K_SERVICE=svc"));
+    }
+
+    @Test
     void buildSpecMountsReadOnlyGcsVolumeSnapshot() {
         CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
                 lifecycleManager, config);

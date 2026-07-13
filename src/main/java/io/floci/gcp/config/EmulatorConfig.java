@@ -40,6 +40,10 @@ public interface EmulatorConfig {
 
     InitHooksConfig initHooks();
 
+    AuthConfig auth();
+
+    CtfConfig ctf();
+
     interface DnsConfig {
         Optional<List<String>> extraSuffixes();
     }
@@ -184,6 +188,12 @@ public interface EmulatorConfig {
     interface IamServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean enforcementEnabled();
+
+        @WithDefault("false")
+        boolean strictEnforcementEnabled();
     }
 
     interface SecretManagerServiceConfig {
@@ -329,5 +339,20 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         long timeoutSeconds();
+    }
+
+    interface AuthConfig {
+        @WithDefault("false")
+        boolean validateTokens();
+
+        Optional<String> rootServiceAccount();
+
+        Optional<String> rootAccessToken();
+    }
+
+    interface CtfConfig {
+        /** false | true | all */
+        @WithDefault("false")
+        String hideInternalEndpoints();
     }
 }

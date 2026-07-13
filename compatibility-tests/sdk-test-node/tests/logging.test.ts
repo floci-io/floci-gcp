@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { v2 } from '@google-cloud/logging';
 import * as grpc from '@grpc/grpc-js';
-import { PROJECT_ID, LOGGING_HOST, uniqueName } from './setup';
+import { PROJECT_ID, LOGGING_HOST, authClient, uniqueName } from './setup';
 
 describe('Cloud Logging', () => {
   let client: InstanceType<typeof v2.LoggingServiceV2Client>;
@@ -14,6 +14,7 @@ describe('Cloud Logging', () => {
       servicePath: host,
       port: port ? parseInt(port, 10) : 4588,
       sslCreds: grpc.credentials.createInsecure(),
+      authClient: authClient(),
     });
     logName = `${parent}/logs/${uniqueName('node-log')}`;
   });

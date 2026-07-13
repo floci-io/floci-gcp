@@ -222,3 +222,18 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
 - `UpdateSnapshot`
 - `DeleteSnapshot`
 - `Seek`
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Pub/Sub calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Pub/Sub (`google.pubsub.v1.Publisher` / `Subscriber`) is gated by `IamEnforcementGrpcInterceptor` with `pubsub.topics.*` / `pubsub.subscriptions.*` / `pubsub.snapshots.*` permissions via `IamGrpcPermissionMapper` (for example `Publish` → `pubsub.topics.publish`, `Pull` / `Acknowledge` → `pubsub.subscriptions.consume`, `CreateSnapshot` → `pubsub.snapshots.create`, `DetachSubscription` → `pubsub.topics.detachSubscription`).
+- `IamPermissionMapper` maps Pub/Sub REST paths to `pubsub.topics.*` and `pubsub.subscriptions.*` permissions (create, get, list, update, delete, publish, consume).
+- `roles/pubsub.publisher` grants `pubsub.topics.publish` only.
+- `roles/pubsub.subscriber` grants `pubsub.subscriptions.consume` only (pull, acknowledge, and seek).
+- `roles/pubsub.admin` grants the broad Pub/Sub permissions used by the CTF mapper (including snapshots and detach).
+
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`) bypasses IAM evaluation.
+
+Regression: `PubSubIamEnforcementIntegrationTest`, `PubSubGrpcIamEnforcementIntegrationTest`.

@@ -10,8 +10,10 @@ Unlike the GCP SDKs, the `gcloud` CLI does **not** honour `*_EMULATOR_HOST` and
 always requires a credential. `test/test_helper/common-setup.bash` configures it via
 environment only (no `gcloud config` mutation):
 
-- `CLOUDSDK_AUTH_ACCESS_TOKEN` — any non-empty value; satisfies gcloud's
-  active-account check. floci-gcp ignores the token.
+- `CLOUDSDK_AUTH_ACCESS_TOKEN` — CTF operator Bearer token (default
+  `fake-token-floci-gcp`). Must match `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` on the
+  emulator when token validation is enabled. Also accepts
+  `GOOGLE_OAUTH_ACCESS_TOKEN` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN` as fallbacks.
 - `CLOUDSDK_API_ENDPOINT_OVERRIDES_<SERVICE>` — routes each service's API to the
   emulator. Storage's override includes the version path (`/storage/v1/`); the
   others take the bare base URL.
@@ -32,8 +34,8 @@ environment only (no `gcloud config` mutation):
 surfaces a few emulator gaps. These operations are intentionally not asserted here
 (tracked for follow-up); the underlying data paths are covered by the SDK suites:
 
-- **Pub/Sub** — gRPC-only in the emulator; `gcloud pubsub` (REST) cannot reach it,
-  so there is no Pub/Sub coverage in this suite.
+- **Pub/Sub** — this suite does not yet cover `gcloud pubsub`. The emulator exposes Pub/Sub over
+  gRPC and REST; add `CLOUDSDK_API_ENDPOINT_OVERRIDES_PUBSUB` coverage in a follow-up if needed.
 - **Cloud KMS encrypt/decrypt** — gcloud verifies request/response CRC32C; the
   emulator does not yet return matching CRC32C fields, so gcloud reports
   "corrupted in-transit". (`KmsTest` covers the encrypt/decrypt data path.)

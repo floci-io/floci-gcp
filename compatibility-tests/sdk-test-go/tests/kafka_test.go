@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"floci-gcp-sdk-test-go/internal/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,11 +34,19 @@ func kafkaBase(project string) string {
 	return fmt.Sprintf("%s/v1/projects/%s/locations/us-central1", kafkaEndpoint(), project)
 }
 
+func kafkaAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+testutil.AccessToken())
+}
+
 func kafkaPost(t *testing.T, url string, body interface{}) map[string]interface{} {
 	t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data)) //nolint:noctx
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	kafkaAuthHeader(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
@@ -49,7 +59,10 @@ func kafkaPost(t *testing.T, url string, body interface{}) map[string]interface{
 
 func kafkaGet(t *testing.T, url string) map[string]interface{} {
 	t.Helper()
-	resp, err := http.Get(url) //nolint:noctx
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	require.NoError(t, err)
+	kafkaAuthHeader(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
@@ -62,6 +75,7 @@ func kafkaGet(t *testing.T, url string) map[string]interface{} {
 
 func kafkaDelete(url string) {
 	req, _ := http.NewRequest(http.MethodDelete, url, nil) //nolint:noctx
+	kafkaAuthHeader(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
@@ -75,6 +89,7 @@ func kafkaPatch(t *testing.T, url string, body interface{}) map[string]interface
 	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(data)) //nolint:noctx
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	kafkaAuthHeader(req)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

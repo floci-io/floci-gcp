@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Firestore } from '@google-cloud/firestore';
-import { PROJECT_ID, FIRESTORE_HOST, uniqueName } from './setup';
+import { PROJECT_ID, FIRESTORE_HOST, authClient, uniqueName } from './setup';
 
 describe('Firestore', () => {
   let db: Firestore;
@@ -9,7 +9,7 @@ describe('Firestore', () => {
 
   beforeAll(() => {
     process.env.FIRESTORE_EMULATOR_HOST = FIRESTORE_HOST;
-    db = new Firestore({ projectId: PROJECT_ID });
+    db = new Firestore({ projectId: PROJECT_ID, authClient: authClient() });
     collectionName = uniqueName('test-col');
     docId = uniqueName('doc');
   });

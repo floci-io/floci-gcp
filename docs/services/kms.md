@@ -168,3 +168,29 @@ verifies them and sets the corresponding `verified_*_crc32c` response flag (a mi
 
 `RawEncrypt`/`RawDecrypt`, `MacSign`/`MacVerify`, import jobs, RSA-PSS signing, post-quantum
 algorithms, HSM/EXTERNAL protection levels, and IAM policy storage.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- REST Cloud KMS calls require a registered Bearer token and a matching project allow-policy binding.
+- gRPC Cloud KMS (`google.cloud.kms.v1.KeyManagementService`) is gated by `IamEnforcementGrpcInterceptor`
+  with the same `cloudkms.keyRings.*` / `cloudkms.cryptoKeys.*` / `cloudkms.cryptoKeyVersions.*`
+  permissions via `IamGrpcPermissionMapper` (for example `ListKeyRings` → `cloudkms.keyRings.list`,
+  `Encrypt` → `cloudkms.cryptoKeyVersions.useToEncrypt`,
+  `UpdateCryptoKeyPrimaryVersion` → `cloudkms.cryptoKeys.update`).
+- `IamPermissionMapper` maps Cloud KMS REST paths to `cloudkms.keyRings.*`, `cloudkms.cryptoKeys.*`,
+  and crypto ops (`cloudkms.cryptoKeyVersions.useToEncrypt`, `useToDecrypt`, `useToSign`,
+  `viewPublicKey`), plus version management permissions used by the controller.
+- gRPC `GenerateRandomBytes` maps to `cloudkms.locations.generateRandomBytes` via
+  `IamGrpcPermissionMapper`.
+- REST `:generateRandomBytes` maps to `cloudkms.locations.generateRandomBytes` via
+  `IamPermissionMapper`. Stage 0 role sets do not grant this permission (operator or
+  `roles/owner` style catch-all only).
+- `roles/cloudkms.cryptoKeyEncrypterDecrypter` grants encrypt and decrypt only.
+- `roles/cloudkms.admin` grants key ring / crypto key / version management, not crypto ops
+  (aligned with GCP Cloud KMS Admin).
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `CloudKmsIamEnforcementIntegrationTest`, `CloudKmsGrpcIamEnforcementIntegrationTest`.

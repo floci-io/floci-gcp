@@ -8,7 +8,6 @@ import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
 import com.google.firebase.auth.FirebaseToken;
 import com.google.firebase.auth.UserRecord;
-import com.google.firebase.internal.EmulatorCredentials;
 import com.google.firebase.internal.FirebaseProcessEnvironment;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -53,7 +52,7 @@ class FirebaseAuthTest {
         FirebaseProcessEnvironment.setenv("FIREBASE_AUTH_EMULATOR_HOST", host);
         app = FirebaseApp.initializeApp(FirebaseOptions.builder()
                 .setProjectId(PROJECT_ID)
-                .setCredentials(new EmulatorCredentials())
+                .setCredentials(TestFixtures.googleCredentials())
                 .build(), "floci-firebase-auth-test");
         auth = FirebaseAuth.getInstance(app);
     }
@@ -106,12 +105,12 @@ class FirebaseAuthTest {
         String customToken = auth.createCustomToken(UID, Map.of("premium", true));
 
         HttpResponse<String> response = HttpClient.newHttpClient().send(
-                HttpRequest.newBuilder()
+                TestFixtures.authorize(HttpRequest.newBuilder()
                         .uri(URI.create(TestFixtures.endpoint()
                                 + "/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=fake-api-key"))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                MAPPER.writeValueAsString(Map.of("token", customToken, "returnSecureToken", true))))
+                                MAPPER.writeValueAsString(Map.of("token", customToken, "returnSecureToken", true)))))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).isEqualTo(200);

@@ -82,3 +82,23 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
 - Passwords are stored in the emulator's literal `fakeHash:salt=...:password=...` format —
   a dev fixture, not a security boundary, identical to the official emulator.
 - `securetoken` responses report `project_id: "12345"`, the emulator's hardcoded project number.
+
+## CTF fork
+
+When IAM enforcement is enabled (`floci-gcp.services.iam.enforcement-enabled`):
+
+- Identity Toolkit / Firebase Auth REST calls require a registered Bearer token and a matching
+  project allow-policy binding (including client `accounts:*` and `securetoken` paths under
+  token validation).
+- `IamPermissionMapper` maps API paths to `firebaseauth.users.*` permissions:
+  `create` (signUp / admin create), `createSession` (sign-in / securetoken refresh),
+  `get` (lookup / batchGet), `update`, `delete` (delete / batchDelete / emulator wipe).
+- `roles/identitytoolkit.viewer` grants `firebaseauth.users.get` only.
+- `roles/firebaseauth.admin` grants the broad user permissions used by the CTF mapper.
+- When token validation is on, admin Identity Toolkit routes treat any CTF-validated Bearer
+  principal as privileged (emulator `Bearer owner` / `ya29.*` still work when validation is off).
+  IAM enforcement remains the permission gate.
+- Operator root (`FLOCI_GCP_AUTH_ROOT_SERVICE_ACCOUNT` / `FLOCI_GCP_AUTH_ROOT_ACCESS_TOKEN`)
+  bypasses IAM evaluation.
+
+Regression: `FirebaseAuthIamEnforcementIntegrationTest`.

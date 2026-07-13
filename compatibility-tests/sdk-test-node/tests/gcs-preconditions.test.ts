@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Storage } from '@google-cloud/storage';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authClient, uniqueName } from './setup';
 
 // Regression coverage for issue #2: preconditions were accepted but ignored, so
 // unsafe writes silently succeeded. Real GCS returns 412 Precondition Failed.
@@ -30,7 +30,7 @@ describe('GCS preconditions', () => {
   let generation: number;
 
   beforeAll(async () => {
-    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID });
+    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID, authClient: authClient() });
     bucketName = uniqueName('precond-bucket');
     await storage.createBucket(bucketName);
     await storage.bucket(bucketName).file(objectName).save('v1');

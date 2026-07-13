@@ -27,9 +27,9 @@ class GcsBucketInsertRawTest {
                 + TestFixtures.projectId());
 
         // No Content-Type header at all (mirrors `curl -d` defaults).
-        HttpRequest noContentType = HttpRequest.newBuilder(uri)
+        HttpRequest noContentType = TestFixtures.authorize(HttpRequest.newBuilder(uri)
                 .POST(HttpRequest.BodyPublishers.ofString("{\"name\":\"" + bucket + "\"}",
-                        StandardCharsets.UTF_8))
+                        StandardCharsets.UTF_8)))
                 .build();
         HttpResponse<String> response = client.send(noContentType,
                 HttpResponse.BodyHandlers.ofString());
@@ -43,10 +43,10 @@ class GcsBucketInsertRawTest {
         URI uri = URI.create(TestFixtures.endpoint() + "/storage/v1/b?project="
                 + TestFixtures.projectId());
 
-        HttpRequest withJson = HttpRequest.newBuilder(uri)
+        HttpRequest withJson = TestFixtures.authorize(HttpRequest.newBuilder(uri)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString("{\"name\":\"" + bucket + "\"}",
-                        StandardCharsets.UTF_8))
+                        StandardCharsets.UTF_8)))
                 .build();
         HttpResponse<String> response = client.send(withJson,
                 HttpResponse.BodyHandlers.ofString());

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Storage } from '@google-cloud/storage';
-import { ENDPOINT, PROJECT_ID, uniqueName } from './setup';
+import { ENDPOINT, PROJECT_ID, authClient, uniqueName } from './setup';
 
 // Regression coverage for issue #1: object compose was broken
 // ("400 Unsupported method override: null"). bucket.combine() must work.
@@ -9,7 +9,7 @@ describe('GCS compose', () => {
   let bucketName: string;
 
   beforeAll(async () => {
-    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID });
+    storage = new Storage({ apiEndpoint: ENDPOINT, projectId: PROJECT_ID, authClient: authClient() });
     bucketName = uniqueName('compose-bucket');
     await storage.createBucket(bucketName);
   });

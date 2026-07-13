@@ -49,6 +49,15 @@ class GcpExceptionTest {
     }
 
     @Test
+    void unauthenticated() {
+        GcpException ex = GcpException.unauthenticated("no credentials");
+        assertEquals(401, ex.getHttpStatus());
+        assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+        assertEquals(Status.Code.UNAUTHENTICATED, ex.getGrpcCode());
+        assertEquals("no credentials", ex.getMessage());
+    }
+
+    @Test
     void resourceExhausted() {
         GcpException ex = GcpException.resourceExhausted("quota exceeded");
         assertEquals(429, ex.getHttpStatus());

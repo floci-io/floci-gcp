@@ -83,6 +83,8 @@ public interface EmulatorConfig {
 
         IamServiceConfig iam();
 
+        IamCredentialsServiceConfig iamcredentials();
+
         SecretManagerServiceConfig secretmanager();
 
         LoggingServiceConfig logging();
@@ -182,6 +184,11 @@ public interface EmulatorConfig {
     }
 
     interface IamServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface IamCredentialsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

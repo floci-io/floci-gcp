@@ -3,6 +3,7 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,11 +31,14 @@ public class GcsObjectController {
 
     private final GcsService service;
     private final EmulatorConfig config;
+	private final GcsAuthorizationService authorizationService;
 
     @Inject
-    public GcsObjectController(GcsService service, EmulatorConfig config) {
+	public GcsObjectController(GcsService service, EmulatorConfig config,
+			GcsAuthorizationService authorizationService) {
         this.service = service;
         this.config = config;
+		this.authorizationService = authorizationService;
     }
 
     @OPTIONS
@@ -49,8 +53,10 @@ public class GcsObjectController {
             @QueryParam("pageToken") String pageToken,
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
-            @QueryParam("startOffset") String startOffset,
+			@QueryParam("startOffset") String startOffset,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
+		authorizationService.requireObjectList(authorization, bucket, prefix);
         List<GcsObjectMeta> all = includeVersions
                 ? service.listObjectVersions(bucket, prefix)
                 : service.listObjects(bucket);
@@ -94,7 +100,9 @@ public class GcsObjectController {
     @GET
     @Path("/{object: .+}/acl")
     public Response listObjectAcls(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("object") String objectPath) {
+		authorizationService.rejectDownscopedToken(authorization);
         String objectName = decode(objectPath);
         List<StoredAcl> items = service.listObjectAcls(bucket, objectName);
         return Response.ok(Map.of("kind", "storage#objectAccessControls", "items", items)).build();
@@ -104,7 +112,9 @@ public class GcsObjectController {
     @Path("/{object: .+}/acl")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response insertObjectAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("object") String objectPath, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String objectName = decode(objectPath);
         String entity = body != null ? (String) body.get("entity") : null;
         String role = body != null ? (String) body.get("role") : "READER";
@@ -115,8 +125,10 @@ public class GcsObjectController {
     @GET
     @Path("/{object: .+}/acl/{entity}")
     public Response getObjectAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         String objectName = decode(objectPath);
         return Response.ok(service.getObjectAcl(bucket, objectName, decode(entity))).build();
     }
@@ -125,8 +137,10 @@ public class GcsObjectController {
     @Path("/{object: .+}/acl/{entity}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateObjectAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String objectName = decode(objectPath);
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertObjectAcl(bucket, objectName, decode(entity), role);
@@ -136,8 +150,10 @@ public class GcsObjectController {
     @DELETE
     @Path("/{object: .+}/acl/{entity}")
     public Response deleteObjectAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         String objectName = decode(objectPath);
         service.deleteObjectAcl(bucket, objectName, decode(entity));
         return Response.noContent().build();
@@ -150,8 +166,10 @@ public class GcsObjectController {
             @QueryParam("alt") String alt,
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader) {
         String objectName = decode(objectPath);
+		authorizationService.requireObjectRead(authorization, bucket, objectName);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             if ("media".equals(alt)) {
@@ -178,8 +196,10 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
         String objectName = decode(objectPath);
+		authorizationService.requireObjectWrite(authorization, bucket, objectName);
         service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectName, body)).build();
@@ -194,8 +214,10 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
         String objectName = decode(objectPath);
+		authorizationService.requireObjectWrite(authorization, bucket, objectName);
         service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectName, body)).build();
@@ -211,9 +233,11 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
             String objectName = decode(objectPath);
+			authorizationService.requireObjectWrite(authorization, bucket, objectName);
             service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
                     ifMetagenerationMatch, ifMetagenerationNotMatch);
             return Response.ok(service.patchObject(bucket, objectName, body)).build();
@@ -225,8 +249,10 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     public Response deleteObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("generation") String generation) {
         String objectName = decode(objectPath);
+		authorizationService.requireObjectDelete(authorization, bucket, objectName);
         if (generation != null) {
             service.deleteObjectVersion(bucket, objectName, generation);
             return Response.noContent().build();
@@ -244,6 +270,7 @@ public class GcsObjectController {
             @PathParam("destObject") String destObjectPath,
             @Context HttpHeaders headers, Map<String, Object> body) {
         String destObject = decode(destObjectPath);
+		String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> sourceObjects = body != null
                 ? (List<Map<String, Object>>) body.get("sourceObjects") : List.of();
@@ -253,6 +280,10 @@ public class GcsObjectController {
         String contentType = destReq != null ? (String) destReq.get("contentType") : null;
         List<String> sourceNames = sourceObjects == null ? List.of()
                 : sourceObjects.stream().map(s -> (String) s.get("name")).toList();
+		for (String sourceName : sourceNames) {
+			authorizationService.requireObjectRead(authorization, bucket, sourceName);
+		}
+		authorizationService.requireObjectWrite(authorization, bucket, destObject);
         GcsObjectMeta meta = service.composeObject(bucket, destObject, sourceNames, contentType,
                 requestBaseUrl(headers));
         return Response.ok(meta).build();
@@ -267,6 +298,8 @@ public class GcsObjectController {
             @Context HttpHeaders headers) {
         String srcObject = decode(srcObjectPath);
         String dstObject = decode(dstObjectPath);
+		authorizationService.requireSourceReadAndDestinationWrite(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), srcBucket, srcObject, dstBucket, dstObject);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
                 requestBaseUrl(headers));
         return Response.ok(meta).build();
@@ -281,6 +314,8 @@ public class GcsObjectController {
             @Context HttpHeaders headers) {
         String srcObject = decode(srcObjectPath);
         String dstObject = decode(dstObjectPath);
+		authorizationService.requireSourceReadAndDestinationWrite(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), srcBucket, srcObject, dstBucket, dstObject);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
                 requestBaseUrl(headers));
         Map<String, Object> response = new LinkedHashMap<>();

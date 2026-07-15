@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,11 +26,14 @@ public class GcsXmlDownloadController {
 
     private final GcsService service;
     private final EmulatorConfig config;
+	private final GcsAuthorizationService authorizationService;
 
     @Inject
-    public GcsXmlDownloadController(GcsService service, EmulatorConfig config) {
+	public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
+			GcsAuthorizationService authorizationService) {
         this.service = service;
         this.config = config;
+		this.authorizationService = authorizationService;
     }
 
     @OPTIONS
@@ -51,8 +55,10 @@ public class GcsXmlDownloadController {
             @Context UriInfo uriInfo,
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader) {
         GcsSignedUrl.checkNotExpired(uriInfo);
+        authorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
@@ -69,6 +75,8 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             byte[] body) {
         GcsSignedUrl.checkNotExpired(uriInfo);
+        authorizationService.requireObjectWrite(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String host = headers.getHeaderString("Host");
         String baseUrl = host != null ? "http://" + host : config.baseUrl();

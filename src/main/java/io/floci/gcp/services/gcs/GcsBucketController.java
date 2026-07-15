@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.iam.IamService;
@@ -31,14 +32,16 @@ public class GcsBucketController {
     private final EmulatorConfig config;
     private final IamService iamService;
     private final ObjectMapper objectMapper;
+	private final GcsAuthorizationService authorizationService;
 
     @Inject
     public GcsBucketController(GcsService service, EmulatorConfig config, IamService iamService,
-            ObjectMapper objectMapper) {
+			ObjectMapper objectMapper, GcsAuthorizationService authorizationService) {
         this.service = service;
         this.config = config;
         this.iamService = iamService;
         this.objectMapper = objectMapper;
+		this.authorizationService = authorizationService;
     }
 
     @OPTIONS
@@ -56,6 +59,7 @@ public class GcsBucketController {
     @Consumes(MediaType.WILDCARD)
     public Response createBucket(@QueryParam("project") String project,
             @Context HttpHeaders headers, byte[] body) {
+		authorizationService.rejectDownscopedToken(headers.getHeaderString(HttpHeaders.AUTHORIZATION));
         Map<String, Object> parsed = parseJsonBody(body);
         String name = parsed != null ? (String) parsed.get("name") : null;
         if (name == null || name.isBlank()) {
@@ -80,7 +84,9 @@ public class GcsBucketController {
     @GET
     public Response listBuckets(@QueryParam("project") String project,
             @QueryParam("maxResults") @DefaultValue("0") int maxResults,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("pageToken") String pageToken) {
+		authorizationService.rejectDownscopedToken(authorization);
         List<GcsBucket> all = service.listBuckets(project);
         PageToken.Page<GcsBucket> page = PageToken.paginate(all, maxResults, pageToken);
         Map<String, Object> response = new LinkedHashMap<>();
@@ -96,14 +102,18 @@ public class GcsBucketController {
 
     @GET
     @Path("/{bucket}")
-    public Response getBucket(@PathParam("bucket") String bucket) {
+	public Response getBucket(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         return Response.ok(service.getBucket(bucket)).build();
     }
 
     @PATCH
     @Path("/{bucket}")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response patchBucket(@PathParam("bucket") String bucket, Map<String, Object> body) {
+	public Response patchBucket(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         return Response.ok(service.updateBucket(bucket, body)).build();
     }
 
@@ -112,7 +122,9 @@ public class GcsBucketController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response postBucketMethodOverride(@PathParam("bucket") String bucket,
             @HeaderParam("X-HTTP-Method-Override") String methodOverride,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
             return Response.ok(service.updateBucket(bucket, body)).build();
         }
@@ -121,7 +133,9 @@ public class GcsBucketController {
 
     @DELETE
     @Path("/{bucket}")
-    public Response deleteBucket(@PathParam("bucket") String bucket) {
+	public Response deleteBucket(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.deleteBucket(bucket);
         return Response.noContent().build();
     }
@@ -129,13 +143,17 @@ public class GcsBucketController {
     @POST
     @Path("/{bucket}/lockRetentionPolicy")
     public Response lockRetentionPolicy(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch) {
+		authorizationService.rejectDownscopedToken(authorization);
         return Response.ok(service.lockRetentionPolicy(bucket, ifMetagenerationMatch)).build();
     }
 
     @GET
     @Path("/{bucket}/storageLayout")
-    public Response getStorageLayout(@PathParam("bucket") String bucket) {
+	public Response getStorageLayout(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         GcsBucket b = service.getBucket(bucket);
         String location = b.getLocation() != null ? b.getLocation() : "US";
         Map<String, Object> response = new LinkedHashMap<>();
@@ -158,7 +176,9 @@ public class GcsBucketController {
 
     @GET
     @Path("/{bucket}/iam")
-    public Response getBucketIamPolicy(@PathParam("bucket") String bucket) {
+	public Response getBucketIamPolicy(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.getBucket(bucket);
         StoredPolicy policy = iamService.getPolicy("buckets/" + bucket);
         return Response.ok(bucketIamResponse(bucket, policy)).build();
@@ -167,7 +187,9 @@ public class GcsBucketController {
     @PUT
     @Path("/{bucket}/iam")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response setBucketIamPolicy(@PathParam("bucket") String bucket, Map<String, Object> body) {
+	public Response setBucketIamPolicy(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.getBucket(bucket);
         StoredPolicy policy = parsePolicy(body);
         iamService.setPolicy("buckets/" + bucket, policy);
@@ -178,7 +200,9 @@ public class GcsBucketController {
     @Path("/{bucket}/iam:testPermissions")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response testBucketIamPermissions(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.getBucket(bucket);
         @SuppressWarnings("unchecked")
         List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
@@ -190,7 +214,9 @@ public class GcsBucketController {
 
     @GET
     @Path("/{bucket}/acl")
-    public Response listBucketAcls(@PathParam("bucket") String bucket) {
+	public Response listBucketAcls(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         List<StoredAcl> items = service.listBucketAcls(bucket);
         return Response.ok(Map.of("kind", "storage#bucketAccessControls", "items", items)).build();
     }
@@ -198,7 +224,9 @@ public class GcsBucketController {
     @POST
     @Path("/{bucket}/acl")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response insertBucketAcl(@PathParam("bucket") String bucket, Map<String, Object> body) {
+	public Response insertBucketAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String entity = body != null ? (String) body.get("entity") : null;
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertBucketAcl(bucket, entity, role);
@@ -208,7 +236,9 @@ public class GcsBucketController {
     @GET
     @Path("/{bucket}/acl/{entity}")
     public Response getBucketAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         return Response.ok(service.getBucketAcl(bucket, decode(entity))).build();
     }
 
@@ -216,7 +246,9 @@ public class GcsBucketController {
     @Path("/{bucket}/acl/{entity}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateBucketAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertBucketAcl(bucket, decode(entity), role);
         return Response.ok(acl).build();
@@ -225,7 +257,9 @@ public class GcsBucketController {
     @DELETE
     @Path("/{bucket}/acl/{entity}")
     public Response deleteBucketAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.deleteBucketAcl(bucket, decode(entity));
         return Response.noContent().build();
     }
@@ -234,7 +268,9 @@ public class GcsBucketController {
 
     @GET
     @Path("/{bucket}/defaultObjectAcl")
-    public Response listDefaultAcls(@PathParam("bucket") String bucket) {
+	public Response listDefaultAcls(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+		authorizationService.rejectDownscopedToken(authorization);
         List<StoredAcl> items = service.listDefaultAcls(bucket);
         return Response.ok(Map.of("kind", "storage#objectAccessControls", "items", items)).build();
     }
@@ -242,7 +278,9 @@ public class GcsBucketController {
     @POST
     @Path("/{bucket}/defaultObjectAcl")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response insertDefaultAcl(@PathParam("bucket") String bucket, Map<String, Object> body) {
+	public Response insertDefaultAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String entity = body != null ? (String) body.get("entity") : null;
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertDefaultAcl(bucket, entity, role);
@@ -252,7 +290,9 @@ public class GcsBucketController {
     @GET
     @Path("/{bucket}/defaultObjectAcl/{entity}")
     public Response getDefaultAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         return Response.ok(service.getDefaultAcl(bucket, decode(entity))).build();
     }
 
@@ -260,7 +300,9 @@ public class GcsBucketController {
     @Path("/{bucket}/defaultObjectAcl/{entity}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateDefaultAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity, Map<String, Object> body) {
+		authorizationService.rejectDownscopedToken(authorization);
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertDefaultAcl(bucket, decode(entity), role);
         return Response.ok(acl).build();
@@ -269,7 +311,9 @@ public class GcsBucketController {
     @DELETE
     @Path("/{bucket}/defaultObjectAcl/{entity}")
     public Response deleteDefaultAcl(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("entity") String entity) {
+		authorizationService.rejectDownscopedToken(authorization);
         service.deleteDefaultAcl(bucket, decode(entity));
         return Response.noContent().build();
     }

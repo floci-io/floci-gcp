@@ -84,6 +84,8 @@ class GcpExceptionMapperTest {
                 GcpExceptionMapper.ErrorDetail.of(409, "x", "ALREADY_EXISTS").errors().get(0).reason());
         assertEquals("conditionNotMet",
                 GcpExceptionMapper.ErrorDetail.of(412, "x", "CONDITION_NOT_MET").errors().get(0).reason());
+		assertEquals("authError",
+				GcpExceptionMapper.ErrorDetail.of(401, "x", "UNAUTHENTICATED").errors().get(0).reason());
         assertEquals("forbidden",
                 GcpExceptionMapper.ErrorDetail.of(403, "x", "PERMISSION_DENIED").errors().get(0).reason());
         assertEquals("backendError",

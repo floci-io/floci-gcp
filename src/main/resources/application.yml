@@ -55,6 +55,10 @@ floci-gcp:
       enabled: true
     iam:
       enabled: true
+    iamcredentials:
+      enabled: true
+    sts:
+      enabled: true
     secretmanager:
       enabled: true
     logging:

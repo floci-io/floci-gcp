@@ -2,6 +2,7 @@ package io.floci.gcp.test;
 
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
+import com.google.auth.Credentials;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.datastore.Datastore;
 import com.google.cloud.datastore.DatastoreOptions;
@@ -9,6 +10,8 @@ import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.FirestoreOptions;
 import com.google.cloud.functions.v2.FunctionServiceClient;
 import com.google.cloud.functions.v2.FunctionServiceSettings;
+import com.google.cloud.iam.credentials.v1.IamCredentialsClient;
+import com.google.cloud.iam.credentials.v1.IamCredentialsSettings;
 import com.google.cloud.run.v2.RevisionsClient;
 import com.google.cloud.run.v2.RevisionsSettings;
 import com.google.cloud.run.v2.ServicesClient;
@@ -63,6 +66,15 @@ public final class TestFixtures {
                 .build()
                 .getService();
     }
+
+	public static Storage storageClient(Credentials credentials) {
+		return StorageOptions.newBuilder()
+				.setHost(endpoint())
+				.setProjectId(projectId())
+				.setCredentials(credentials)
+				.build()
+				.getService();
+	}
 
     /**
      * Creates a Firestore client pointing at the emulator.
@@ -213,6 +225,14 @@ public final class TestFixtures {
                 // /sql/v1beta4/sql/v1beta4/... and miss the emulator routes.
                 .setServicePath("")
                 .build();
+    }
+
+    public static IamCredentialsClient iamCredentialsClient() throws IOException {
+        IamCredentialsSettings settings = IamCredentialsSettings.newHttpJsonBuilder()
+                .setEndpoint(endpoint())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+        return IamCredentialsClient.create(settings);
     }
 
     /**

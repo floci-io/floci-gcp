@@ -11,6 +11,10 @@ floci-gcp:
   storage:
     mode: memory
   services:
+    iamcredentials:
+      enabled: true
+    sts:
+      enabled: true
     datastore:
       enabled: true
     kafka:

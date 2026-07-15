@@ -1,12 +1,16 @@
 package io.floci.gcp.services.iamcredentials;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.credentials.CredentialTokenService;
+import io.floci.gcp.services.credentials.StoredCredentialToken;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -14,11 +18,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IamCredentialsServiceTest {
 
-    private static final Instant NOW = Instant.parse("2026-07-15T12:00:00Z");
-    private static final String SERVICE_ACCOUNT = "test@test-project.iam.gserviceaccount.com";
+	private static final Instant NOW = Instant.parse("2026-07-15T12:00:00Z");
+	private static final String SERVICE_ACCOUNT = "test@test-project.iam.gserviceaccount.com";
 
-    private final IamCredentialsService service =
-            new IamCredentialsService(Clock.fixed(NOW, ZoneOffset.UTC));
+	private final InMemoryStorage<String, StoredCredentialToken> tokenStore = new InMemoryStorage<>();
+	private final CredentialTokenService tokenService =
+			new CredentialTokenService(tokenStore, Clock.fixed(NOW, ZoneOffset.UTC));
+	private final IamCredentialsService service =
+			new IamCredentialsService(tokenService, Clock.fixed(NOW, ZoneOffset.UTC));
 
     @Test
     void generatesTokenAndExpiryForNormalRequest() {
@@ -27,9 +34,13 @@ class IamCredentialsServiceTest {
                 List.of(IamCredentialsService.DEVSTORAGE_READ_WRITE_SCOPE),
                 "1200s");
 
-        assertTrue(token.accessToken().startsWith(IamCredentialsService.TOKEN_PREFIX));
-        assertEquals(NOW.plusSeconds(1200), token.expireTime());
-    }
+		assertTrue(token.accessToken().startsWith(IamCredentialsService.TOKEN_PREFIX));
+		assertEquals(NOW.plusSeconds(1200), token.expireTime());
+		Optional<StoredCredentialToken> stored = tokenService.lookupBearerToken(token.accessToken());
+		assertTrue(stored.isPresent());
+		assertEquals(StoredCredentialToken.TokenKind.IMPERSONATED, stored.get().getTokenKind());
+		assertEquals(SERVICE_ACCOUNT, stored.get().getPrincipal());
+	}
 
     @Test
     void defaultsLifetimeWhenAbsent() {

@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs.model;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -16,12 +17,16 @@ public class StoredNotification {
     private String selfLink;
     private String topic;
     @JsonProperty("payload_format")
+    @JsonAlias("payloadFormat")
     private String payloadFormat = "JSON_API_V1";
     @JsonProperty("event_types")
+    @JsonAlias("eventTypes")
     private List<String> eventTypes;
     @JsonProperty("custom_attributes")
+    @JsonAlias("customAttributes")
     private Map<String, String> customAttributes;
     @JsonProperty("object_name_prefix")
+    @JsonAlias("objectNamePrefix")
     private String objectNamePrefix;
 
     public String getKind() { return kind; }

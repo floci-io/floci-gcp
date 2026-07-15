@@ -37,6 +37,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,7 +58,7 @@ class GcsNotificationTest {
     private static TopicAdminClient topicAdminClient;
     private static SubscriptionAdminClient subscriptionAdminClient;
 
-    private static String notificationId;
+    private static Notification createdNotification;
 
     @BeforeAll
     static void setUp() throws IOException {
@@ -121,13 +122,21 @@ class GcsNotificationTest {
                 .setEventTypes(NotificationInfo.EventType.OBJECT_FINALIZE,
                         NotificationInfo.EventType.OBJECT_DELETE)
                 .setPayloadFormat(NotificationInfo.PayloadFormat.JSON_API_V1)
+                .setCustomAttributes(Map.of("env", "test"))
+                .setObjectNamePrefix("notification/")
                 .build();
 
-        Notification notification = storage.createNotification(BUCKET_NAME, notifInfo);
-        assertThat(notification).isNotNull();
-        assertThat(notification.getTopic()).isEqualTo(topicName);
-        notificationId = notification.getNotificationId();
-        assertThat(notificationId).isNotBlank();
+        createdNotification = storage.createNotification(BUCKET_NAME, notifInfo);
+        assertThat(createdNotification).isNotNull();
+        assertThat(createdNotification.getTopic()).isEqualTo(topicName);
+        assertThat(createdNotification.getNotificationId()).isNotBlank();
+        assertThat(createdNotification.getPayloadFormat()).isEqualTo(NotificationInfo.PayloadFormat.JSON_API_V1);
+        assertThat(createdNotification.getEventTypes())
+                .containsExactlyInAnyOrder(NotificationInfo.EventType.OBJECT_FINALIZE,
+                        NotificationInfo.EventType.OBJECT_DELETE);
+        assertThat(createdNotification.getCustomAttributes())
+                .containsEntry("env", "test");
+        assertThat(createdNotification.getObjectNamePrefix()).isEqualTo("notification/");
     }
 
     @Test
@@ -135,15 +144,23 @@ class GcsNotificationTest {
     void listNotificationsReturnCreated() {
         List<Notification> notifications = storage.listNotifications(BUCKET_NAME);
         assertThat(notifications).isNotEmpty();
-        assertThat(notifications.stream().anyMatch(n -> notificationId.equals(n.getNotificationId()))).isTrue();
+        assertThat(notifications.stream()
+                .anyMatch(n -> createdNotification.getNotificationId().equals(n.getNotificationId())))
+                .isTrue();
     }
 
     @Test
     @Order(4)
     void getNotificationById() {
-        Notification notification = storage.getNotification(BUCKET_NAME, notificationId);
+        Notification notification = storage.getNotification(BUCKET_NAME, createdNotification.getNotificationId());
         assertThat(notification).isNotNull();
-        assertThat(notification.getNotificationId()).isEqualTo(notificationId);
+        assertThat(notification.getNotificationId()).isEqualTo(createdNotification.getNotificationId());
+        assertThat(notification.getTopic()).isEqualTo(createdNotification.getTopic());
+        assertThat(notification.getPayloadFormat()).isEqualTo(createdNotification.getPayloadFormat());
+        assertThat(notification.getEventTypes())
+                .containsExactlyInAnyOrderElementsOf(createdNotification.getEventTypes());
+        assertThat(notification.getCustomAttributes()).isEqualTo(createdNotification.getCustomAttributes());
+        assertThat(notification.getObjectNamePrefix()).isEqualTo(createdNotification.getObjectNamePrefix());
     }
 
     @Test
@@ -222,11 +239,11 @@ class GcsNotificationTest {
     @Test
     @Order(7)
     void deleteNotificationConfig() {
-        storage.deleteNotification(BUCKET_NAME, notificationId);
+        storage.deleteNotification(BUCKET_NAME, createdNotification.getNotificationId());
 
         List<Notification> remaining = storage.listNotifications(BUCKET_NAME);
         boolean stillPresent = remaining.stream()
-                .anyMatch(n -> notificationId.equals(n.getNotificationId()));
+                .anyMatch(n -> createdNotification.getNotificationId().equals(n.getNotificationId()));
         assertThat(stillPresent).isFalse();
     }
 }

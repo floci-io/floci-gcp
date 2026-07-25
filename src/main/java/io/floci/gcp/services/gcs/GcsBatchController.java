@@ -171,10 +171,7 @@ public class GcsBatchController {
 
     private SubResponse dispatch(SubRequest req) {
         try {
-            String path = req.path();
-            URI uri = path.startsWith("http://") || path.startsWith("https://")
-                    ? rewriteToLocalhost(URI.create(path))
-                    : URI.create("http://localhost:" + config.port() + path);
+            URI uri = rewriteToLocalhost(URI.create(req.path()));
 
             HttpRequest.BodyPublisher bodyPublisher = req.body().isEmpty()
                     ? HttpRequest.BodyPublishers.noBody()
@@ -212,13 +209,8 @@ public class GcsBatchController {
     }
 
     private URI rewriteToLocalhost(URI original) {
-        try {
-            return new URI("http", null, "localhost", config.port(),
-                    original.getRawPath(), original.getRawQuery(), null);
-        } catch (Exception e) {
-            return URI.create("http://localhost:" + config.port() + original.getRawPath()
-                    + (original.getRawQuery() != null ? "?" + original.getRawQuery() : ""));
-        }
+        String query = original.getRawQuery() == null ? "" : "?" + original.getRawQuery();
+        return URI.create("http://localhost:" + config.port() + original.getRawPath() + query);
     }
 
     private void appendResponsePart(StringBuilder sb, String boundary, int index,

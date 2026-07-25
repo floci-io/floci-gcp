@@ -44,6 +44,20 @@ setup() {
     assert_output --partial "gs://${BUCKET}/data.txt"
 }
 
+@test "storage: preserve URI-encoded object names" {
+    local f="${BATS_TEST_TMPDIR}/encoded.txt"
+    echo "encoded object" > "$f"
+
+    for object in "literal%2Fslash" "literal%20space" "literal%25percent" "literal%2Bplus"; do
+        run gcloud_cmd storage cp "$f" "gs://${BUCKET}/${object}"
+        assert_success
+
+        run gcloud_cmd storage cat "gs://${BUCKET}/${object}"
+        assert_success
+        assert_output --partial "encoded object"
+    done
+}
+
 @test "storage: delete object" {
     local f="${BATS_TEST_TMPDIR}/del.txt"
     echo "x" > "$f"

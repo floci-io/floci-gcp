@@ -11,9 +11,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-
 /**
  * Handles GCS XML API requests: GET/PUT /{bucket}/{object}.
  * Used by Go SDK (STORAGE_EMULATOR_HOST) and for signed URL access.
@@ -52,15 +49,14 @@ public class GcsXmlDownloadController {
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
-            byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
-            GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
+            byte[] data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
+            GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath, generation);
             return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
         }
-        byte[] data = service.getObjectData(bucket, objectName, customerEncryption);
-        GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
+        byte[] data = service.getObjectData(bucket, objectPath, customerEncryption);
+        GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath);
         return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
     }
 
@@ -75,11 +71,10 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             byte[] body) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String host = headers.getHeaderString("Host");
         String baseUrl = host != null ? "http://" + host : config.baseUrl();
-        GcsObjectMeta meta = service.putObject(bucket, objectName, contentType, body != null ? body : new byte[0],
+        GcsObjectMeta meta = service.putObject(bucket, objectPath, contentType, body != null ? body : new byte[0],
                 GcsCustomerEncryption.fromHeaders(headers), baseUrl);
         return Response.ok(meta).build();
     }

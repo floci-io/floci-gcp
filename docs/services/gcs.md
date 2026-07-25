@@ -20,6 +20,27 @@ export STORAGE_EMULATOR_HOST=http://localhost:4588
 
 GCP Storage SDK clients use this variable to route requests to floci-gcp instead of `storage.googleapis.com`.
 
+## Service Account Authentication
+
+Clients can exercise the normal service-account OAuth flow by setting the
+credential's `token_uri` to the emulator:
+
+```json
+{
+  "type": "service_account",
+  "project_id": "floci-local",
+  "private_key_id": "test-key",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "client_email": "test@floci-local.iam.gserviceaccount.com",
+  "client_id": "123456789",
+  "token_uri": "http://localhost:4588/token"
+}
+```
+
+floci-gcp implements the standard OAuth JWT bearer exchange and returns a
+short-lived Bearer token. As with other emulator credentials, JWT signatures
+and Bearer tokens are not validated.
+
 ## Quick Start
 
 === "gcloud CLI"

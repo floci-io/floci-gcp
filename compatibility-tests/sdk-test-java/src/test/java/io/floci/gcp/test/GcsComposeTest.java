@@ -5,6 +5,7 @@ import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Regression coverage for issue #1: object compose was broken
@@ -62,5 +64,21 @@ class GcsComposeTest {
                 StandardCharsets.UTF_8);
         assertThat(content).isEqualTo("hello world");
         assertThat(composed.getSize()).isEqualTo("hello world".getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    @Test
+    void composeDoesNotExistPreconditionFailsWith412() {
+        storage.create(BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "precondition-source")).build(), new byte[0]);
+        BlobInfo target = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "precondition-target")).build();
+        storage.create(target, new byte[0]);
+        Storage.ComposeRequest request = Storage.ComposeRequest.newBuilder()
+                .addSource("precondition-source")
+                .setTarget(target)
+                .setTargetOptions(Storage.BlobTargetOption.doesNotExist())
+                .build();
+
+        assertThatThrownBy(() -> storage.compose(request))
+                .isInstanceOf(StorageException.class)
+                .satisfies(e -> assertThat(((StorageException) e).getCode()).isEqualTo(412));
     }
 }

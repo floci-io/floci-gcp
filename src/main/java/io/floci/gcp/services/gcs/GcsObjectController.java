@@ -4,6 +4,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -171,9 +172,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
     }
 
     @PUT
@@ -186,9 +187,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
     }
 
     @POST
@@ -203,9 +204,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+            GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                     ifMetagenerationMatch, ifMetagenerationNotMatch);
-            return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+            return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
         }
         throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
     }
@@ -214,12 +215,18 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     public Response deleteObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
-            @QueryParam("generation") String generation) {
+            @QueryParam("generation") String generation,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch) {
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
         if (generation != null) {
-            service.deleteObjectVersion(bucket, objectPath, generation);
+            service.deleteObjectVersion(bucket, objectPath, generation, preconditions);
             return Response.noContent().build();
         }
-        if (!service.deleteObject(bucket, objectPath)) {
+        if (!service.deleteObject(bucket, objectPath, preconditions)) {
             throw GcpException.notFound("Object not found: " + objectPath);
         }
         return Response.noContent().build();
@@ -230,6 +237,8 @@ public class GcsObjectController {
     @Path("/{destObject: .+}/compose")
     public Response composeObject(@PathParam("bucket") String bucket,
             @PathParam("destObject") String destObjectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @Context HttpHeaders headers, Map<String, Object> body) {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> sourceObjects = body != null
@@ -240,8 +249,10 @@ public class GcsObjectController {
         String contentType = destReq != null ? (String) destReq.get("contentType") : null;
         List<String> sourceNames = sourceObjects == null ? List.of()
                 : sourceObjects.stream().map(s -> (String) s.get("name")).toList();
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, null,
+                ifMetagenerationMatch, null);
         GcsObjectMeta meta = service.composeObject(bucket, destObjectPath, sourceNames, contentType,
-                requestBaseUrl(headers));
+                preconditions, requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 
@@ -251,9 +262,15 @@ public class GcsObjectController {
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @Context HttpHeaders headers) {
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
-                requestBaseUrl(headers));
+                preconditions, requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 
@@ -263,9 +280,15 @@ public class GcsObjectController {
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @Context HttpHeaders headers) {
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
-                requestBaseUrl(headers));
+                preconditions, requestBaseUrl(headers));
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#rewriteResponse");
         response.put("totalBytesRewritten", meta.getSize());

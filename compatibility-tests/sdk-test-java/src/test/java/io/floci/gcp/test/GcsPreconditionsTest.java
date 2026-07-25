@@ -99,4 +99,26 @@ class GcsPreconditionsTest {
                 Storage.BlobTargetOption.metagenerationMatch(blob.getMetageneration()));
         assertThat(updated.getContentType()).isEqualTo("text/markdown");
     }
+
+    @Test
+    @Order(5)
+    void generationNotMatchOnMissingObjectFailsWith412() {
+        BlobInfo info = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "missing-object")).build();
+
+        assertThatThrownBy(() -> storage.create(info, new byte[0],
+                Storage.BlobTargetOption.generationNotMatch(1)))
+                .isInstanceOf(StorageException.class)
+                .satisfies(e -> assertThat(((StorageException) e).getCode()).isEqualTo(412));
+    }
+
+    @Test
+    @Order(6)
+    void deleteGenerationNotMatchFailsWith412() {
+        Blob blob = storage.create(BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "delete-target")).build(), new byte[0]);
+
+        assertThatThrownBy(() -> storage.delete(blob.getBlobId(),
+                Storage.BlobSourceOption.generationNotMatch(blob.getGeneration())))
+                .isInstanceOf(StorageException.class)
+                .satisfies(e -> assertThat(((StorageException) e).getCode()).isEqualTo(412));
+    }
 }

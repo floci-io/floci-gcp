@@ -6,6 +6,7 @@ import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.CopyWriter;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Regression coverage for issue #3: copy/rewrite dropped custom object metadata
@@ -66,5 +68,21 @@ class GcsCopyRewriteTest {
         // Re-read to confirm the metadata is persisted, not just echoed.
         Blob reread = storage.get(BlobId.of(BUCKET_NAME, "dst"));
         assertThat(reread.getMetadata()).containsEntry("tag", "keep-me");
+    }
+
+    @Test
+    void copyDoesNotExistPreconditionFailsWith412() {
+        BlobId source = BlobId.of(BUCKET_NAME, "precondition-source");
+        BlobId target = BlobId.of(BUCKET_NAME, "precondition-target");
+        storage.create(BlobInfo.newBuilder(source).build(), new byte[0]);
+        storage.create(BlobInfo.newBuilder(target).build(), new byte[0]);
+        Storage.CopyRequest copyRequest = Storage.CopyRequest.newBuilder()
+                .setSource(source)
+                .setTarget(target, Storage.BlobTargetOption.doesNotExist())
+                .build();
+
+        assertThatThrownBy(() -> storage.copy(copyRequest).getResult())
+                .isInstanceOf(StorageException.class)
+                .satisfies(e -> assertThat(((StorageException) e).getCode()).isEqualTo(412));
     }
 }

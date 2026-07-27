@@ -377,6 +377,81 @@ class GkeServiceTest {
     }
 
     @Test
+    void updateClusterAppliesTypedDesiredFieldsRatherThanLeavingThemStale() {
+        // Regression: locations/loggingService/monitoringService are typed StoredCluster fields,
+        // not extraConfig-only — clusterToJson reads them from their typed getter, which would
+        // silently overwrite whatever a naive extraConfig-only merge wrote under the same key.
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "typed-update"));
+
+        service.updateCluster(PROJECT, LOCATION, "typed-update", Map.of(
+                "desiredLocations", List.of("us-central1-a", "us-central1-b"),
+                "desiredLoggingService", "none",
+                "desiredMonitoringService", "none"));
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "typed-update");
+        assertEquals(List.of("us-central1-a", "us-central1-b"), cluster.getLocations());
+        assertEquals("none", cluster.getLoggingService());
+        assertEquals("none", cluster.getMonitoringService());
+    }
+
+    @Test
+    void createClusterWithDuplicateNodePoolNameLeavesNoPartialState() {
+        // Regression: an invalid/duplicate entry partway through an explicit nodePools[] list
+        // used to leave the cluster and any earlier pools persisted despite the overall create
+        // failing, so a retry hit AlreadyExists instead of succeeding.
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION, Map.of(
+                "name", "partial-create",
+                "nodePools", List.of(
+                        Map.of("name", "pool-a"),
+                        Map.of("name", "pool-a")))));
+
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "partial-create"));
+        assertTrue(service.listNodePools(PROJECT, LOCATION, "partial-create").isEmpty());
+
+        // A retry with a valid spec must succeed — not fail with AlreadyExists against
+        // leftover state from the failed attempt.
+        StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of(
+                "name", "partial-create",
+                "nodePools", List.of(Map.of("name", "pool-a"))));
+        assertEquals(OperationType.CREATE_CLUSTER, op.getOperationType());
+    }
+
+    @Test
+    void startupMigratesNodePoolsEmbeddedByAPreviousVersion() {
+        // Regression: clusters persisted by a floci-gcp version before node pools had their own
+        // store embedded pools directly on the cluster record. Without migration, upgrading
+        // silently drops that data — the new node pool store starts empty and nothing populates
+        // it for a pre-existing cluster.
+        StoredCluster legacyCluster = new StoredCluster();
+        legacyCluster.setName("legacy-cluster");
+        legacyCluster.setProject(PROJECT);
+        legacyCluster.setLocation(LOCATION);
+        legacyCluster.setStatus("RUNNING");
+        StoredNodePool embeddedPool = new StoredNodePool();
+        embeddedPool.setName("default-pool");
+        embeddedPool.setStatus("RUNNING");
+        legacyCluster.setNodePools(List.of(embeddedPool));
+
+        InMemoryStorage<String, StoredCluster> clusterStore = new InMemoryStorage<>();
+        clusterStore.put("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/legacy-cluster",
+                legacyCluster);
+        GkeOperationService operationService =
+                new GkeOperationService(new InMemoryStorage<String, StoredOperation>());
+        GkeService migratingService = new GkeService(clusterStore, new InMemoryStorage<String, StoredNodePool>(),
+                config, clusterManager, operationService, null);
+
+        migratingService.init();
+
+        List<StoredNodePool> migrated = migratingService.listNodePools(PROJECT, LOCATION, "legacy-cluster");
+        assertEquals(1, migrated.size());
+        assertEquals("default-pool", migrated.get(0).getName());
+        assertEquals(PROJECT, migrated.get(0).getProject());
+        assertEquals(LOCATION, migrated.get(0).getLocation());
+        assertEquals("legacy-cluster", migrated.get(0).getClusterId());
+        assertNotNull(migrated.get(0).getSelfLink());
+    }
+
+    @Test
     void updateClusterMergesDesiredFieldsIntoExtraConfig() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "updatable"));
 

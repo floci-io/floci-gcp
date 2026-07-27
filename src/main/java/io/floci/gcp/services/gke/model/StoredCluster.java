@@ -1,6 +1,5 @@
 package io.floci.gcp.services.gke.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -44,10 +43,13 @@ public class StoredCluster {
     private List<String> locations;
     private String loggingService;
     private String monitoringService;
-    // Not persisted with the cluster record — always recomputed from the node
-    // pool store (the source of truth) by GkeService before this is returned,
-    // so a stale copy here can never drift from the real node pool set.
-    @JsonIgnore
+    // The node pool store (populated by GkeService.getCluster/listClusters before this is
+    // returned) is the real source of truth, not this field — but it is deliberately NOT
+    // @JsonIgnore'd, for two reasons: (1) clusters persisted by a version of floci-gcp before
+    // node pools had their own store embedded pools directly here, and GkeService migrates that
+    // embedded data into the node pool store on startup, which only works if Jackson still
+    // deserializes it; (2) no code path calls clusterStore.put() on an object that has had
+    // setNodePools() called on it, so this never round-trips a stale snapshot back to disk.
     private List<StoredNodePool> nodePools;
     private Map<String, String> resourceLabels;
     private String labelFingerprint;

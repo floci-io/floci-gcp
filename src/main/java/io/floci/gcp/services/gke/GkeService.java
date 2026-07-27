@@ -24,8 +24,10 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -105,8 +107,61 @@ public class GkeService {
 
     @PostConstruct
     public void init() {
+        migrateEmbeddedNodePools();
         if (!mock()) {
             poller.scheduleAtFixedRate(this::pollReadiness, 2, 3, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Clusters persisted by a floci-gcp version before node pools had their own store embedded
+     * their pools directly on the cluster record (just {@code name}/{@code status}, nothing
+     * else). Without this, those pools would simply vanish after an upgrade — the node pool
+     * store starts empty and nothing would ever populate it for a pre-existing cluster. Backfills
+     * the fields the embedded shape never had (project/location/clusterId/selfLink/etag/status)
+     * and moves each pool into the node pool store. Idempotent: skipped for any cluster that
+     * already has node pool store entries, so it's safe to run on every startup. */
+    private void migrateEmbeddedNodePools() {
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            List<StoredNodePool> embedded = cluster.getNodePools();
+            if (embedded == null || embedded.isEmpty()) {
+                continue;
+            }
+            if (!listNodePools(cluster.getProject(), cluster.getLocation(), cluster.getName()).isEmpty()) {
+                continue;
+            }
+            int migrated = 0;
+            for (StoredNodePool pool : embedded) {
+                if (pool.getName() == null || pool.getName().isBlank()) {
+                    continue;
+                }
+                pool.setProject(cluster.getProject());
+                pool.setLocation(cluster.getLocation());
+                pool.setClusterId(cluster.getName());
+                if (pool.getSelfLink() == null) {
+                    pool.setSelfLink(nodePoolSelfLink(
+                            cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()));
+                }
+                if (pool.getEtag() == null) {
+                    pool.setEtag(newFingerprint());
+                }
+                if (pool.getStatus() == null) {
+                    pool.setStatus("RUNNING");
+                }
+                if (pool.getInstanceGroupUrls() == null) {
+                    pool.setInstanceGroupUrls(List.of());
+                }
+                if (pool.getConditions() == null) {
+                    pool.setConditions(List.of());
+                }
+                nodePoolStore.put(
+                        nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()),
+                        pool);
+                migrated++;
+            }
+            if (migrated > 0) {
+                LOG.infov("Migrated {0} embedded node pool(s) for cluster {1} to the node pool store",
+                        migrated, cluster.getName());
+            }
         }
     }
 
@@ -138,6 +193,10 @@ public class GkeService {
         if (clusterStore.get(key).isPresent()) {
             throw GcpException.alreadyExists("Already exists: cluster " + name);
         }
+        // Validate every explicit node pool spec up front — before the cluster or any pool is
+        // persisted — so an invalid/duplicate name partway through the list can't leave a
+        // half-created cluster behind that a retry then finds AlreadyExists against.
+        validateNodePoolSpecs(clusterMap.get("nodePools"));
 
         StoredCluster cluster = new StoredCluster();
         cluster.setName(name);
@@ -212,7 +271,13 @@ public class GkeService {
         return operationService.createOperation(project, location, clusterId, OperationType.DELETE_CLUSTER);
     }
 
-    /** Generic {@code UpdateCluster} — merges the request's {@code update} object into extraConfig. */
+    /** Generic {@code UpdateCluster} — {@code desired*} fields that back one of
+     * {@link StoredCluster}'s own typed fields (locations, logging/monitoring service, node/master
+     * version) are applied to that field directly; everything else merges into extraConfig.
+     * Typed fields can't just flow through the generic extraConfig merge below: {@code
+     * clusterToJson} always reads them from their typed getter, which would silently overwrite
+     * whatever the merge wrote under the same JSON key, making the update a no-op that still
+     * reports success. */
     public StoredOperation updateCluster(String project, String location, String clusterId,
                                          Map<String, Object> updateMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
@@ -225,7 +290,27 @@ public class GkeService {
             if (desiredMasterVersion != null) {
                 cluster.setCurrentMasterVersion(desiredMasterVersion);
             }
-            mergeExtraConfig(cluster, stripPrefix(updateMap, "desired"));
+            if (updateMap.get("desiredLocations") != null) {
+                cluster.setLocations(stringListField(updateMap, "desiredLocations", cluster.getLocations()));
+            }
+            String desiredLoggingService = (String) updateMap.get("desiredLoggingService");
+            if (desiredLoggingService != null) {
+                cluster.setLoggingService(desiredLoggingService);
+            }
+            String desiredMonitoringService = (String) updateMap.get("desiredMonitoringService");
+            if (desiredMonitoringService != null) {
+                cluster.setMonitoringService(desiredMonitoringService);
+            }
+
+            Map<String, Object> stripped = stripPrefix(updateMap, "desired");
+            // Already applied above to their typed field — drop so they aren't also duplicated,
+            // inertly but pointlessly, into extraConfig under the same key.
+            stripped.remove("nodeVersion");
+            stripped.remove("masterVersion");
+            stripped.remove("locations");
+            stripped.remove("loggingService");
+            stripped.remove("monitoringService");
+            mergeExtraConfig(cluster, stripped);
         }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
@@ -539,7 +624,32 @@ public class GkeService {
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
-    @SuppressWarnings("unchecked")
+    /** Validates every entry of an explicit {@code nodePools[]} create-time spec — name present,
+     * pattern-valid, and unique within the list — without persisting anything, so a bad entry
+     * partway through the list can be rejected before the cluster or any earlier pool exists. */
+    private void validateNodePoolSpecs(Object requestedPools) {
+        if (!(requestedPools instanceof List<?> list) || list.isEmpty()) {
+            return;
+        }
+        Set<String> seen = new HashSet<>();
+        for (Object poolObj : list) {
+            if (!(poolObj instanceof Map<?, ?> poolMap)) {
+                throw GcpException.invalidArgument("Each entry in 'nodePools' must be an object");
+            }
+            Object nameObj = poolMap.get("name");
+            if (!(nameObj instanceof String poolName) || poolName.isBlank()) {
+                throw GcpException.invalidArgument("Node pool name is required");
+            }
+            if (!VALID_NODE_POOL_NAME.matcher(poolName).matches()) {
+                throw GcpException.invalidArgument(
+                        "Invalid node pool name: '" + poolName + "'. Must match " + VALID_NODE_POOL_NAME.pattern());
+            }
+            if (!seen.add(poolName)) {
+                throw GcpException.alreadyExists("Already exists: nodePool " + poolName);
+            }
+        }
+    }
+
     private void createInitialNodePools(String project, String location, String clusterName,
                                         Map<String, Object> clusterMap) {
         Object requestedPools = clusterMap.get("nodePools");

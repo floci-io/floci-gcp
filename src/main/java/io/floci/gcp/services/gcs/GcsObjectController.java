@@ -13,8 +13,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -95,7 +93,7 @@ public class GcsObjectController {
     @Path("/{object: .+}/acl")
     public Response listObjectAcls(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath) {
-        String objectName = decode(objectPath);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         List<StoredAcl> items = service.listObjectAcls(bucket, objectName);
         return Response.ok(Map.of("kind", "storage#objectAccessControls", "items", items)).build();
     }
@@ -105,7 +103,7 @@ public class GcsObjectController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response insertObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath, Map<String, Object> body) {
-        String objectName = decode(objectPath);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         String entity = body != null ? (String) body.get("entity") : null;
         String role = body != null ? (String) body.get("role") : "READER";
         StoredAcl acl = service.upsertObjectAcl(bucket, objectName, entity, role);
@@ -117,8 +115,8 @@ public class GcsObjectController {
     public Response getObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
-        String objectName = decode(objectPath);
-        return Response.ok(service.getObjectAcl(bucket, objectName, decode(entity))).build();
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
+        return Response.ok(service.getObjectAcl(bucket, objectName, entity)).build();
     }
 
     @PUT
@@ -127,9 +125,9 @@ public class GcsObjectController {
     public Response updateObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity, Map<String, Object> body) {
-        String objectName = decode(objectPath);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         String role = body != null ? (String) body.get("role") : "READER";
-        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, decode(entity), role);
+        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, entity, role);
         return Response.ok(acl).build();
     }
 
@@ -138,8 +136,8 @@ public class GcsObjectController {
     public Response deleteObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
-        String objectName = decode(objectPath);
-        service.deleteObjectAcl(bucket, objectName, decode(entity));
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
+        service.deleteObjectAcl(bucket, objectName, entity);
         return Response.noContent().build();
     }
 
@@ -151,7 +149,7 @@ public class GcsObjectController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
-        String objectName = decode(objectPath);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             if ("media".equals(alt)) {
@@ -179,10 +177,10 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        String objectName = decode(objectPath);
-        service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
-                ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectName, body)).build();
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
+        return Response.ok(service.patchObject(bucket, objectName, body,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
 
     @PUT
@@ -195,10 +193,10 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        String objectName = decode(objectPath);
-        service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
-                ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectName, body)).build();
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
+        return Response.ok(service.patchObject(bucket, objectName, body,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
 
     @POST
@@ -213,10 +211,10 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            String objectName = decode(objectPath);
-            service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
-                    ifMetagenerationMatch, ifMetagenerationNotMatch);
-            return Response.ok(service.patchObject(bucket, objectName, body)).build();
+            String objectName = GcsObjectNames.fromPathParam(objectPath);
+            return Response.ok(service.patchObject(bucket, objectName, body,
+                    preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                            ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
         }
         throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
     }
@@ -225,13 +223,19 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     public Response deleteObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
-            @QueryParam("generation") String generation) {
-        String objectName = decode(objectPath);
+            @QueryParam("generation") String generation,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch) {
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         if (generation != null) {
             service.deleteObjectVersion(bucket, objectName, generation);
             return Response.noContent().build();
         }
-        if (!service.deleteObject(bucket, objectName)) {
+        if (!service.deleteObject(bucket, objectName,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))) {
             throw GcpException.notFound("Object not found: " + objectName);
         }
         return Response.noContent().build();
@@ -243,7 +247,7 @@ public class GcsObjectController {
     public Response composeObject(@PathParam("bucket") String bucket,
             @PathParam("destObject") String destObjectPath,
             @Context HttpHeaders headers, Map<String, Object> body) {
-        String destObject = decode(destObjectPath);
+        String destObject = GcsObjectNames.fromPathParam(destObjectPath);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> sourceObjects = body != null
                 ? (List<Map<String, Object>>) body.get("sourceObjects") : List.of();
@@ -265,8 +269,8 @@ public class GcsObjectController {
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = decode(srcObjectPath);
-        String dstObject = decode(dstObjectPath);
+        String srcObject = GcsObjectNames.fromPathParam(srcObjectPath);
+        String dstObject = GcsObjectNames.fromPathParam(dstObjectPath);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
                 requestBaseUrl(headers));
         return Response.ok(meta).build();
@@ -279,8 +283,8 @@ public class GcsObjectController {
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = decode(srcObjectPath);
-        String dstObject = decode(dstObjectPath);
+        String srcObject = GcsObjectNames.fromPathParam(srcObjectPath);
+        String dstObject = GcsObjectNames.fromPathParam(dstObjectPath);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
                 requestBaseUrl(headers));
         Map<String, Object> response = new LinkedHashMap<>();
@@ -292,12 +296,14 @@ public class GcsObjectController {
         return Response.ok(response).build();
     }
 
-    private static String decode(String s) {
-        return URLDecoder.decode(s, StandardCharsets.UTF_8);
-    }
-
     private String requestBaseUrl(HttpHeaders headers) {
         String host = headers.getHeaderString("Host");
         return host != null ? "http://" + host : config.baseUrl();
+    }
+
+    private static GcsService.ObjectPreconditions preconditions(Long ifGenerationMatch,
+            Long ifGenerationNotMatch, Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
+        return new GcsService.ObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
     }
 }

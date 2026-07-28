@@ -11,9 +11,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-
 /**
  * Handles GCS XML API requests: GET/PUT /{bucket}/{object}.
  * Used by Go SDK (STORAGE_EMULATOR_HOST) and for signed URL access.
@@ -52,7 +49,7 @@ public class GcsXmlDownloadController {
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
@@ -75,7 +72,7 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             byte[] body) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String host = headers.getHeaderString("Host");
         String baseUrl = host != null ? "http://" + host : config.baseUrl();

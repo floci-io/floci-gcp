@@ -45,8 +45,8 @@ public class GcsUploadController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @jakarta.ws.rs.core.Context HttpHeaders headers,
             byte[] body) {
-        Preconditions preconditions = new Preconditions(ifGenerationMatch, ifGenerationNotMatch,
-                ifMetagenerationMatch, ifMetagenerationNotMatch);
+        GcsService.ObjectPreconditions preconditions = new GcsService.ObjectPreconditions(
+                ifGenerationMatch, ifGenerationNotMatch, ifMetagenerationMatch, ifMetagenerationNotMatch);
         if ("multipart".equals(uploadType)) {
             return handleMultipart(bucket, nameParam, headers, body, preconditions);
         } else if ("resumable".equals(uploadType)) {
@@ -55,14 +55,6 @@ public class GcsUploadController {
             return handleMedia(bucket, nameParam, headers, body, preconditions);
         }
         throw GcpException.invalidArgument("unsupported uploadType: " + uploadType);
-    }
-
-    private record Preconditions(Long ifGenerationMatch, Long ifGenerationNotMatch,
-            Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
-        void check(GcsService service, String bucket, String objectName) {
-            service.checkPreconditions(bucket, objectName, ifGenerationMatch, ifGenerationNotMatch,
-                    ifMetagenerationMatch, ifMetagenerationNotMatch);
-        }
     }
 
     @PUT
@@ -153,7 +145,7 @@ public class GcsUploadController {
     }
 
     private Response handleMultipart(String bucket, String nameParam, HttpHeaders headers, byte[] body,
-            Preconditions preconditions) {
+            GcsService.ObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String[] rawParts = parseMultipartRaw(contentType, new String(body, ISO));
 
@@ -172,16 +164,15 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
-        preconditions.check(service, bucket, objectName);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
-                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers));
+                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers), preconditions);
         return Response.ok(meta).build();
     }
 
     @SuppressWarnings("unchecked")
     private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, byte[] body,
-            Preconditions preconditions) {
+            GcsService.ObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString("X-Upload-Content-Type");
         String name = nameParam;
 
@@ -215,11 +206,10 @@ public class GcsUploadController {
     }
 
     private Response handleMedia(String bucket, String name, HttpHeaders headers, byte[] body,
-            Preconditions preconditions) {
+            GcsService.ObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
-        preconditions.check(service, bucket, name);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
-                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers));
+                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers), preconditions);
         return Response.ok(meta).build();
     }
 

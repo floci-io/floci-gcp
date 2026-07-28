@@ -10,9 +10,6 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Response;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-
 @ApplicationScoped
 @Path("/download/storage/v1/b/{bucket}/o")
 public class GcsDownloadController {
@@ -32,7 +29,7 @@ public class GcsDownloadController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
-        String objectName = URLDecoder.decode(objectPath, StandardCharsets.UTF_8);
+        String objectName = GcsObjectNames.fromPathParam(objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);

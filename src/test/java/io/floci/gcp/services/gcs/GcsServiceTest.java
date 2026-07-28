@@ -17,6 +17,10 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -103,6 +107,95 @@ class GcsServiceTest {
     }
 
     @Test
+    void putObjectChecksGenerationPreconditionsAtomically() throws Exception {
+        service.createBucket("atomic-bucket", "p1", BASE_URL, Map.of());
+        GcsService.ObjectPreconditions createOnly = new GcsService.ObjectPreconditions(0L, null, null, null);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(() -> conditionalPut(start, createOnly, "first"));
+            Future<Boolean> second = executor.submit(() -> conditionalPut(start, createOnly, "second"));
+
+            start.countDown();
+
+            long successes = List.of(first.get(), second.get()).stream()
+                    .filter(Boolean::booleanValue)
+                    .count();
+            assertEquals(1, successes);
+            assertEquals("atomic-object", service.getObjectMeta("atomic-bucket", "atomic-object").getName());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void patchObjectChecksMetagenerationPreconditionsAtomically() throws Exception {
+        service.createBucket("atomic-bucket", "p1", BASE_URL, Map.of());
+        service.putObject("atomic-bucket", "atomic-object", "text/plain", new byte[0],
+                GcsCustomerEncryption.none(), BASE_URL);
+        GcsService.ObjectPreconditions matchInitialMetageneration =
+                new GcsService.ObjectPreconditions(null, null, 1L, null);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(
+                    () -> conditionalPatch(start, matchInitialMetageneration, "first"));
+            Future<Boolean> second = executor.submit(
+                    () -> conditionalPatch(start, matchInitialMetageneration, "second"));
+
+            start.countDown();
+
+            long successes = List.of(first.get(), second.get()).stream()
+                    .filter(Boolean::booleanValue)
+                    .count();
+            assertEquals(1, successes);
+            assertEquals("2", service.getObjectMeta("atomic-bucket", "atomic-object").getMetageneration());
+            assertEquals(0, service.objectLockCount());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void putAndDeleteCheckGenerationPreconditionsAtomically() throws Exception {
+        service.createBucket("atomic-bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta original = service.putObject("atomic-bucket", "atomic-object", "text/plain", new byte[0],
+                GcsCustomerEncryption.none(), BASE_URL);
+        GcsService.ObjectPreconditions matchOriginalGeneration = new GcsService.ObjectPreconditions(
+                Long.parseLong(original.getGeneration()), null, null, null);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> put = executor.submit(
+                    () -> conditionalPut(start, matchOriginalGeneration, "replacement"));
+            Future<Boolean> delete = executor.submit(
+                    () -> conditionalDelete(start, matchOriginalGeneration));
+
+            start.countDown();
+
+            long successes = List.of(put.get(), delete.get()).stream()
+                    .filter(Boolean::booleanValue)
+                    .count();
+            assertEquals(1, successes);
+            assertEquals(0, service.objectLockCount());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void objectLocksAreReleasedAfterNameChurn() {
+        service.createBucket("lock-bucket", "p1", BASE_URL, Map.of());
+
+        for (int i = 0; i < 100; i++) {
+            service.putObject("lock-bucket", "object-" + i, "text/plain", new byte[0],
+                    GcsCustomerEncryption.none(), BASE_URL);
+        }
+
+        assertEquals(0, service.objectLockCount());
+    }
+
+    @Test
     void objectDataSurvivesPersistentStoreReload() {
         GcsService first = persistentService(tempDir);
         first.createBucket("bucket", "p1", BASE_URL, Map.of());
@@ -181,6 +274,43 @@ class GcsServiceTest {
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.getBucket("bucket"));
         assertEquals("NOT_FOUND", ex.getGcpStatus());
+    }
+
+    private boolean conditionalPut(CountDownLatch start, GcsService.ObjectPreconditions preconditions,
+            String value) throws Exception {
+        start.await();
+        try {
+            service.putObject("atomic-bucket", "atomic-object", "text/plain",
+                    value.getBytes(StandardCharsets.UTF_8), GcsCustomerEncryption.none(), BASE_URL, preconditions);
+            return true;
+        } catch (GcpException e) {
+            assertEquals("CONDITION_NOT_MET", e.getGcpStatus());
+            return false;
+        }
+    }
+
+    private boolean conditionalPatch(CountDownLatch start, GcsService.ObjectPreconditions preconditions,
+            String contentType) throws Exception {
+        start.await();
+        try {
+            service.patchObject("atomic-bucket", "atomic-object", Map.of("contentType", contentType), preconditions);
+            return true;
+        } catch (GcpException e) {
+            assertEquals("CONDITION_NOT_MET", e.getGcpStatus());
+            return false;
+        }
+    }
+
+    private boolean conditionalDelete(CountDownLatch start, GcsService.ObjectPreconditions preconditions)
+            throws Exception {
+        start.await();
+        try {
+            service.deleteObject("atomic-bucket", "atomic-object", preconditions);
+            return true;
+        } catch (GcpException e) {
+            assertEquals("CONDITION_NOT_MET", e.getGcpStatus());
+            return false;
+        }
     }
 
     private static GcsService persistentService(Path root) {

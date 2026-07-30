@@ -212,13 +212,14 @@ public class GcsBatchController {
     }
 
     private URI rewriteToLocalhost(URI original) {
-        try {
-            return new URI("http", null, "localhost", config.port(),
-                    original.getRawPath(), original.getRawQuery(), null);
-        } catch (Exception e) {
-            return URI.create("http://localhost:" + config.port() + original.getRawPath()
-                    + (original.getRawQuery() != null ? "?" + original.getRawQuery() : ""));
-        }
+        // Build from the raw path/query so already-percent-encoded segments (e.g. %2F in an
+        // object name) are preserved. The multi-argument URI constructor treats its path
+        // argument as *decoded* and re-encodes the '%', turning %2F into %252F — which makes
+        // the dispatched sub-request arrive double-encoded and 404 for names containing
+        // reserved characters (slashes, etc.).
+        String rawQuery = original.getRawQuery();
+        return URI.create("http://localhost:" + config.port() + original.getRawPath()
+                + (rawQuery != null ? "?" + rawQuery : ""));
     }
 
     private void appendResponsePart(StringBuilder sb, String boundary, int index,

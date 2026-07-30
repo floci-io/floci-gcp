@@ -17,6 +17,8 @@ import java.util.Map;
 @ApplicationScoped
 public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseFilter {
 
+    private static final String ACCESS_CONTROL_REQUEST_METHOD = "Access-Control-Request-Method";
+
     private final GcsService gcsService;
 
     @Inject
@@ -34,17 +36,19 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
             return;
         }
         String bucket = extractBucket(req.getUriInfo().getRequestUri().getRawPath());
-        Map<String, Object> rule = matchCorsRule(bucket, origin);
+        String requestedMethod = req.getHeaderString(ACCESS_CONTROL_REQUEST_METHOD);
+        Map<String, Object> rule = matchCorsRule(bucket, origin, requestedMethod);
         Response.ResponseBuilder rb = Response.ok();
-        rb.header("Access-Control-Allow-Origin", origin);
-        rb.header("Vary", "Origin");
+        // Real GCS only answers a preflight with CORS headers when the bucket's CORS
+        // configuration actually permits the origin and the requested method. Without a
+        // matching rule the response carries no CORS headers at all, so the browser
+        // blocks the request instead of it being silently allowed.
         if (rule != null) {
+            rb.header("Access-Control-Allow-Origin", origin);
+            rb.header("Vary", "Origin");
             appendMethodsHeader(rb, rule);
             appendHeadersHeader(rb, rule);
             appendMaxAge(rb, rule);
-        } else {
-            rb.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD");
-            rb.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Goog-*");
         }
         req.abortWith(rb.build());
     }
@@ -56,21 +60,26 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
             return;
         }
         String bucket = extractBucket(req.getUriInfo().getRequestUri().getRawPath());
-        Map<String, Object> rule = matchCorsRule(bucket, origin);
-        if (rule == null && bucket == null) {
+        Map<String, Object> rule = matchCorsRule(bucket, origin, req.getMethod());
+        if (rule == null) {
             return;
         }
         resp.getHeaders().putSingle("Access-Control-Allow-Origin", origin);
         resp.getHeaders().putSingle("Vary", "Origin");
-        if (rule != null) {
-            appendMethodsHeader(resp, rule);
-            appendHeadersHeader(resp, rule);
-            appendMaxAge(resp, rule);
-        }
+        // `Access-Control-Allow-Methods`/`-Headers`/`-Max-Age` are preflight-only; an
+        // actual response advertises which response headers the browser may read.
+        appendExposeHeaders(resp, rule);
     }
 
+    /**
+     * Find the first CORS rule of the bucket that permits both the origin and the method,
+     * mirroring how real GCS evaluates a request against the bucket's CORS configuration.
+     *
+     * @param method the method being authorized — the requested method for a preflight,
+     *               otherwise the method of the request itself. {@code null} matches on origin only.
+     */
     @SuppressWarnings("unchecked")
-    private Map<String, Object> matchCorsRule(String bucketName, String origin) {
+    private Map<String, Object> matchCorsRule(String bucketName, String origin, String method) {
         if (bucketName == null) {
             return null;
         }
@@ -80,11 +89,29 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
         }
         for (Map<String, Object> rule : bucket.getCors()) {
             List<String> origins = (List<String>) rule.get("origin");
-            if (origins != null && (origins.contains("*") || origins.contains(origin))) {
+            if (origins == null || !(origins.contains("*") || origins.contains(origin))) {
+                continue;
+            }
+            if (methodAllowed((List<String>) rule.get("method"), method)) {
                 return rule;
             }
         }
         return null;
+    }
+
+    private static boolean methodAllowed(List<String> methods, String method) {
+        if (method == null) {
+            return true;
+        }
+        if (methods == null || methods.isEmpty()) {
+            return false;
+        }
+        for (String allowed : methods) {
+            if ("*".equals(allowed) || allowed.equalsIgnoreCase(method)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String extractBucket(String path) {
@@ -100,7 +127,16 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
                 return slash >= 0 ? rest.substring(0, slash) : rest;
             }
         }
-        return null;
+        // XML API (path-style) URLs — `/{bucket}/{object}`, the form `blob.public_url`
+        // produces. Any non-GCS path resolves to a bucket that does not exist, so the
+        // rule lookup simply finds nothing.
+        String rest = path.startsWith("/") ? path.substring(1) : path;
+        if (rest.isEmpty()) {
+            return null;
+        }
+        int slash = rest.indexOf('/');
+        String candidate = slash >= 0 ? rest.substring(0, slash) : rest;
+        return candidate.isEmpty() ? null : candidate;
     }
 
     @SuppressWarnings("unchecked")
@@ -128,26 +164,10 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
     }
 
     @SuppressWarnings("unchecked")
-    private static void appendMethodsHeader(ContainerResponseContext resp, Map<String, Object> rule) {
-        List<String> methods = (List<String>) rule.get("method");
-        if (methods != null && !methods.isEmpty()) {
-            resp.getHeaders().putSingle("Access-Control-Allow-Methods", String.join(", ", methods));
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void appendHeadersHeader(ContainerResponseContext resp, Map<String, Object> rule) {
+    private static void appendExposeHeaders(ContainerResponseContext resp, Map<String, Object> rule) {
         List<String> headers = (List<String>) rule.get("responseHeader");
         if (headers != null && !headers.isEmpty()) {
-            resp.getHeaders().putSingle("Access-Control-Allow-Headers", String.join(", ", headers));
             resp.getHeaders().putSingle("Access-Control-Expose-Headers", String.join(", ", headers));
-        }
-    }
-
-    private static void appendMaxAge(ContainerResponseContext resp, Map<String, Object> rule) {
-        Object maxAge = rule.get("maxAgeSeconds");
-        if (maxAge != null) {
-            resp.getHeaders().putSingle("Access-Control-Max-Age", maxAge.toString());
         }
     }
 }

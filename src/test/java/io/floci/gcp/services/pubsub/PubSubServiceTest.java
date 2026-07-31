@@ -222,6 +222,48 @@ class PubSubServiceTest {
     }
 
     @Test
+    void rejectedUpdateLeavesEarlierFieldsUnchanged() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 30,
+                        Map.of("env", "local"), null, null, "attributes.name = ", null, null, null,
+                        null, null, null, null, null,
+                        List.of("ackDeadlineSeconds", "labels", "filter")));
+
+        StoredSubscription unchanged = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals(10, unchanged.getAckDeadlineSeconds());
+        assertNull(unchanged.getLabels());
+        assertNull(unchanged.getFilter());
+    }
+
+    @Test
+    void rejectedUpdateViaFieldMaskLeavesEarlierFieldsUnchanged() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        assertThrows(GcpException.class,
+                () -> service.updateSubscription(
+                        com.google.pubsub.v1.Subscription.newBuilder()
+                                .setName("projects/p1/subscriptions/s1")
+                                .setAckDeadlineSeconds(30)
+                                .putLabels("env", "local")
+                                .setFilter("attributes.name = ")
+                                .build(),
+                        com.google.protobuf.FieldMask.newBuilder()
+                                .addPaths("ack_deadline_seconds")
+                                .addPaths("labels")
+                                .addPaths("filter")
+                                .build()));
+
+        StoredSubscription unchanged = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals(10, unchanged.getAckDeadlineSeconds());
+        assertNull(unchanged.getLabels());
+        assertNull(unchanged.getFilter());
+    }
+
+    @Test
     void updateSubscriptionDoesNotValidateFilterOutsideTheUpdateMask() {
         service.createTopic("projects/p1/topics/t1");
         StoredSubscription corrupted =

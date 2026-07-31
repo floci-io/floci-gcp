@@ -249,15 +249,15 @@ public class PubSubService {
             com.google.protobuf.FieldMask updateMask) {
         LOG.infof("updateSubscription name=%s", subProto.getName());
         StoredSubscription stored = getSubscription(subProto.getName());
+        if (updateMask.getPathsList().contains("filter")) {
+            SubscriptionFilter.validate(subProto.getFilter());
+        }
         for (String path : updateMask.getPathsList()) {
             switch (path) {
                 case "ack_deadline_seconds" -> stored.setAckDeadlineSeconds(subProto.getAckDeadlineSeconds());
                 case "labels" -> stored.setLabels(subProto.getLabelsMap().isEmpty() ? null
                         : new java.util.HashMap<>(subProto.getLabelsMap()));
-                case "filter" -> {
-                    SubscriptionFilter.validate(subProto.getFilter());
-                    stored.setFilter(subProto.getFilter().isEmpty() ? null : subProto.getFilter());
-                }
+                case "filter" -> stored.setFilter(subProto.getFilter().isEmpty() ? null : subProto.getFilter());
                 case "retain_acked_messages" -> stored.setRetainAckedMessages(subProto.getRetainAckedMessages());
                 case "message_retention_duration" -> {
                     if (subProto.hasMessageRetentionDuration()) {
@@ -303,6 +303,10 @@ public class PubSubService {
         StoredSubscription stored = getSubscription(name);
         boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
 
+        if (replaceAll || masked(updateMaskPaths, "filter")) {
+            SubscriptionFilter.validate(filter);
+        }
+
         if (replaceAll || masked(updateMaskPaths, "ack_deadline_seconds")) {
             if (ackDeadlineSeconds > 0) {
                 stored.setAckDeadlineSeconds(ackDeadlineSeconds);
@@ -320,7 +324,6 @@ public class PubSubService {
             stored.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
         }
         if (replaceAll || masked(updateMaskPaths, "filter")) {
-            SubscriptionFilter.validate(filter);
             stored.setFilter(blankToNull(filter));
         }
         if (replaceAll || masked(updateMaskPaths, "push_config")) {

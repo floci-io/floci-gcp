@@ -49,6 +49,26 @@ class SubscriptionFilterTest {
     }
 
     @Test
+    void unquotedKeyMayContainHyphensAndUnderscores() {
+        assertTrue(matches("attributes:is-even", Map.of("is-even", "false")));
+        assertFalse(matches("attributes:is-even", Map.of("is_even", "false")));
+        assertTrue(matches("attributes.is-even = \"false\"", Map.of("is-even", "false")));
+        assertFalse(matches("attributes.is-even = \"false\"", Map.of("is-even", "true")));
+        assertTrue(matches("hasPrefix(attributes.event-type, \"portal.\")",
+                Map.of("event-type", "portal.upload")));
+        assertTrue(matches("attributes.event_type = \"a\"", Map.of("event_type", "a")));
+    }
+
+    @Test
+    void unaryMinusIsDistinguishedFromAHyphenInsideAKey() {
+        assertTrue(matches("-attributes:is-even", Map.of("other", "x")));
+        assertFalse(matches("-attributes:is-even", Map.of("is-even", "false")));
+        assertTrue(matches("attributes.a = \"1\" AND -attributes:is-even", Map.of("a", "1")));
+        assertFalse(matches("attributes.a = \"1\" AND -attributes:is-even",
+                Map.of("a", "1", "is-even", "false")));
+    }
+
+    @Test
     void existenceKeyIsCaseSensitive() {
         assertFalse(matches("attributes:name", Map.of("Name", "com")));
     }

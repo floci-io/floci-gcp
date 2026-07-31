@@ -135,6 +135,32 @@ class GcsCorsRestIntegrationTest {
     }
 
     @Test
+    void bucketNamedLikeAnotherRouteDoesNotGovernThatRoute() {
+        // A bucket may legally be named after the first path segment of an unrelated
+        // endpoint (here the GCS JSON batch route). Its CORS configuration must not
+        // leak onto that endpoint just because the names collide.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "name": "batch",
+                          "cors": [
+                            {"origin": ["*"], "method": ["*"], "responseHeader": ["Content-Type"]}
+                          ]
+                        }
+                        """)
+                .when().post("/storage/v1/b?project=cors-test")
+                .then().statusCode(200);
+
+        given()
+                .header("Origin", DISALLOWED_ORIGIN)
+                .header("Access-Control-Request-Method", "POST")
+                .when().options("/batch/storage/v1")
+                .then()
+                .header("Access-Control-Allow-Origin", nullValue());
+    }
+
+    @Test
     void requestToABucketWithoutCorsConfigGetsNoCorsHeaders() {
         given()
                 .contentType("application/json")

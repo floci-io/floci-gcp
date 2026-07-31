@@ -7,6 +7,8 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 
@@ -18,6 +20,9 @@ import java.util.Map;
 public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseFilter {
 
     private static final String ACCESS_CONTROL_REQUEST_METHOD = "Access-Control-Request-Method";
+
+    @Context
+    ResourceInfo resourceInfo;
 
     private final GcsService gcsService;
 
@@ -114,7 +119,7 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
         return false;
     }
 
-    private static String extractBucket(String path) {
+    private String extractBucket(String path) {
         String[] prefixes = {
                 "/storage/v1/b/",
                 "/download/storage/v1/b/",
@@ -128,8 +133,13 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
             }
         }
         // XML API (path-style) URLs — `/{bucket}/{object}`, the form `blob.public_url`
-        // produces. Any non-GCS path resolves to a bucket that does not exist, so the
-        // rule lookup simply finds nothing.
+        // produces. The leading segment is only a bucket when JAX-RS routed the request
+        // to the path-style controller; otherwise an unrelated endpoint whose first
+        // segment happens to match a bucket name (e.g. a bucket called `batch` and
+        // `/batch/storage/v1`) would inherit that bucket's CORS configuration.
+        if (!isPathStyleObjectRoute()) {
+            return null;
+        }
         String rest = path.startsWith("/") ? path.substring(1) : path;
         if (rest.isEmpty()) {
             return null;
@@ -137,6 +147,11 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
         int slash = rest.indexOf('/');
         String candidate = slash >= 0 ? rest.substring(0, slash) : rest;
         return candidate.isEmpty() ? null : candidate;
+    }
+
+    private boolean isPathStyleObjectRoute() {
+        return resourceInfo != null
+                && resourceInfo.getResourceClass() == GcsXmlDownloadController.class;
     }
 
     @SuppressWarnings("unchecked")

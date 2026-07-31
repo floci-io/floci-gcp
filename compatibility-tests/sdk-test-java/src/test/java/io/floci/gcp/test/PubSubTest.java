@@ -3,6 +3,7 @@ package io.floci.gcp.test;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.api.gax.rpc.InvalidArgumentException;
 import com.google.api.gax.rpc.TransportChannelProvider;
 import com.google.cloud.pubsub.v1.Publisher;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
@@ -39,6 +40,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PubSubTest {
@@ -350,6 +352,156 @@ class PubSubTest {
                 .forEach(t -> topicNames.add(t.getName()));
 
         assertThat(topicNames).doesNotContain(topicName.toString());
+    }
+
+    @Test
+    @Order(14)
+    void subscriptionFilterOnlyDeliversMatchingMessages() throws Exception {
+        String topicId = TestFixtures.uniqueName("filter-topic");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName filtered =
+                ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("filtered-sub"));
+        ProjectSubscriptionName unfiltered =
+                ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("unfiltered-sub"));
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+                .setName(filtered.toString())
+                .setTopic(topicName.toString())
+                .setAckDeadlineSeconds(10)
+                .setFilter("attributes.event_type = \"ocr-invoice\"")
+                .build());
+        subscriptionAdminClient.createSubscription(
+                unfiltered, topicName, PushConfig.getDefaultInstance(), 10);
+
+        try {
+            assertThat(subscriptionAdminClient.getSubscription(filtered).getFilter())
+                    .isEqualTo("attributes.event_type = \"ocr-invoice\"");
+
+            Publisher publisher = Publisher.newBuilder(topicName)
+                    .setChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try {
+                publisher.publish(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("excluded"))
+                        .putAttributes("event_type", "portal.upload")
+                        .build()).get(10, TimeUnit.SECONDS);
+                publisher.publish(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("included"))
+                        .putAttributes("event_type", "ocr-invoice")
+                        .build()).get(10, TimeUnit.SECONDS);
+            } finally {
+                publisher.shutdown();
+                publisher.awaitTermination(5, TimeUnit.SECONDS);
+            }
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullResponse filteredResponse = subscriberStub.pullCallable().call(PullRequest.newBuilder()
+                        .setSubscription(filtered.toString())
+                        .setMaxMessages(10)
+                        .build());
+
+                assertThat(filteredResponse.getReceivedMessagesList()).hasSize(1);
+                assertThat(filteredResponse.getReceivedMessages(0).getMessage().getData().toStringUtf8())
+                        .isEqualTo("included");
+
+                PullResponse unfilteredResponse = subscriberStub.pullCallable().call(PullRequest.newBuilder()
+                        .setSubscription(unfiltered.toString())
+                        .setMaxMessages(10)
+                        .build());
+
+                assertThat(unfilteredResponse.getReceivedMessagesList()).hasSize(2);
+            }
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(filtered); } catch (Exception ignored) {}
+            try { subscriptionAdminClient.deleteSubscription(unfiltered); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(15)
+    void hasPrefixFilterOnlyDeliversMatchingMessages() throws Exception {
+        String topicId = TestFixtures.uniqueName("prefix-topic");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName =
+                ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("prefix-sub"));
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+                .setName(subName.toString())
+                .setTopic(topicName.toString())
+                .setAckDeadlineSeconds(10)
+                .setFilter("hasPrefix(attributes.event_type, \"portal.\")")
+                .build());
+
+        try {
+            Publisher publisher = Publisher.newBuilder(topicName)
+                    .setChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try {
+                publisher.publish(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("excluded"))
+                        .putAttributes("event_type", "ocr-invoice")
+                        .build()).get(10, TimeUnit.SECONDS);
+                publisher.publish(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("included"))
+                        .putAttributes("event_type", "portal.upload")
+                        .build()).get(10, TimeUnit.SECONDS);
+            } finally {
+                publisher.shutdown();
+                publisher.awaitTermination(5, TimeUnit.SECONDS);
+            }
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullResponse response = subscriberStub.pullCallable().call(PullRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setMaxMessages(10)
+                        .build());
+
+                assertThat(response.getReceivedMessagesList()).hasSize(1);
+                assertThat(response.getReceivedMessages(0).getMessage().getData().toStringUtf8())
+                        .isEqualTo("included");
+            }
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(16)
+    void unparseableFilterIsRejected() {
+        String topicId = TestFixtures.uniqueName("bad-filter-topic");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName =
+                ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("bad-filter-sub"));
+
+        topicAdminClient.createTopic(topicName);
+        try {
+            assertThatThrownBy(() -> subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+                    .setName(subName.toString())
+                    .setTopic(topicName.toString())
+                    .setAckDeadlineSeconds(10)
+                    .setFilter("this is not a filter (((")
+                    .build()))
+                    .isInstanceOf(InvalidArgumentException.class);
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
     }
 
     @Test

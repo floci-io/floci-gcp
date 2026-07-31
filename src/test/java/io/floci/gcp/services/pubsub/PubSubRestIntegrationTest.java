@@ -181,4 +181,117 @@ class PubSubRestIntegrationTest {
                 .statusCode(200)
                 .body("$", anEmptyMap());
     }
+
+    @Test
+    void filteredSubscriptionOnlyReceivesMatchingMessages() {
+        String project = "pubsub-rest-filter-it";
+        String topic = "events";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/" + topic).then().statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/%s/topics/%s",
+                          "filter": "attributes.event_type = \\"ocr-invoice\\""
+                        }
+                        """.formatted(project, topic))
+                .when().put(base + "/subscriptions/filtered")
+                .then()
+                .statusCode(200)
+                .body("filter", equalTo("attributes.event_type = \"ocr-invoice\""));
+
+        given()
+                .contentType("application/json")
+                .body("{\"topic\": \"projects/%s/topics/%s\"}".formatted(project, topic))
+                .when().put(base + "/subscriptions/unfiltered")
+                .then()
+                .statusCode(200);
+
+        String payload = Base64.getEncoder().encodeToString("body".getBytes());
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("""
+                        {
+                          "messages": [
+                            {"data": "%s", "attributes": {"event_type": "portal.upload"}},
+                            {"data": "%s", "attributes": {"event_type": "ocr-invoice"}}
+                          ]
+                        }
+                        """.formatted(payload, payload))
+                .when().post(base + "/topics/" + topic + ":publish")
+                .then()
+                .statusCode(200)
+                .body("messageIds.size()", equalTo(2));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 10}")
+                .when().post(base + "/subscriptions/filtered:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages.size()", equalTo(1))
+                .body("receivedMessages[0].message.attributes.event_type", equalTo("ocr-invoice"));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 10}")
+                .when().post(base + "/subscriptions/unfiltered:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages.size()", equalTo(2));
+    }
+
+    @Test
+    void unparseableFilterIsRejectedWithInvalidArgument() {
+        String project = "pubsub-rest-filter-invalid-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/events").then().statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/%s/topics/events",
+                          "filter": "this is not a filter ((("
+                        }
+                        """.formatted(project))
+                .when().put(base + "/subscriptions/bad")
+                .then()
+                .statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        given()
+                .when().get(base + "/subscriptions/bad")
+                .then()
+                .statusCode(404);
+    }
+
+    @Test
+    void filterOverTheByteLimitIsRejectedWithInvalidArgument() {
+        String project = "pubsub-rest-filter-length-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/events").then().statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/%s/topics/events",
+                          "filter": "attributes.name = \\"%s\\""
+                        }
+                        """.formatted(project, "x".repeat(300)))
+                .when().put(base + "/subscriptions/too-long")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
 }

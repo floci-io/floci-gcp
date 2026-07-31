@@ -12,18 +12,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class PubSubServiceTest {
 
     private PubSubService service;
+    private InMemoryStorage<String, StoredSubscription> subStore;
 
     @BeforeEach
     void setUp() {
+        subStore = new InMemoryStorage<>();
         service = new PubSubService(
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                subStore,
                 new InMemoryStorage<>());
     }
 
@@ -105,6 +108,152 @@ class PubSubServiceTest {
     }
 
     @Test
+    void publishSkipsSubscriptionWhoseFilterDoesNotMatch() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"match\"");
+
+        service.publish("projects/p1/topics/t1", List.of(message("body", "event_type", "nomatch")));
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void publishDeliversToSubscriptionWhoseFilterMatches() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"match\"");
+
+        service.publish("projects/p1/topics/t1", List.of(message("body", "event_type", "match")));
+
+        List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, messages.size());
+        assertEquals("body", messages.get(0).getMessage().getData().toStringUtf8());
+    }
+
+    @Test
+    void publishDeliversEveryMessageToSubscriptionWithoutFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        service.publish("projects/p1/topics/t1", List.of(
+                message("first", "event_type", "a"),
+                message("second", "event_type", "b"),
+                PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("third")).build()));
+
+        assertEquals(3, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void publishFansOutIndependentlyPerSubscriptionFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/matching", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+        createFilteredSubscription("projects/p1/subscriptions/other", "projects/p1/topics/t1",
+                "attributes.event_type = \"b\"");
+        service.createSubscription("projects/p1/subscriptions/unfiltered", "projects/p1/topics/t1", 10);
+
+        service.publish("projects/p1/topics/t1", List.of(message("body", "event_type", "a")));
+
+        assertEquals(1, service.pull("projects/p1/subscriptions/matching", 10).size());
+        assertTrue(service.pull("projects/p1/subscriptions/other", 10).isEmpty());
+        assertEquals(1, service.pull("projects/p1/subscriptions/unfiltered", 10).size());
+    }
+
+    @Test
+    void createSubscriptionRejectsUnparseableFilter() {
+        service.createTopic("projects/p1/topics/t1");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> createFilteredSubscription("projects/p1/subscriptions/s1",
+                        "projects/p1/topics/t1", "this is not a filter ((("));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertThrows(GcpException.class, () -> service.getSubscription("projects/p1/subscriptions/s1"));
+    }
+
+    @Test
+    void createSubscriptionRejectsFilterOverTheByteLimit() {
+        service.createTopic("projects/p1/topics/t1");
+        String filter = "attributes.name = \"" + "x".repeat(300) + "\"";
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> createFilteredSubscription("projects/p1/subscriptions/s1",
+                        "projects/p1/topics/t1", filter));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
+
+    @Test
+    void createSubscriptionStoresValidFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        assertEquals("attributes.event_type = \"a\"",
+                service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionRejectsUnparseableFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null,
+                        "attributes.name = ", null, null, null, null, null, null, null, null,
+                        List.of("filter")));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertNull(service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionViaFieldMaskRejectsUnparseableFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription(
+                        com.google.pubsub.v1.Subscription.newBuilder()
+                                .setName("projects/p1/subscriptions/s1")
+                                .setFilter("attributes.name = ")
+                                .build(),
+                        com.google.protobuf.FieldMask.newBuilder().addPaths("filter").build()));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertNull(service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionDoesNotValidateFilterOutsideTheUpdateMask() {
+        service.createTopic("projects/p1/topics/t1");
+        StoredSubscription corrupted =
+                new StoredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        corrupted.setFilter("this is not a filter (((");
+        subStore.put(corrupted.getName(), corrupted);
+
+        StoredSubscription updated = service.updateSubscription("projects/p1/subscriptions/s1", 0,
+                Map.of("env", "local"), null, null, null, null, null, null, null, null, null, null, null,
+                List.of("labels"));
+
+        assertEquals("local", updated.getLabels().get("env"));
+        assertEquals("this is not a filter (((", updated.getFilter());
+    }
+
+    @Test
+    void publishTreatsPersistedUnparseableFilterAsNoMatchWithoutFailing() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/healthy", "projects/p1/topics/t1", 10);
+
+        StoredSubscription corrupted =
+                new StoredSubscription("projects/p1/subscriptions/corrupted", "projects/p1/topics/t1", 10);
+        corrupted.setFilter("this is not a filter (((");
+        subStore.put(corrupted.getName(), corrupted);
+
+        service.publish("projects/p1/topics/t1", List.of(message("body", "event_type", "a")));
+
+        assertEquals(1, service.pull("projects/p1/subscriptions/healthy", 10).size());
+        assertTrue(service.pull("projects/p1/subscriptions/corrupted", 10).isEmpty());
+    }
+
+    @Test
     void acknowledgeRemovesMessageFromQueue() {
         service.createTopic("projects/p1/topics/t1");
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
@@ -119,5 +268,17 @@ class PubSubServiceTest {
 
         List<ReceivedMessage> second = service.pull("projects/p1/subscriptions/s1", 10);
         assertTrue(second.isEmpty());
+    }
+
+    private void createFilteredSubscription(String name, String topic, String filter) {
+        service.createSubscription(name, topic, 10, null, false, null, filter,
+                null, null, null, null, null, 0, false, false);
+    }
+
+    private static PubsubMessage message(String data, String attributeKey, String attributeValue) {
+        return PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8(data))
+                .putAttributes(attributeKey, attributeValue)
+                .build();
     }
 }

@@ -58,6 +58,7 @@ floci-gcp:
     docker-host: unix:///var/run/docker.sock
     api-timeout: 30s
     docker-config-path: ""
+    resource-namespace: ""            # Optional; inserted into sidecar container/volume names (floci-gcp-<ns>-...)
 
   services:
     gcs:
@@ -110,7 +111,6 @@ floci-gcp:
         request-timeout: 300s
         operation-timeout: 300s
         cleanup-timeout: 15s
-        container-name-prefix: floci-cloudrun
         url-host-suffix:              # Optional; defaults to hostname, then localhost.floci.io
 
     cloudfunctions:

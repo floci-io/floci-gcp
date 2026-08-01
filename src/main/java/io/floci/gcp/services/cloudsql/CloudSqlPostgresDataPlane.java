@@ -32,6 +32,13 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
     private static final String POSTGRES_DATA_PARENT_LEGACY = "/var/lib/postgresql/data";
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    /**
+     * Volume-name prefix used before names were persisted. Pinned for backfill only —
+     * pre-upgrade volumes must keep resolving to this exact prefix regardless of what the
+     * live naming helper produces.
+     */
+    private static final String LEGACY_VOLUME_PREFIX = "floci-gcp-cloudsql-";
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
@@ -56,6 +63,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         String volumeId = volumeId(updated, project, instance);
         String containerName = containerName(project, instance);
         String fallbackId = fallbackId(project, instance);
+        String volumeName = resolveVolumeName(updated, volumeId, fallbackId, newVolume);
 
         LOG.infov("Starting Cloud SQL PostgreSQL instance {0}:{1} using image {2}", project, instance, image);
         lifecycleManager.removeIfExists(containerName);
@@ -76,8 +84,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
 
         String internalMountPath = getInternalMountPath(stringValue(updated.get("databaseVersion")));
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
-                    "cloudsql", volumeId, fallbackId, internalMountPath);
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, volumeName, internalMountPath);
         } else {
             String hostDataPath = Path.of(config.storage().hostPersistentPath(), "cloudsql",
                     sanitize(project), sanitize(instance)).toAbsolutePath().toString();
@@ -92,14 +99,14 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo endpoint = info.getEndpoint(POSTGRES_PORT);
             awaitReady(info.containerId(), Duration.ofSeconds(config.services().cloudsql().startupTimeoutSeconds()));
-            applyEndpoint(updated, image, volumeId, info.containerId(), endpoint);
+            applyEndpoint(updated, image, volumeId, volumeName, info.containerId(), endpoint);
             return updated;
         } catch (RuntimeException e) {
             if (containerId != null) {
                 lifecycleManager.stopAndRemove(containerId, null);
             }
             if (newVolume && ContainerStorageHelper.isNamedVolumeMode(config)) {
-                lifecycleManager.removeVolume(ContainerStorageHelper.resourceName(config, "cloudsql", volumeId, fallbackId));
+                lifecycleManager.removeVolume(volumeName);
             }
             throw e;
         }
@@ -112,8 +119,10 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         if (containerId != null && lifecycleManager.isContainerRunning(containerId)) {
             EndpointInfo endpoint = lifecycleManager.resolveEndpoint(containerId, POSTGRES_PORT);
             Map<String, Object> updated = copy(metadata);
-            applyEndpoint(updated, stringValue(dataPlane.get("image")),
-                    volumeId(updated, project, instance), containerId, endpoint);
+            String volumeId = volumeId(updated, project, instance);
+            applyEndpoint(updated, stringValue(dataPlane.get("image")), volumeId,
+                    resolveVolumeName(updated, volumeId, fallbackId(project, instance), false),
+                    containerId, endpoint);
             return updated;
         }
         return startInstance(project, instance, metadata);
@@ -130,7 +139,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         if (removeStorage) {
             String volumeId = stringValue(dataPlane(metadata).get("volumeId"));
             ContainerStorageHelper.removeStorage(config, lifecycleManager,
-                    "cloudsql", volumeId, fallbackId(project, instance));
+                    resolveVolumeName(metadata, volumeId, fallbackId(project, instance), false));
         }
     }
 
@@ -259,7 +268,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
     }
 
     private void applyEndpoint(Map<String, Object> metadata, String image, String volumeId,
-                               String containerId, EndpointInfo endpoint) {
+                               String volumeName, String containerId, EndpointInfo endpoint) {
         metadata.put("ipAddresses", List.of(mapOf(
                 "type", "PRIMARY",
                 "ipAddress", endpoint.host(),
@@ -271,6 +280,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
                 "host", endpoint.host(),
                 "port", endpoint.port(),
                 "volumeId", volumeId,
+                "volumeName", volumeName,
                 "status", "RUNNING"));
     }
 
@@ -300,6 +310,23 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
         return Map.of();
     }
 
+    /**
+     * Resolves the Docker volume name for an instance. Pre-upgrade instances persisted only a
+     * {@code volumeId}, so their data lives under the pinned legacy name; the live helper must
+     * never be used to backfill them — a future prefix or namespace change would orphan the data.
+     */
+    private String resolveVolumeName(Map<String, Object> metadata, String volumeId,
+                                     String fallbackId, boolean newVolume) {
+        String persisted = stringValue(dataPlane(metadata).get("volumeName"));
+        if (persisted != null && !persisted.isBlank()) {
+            return persisted;
+        }
+        if (newVolume) {
+            return ContainerStorageHelper.resourceName(config, "cloudsql", volumeId, fallbackId);
+        }
+        return LEGACY_VOLUME_PREFIX + (volumeId != null ? volumeId : fallbackId);
+    }
+
     private String volumeId(Map<String, Object> metadata, String project, String instance) {
         String existing = stringValue(dataPlane(metadata).get("volumeId"));
         if (existing != null && !existing.isBlank()) {
@@ -309,7 +336,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
     }
 
     private String containerName(String project, String instance) {
-        return "floci-cloudsql-" + fallbackId(project, instance);
+        return ContainerStorageHelper.dockerName(config, "cloudsql-" + fallbackId(project, instance));
     }
 
     private String fallbackId(String project, String instance) {

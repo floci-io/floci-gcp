@@ -63,7 +63,9 @@ Database and user Admin API operations are synchronized into the backing Postgre
 - Created users receive connect/create privileges on existing and newly created databases.
 
 Docker storage follows the global floci-gcp storage policy. In named-volume mode, each instance gets
-a stable `floci-gcp-cloudsql-*` volume. `memory` mode, or `floci-gcp.storage.prune-volumes-on-delete=true`,
+a stable `floci-gcp-cloudsql-*` volume (with `floci-gcp.docker.resource-namespace` configured, new
+volumes are named `floci-gcp-<ns>-cloudsql-*`; volumes created before the name was persisted keep
+their original name). `memory` mode, or `floci-gcp.storage.prune-volumes-on-delete=true`,
 removes the volume when the instance is deleted; `persistent`, `hybrid`, and `wal` retain volumes by
 default. When `floci-gcp.storage.host-persistent-path` is absolute, instance data is bind-mounted under
 `{hostPersistentPath}/cloudsql/{project}/{instance}`.

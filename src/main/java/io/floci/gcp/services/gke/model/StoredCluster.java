@@ -34,6 +34,7 @@ public class StoredCluster {
     private String containerId;
     private int hostPort;
     private String internalEndpoint;
+    private String volumeName;
 
     public StoredCluster() {
     }
@@ -164,5 +165,13 @@ public class StoredCluster {
 
     public void setInternalEndpoint(String internalEndpoint) {
         this.internalEndpoint = internalEndpoint;
+    }
+
+    public String getVolumeName() {
+        return volumeName;
+    }
+
+    public void setVolumeName(String volumeName) {
+        this.volumeName = volumeName;
     }
 }

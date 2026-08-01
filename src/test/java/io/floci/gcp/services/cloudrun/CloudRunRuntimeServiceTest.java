@@ -51,10 +51,10 @@ class CloudRunRuntimeServiceTest {
         when(config.services().cloudrun().execution().defaultPort()).thenReturn(8080);
         when(config.services().cloudrun().execution().startupTimeout()).thenReturn(Duration.ofSeconds(1));
         when(config.services().cloudrun().execution().requestTimeout()).thenReturn(Duration.ofSeconds(300));
-        when(config.services().cloudrun().execution().containerNamePrefix()).thenReturn("floci-cloudrun");
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4588");
         when(config.docker().logMaxSize()).thenReturn("10m");
         when(config.docker().logMaxFile()).thenReturn("3");
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
 
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.isLinuxHost()).thenReturn(false);
@@ -96,7 +96,10 @@ class CloudRunRuntimeServiceTest {
         assertFalse(spec.env().contains("PORT=9999"));
         assertTrue(spec.env().contains("K_SERVICE=svc"));
         assertTrue(spec.env().contains("K_REVISION=svc-00001"));
-        assertEquals("cloudrun", spec.labels().get("floci-gcp.service"));
+        assertEquals("cloudrun", spec.labels().get("floci_service"));
+        assertEquals("p1", spec.labels().get("floci_project"));
+        assertEquals("us-central1", spec.labels().get("floci_location"));
+        assertEquals(revision.getName(), spec.labels().get("floci_resource"));
     }
 
     @Test

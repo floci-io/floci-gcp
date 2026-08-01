@@ -19,6 +19,7 @@ public class StoredCluster {
     @JsonIgnore
     private String containerId;
     private String volumeId;
+    private String volumeName;
 
     public StoredCluster() {}
 
@@ -57,4 +58,7 @@ public class StoredCluster {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getVolumeName() { return volumeName; }
+    public void setVolumeName(String volumeName) { this.volumeName = volumeName; }
 }

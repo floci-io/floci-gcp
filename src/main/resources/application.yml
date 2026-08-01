@@ -84,7 +84,6 @@ floci-gcp:
         request-timeout: 300s
         operation-timeout: 300s
         cleanup-timeout: 15s
-        container-name-prefix: floci-cloudrun
         url-host-suffix:
     cloudfunctions:
       enabled: true
@@ -115,12 +114,25 @@ floci-gcp:
       enabled: true
   dns:
     extra-suffixes:
+    # Public resolvers appended after floci-gcp's embedded DNS in every spawned container.
+    # Lets Cloud Run/GKE/sidecar containers resolve public hostnames even if the embedded
+    # forwarder cannot answer. Disable in offline/locked-down networks where these
+    # resolvers are blocked.
+    container-fallback-enabled: true              # FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED
+    container-fallback-servers:                   # FLOCI_GCP_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+      - 8.8.8.8
+      - 8.8.4.4
   docker:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: "unix:///var/run/docker.sock"
     api-timeout: 30s
     resource-namespace: ""          # FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE; scopes sidecar container/volume names
+    # image-registry-base: mirror.example.com     # FLOCI_GCP_DOCKER_IMAGE_REGISTRY_BASE; prefixes every launched image
+    # registry-credentials:                       # explicit credentials for private registries
+    #   - server: myregistry.example.com
+    #     username: user
+    #     password: secret
   init-hooks:
     shell-executable: /bin/sh
     shutdown-grace-period-seconds: 2

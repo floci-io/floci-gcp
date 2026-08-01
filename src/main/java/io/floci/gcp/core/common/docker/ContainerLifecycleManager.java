@@ -15,6 +15,7 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.api.model.StreamType;
+import io.floci.gcp.config.EmulatorConfig;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -30,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +51,7 @@ public class ContainerLifecycleManager {
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final ImageCacheService imageCacheService;
+    private final EmulatorConfig config;
     private final ExecutorService dockerApiExecutor = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r, "floci-docker-api-" + DOCKER_API_THREAD.incrementAndGet());
         thread.setDaemon(true);
@@ -59,11 +62,13 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClientProducer dockerClients,
                                      ContainerDetector containerDetector,
                                      PortAllocator portAllocator,
-                                     ImageCacheService imageCacheService) {
+                                     ImageCacheService imageCacheService,
+                                     EmulatorConfig config) {
         this.dockerClients = dockerClients;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.imageCacheService = imageCacheService;
+        this.config = config;
     }
 
     @PreDestroy
@@ -73,7 +78,15 @@ public class ContainerLifecycleManager {
 
     public ContainerInfo createAndStart(ContainerSpec spec) {
         String containerId = create(spec);
-        return startCreated(containerId, spec);
+        try {
+            return startCreated(containerId, spec);
+        } catch (Exception e) {
+            // A failed start (e.g. host-port conflict) must not leak the created
+            // container: retrying callers would accumulate Created containers and
+            // fixed-name callers would hit name conflicts on the next attempt.
+            removeIfExists(containerId);
+            throw e;
+        }
     }
 
     public String create(ContainerSpec spec) {
@@ -88,6 +101,9 @@ public class ContainerLifecycleManager {
 
         if (spec.name() != null) {
             createCmd.withName(spec.name());
+        }
+        if (spec.user() != null && !spec.user().isBlank()) {
+            createCmd.withUser(spec.user());
         }
         if (spec.env() != null && !spec.env().isEmpty()) {
             createCmd.withEnv(spec.env());
@@ -107,9 +123,7 @@ public class ContainerLifecycleManager {
                     .toArray(ExposedPort[]::new);
             createCmd.withExposedPorts(exposed);
         }
-        if (spec.labels() != null && !spec.labels().isEmpty()) {
-            createCmd.withLabels(spec.labels());
-        }
+        createCmd.withLabels(mergedLabels(spec.labels()));
 
         CreateContainerResponse response = dockerApi("create container " + spec.name(), createCmd::exec);
         String containerId = response.getId();
@@ -203,18 +217,33 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Creates a named volume if it does not already exist. Idempotent — safe to call on every
+     * container start. Labels the volume {@code floci=true} and
+     * {@code floci_emulator=floci-gcp} so both
+     * {@code docker volume prune --filter label=floci=true} (all emulators) and
+     * {@code --filter label=floci_emulator=floci-gcp} (this emulator only) work.
+     */
     public void ensureVolume(String volumeName) {
         if (!volumeExists(volumeName)) {
             LOG.infov("Creating Docker volume {0}", volumeName);
             dockerApi("create Docker volume " + volumeName, () -> {
                 dockerClient().createVolumeCmd()
                         .withName(volumeName)
-                        .withLabels(Map.of("floci-gcp", "true"))
+                        .withLabels(ContainerStorageHelper.defaultLabels(config))
                         .exec();
                 return null;
             });
             LOG.infov("Created Docker volume {0}", volumeName);
         }
+    }
+
+    private Map<String, String> mergedLabels(Map<String, String> specLabels) {
+        Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
+        if (specLabels != null) {
+            labels.putAll(specLabels);
+        }
+        return labels;
     }
 
     public void removeVolume(String volumeName) {
@@ -274,11 +303,38 @@ public class ContainerLifecycleManager {
         }
 
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
+        Map<Integer, Integer> publishedHostPorts = new HashMap<>();
         for (int port : ports) {
             endpoints.put(port, resolveEndpoint(inspect, port));
+            OptionalInt published = readPublishedHostPort(inspect, port);
+            if (published.isPresent()) {
+                publishedHostPorts.put(port, published.getAsInt());
+            }
         }
 
-        return new ContainerInfo(containerId, endpoints);
+        return new ContainerInfo(containerId, endpoints, publishedHostPorts);
+    }
+
+    /**
+     * Reads the host port a container's internal port is published on, independent of
+     * whether floci-gcp itself runs inside a container. Unlike {@link #resolveEndpoint} —
+     * which switches to container-IP + internal port in container mode — this always
+     * reads the port binding, for URIs consumed by the host-side Docker daemon.
+     */
+    private static OptionalInt readPublishedHostPort(InspectContainerResponse inspect, int containerPort) {
+        Ports ports = inspect.getNetworkSettings().getPorts();
+        if (ports != null) {
+            Ports.Binding[] binding = ports.getBindings().get(ExposedPort.tcp(containerPort));
+            if (binding != null && binding.length > 0) {
+                try {
+                    return OptionalInt.of(Integer.parseInt(binding[0].getHostPortSpec()));
+                } catch (NumberFormatException e) {
+                    LOG.debugv("Unparseable host port binding for container port {0}: {1}",
+                            String.valueOf(containerPort), binding[0].getHostPortSpec());
+                }
+            }
+        }
+        return OptionalInt.empty();
     }
 
     public void removeIfExists(String name) {
@@ -361,6 +417,14 @@ public class ContainerLifecycleManager {
 
         if (spec.privileged()) {
             hostConfig.withPrivileged(true);
+        }
+        if (spec.cgroupnsMode() != null && !spec.cgroupnsMode().isBlank()) {
+            hostConfig.withCgroupnsMode(spec.cgroupnsMode());
+        }
+        // Supplementary groups (Docker --group-add), e.g. to give a process access to a
+        // group-shared volume without changing its primary uid/gid.
+        if (spec.groupAdd() != null && !spec.groupAdd().isEmpty()) {
+            hostConfig.withGroupAdd(spec.groupAdd());
         }
         if (spec.hasMemoryLimit()) {
             hostConfig.withMemory(spec.memoryBytes());
@@ -530,12 +594,34 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Information about a created or adopted container.
+     *
+     * @param containerId the Docker container ID
+     * @param endpoints map of container port to resolved endpoint (host:port for connection)
+     * @param publishedHostPorts map of container port to the host port it is published on;
+     *                           a port without a binding is absent
+     */
     public record ContainerInfo(
             String containerId,
-            Map<Integer, EndpointInfo> endpoints
+            Map<Integer, EndpointInfo> endpoints,
+            Map<Integer, Integer> publishedHostPorts
     ) {
+        public ContainerInfo(String containerId, Map<Integer, EndpointInfo> endpoints) {
+            this(containerId, endpoints, Map.of());
+        }
+
         public EndpointInfo getEndpoint(int containerPort) {
             return endpoints.get(containerPort);
+        }
+
+        /**
+         * Gets the host port a container port is published on, regardless of whether
+         * floci-gcp itself runs inside a container. Empty when the port has no binding.
+         */
+        public OptionalInt publishedHostPort(int containerPort) {
+            Integer published = publishedHostPorts.get(containerPort);
+            return published != null ? OptionalInt.of(published) : OptionalInt.empty();
         }
     }
 

@@ -10,6 +10,27 @@ import java.util.Map;
 /**
  * Immutable specification for a Docker container to be created.
  * Use {@link ContainerBuilder} to construct instances of this record.
+ *
+ * @param image Docker image name (required)
+ * @param name Container name (optional, Docker generates one if null)
+ * @param env Environment variables as "KEY=value" strings
+ * @param cmd Command to run (overrides image CMD)
+ * @param entrypoint Entrypoint to use (overrides image ENTRYPOINT)
+ * @param memoryBytes Memory limit in bytes (null = no limit)
+ * @param portBindings Map of container port to host port (0 = dynamic allocation)
+ * @param exposedPorts Ports to expose (required for port bindings)
+ * @param networkMode Docker network name or mode (null = default bridge)
+ * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
+ * @param binds Legacy bind mounts (prefer mounts for new code)
+ * @param extraHosts Extra /etc/hosts entries as "hostname:ip" strings
+ * @param labels Container labels merged over the default floci-gcp labels
+ * @param logConfig Docker log driver configuration (null = daemon default)
+ * @param privileged Whether to run the container in privileged mode (required for k3s)
+ * @param cgroupnsMode Docker cgroup namespace mode (for example, "host")
+ * @param dnsServers DNS server IPs to inject into the container (e.g. floci-gcp's embedded DNS)
+ * @param workingDir Working directory inside the container (overrides image WORKDIR)
+ * @param user User the container process runs as, formatted "uid[:gid]" (null = image USER)
+ * @param groupAdd Supplementary group IDs added to the container process
  */
 public record ContainerSpec(
         String image,
@@ -27,11 +48,14 @@ public record ContainerSpec(
         Map<String, String> labels,
         LogConfig logConfig,
         boolean privileged,
+        String cgroupnsMode,
         List<String> dnsServers,
-        String workingDir
+        String workingDir,
+        String user,
+        List<String> groupAdd
 ) {
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, List.of(), null);
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
     }
 
     public boolean hasPortBindings() {

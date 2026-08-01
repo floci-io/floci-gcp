@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.common.docker.PortAllocator;
 import io.floci.gcp.services.gke.model.StoredCluster;
@@ -38,6 +39,13 @@ public class GkeClusterManager {
     private static final Logger LOG = Logger.getLogger(GkeClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
     private static final String ENDPOINT_MODE_NETWORK = "network";
+
+    /**
+     * Volume-name prefix used before names were persisted. Pinned for backfill only —
+     * pre-upgrade volumes must keep resolving to this exact prefix regardless of what the
+     * live naming helper produces.
+     */
+    private static final String LEGACY_VOLUME_PREFIX = "floci-gke-";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "gke-token-webhook.yaml";
@@ -72,7 +80,8 @@ public class GkeClusterManager {
      */
     public void startCluster(StoredCluster cluster) {
         String image = config.services().gke().defaultImage();
-        String containerName = "floci-gke-" + cluster.getName();
+        String containerName = ContainerStorageHelper.dockerName(config,
+                "gke-" + cluster.getProject() + "-" + cluster.getName());
 
         LOG.infov("Starting k3s container for GKE cluster {0} using image {1}",
                 cluster.getName(), image);
@@ -87,7 +96,9 @@ public class GkeClusterManager {
         // A named Docker volume (not a host bind mount) for the k3s data dir: bind mounts to a
         // macOS host path make kine's unix socket chmod fail (EINVAL); named volumes live in the
         // Docker VM's Linux filesystem. k3s v1.34+ manages embedded SQLite (kine) internally.
-        String volumeName = "floci-gke-" + cluster.getName();
+        String volumeName = volumeName(cluster);
+        cluster.setVolumeName(volumeName);
+        lifecycleManager.ensureVolume(volumeName);
 
         List<String> serverArgs = new ArrayList<>(List.of(
                 "server", "--disable=traefik", "--tls-san=localhost"));
@@ -192,8 +203,27 @@ public class GkeClusterManager {
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
-        lifecycleManager.removeVolume("floci-gke-" + cluster.getName());
+        lifecycleManager.removeVolume(volumeName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    /**
+     * Resolves the k3s data volume name. Pre-upgrade clusters used an unscoped
+     * {@code floci-gke-<cluster>} name; an existing volume under that name is adopted so its
+     * data survives the rename. New volumes are project-scoped, which also keeps clusters with
+     * the same id in different projects apart. Long namespace+project+cluster combinations can
+     * exceed the 63-character DNS label limit for in-network resolution of the container name.
+     */
+    String volumeName(StoredCluster cluster) {
+        if (cluster.getVolumeName() != null && !cluster.getVolumeName().isBlank()) {
+            return cluster.getVolumeName();
+        }
+        String legacy = LEGACY_VOLUME_PREFIX + cluster.getName();
+        if (lifecycleManager.volumeExists(legacy)) {
+            return legacy;
+        }
+        return ContainerStorageHelper.resourceName(config, "gke", null,
+                cluster.getProject() + "-" + cluster.getName());
     }
 
     /** The raw k3s kubeconfig (server URL unmodified), for the internal kubeconfig endpoint. */

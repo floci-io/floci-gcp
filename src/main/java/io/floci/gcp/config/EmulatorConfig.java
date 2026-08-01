@@ -42,6 +42,31 @@ public interface EmulatorConfig {
 
     interface DnsConfig {
         Optional<List<String>> extraSuffixes();
+
+        /**
+         * When {@code true} (default), the configured {@link #containerFallbackServers()} are
+         * appended after floci-gcp's embedded DNS to every spawned container's
+         * {@code HostConfig.Dns}. This gives Cloud Run/GKE/sidecar containers a real secondary
+         * resolver so public hostnames still resolve if floci-gcp's embedded forwarder cannot
+         * answer — mirroring the {@code docker run --dns <flociIp> --dns 8.8.8.8} workaround.
+         *
+         * <p>Disable (via {@code FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED=false}) in offline or
+         * locked-down networks where the public resolvers are unreachable/blocked.
+         */
+        @WithDefault("true")
+        boolean containerFallbackEnabled();
+
+        /**
+         * Ordered list of public DNS resolvers injected into spawned containers as secondary
+         * resolvers when {@link #containerFallbackEnabled()} is set.
+         *
+         * <p>Via environment variable (comma-separated):
+         * <pre>
+         * FLOCI_GCP_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+         * </pre>
+         */
+        @WithDefault("8.8.8.8,8.8.4.4")
+        List<String> containerFallbackServers();
     }
 
     interface StorageConfig {
@@ -267,9 +292,6 @@ public interface EmulatorConfig {
             @WithDefault("15s")
             Duration cleanupTimeout();
 
-            @WithDefault("floci-cloudrun")
-            String containerNamePrefix();
-
             Optional<String> urlHostSuffix();
         }
     }
@@ -323,6 +345,29 @@ public interface EmulatorConfig {
          * Useful when multiple Floci processes share one Docker daemon.
          */
         Optional<String> resourceNamespace();
+
+        /**
+         * Optional registry/repository base for every Docker image floci-gcp launches.
+         * When set, images such as {@code postgres:16.14-alpine} and
+         * {@code redpandadata/redpanda:latest} resolve under this base before the
+         * container is created.
+         */
+        Optional<String> imageRegistryBase();
+
+        /**
+         * Explicit credentials for private Docker registries.
+         * Each entry maps a registry hostname to a username/password pair.
+         * Use when mounting the host Docker config is impractical.
+         */
+        @WithDefault("")
+        List<RegistryCredential> registryCredentials();
+
+        interface RegistryCredential {
+            /** Registry hostname (e.g. myregistry.example.com). */
+            String server();
+            String username();
+            String password();
+        }
     }
 
     interface InitHooksConfig {

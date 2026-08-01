@@ -266,6 +266,35 @@ class PubSubServiceTest {
     }
 
     @Test
+    void updateSubscriptionWithoutUpdateMaskAcceptsTheExistingFilterInTheBody() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        StoredSubscription updated = service.updateSubscription("projects/p1/subscriptions/s1", 0,
+                Map.of("env", "local"), null, null, "attributes.event_type = \"a\"", null, null, null,
+                null, null, null, null, null, null);
+
+        assertEquals("local", updated.getLabels().get("env"));
+        assertEquals("attributes.event_type = \"a\"", updated.getFilter());
+    }
+
+    @Test
+    void updateSubscriptionWithoutUpdateMaskRejectsADifferentFilterInTheBody() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null,
+                        "attributes.event_type = \"b\"", null, null, null, null, null, null, null, null,
+                        null));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("attributes.event_type = \"a\"",
+                service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
     void updateSubscriptionWithoutUpdateMaskPreservesTheFilter() {
         service.createTopic("projects/p1/topics/t1");
         createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
@@ -275,6 +304,24 @@ class PubSubServiceTest {
                 Map.of("env", "local"), null, null, null, null, null, null, null, null, null, null, null,
                 null);
 
+        assertEquals("attributes.event_type = \"a\"", updated.getFilter());
+    }
+
+    @Test
+    void updateSubscriptionViaFieldMaskIgnoresAFilterOutsideTheUpdateMask() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        StoredSubscription updated = service.updateSubscription(
+                com.google.pubsub.v1.Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s1")
+                        .setFilter("attributes.event_type = \"ignored\"")
+                        .putLabels("env", "local")
+                        .build(),
+                com.google.protobuf.FieldMask.newBuilder().addPaths("labels").build());
+
+        assertEquals("local", updated.getLabels().get("env"));
         assertEquals("attributes.event_type = \"a\"", updated.getFilter());
     }
 

@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -302,7 +303,7 @@ public class PubSubService {
         StoredSubscription stored = getSubscription(name);
         boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
 
-        if (replaceAll ? filter != null : masked(updateMaskPaths, "filter")) {
+        if (filterChangeRequested(stored.getFilter(), filter, updateMaskPaths)) {
             throw filterNotMutable(stored.getName());
         }
 
@@ -439,6 +440,16 @@ public class PubSubService {
             }
         }
         return messageIds;
+    }
+
+    // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request
+    // outright, so only a value that actually differs is treated as a change here.
+    private static boolean filterChangeRequested(String current, String requested,
+            List<String> updateMaskPaths) {
+        if (updateMaskPaths != null && !updateMaskPaths.isEmpty()) {
+            return masked(updateMaskPaths, "filter");
+        }
+        return requested != null && !Objects.equals(blankToNull(requested), current);
     }
 
     private static GcpException filterNotMutable(String name) {

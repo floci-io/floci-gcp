@@ -219,6 +219,11 @@ value differs, so restating the current filter fails too. A patch that does not 
 mask succeeds and leaves the filter untouched, even when the request body carries one — the update
 mask governs, so clients that echo a whole subscription back keep working.
 
+GCP requires an update mask on `subscriptions.patch`; floci-gcp also accepts a patch without one and
+treats it as replacing every field. On that path a body carrying the subscription's current filter is
+accepted and the filter is left alone, a body carrying a different one is rejected, and a body
+omitting it leaves the filter in place rather than clearing it.
+
 To change a filter, follow the same path as in GCP: snapshot the subscription, create a new one with
 the desired filter, `Seek` to the snapshot, move subscribers over, then delete the old subscription.
 

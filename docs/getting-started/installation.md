@@ -23,6 +23,8 @@ docker pull floci/floci-gcp:latest
 | `x.y.z` | Pinned release |
 | `nightly` | Latest nightly build (floating) |
 | `nightly-mmddyyyy` | Pinned nightly |
+| `latest-compat` / `x.y.z-compat` | JVM-based compatibility variant for platforms where the native image is unavailable |
+| `nightly-compat` / `nightly-mmddyyyy-compat` | Nightly compatibility variant |
 
 ## Choosing a tag
 
@@ -62,7 +64,7 @@ java -jar target/quarkus-app/quarkus-run.jar
 
 ```bash
 ./mvnw clean package -Pnative -DskipTests
-./target/floci-gcp-runner
+./target/floci-gcp-*-runner   # e.g. ./target/floci-gcp-0.5.0-runner
 ```
 
 !!! note

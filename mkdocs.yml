@@ -77,6 +77,7 @@ nav:
     - Cloud Logging: services/logging.md
     - Cloud KMS: services/kms.md
     - IAM: services/iam.md
+    - IAM Credentials: services/iam-credentials.md
     - Managed Kafka: services/managed-kafka.md
     - GKE (Kubernetes Engine): services/gke.md
     - Cloud SQL for PostgreSQL: services/cloud-sql-postgres.md
@@ -85,6 +86,7 @@ nav:
     - Cloud Tasks: services/cloud-tasks.md
     - Cloud Scheduler: services/scheduler.md
     - Cloud Monitoring: services/cloud-monitoring.md
+    - Eventarc: services/eventarc.md
     - Service Usage: services/service-usage.md
     - Firebase Auth: services/firebase-auth.md
     - BigQuery: services/bigquery.md

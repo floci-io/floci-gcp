@@ -106,3 +106,7 @@ URL signedUrl = storage.signUrl(
 - `SetIamPolicy`
 - `TestIamPermissions`
 - `SignBlob`
+
+## Related: Service Account Impersonation
+
+`generateAccessToken` (the `iamcredentials.googleapis.com` API used by `ImpersonatedCredentials`) is provided by the separate [IAM Credentials service](iam-credentials.md), toggled with `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED`.

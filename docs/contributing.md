@@ -94,7 +94,11 @@ Quick summary:
 The `./compatibility-tests/` directory contains SDK-based integration tests. Run them before submitting changes that affect GCP protocol behavior:
 
 ```bash
-docker compose -f docker-compose-test.yml up --build
+cd compatibility-tests
+cp env.example .env
+just setup
+just test-all          # SDK suites (Java, Node, Python, Go, gcloud)
+just test-all-iac      # Terraform / OpenTofu
 ```
 
 If the compatibility test suite is unavailable in your environment, state that explicitly in the PR description.

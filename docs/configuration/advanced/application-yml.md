@@ -46,50 +46,29 @@ floci-gcp:
     wal:
       compaction-interval-ms: 30000
 
-  dns:
-    # Extra hostname suffixes resolved to floci-gcp's container IP by the embedded DNS server.
-    # Via env var (comma-separated): FLOCI_GCP_DNS_EXTRA_SUFFIXES=custom.internal,other.domain
-    # extra-suffixes:
-    #   - custom.internal
-
-  docker:
-    log-max-size: "10m"
-    log-max-file: "3"
-    docker-host: unix:///var/run/docker.sock
-    api-timeout: 30s
-    docker-config-path: ""
-    resource-namespace: ""            # Optional; inserted into sidecar container/volume names (floci-gcp-<ns>-...)
-
   services:
     gcs:
       enabled: true
-
     pubsub:
       enabled: true
-
     firestore:
       enabled: true
-
     datastore:
       enabled: true
-
-    secretmanager:
-      enabled: true
-
     iam:
       enabled: true
-
+    iamcredentials:
+      enabled: true
+    secretmanager:
+      enabled: true
     logging:
       enabled: true
-
     kms:
       enabled: true
-
     kafka:
       enabled: true
       mock: false
       default-image: "redpandadata/redpanda:latest"
-
     cloudsql:
       enabled: true
       mock: false
@@ -98,10 +77,8 @@ floci-gcp:
       postgres17-image: "postgres:17.10-alpine"
       postgres18-image: "postgres:18.4-alpine"
       startup-timeout-seconds: 90
-
     cloudtasks:
       enabled: true
-
     cloudrun:
       enabled: true
       mock: false                     # false runs Docker-backed service execution
@@ -112,18 +89,18 @@ floci-gcp:
         operation-timeout: 300s
         cleanup-timeout: 15s
         url-host-suffix:              # Optional; defaults to hostname, then localhost.floci.io
-
     cloudfunctions:
       enabled: true
-
     monitoring:
       enabled: true
-
     scheduler:
       enabled: true
       invocation-enabled: true        # background dispatcher fires due jobs
       tick-interval-seconds: 10
-
+    eventarc:
+      enabled: true
+    bigquery:
+      enabled: true
     gke:
       enabled: true
       mock: false                     # false starts real rancher/k3s clusters
@@ -131,8 +108,44 @@ floci-gcp:
       api-server-base-port: 6550
       api-server-max-port: 6599
       keep-running-on-shutdown: false
-      endpoint-mode: host
+      endpoint-mode: host             # host | network (network for emulator-in-Docker setups)
       docker-network:                 # overrides services.docker-network for k3s sidecars
+    serviceusage:
+      enabled: true
+    resourcemanager:
+      enabled: true
+    firebaseauth:
+      enabled: true
+    # docker-network:                 # shared Docker network for all spawned sidecars (FLOCI_GCP_SERVICES_DOCKER_NETWORK)
+
+  dns:
+    extra-suffixes:
+    # Public resolvers appended after floci-gcp's embedded DNS in every spawned container.
+    # Lets Cloud Run/GKE/sidecar containers resolve public hostnames even if the embedded
+    # forwarder cannot answer. Disable in offline/locked-down networks where these
+    # resolvers are blocked.
+    container-fallback-enabled: true              # FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED
+    container-fallback-servers:                   # FLOCI_GCP_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+      - 8.8.8.8
+      - 8.8.4.4
+
+  docker:
+    log-max-size: "10m"
+    log-max-file: "3"
+    docker-host: "unix:///var/run/docker.sock"
+    api-timeout: 30s
+    # docker-config-path:                         # directory containing Docker's config.json for registry auth
+    resource-namespace: ""          # FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE; scopes sidecar container/volume names
+    # image-registry-base: mirror.example.com     # FLOCI_GCP_DOCKER_IMAGE_REGISTRY_BASE; prefixes every launched image
+    # registry-credentials:                       # explicit credentials for private registries
+    #   - server: myregistry.example.com
+    #     username: user
+    #     password: secret
+
+  init-hooks:
+    shell-executable: /bin/sh
+    shutdown-grace-period-seconds: 2
+    timeout-seconds: 30
 ```
 
 ## Disabling Services

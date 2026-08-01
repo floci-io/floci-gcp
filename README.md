@@ -48,9 +48,13 @@ services:
       - "4588:4588"
     volumes:
       - ./data:/app/data
+      # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE)
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      # Keep state across restarts in the mounted ./data volume
+      FLOCI_GCP_STORAGE_MODE: hybrid
 ```
 
 ```bash
@@ -65,6 +69,7 @@ export FIRESTORE_EMULATOR_HOST=localhost:4588
 export DATASTORE_EMULATOR_HOST=localhost:4588
 export STORAGE_EMULATOR_HOST=http://localhost:4588
 export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
+export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
@@ -146,6 +151,8 @@ GCP's official emulators are fragmented — each service ships its own binary, r
 | Service Usage | ✅ | ❌ |
 | Identity Platform / Firebase Auth | ✅ | ❌ |
 | BigQuery (Phase 1) | ✅ | ❌ |
+| Eventarc | ✅ | ❌ |
+| IAM Service Account Credentials | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
@@ -162,11 +169,11 @@ flowchart LR
         end
 
         subgraph REST ["REST services"]
-            B["Cloud Storage\nIAM\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE\nBigQuery"]
+            B["Cloud Storage\nIAM\nIAM Credentials\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE\nBigQuery\nEventarc\nService Usage\nFirebase Auth"]
         end
 
         subgraph Docker ["Docker-backed"]
-            C["Managed Kafka\n(Redpanda)"]
+            C["Managed Kafka (Redpanda)\nCloud SQL (Postgres)\nCloud Run\nGKE (k3s)"]
         end
 
         Router --> GRPC
@@ -187,31 +194,34 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Category | Services |
 |---|---|
 | Object and document storage | Cloud Storage (GCS), Firestore, Datastore |
-| Messaging | Pub/Sub, Managed Kafka |
-| Security and identity | Secret Manager, Cloud KMS, IAM |
+| Messaging and events | Pub/Sub, Managed Kafka, Eventarc |
+| Security and identity | Secret Manager, Cloud KMS, IAM, IAM Service Account Credentials, Firebase Auth (Identity Platform) |
 | Container orchestration | GKE (Kubernetes Engine) |
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
 | Analytics | BigQuery (Phase 1) |
 | Observability | Cloud Logging, Cloud Monitoring |
+| API management | Service Usage, Cloud Resource Manager (minimal `projects.get`) |
 
 <details>
 <summary>Detailed service notes</summary>
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4) |
-| **Pub/Sub** | gRPC | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update |
+| **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
 | **Secret Manager** | gRPC | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads |
 | **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
+| **IAM Service Account Credentials** | REST JSON | `generateAccessToken` (`iamcredentials.googleapis.com` v1) for service-account impersonation with scopes and lifetime; tokens are opaque emulator stubs |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **GKE (Kubernetes Engine)** | REST JSON | Clusters and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. Reached by SDKs/gcloud through host-based routing (`container.*`) or the `/container/v1` path prefix |
-| **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane by default, experimental Docker-backed invocation when enabled |
+| **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; Docker-backed invocation on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
+| **Eventarc** | REST JSON | Trigger CRUD (`eventarc.googleapis.com` v1); delivers CloudEvents from Pub/Sub publishes and GCS object events to Cloud Run and HTTP endpoint destinations |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 | **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
@@ -232,6 +242,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 | Managed Kafka | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
 | Cloud SQL for PostgreSQL | `postgres:15.18-alpine` (15–18) | PostgreSQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
+| GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
 
 Docker-backed services require the Docker socket:
 
@@ -251,6 +262,7 @@ docker run -d --name floci-gcp \
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES18_IMAGE` | `postgres:18.4-alpine` |
+| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` |
 
 ## Persistence and Storage Modes
 
@@ -487,6 +499,8 @@ gcloud secrets versions access latest --secret=my-secret
 
 Use `GenericContainer` to start an isolated floci-gcp instance directly from your tests. This avoids shared state, manual daemon setup, and port conflicts.
 
+The emulator also ships helper endpoints for test harnesses: `GET /health` (readiness, also at `/_floci-gcp/health`), `GET /_floci-gcp/info` (build and service info), and `POST /_floci-gcp/state/reset` (wipe all emulator state between tests without a restart).
+
 <details>
 <summary><strong>Java</strong></summary>
 
@@ -497,7 +511,7 @@ class PubSubIntegrationTest {
     @Container
     static GenericContainer<?> flociGcp = new GenericContainer<>("floci/floci-gcp:latest")
         .withExposedPorts(4588)
-        .waitingFor(Wait.forHttp("/_floci/health").forPort(4588));
+        .waitingFor(Wait.forHttp("/health").forPort(4588));
 
     static TopicAdminClient topicClient;
 
@@ -591,6 +605,7 @@ Google ships a separate emulator per service (`gcloud beta emulators pubsub | fi
 | `gcloud beta emulators datastore start` → `DATASTORE_EMULATOR_HOST=localhost:8081` | `DATASTORE_EMULATOR_HOST=localhost:4588` |
 | _(no official emulator)_ | `STORAGE_EMULATOR_HOST=http://localhost:4588` |
 | _(no official emulator)_ | `SECRET_MANAGER_EMULATOR_HOST=localhost:4588` |
+| Firebase Auth emulator → `FIREBASE_AUTH_EMULATOR_HOST=localhost:9099` | `FIREBASE_AUTH_EMULATOR_HOST=localhost:4588` |
 
 The GCP SDKs skip credential checks automatically when these variables are set, so no code changes are needed — one container replaces the fragmented per-service emulator processes.
 
@@ -612,7 +627,7 @@ Use `latest` for stable releases, a pinned version for reproducible builds, and 
 image: floci/floci-gcp:latest
 
 # Pinned release
-image: floci/floci-gcp:1.0.0
+image: floci/floci-gcp:0.5.0
 
 # Track main
 image: floci/floci-gcp:nightly
@@ -630,6 +645,9 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 | `FLOCI_GCP_HOSTNAME` | *(unset)* | Hostname to use in returned URLs when running inside Docker Compose |
 | `FLOCI_GCP_STORAGE_MODE` | `memory` | Storage mode: `memory` · `persistent` · `hybrid` · `wal` |
 | `FLOCI_GCP_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persisted state |
+| `FLOCI_GCP_SERVICES_DOCKER_NETWORK` | *(unset)* | Docker network that spawned sidecar containers join (set to your compose network) |
+| `FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE` | *(empty)* | Name prefix isolating sidecar containers and volumes when multiple instances share one Docker daemon |
+| `FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED` | `true` | Append public DNS resolvers in spawned containers; disable in offline or locked-down networks |
 
 Per-service enable flags (`FLOCI_GCP_SERVICES_<SERVICE>_ENABLED`), mock flags (`*_MOCK`), sidecar images, Docker networking, and DNS suffixes are documented in the full reference.
 
@@ -645,18 +663,35 @@ services:
     image: floci/floci-gcp:latest
     ports:
       - "4588:4588"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      # Attach spawned sidecars (Cloud Run, Cloud SQL, Kafka, GKE) to this network
+      FLOCI_GCP_SERVICES_DOCKER_NETWORK: my_project_default
+    networks:
+      my_project_default:
+        aliases:
+          - localhost.floci.io
+          - container.localhost.floci.io
 
   my-app:
     environment:
       PUBSUB_EMULATOR_HOST: floci-gcp:4588
       FIRESTORE_EMULATOR_HOST: floci-gcp:4588
       STORAGE_EMULATOR_HOST: http://floci-gcp:4588
+    networks:
+      - my_project_default
     depends_on:
       - floci-gcp
+
+networks:
+  my_project_default:
+    name: my_project_default
 ```
+
+The network aliases let other containers resolve virtual-hosted URLs (`*.localhost.floci.io`) that the emulator's embedded DNS serves for GCS and Cloud Run.
 
 ## Community
 

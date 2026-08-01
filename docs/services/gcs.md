@@ -199,6 +199,14 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, custom metadata)
 - `ComposeObject` (concatenate up to 32 source objects)
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
+- Batch requests (`/batch/storage/v1`)
+- Customer-supplied encryption keys (CSEK)
+
+Object names containing `/`, spaces, `+`, or percent-encoded sequences round-trip correctly — the emulator preserves URI-encoded names exactly as real GCS does.
+
+**Pub/Sub notifications (REST JSON):**
+
+- `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`) — object changes publish to the configured Pub/Sub topic in the local backend
 
 **Object ACLs (REST JSON):**
 
@@ -210,3 +218,5 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - `ifGenerationMatch` / `ifGenerationNotMatch`
 - `ifMetagenerationMatch` / `ifMetagenerationNotMatch`
 - Returns HTTP 412 on precondition failure
+- Enforced atomically on the write paths (insert, patch/update, resumable finalize) under a per-object lock, with a monotonic generation sequence — concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)
+- Not yet enforced on `delete`, `compose`, `copyTo`, and `rewriteTo` (params are accepted and ignored)

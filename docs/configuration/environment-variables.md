@@ -43,6 +43,8 @@ floci-gcp's embedded DNS server runs inside the container and resolves GCS virtu
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to floci-gcp's container IP |
+| `FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED` | `true` | Append public resolvers after the embedded DNS in every spawned container so sidecars (Cloud Run, GKE, Kafka) can resolve public hostnames. Disable in offline or locked-down networks where these resolvers are blocked |
+| `FLOCI_GCP_DNS_CONTAINER_FALLBACK_SERVERS` | `8.8.8.8,8.8.4.4` | The fallback resolvers appended when container fallback is enabled |
 
 ---
 
@@ -58,11 +60,14 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Datastore |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Secret Manager |
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | IAM |
+| `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED` | `true` | IAM Service Account Credentials (`generateAccessToken`) |
 | `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Cloud Logging |
 | `FLOCI_GCP_SERVICES_KMS_ENABLED` | `true` | Cloud KMS |
 | `FLOCI_GCP_SERVICES_MONITORING_ENABLED` | `true` | Cloud Monitoring |
 | `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Cloud Tasks |
 | `FLOCI_GCP_SERVICES_SCHEDULER_ENABLED` | `true` | Cloud Scheduler |
+| `FLOCI_GCP_SERVICES_SCHEDULER_INVOCATION_ENABLED` | `true` | Fire due Scheduler jobs in the background (disable for control plane only) |
+| `FLOCI_GCP_SERVICES_SCHEDULER_TICK_INTERVAL_SECONDS` | `10` | How often the Scheduler background dispatcher checks for due jobs |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Managed Service for Apache Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Cloud SQL for PostgreSQL |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode — no Docker-backed PostgreSQL data-plane instances |
@@ -75,6 +80,12 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` | `15s` | Maximum time to wait for best-effort Docker cleanup after an operation is already resolved |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Cloud Functions |
+| `FLOCI_GCP_SERVICES_GKE_ENABLED` | `true` | GKE (Kubernetes Engine) |
+| `FLOCI_GCP_SERVICES_BIGQUERY_ENABLED` | `true` | BigQuery |
+| `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Service Usage |
+| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager (minimal `projects.get`) |
+| `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
+| `FLOCI_GCP_SERVICES_EVENTARC_ENABLED` | `true` | Eventarc |
 
 ### Sidecar containers
 
@@ -113,7 +124,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT` | `6550` | Lowest host port assigned to a cluster's Kubernetes API server |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | Highest host port assigned to a cluster's Kubernetes API server |
 | `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | When `true`, leave spawned k3s containers running after floci-gcp shuts down |
-| `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl` (`host` for a reachable `host:port`) |
+| `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl`: `host` (a reachable `host:port`) or `network` (the container's network address, for emulator-in-Docker setups) |
 | `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
 
 ---
@@ -141,6 +152,9 @@ These variables control the Docker daemon used by floci-gcp's embedded DNS and s
 | `FLOCI_GCP_DOCKER_API_TIMEOUT` | `30s` | Per-call Docker API timeout before floci-gcp resets the Docker client |
 | `FLOCI_GCP_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers |
 | `FLOCI_GCP_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep |
+| `FLOCI_GCP_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Registry prefix applied to every sidecar image floci-gcp launches (e.g. an internal mirror like `mirror.example.com`) |
+
+Private-registry credentials (`floci-gcp.docker.registry-credentials`, a list of `server`/`username`/`password` entries) are best set in an `application.yml` — see the [application.yml reference](./advanced/application-yml.md).
 
 ---
 

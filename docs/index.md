@@ -15,7 +15,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | Service | Protocol | Notable features |
 |---|---|---|
 | **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, bucket IAM, conditional requests, versioning, pre-signed URLs |
-| **Pub/Sub** | gRPC | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek |
+| **Pub/Sub** | gRPC + REST | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, subscription filters |
 | **Firestore** | gRPC | Documents, collections, queries, field transforms, aggregation, transactions, real-time listeners |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation, transactions |
 | **Secret Manager** | gRPC | Secrets, versions, access, disable/enable/destroy, IAM bindings |
@@ -23,12 +23,19 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Cloud KMS** | gRPC + REST | Key rings, crypto keys, versions, symmetric encrypt/decrypt, asymmetric sign/decrypt, `GenerateRandomBytes` |
 | **IAM** | REST | Service accounts, RSA-2048 keys, policy bindings, SignBlob (V4 signed URLs) |
 | **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed or mock mode) |
-| **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; control plane by default, experimental Docker-backed invocation and GCS volume mounts when enabled |
+| **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; Docker-backed invocation on by default (mock flag for control plane only) |
 | **Cloud Functions** | REST | Function create/get/list/delete, upload URL generation, LRO polling; control plane only |
-| **Cloud SQL for PostgreSQL** | REST | Instance lifecycle (Postgres), LRO polling; control plane only |
+| **Cloud SQL for PostgreSQL** | REST | Instance lifecycle (Postgres), LRO polling; Docker-backed PostgreSQL data plane on by default (mock flag for control plane only) |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry, pause/resume/purge), tasks (HTTP/App Engine targets), `RunTask`; control plane only |
 | **Cloud Scheduler** | gRPC + REST | Cron jobs (Pub/Sub, HTTP, App Engine targets), `Pause`/`Resume`/`RunJob`, unix-cron + time zones; background dispatcher fires due jobs |
 | **Cloud Monitoring** | gRPC + REST | Metric descriptors, monitored resource descriptors, time series write (`CreateTimeSeries`) and read (`ListTimeSeries`) |
+| **GKE (Kubernetes Engine)** | REST | Cluster and operation APIs (`container.googleapis.com` v1); real k3s clusters via Docker or mock mode |
+| **BigQuery (Phase 1)** | REST | Datasets, tables, `insertAll`/`tabledata.list`, query jobs over a SQL subset |
+| **Service Usage** | REST | Enable/disable/list project services; backs Terraform `google_project_service` |
+| **Firebase Auth (Identity Platform)** | REST | Identity Toolkit v1 sign-up/sign-in, emulator JWTs, admin user CRUD |
+| **Eventarc** | REST | Trigger CRUD; delivers CloudEvents from Pub/Sub and GCS events to Cloud Run and HTTP endpoints |
+| **IAM Credentials** | REST | `generateAccessToken` for service-account impersonation (shape-only stub tokens) |
+| **Resource Manager** | REST | Minimal `projects.get` for provider project lookups |
 
 ## Why floci-gcp?
 
@@ -52,9 +59,13 @@ services:
       - "4588:4588"
     volumes:
       - ./data:/app/data
+      # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE)
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      # Keep state across restarts in the mounted ./data volume
+      FLOCI_GCP_STORAGE_MODE: hybrid
 ```
 
 ```bash

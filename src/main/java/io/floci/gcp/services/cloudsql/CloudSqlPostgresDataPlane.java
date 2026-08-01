@@ -76,7 +76,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
 
         String internalMountPath = getInternalMountPath(stringValue(updated.get("databaseVersion")));
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
                     "cloudsql", volumeId, fallbackId, internalMountPath);
         } else {
             String hostDataPath = Path.of(config.storage().hostPersistentPath(), "cloudsql",
@@ -99,7 +99,7 @@ public class CloudSqlPostgresDataPlane implements CloudSqlDataPlane {
                 lifecycleManager.stopAndRemove(containerId, null);
             }
             if (newVolume && ContainerStorageHelper.isNamedVolumeMode(config)) {
-                lifecycleManager.removeVolume(ContainerStorageHelper.resourceName("cloudsql", volumeId, fallbackId));
+                lifecycleManager.removeVolume(ContainerStorageHelper.resourceName(config, "cloudsql", volumeId, fallbackId));
             }
             throw e;
         }

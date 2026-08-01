@@ -70,7 +70,7 @@ public class RedpandaManager {
         }
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
                     "kafka", cluster.getVolumeId(), clusterId(cluster.getName()),
                     "/var/lib/redpanda/data");
         } else {

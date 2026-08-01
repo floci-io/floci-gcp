@@ -317,6 +317,12 @@ public interface EmulatorConfig {
         Duration apiTimeout();
 
         Optional<String> dockerConfigPath();
+
+        /**
+         * Optional namespace inserted into Floci-managed sidecar container and volume names.
+         * Useful when multiple Floci processes share one Docker daemon.
+         */
+        Optional<String> resourceNamespace();
     }
 
     interface InitHooksConfig {

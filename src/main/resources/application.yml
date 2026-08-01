@@ -120,6 +120,7 @@ floci-gcp:
     log-max-file: "3"
     docker-host: "unix:///var/run/docker.sock"
     api-timeout: 30s
+    resource-namespace: ""          # FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE; scopes sidecar container/volume names
   init-hooks:
     shell-executable: /bin/sh
     shutdown-grace-period-seconds: 2

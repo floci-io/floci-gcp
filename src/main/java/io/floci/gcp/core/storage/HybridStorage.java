@@ -24,6 +24,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+/**
+ * Hybrid storage: in-memory reads with async flush to disk.
+ * Writes go to memory immediately, then flushed to disk periodically.
+ */
 public class HybridStorage<K, V> implements StorageBackend<K, V> {
 
     private static final Logger LOG = Logger.getLogger(HybridStorage.class);
@@ -89,6 +93,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     @Override
     public void load() {
         if (!Files.exists(filePath)) {
+            LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
             return;
         }
         try {
@@ -132,6 +137,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
             Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
             objectMapper.writeValue(tempFile.toFile(), store);
             Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            LOG.debugv("Flushed {0} entries to {1}", store.size(), filePath);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to persist data to {0}", filePath);
             dirty.set(true);

@@ -1,33 +1,48 @@
 package io.floci.gcp.lifecycle;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.Resettable;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.inithook.InitializationHook;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
 @Path("/_floci-gcp")
 @Produces(MediaType.APPLICATION_JSON)
 public class EmulatorInfoController {
 
+    private static final Logger LOG = Logger.getLogger(EmulatorInfoController.class);
+
     private final ServiceRegistry serviceRegistry;
     private final InitLifecycleState initLifecycleState;
     private final EmulatorConfig config;
+    private final StorageFactory storageFactory;
+    private final Instance<Resettable> resettables;
 
     @Inject
     public EmulatorInfoController(ServiceRegistry serviceRegistry,
                                   InitLifecycleState initLifecycleState,
-                                  EmulatorConfig config) {
+                                  EmulatorConfig config,
+                                  StorageFactory storageFactory,
+                                  Instance<Resettable> resettables) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.config = config;
+        this.storageFactory = storageFactory;
+        this.resettables = resettables;
     }
 
     @GET
@@ -68,4 +83,26 @@ public class EmulatorInfoController {
         body.put("scripts", scripts);
         return Response.ok(body).build();
     }
+
+    @POST
+    @Path("/state/reset")
+    public Response reset() {
+        performReset();
+        return Response.ok(Map.of("status", "OK")).build();
+    }
+
+    @POST
+    @Path("/state/nuke")
+    public Response nuke() {
+        return reset();
+    }
+
+    private void performReset() {
+        for (Resettable r : resettables) {
+            r.clear();
+        }
+        storageFactory.clearAll();
+    }
+
+    /** Deletes everything under the persistent data root, keeping the root directory itself. */
 }

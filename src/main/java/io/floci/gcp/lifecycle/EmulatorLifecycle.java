@@ -1,7 +1,9 @@
 package io.floci.gcp.lifecycle;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.storage.PersistentPathValidator;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.inithook.InitializationHook;
 import io.floci.gcp.lifecycle.inithook.InitializationHooksRunner;
@@ -13,6 +15,7 @@ import io.quarkus.vertx.http.HttpServerStart;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -33,16 +36,22 @@ public class EmulatorLifecycle {
     private final EmulatorConfig config;
     private final InitializationHooksRunner hooksRunner;
     private final InitLifecycleState initLifecycleState;
+    private final PersistentPathValidator persistentPathValidator;
+    private final Instance<ContainerTeardown> containerTeardowns;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config, InitializationHooksRunner hooksRunner,
-                             InitLifecycleState initLifecycleState) {
+                             InitLifecycleState initLifecycleState,
+                             PersistentPathValidator persistentPathValidator,
+                             Instance<ContainerTeardown> containerTeardowns) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.hooksRunner = hooksRunner;
         this.initLifecycleState = initLifecycleState;
+        this.persistentPathValidator = persistentPathValidator;
+        this.containerTeardowns = containerTeardowns;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -60,6 +69,8 @@ public class EmulatorLifecycle {
             throw new IllegalStateException("Boot hook failed", e);
         }
         initLifecycleState.markBootCompleted();
+
+        persistentPathValidator.validateAtBoot();
 
         storageFactory.loadAll();
 
@@ -116,6 +127,23 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        // Flush persisted state to disk FIRST, before any slow container teardown below.
+        // Stopping Docker sidecars can block long enough to exhaust the SIGTERM grace window
+        // and trigger SIGKILL; if the flush ran last it would be skipped and in-memory (hybrid)
+        // data would be lost on an otherwise-graceful shutdown. shutdownAll() still runs at the
+        // end to stop the flush schedulers and capture any shutdown-time writes.
+        storageFactory.flushAll();
+        // Centralized teardown for process-bound containers (Cloud Run instances, Cloud
+        // Functions workers, in-flight build/job containers). Runs before shutdownAll() so any
+        // state written while stopping is captured by the final flush.
+        for (ContainerTeardown teardown : containerTeardowns) {
+            try {
+                teardown.stopManagedContainers();
+            } catch (Exception e) {
+                LOG.warnv("Container teardown failed for {0}: {1}",
+                        teardown.getClass().getSimpleName(), e.getMessage());
+            }
+        }
         storageFactory.shutdownAll();
         LOG.info("=== floci-gcp Stopped ===");
     }

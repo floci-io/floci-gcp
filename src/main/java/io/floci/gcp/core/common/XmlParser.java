@@ -1,5 +1,7 @@
 package io.floci.gcp.core.common;
 
+import org.jboss.logging.Logger;
+
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -15,6 +17,8 @@ import java.util.Map;
  * (multipart uploads, bucket configurations, etc.).
  */
 public final class XmlParser {
+
+    private static final Logger LOG = Logger.getLogger(XmlParser.class);
 
     private static final XMLInputFactory FACTORY;
 
@@ -96,7 +100,8 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {
+        } catch (XMLStreamException e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
         }
         return result;
     }
@@ -120,7 +125,8 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {
+        } catch (XMLStreamException e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
         }
         return result;
     }

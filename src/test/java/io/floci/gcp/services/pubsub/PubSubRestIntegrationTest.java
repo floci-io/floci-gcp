@@ -248,6 +248,75 @@ class PubSubRestIntegrationTest {
     }
 
     @Test
+    void patchingTheFilterIsRejectedWithInvalidArgument() {
+        String project = "pubsub-rest-filter-immutable-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/events").then().statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/%s/topics/events",
+                          "filter": "attributes.event_type = \\"a\\""
+                        }
+                        """.formatted(project))
+                .when().put(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "filter")
+                .body("{\"filter\": \"attributes.event_type = \\\"b\\\"\"}")
+                .when().patch(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "filter")
+                .body("{\"filter\": \"attributes.event_type = \\\"a\\\"\"}")
+                .when().patch(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        given()
+                .when().get(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(200)
+                .body("filter", equalTo("attributes.event_type = \"a\""));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "labels")
+                .body("{\"labels\": {\"env\": \"local\"}}")
+                .when().patch(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(200)
+                .body("labels.env", equalTo("local"))
+                .body("filter", equalTo("attributes.event_type = \"a\""));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "labels")
+                .body("""
+                        {
+                          "labels": {"env": "echoed"},
+                          "filter": "attributes.event_type = \\"ignored\\""
+                        }
+                        """)
+                .when().patch(base + "/subscriptions/immutable")
+                .then()
+                .statusCode(200)
+                .body("labels.env", equalTo("echoed"))
+                .body("filter", equalTo("attributes.event_type = \"a\""));
+    }
+
+    @Test
     void unparseableFilterIsRejectedWithInvalidArgument() {
         String project = "pubsub-rest-filter-invalid-it";
         String base = "/v1/projects/" + project;

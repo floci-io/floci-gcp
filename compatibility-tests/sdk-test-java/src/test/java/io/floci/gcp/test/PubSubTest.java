@@ -13,6 +13,7 @@ import com.google.cloud.pubsub.v1.TopicAdminSettings;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
 import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.FieldMask;
 import com.google.pubsub.v1.AcknowledgeRequest;
 import com.google.pubsub.v1.DetachSubscriptionRequest;
 import com.google.pubsub.v1.ProjectSubscriptionName;
@@ -24,6 +25,7 @@ import com.google.pubsub.v1.PushConfig;
 import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.Topic;
+import com.google.pubsub.v1.UpdateSubscriptionRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import org.junit.jupiter.api.AfterAll;
@@ -498,6 +500,64 @@ class PubSubTest {
                     .setFilter("this is not a filter (((")
                     .build()))
                     .isInstanceOf(InvalidArgumentException.class);
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(17)
+    void filterCannotBeModifiedAfterCreation() {
+        String topicId = TestFixtures.uniqueName("immutable-filter-topic");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName =
+                ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("immutable-filter-sub"));
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+                .setName(subName.toString())
+                .setTopic(topicName.toString())
+                .setAckDeadlineSeconds(10)
+                .setFilter("attributes.event_type = \"a\"")
+                .build());
+
+        try {
+            assertThatThrownBy(() -> subscriptionAdminClient.updateSubscription(
+                    UpdateSubscriptionRequest.newBuilder()
+                            .setSubscription(Subscription.newBuilder()
+                                    .setName(subName.toString())
+                                    .setFilter("attributes.event_type = \"b\"")
+                                    .build())
+                            .setUpdateMask(FieldMask.newBuilder().addPaths("filter").build())
+                            .build()))
+                    .isInstanceOf(InvalidArgumentException.class);
+
+            assertThatThrownBy(() -> subscriptionAdminClient.updateSubscription(
+                    UpdateSubscriptionRequest.newBuilder()
+                            .setSubscription(Subscription.newBuilder()
+                                    .setName(subName.toString())
+                                    .setFilter("attributes.event_type = \"a\"")
+                                    .build())
+                            .setUpdateMask(FieldMask.newBuilder().addPaths("filter").build())
+                            .build()))
+                    .as("GCP rejects filter in the update mask even when the value is unchanged")
+                    .isInstanceOf(InvalidArgumentException.class);
+
+            assertThat(subscriptionAdminClient.getSubscription(subName).getFilter())
+                    .isEqualTo("attributes.event_type = \"a\"");
+
+            Subscription relabelled = subscriptionAdminClient.updateSubscription(
+                    UpdateSubscriptionRequest.newBuilder()
+                            .setSubscription(Subscription.newBuilder()
+                                    .setName(subName.toString())
+                                    .putLabels("env", "local")
+                                    .build())
+                            .setUpdateMask(FieldMask.newBuilder().addPaths("labels").build())
+                            .build());
+
+            assertThat(relabelled.getLabelsMap()).containsEntry("env", "local");
+            assertThat(relabelled.getFilter()).isEqualTo("attributes.event_type = \"a\"");
         } finally {
             try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
             try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}

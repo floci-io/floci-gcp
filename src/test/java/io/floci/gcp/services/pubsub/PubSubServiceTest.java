@@ -193,32 +193,128 @@ class PubSubServiceTest {
     }
 
     @Test
-    void updateSubscriptionRejectsUnparseableFilter() {
+    void updateSubscriptionRejectsChangingTheFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null,
+                        "attributes.event_type = \"b\"", null, null, null, null, null, null, null, null,
+                        List.of("filter")));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("attributes.event_type = \"a\"",
+                service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionRejectsRemovingTheFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null,
+                        "", null, null, null, null, null, null, null, null, List.of("filter")));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("attributes.event_type = \"a\"",
+                service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionRejectsAddingAFilterToAnUnfilteredSubscription() {
         service.createTopic("projects/p1/topics/t1");
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
 
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null,
-                        "attributes.name = ", null, null, null, null, null, null, null, null,
+                        "attributes.event_type = \"a\"", null, null, null, null, null, null, null, null,
                         List.of("filter")));
         assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
         assertNull(service.getSubscription("projects/p1/subscriptions/s1").getFilter());
     }
 
     @Test
-    void updateSubscriptionViaFieldMaskRejectsUnparseableFilter() {
+    void updateSubscriptionRejectsTheFilterInTheMaskEvenWhenTheValueIsUnchanged() {
         service.createTopic("projects/p1/topics/t1");
-        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription("projects/p1/subscriptions/s1", 0,
+                        Map.of("env", "local"), null, null, "attributes.event_type = \"a\"", null, null,
+                        null, null, null, null, null, null, List.of("filter", "labels")));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+
+        StoredSubscription unchanged = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals("attributes.event_type = \"a\"", unchanged.getFilter());
+        assertNull(unchanged.getLabels());
+    }
+
+    @Test
+    void updateSubscriptionIgnoresAFilterOutsideTheUpdateMask() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        StoredSubscription updated = service.updateSubscription("projects/p1/subscriptions/s1", 0,
+                Map.of("env", "local"), null, null, "attributes.event_type = \"ignored\"", null, null,
+                null, null, null, null, null, null, List.of("labels"));
+
+        assertEquals("local", updated.getLabels().get("env"));
+        assertEquals("attributes.event_type = \"a\"", updated.getFilter());
+    }
+
+    @Test
+    void updateSubscriptionWithoutUpdateMaskPreservesTheFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        StoredSubscription updated = service.updateSubscription("projects/p1/subscriptions/s1", 0,
+                Map.of("env", "local"), null, null, null, null, null, null, null, null, null, null, null,
+                null);
+
+        assertEquals("attributes.event_type = \"a\"", updated.getFilter());
+    }
+
+    @Test
+    void updateSubscriptionViaFieldMaskRejectsChangingTheFilter() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
 
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.updateSubscription(
                         com.google.pubsub.v1.Subscription.newBuilder()
                                 .setName("projects/p1/subscriptions/s1")
-                                .setFilter("attributes.name = ")
+                                .setFilter("attributes.event_type = \"b\"")
                                 .build(),
                         com.google.protobuf.FieldMask.newBuilder().addPaths("filter").build()));
         assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
-        assertNull(service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+        assertEquals("attributes.event_type = \"a\"",
+                service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void updateSubscriptionViaFieldMaskRejectsTheFilterInTheMaskEvenWhenTheValueIsUnchanged() {
+        service.createTopic("projects/p1/topics/t1");
+        createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
+                "attributes.event_type = \"a\"");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateSubscription(
+                        com.google.pubsub.v1.Subscription.newBuilder()
+                                .setName("projects/p1/subscriptions/s1")
+                                .setFilter("attributes.event_type = \"a\"")
+                                .setAckDeadlineSeconds(30)
+                                .build(),
+                        com.google.protobuf.FieldMask.newBuilder()
+                                .addPaths("filter")
+                                .addPaths("ack_deadline_seconds")
+                                .build()));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals(10, service.getSubscription("projects/p1/subscriptions/s1").getAckDeadlineSeconds());
     }
 
     @Test
@@ -228,8 +324,8 @@ class PubSubServiceTest {
 
         assertThrows(GcpException.class,
                 () -> service.updateSubscription("projects/p1/subscriptions/s1", 30,
-                        Map.of("env", "local"), null, null, "attributes.name = ", null, null, null,
-                        null, null, null, null, null,
+                        Map.of("env", "local"), null, null, "attributes.event_type = \"a\"", null, null,
+                        null, null, null, null, null, null,
                         List.of("ackDeadlineSeconds", "labels", "filter")));
 
         StoredSubscription unchanged = service.getSubscription("projects/p1/subscriptions/s1");
@@ -249,7 +345,7 @@ class PubSubServiceTest {
                                 .setName("projects/p1/subscriptions/s1")
                                 .setAckDeadlineSeconds(30)
                                 .putLabels("env", "local")
-                                .setFilter("attributes.name = ")
+                                .setFilter("attributes.event_type = \"a\"")
                                 .build(),
                         com.google.protobuf.FieldMask.newBuilder()
                                 .addPaths("ack_deadline_seconds")

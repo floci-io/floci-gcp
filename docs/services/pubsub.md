@@ -207,8 +207,20 @@ Rules that mirror GCP:
   `attributes:"みんな"`. Escapes outside a string literal are invalid.
 - A filter must be at most **256 bytes**.
 
-An unparseable filter, or one over the byte limit, is rejected with `INVALID_ARGUMENT` when the
-subscription is created or updated, rather than being accepted and silently ignored.
+An unparseable filter, or one over the byte limit, is rejected with `INVALID_ARGUMENT` at creation
+time, rather than being accepted and silently ignored.
+
+### The filter is immutable
+
+As in GCP, the filter is a property of the subscription that cannot change after creation. A
+`subscriptions.patch` that names `filter` in its update mask is rejected with `INVALID_ARGUMENT`,
+whatever value it carries — GCP rejects on the presence of the field in the mask, not on whether the
+value differs, so restating the current filter fails too. A patch that does not name `filter` in its
+mask succeeds and leaves the filter untouched, even when the request body carries one — the update
+mask governs, so clients that echo a whole subscription back keep working.
+
+To change a filter, follow the same path as in GCP: snapshot the subscription, create a new one with
+the desired filter, `Seek` to the snapshot, move subscribers over, then delete the old subscription.
 
 ## Push Subscriptions
 

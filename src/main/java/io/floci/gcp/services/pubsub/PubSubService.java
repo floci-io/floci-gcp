@@ -33,11 +33,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class PubSubService {
 
     private static final Logger LOG = Logger.getLogger(PubSubService.class);
+
+    private static final Predicate<Map<String, String>> NEVER_MATCHES = attributes -> false;
 
     private final StorageBackend<String, StoredTopic> topicStore;
     private final StorageBackend<String, StoredSubscription> subStore;
@@ -46,6 +49,7 @@ public class PubSubService {
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<StoredMessage>> queues = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, StoredMessage>> delivered = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<MessageListener>> listeners = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Predicate<Map<String, String>>> compiledFilters = new ConcurrentHashMap<>();
     private final AtomicLong messageIdCounter = new AtomicLong(0);
 
     private final ServiceRegistry serviceRegistry;
@@ -172,8 +176,13 @@ public class PubSubService {
     // ── Subscriptions ──────────────────────────────────────────────────────────
 
     public StoredSubscription createSubscription(String name, String topicName, int ackDeadlineSeconds) {
+        return createSubscription(name, topicName, ackDeadlineSeconds, null);
+    }
+
+    public StoredSubscription createSubscription(String name, String topicName, int ackDeadlineSeconds,
+            String filter) {
         return createSubscription(name, topicName, ackDeadlineSeconds, null, false, null,
-                null, null, null, null, null, null, 0, false, false);
+                filter, null, null, null, null, null, 0, false, false);
     }
 
     public StoredSubscription createSubscription(String name,
@@ -200,6 +209,7 @@ public class PubSubService {
             LOG.warnf("createSubscription failed: topic not found topic=%s", topicName);
             throw GcpException.notFound("Topic not found: " + topicName);
         }
+        SubscriptionFilter.validate(filter);
         int deadline = ackDeadlineSeconds > 0 ? ackDeadlineSeconds : 10;
         StoredSubscription sub = new StoredSubscription(name, topicName, deadline);
         sub.setLabels(emptyToNull(labels));
@@ -239,6 +249,9 @@ public class PubSubService {
             com.google.protobuf.FieldMask updateMask) {
         LOG.infof("updateSubscription name=%s", subProto.getName());
         StoredSubscription stored = getSubscription(subProto.getName());
+        if (updateMask.getPathsList().contains("filter")) {
+            SubscriptionFilter.validate(subProto.getFilter());
+        }
         for (String path : updateMask.getPathsList()) {
             switch (path) {
                 case "ack_deadline_seconds" -> stored.setAckDeadlineSeconds(subProto.getAckDeadlineSeconds());
@@ -289,6 +302,10 @@ public class PubSubService {
         LOG.infof("updateSubscription name=%s", name);
         StoredSubscription stored = getSubscription(name);
         boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
+
+        if (replaceAll || masked(updateMaskPaths, "filter")) {
+            SubscriptionFilter.validate(filter);
+        }
 
         if (replaceAll || masked(updateMaskPaths, "ack_deadline_seconds")) {
             if (ackDeadlineSeconds > 0) {
@@ -403,10 +420,14 @@ public class PubSubService {
                 stored.setAttributes(msg.getAttributesMap());
             }
 
+            Map<String, String> attributes = stored.getAttributes() == null
+                    ? Map.of() : stored.getAttributes();
+
             int fanOut = 0;
             for (var entry : subStore.keys()) {
                 StoredSubscription sub = subStore.get(entry).orElse(null);
-                if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())) {
+                if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())
+                        && matchesFilter(sub, attributes)) {
                     queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
                     notifyListeners(entry);
                     fanOut++;
@@ -422,6 +443,24 @@ public class PubSubService {
             }
         }
         return messageIds;
+    }
+
+    private boolean matchesFilter(StoredSubscription sub, Map<String, String> attributes) {
+        String filter = sub.getFilter();
+        if (filter == null || filter.isBlank()) {
+            return true;
+        }
+        return compiledFilters.computeIfAbsent(filter, PubSubService::compileFilter).test(attributes);
+    }
+
+    private static Predicate<Map<String, String>> compileFilter(String filter) {
+        try {
+            return SubscriptionFilter.parse(filter);
+        } catch (GcpException e) {
+            LOG.warnf("unparseable subscription filter, no message will match it filter=%s error=%s",
+                    filter, e.getMessage());
+            return NEVER_MATCHES;
+        }
     }
 
     // ── Pull ───────────────────────────────────────────────────────────────────

@@ -159,6 +159,57 @@ The REST surface supports topic and subscription create/read/list/update/delete,
         print(msg.message.data.decode())
     ```
 
+## Subscription Filters
+
+A subscription can declare a `filter` so it only receives messages whose attributes match it.
+Non-matching messages are never delivered to that subscription — as in GCP, which acknowledges
+them automatically on your behalf. Subscriptions without a filter receive every message published
+to the topic.
+
+```java
+subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+    .setName(SubscriptionName.of("floci-local", "invoices").toString())
+    .setTopic(TopicName.of("floci-local", "events").toString())
+    .setAckDeadlineSeconds(10)
+    .setFilter("attributes.event_type = \"ocr-invoice\"")
+    .build());
+```
+
+```python
+subscriber.create_subscription(request={
+    "name": sub_path,
+    "topic": topic_path,
+    "filter": 'attributes.event_type = "ocr-invoice"',
+})
+```
+
+### Supported syntax
+
+| Form | Example | Matches |
+|---|---|---|
+| Attribute exists | `attributes:name` | messages that carry a `name` attribute |
+| Quoted key | `attributes:"iana.org/language_tag"` | keys with characters other than hyphens, underscores or alphanumerics |
+| Equality | `attributes.name = "com"` | `name` is exactly `com` |
+| Inequality | `attributes.name != "com"` | `name` differs from `com`, **including when the attribute is absent** |
+| Prefix | `hasPrefix(attributes.name, "co")` | `name` starts with `co` |
+| Conjunction | `attributes:a AND attributes.b = "1"` | both operands match |
+| Disjunction | `attributes.a = "1" OR attributes.a = "2"` | either operand matches |
+| Negation | `NOT attributes:a` / `-attributes:a` | operand does not match |
+
+Rules that mirror GCP:
+
+- Keys and values are **case-sensitive**; `AND`, `OR` and `NOT` must be **uppercase**.
+- `NOT` has the highest precedence; `-` is a unary alias for it.
+- `AND` and `OR` **cannot be combined without parentheses**. `a AND b OR c` is a syntax error;
+  write `a AND (b OR c)`.
+- `hasPrefix` is the only function — there is no regular-expression support.
+- String literals may contain unicode, hexadecimal and octal escape sequences, for example
+  `attributes:"みんな"`. Escapes outside a string literal are invalid.
+- A filter must be at most **256 bytes**.
+
+An unparseable filter, or one over the byte limit, is rejected with `INVALID_ARGUMENT` when the
+subscription is created or updated, rather than being accepted and silently ignored.
+
 ## Push Subscriptions
 
 floci-gcp supports push subscriptions — it delivers messages to an HTTP endpoint you configure:

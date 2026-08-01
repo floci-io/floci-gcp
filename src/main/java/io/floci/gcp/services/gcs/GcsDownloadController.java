@@ -29,15 +29,14 @@ public class GcsDownloadController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
-            byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
-            GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
+            byte[] data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
+            GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath, generation);
             return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
         }
-        byte[] data = service.getObjectData(bucket, objectName, customerEncryption);
-        GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
+        byte[] data = service.getObjectData(bucket, objectPath, customerEncryption);
+        GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath);
         return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
     }
 }

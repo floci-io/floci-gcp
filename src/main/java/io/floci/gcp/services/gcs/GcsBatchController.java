@@ -171,10 +171,7 @@ public class GcsBatchController {
 
     private SubResponse dispatch(SubRequest req) {
         try {
-            String path = req.path();
-            URI uri = path.startsWith("http://") || path.startsWith("https://")
-                    ? rewriteToLocalhost(URI.create(path))
-                    : URI.create("http://localhost:" + config.port() + path);
+            URI uri = rewriteToLocalhost(URI.create(req.path()));
 
             HttpRequest.BodyPublisher bodyPublisher = req.body().isEmpty()
                     ? HttpRequest.BodyPublishers.noBody()
@@ -212,14 +209,8 @@ public class GcsBatchController {
     }
 
     private URI rewriteToLocalhost(URI original) {
-        // Build from the raw path/query so already-percent-encoded segments (e.g. %2F in an
-        // object name) are preserved. The multi-argument URI constructor treats its path
-        // argument as *decoded* and re-encodes the '%', turning %2F into %252F — which makes
-        // the dispatched sub-request arrive double-encoded and 404 for names containing
-        // reserved characters (slashes, etc.).
-        String rawQuery = original.getRawQuery();
-        return URI.create("http://localhost:" + config.port() + original.getRawPath()
-                + (rawQuery != null ? "?" + rawQuery : ""));
+        String query = original.getRawQuery() == null ? "" : "?" + original.getRawQuery();
+        return URI.create("http://localhost:" + config.port() + original.getRawPath() + query);
     }
 
     private void appendResponsePart(StringBuilder sb, String boundary, int index,

@@ -25,12 +25,14 @@ import java.util.stream.Collectors;
 /**
  * Write-Ahead Log storage: in-memory reads with append-only binary WAL for durability.
  * Periodic compaction writes a full snapshot and truncates the WAL.
+ * On startup: load snapshot, then replay WAL entries after snapshot.
  *
  * Binary WAL entry format:
  *   PUT:    [0x01] [4-byte key length] [key bytes] [4-byte value length] [value bytes]
  *   DELETE: [0x02] [4-byte key length] [key bytes]
  *
- * Key/value bytes are CBOR-serialized (compact binary). Snapshots use indented JSON.
+ * Key and value bytes are serialized via Jackson CBOR (compact binary format).
+ * Snapshot files use indented JSON for debuggability.
  */
 public class WalStorage<K, V> implements StorageBackend<K, V> {
 
@@ -114,7 +116,9 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void flush() { compact(); }
+    public void flush() {
+        compact();
+    }
 
     @Override
     public void load() {
@@ -128,10 +132,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
                 LOG.errorv(e, "Failed to load snapshot from {0}", snapshotPath);
             }
         }
+
         if (Files.exists(walPath)) {
             int replayed = replayWal();
             LOG.infov("Replayed {0} WAL entries from {1}", replayed, walPath);
         }
+
         openWalWriter();
     }
 
@@ -175,9 +181,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
             snapshotMapper.writeValue(tempFile.toFile(), store);
             Files.move(tempFile, snapshotPath, StandardCopyOption.REPLACE_EXISTING,
                     StandardCopyOption.ATOMIC_MOVE);
+
             closeWalWriter();
             Files.deleteIfExists(walPath);
             openWalWriter();
+
+            LOG.debugv("Compacted {0} entries to snapshot, WAL truncated", store.size());
         } catch (IOException e) {
             LOG.errorv(e, "Failed to compact WAL storage");
         } finally {
@@ -232,14 +241,16 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
                 } catch (EOFException e) {
                     break;
                 }
+
                 int keyLen = in.readInt();
                 byte[] keyBytes = in.readNBytes(keyLen);
-                if (keyBytes.length < keyLen) break;
+                if (keyBytes.length < keyLen) break; // truncated entry
 
                 if (op == OP_PUT) {
                     int valueLen = in.readInt();
                     byte[] valueBytes = in.readNBytes(valueLen);
-                    if (valueBytes.length < valueLen) break;
+                    if (valueBytes.length < valueLen) break; // truncated entry
+
                     K key = (K) walMapper.readValue(keyBytes, Object.class);
                     V value = walMapper.readValue(valueBytes,
                             walMapper.constructType(typeReference.getType()).getContentType());
@@ -255,7 +266,8 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
                 }
             }
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to replay WAL from {0} (replayed {1} entries)", walPath, replayed);
+            LOG.errorv(e, "Failed to replay WAL from {0} (replayed {1} entries before error)",
+                    walPath, replayed);
         }
         return replayed;
     }
@@ -263,8 +275,8 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     private void openWalWriter() {
         try {
             Files.createDirectories(walPath.getParent());
-            walWriter = new DataOutputStream(new BufferedOutputStream(
-                    Files.newOutputStream(walPath,
+            walWriter = new DataOutputStream(
+                    new BufferedOutputStream(Files.newOutputStream(walPath,
                             java.nio.file.StandardOpenOption.CREATE,
                             java.nio.file.StandardOpenOption.APPEND)));
         } catch (IOException e) {

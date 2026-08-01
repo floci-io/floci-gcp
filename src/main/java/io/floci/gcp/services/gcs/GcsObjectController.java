@@ -93,8 +93,7 @@ public class GcsObjectController {
     @Path("/{object: .+}/acl")
     public Response listObjectAcls(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
-        List<StoredAcl> items = service.listObjectAcls(bucket, objectName);
+        List<StoredAcl> items = service.listObjectAcls(bucket, objectPath);
         return Response.ok(Map.of("kind", "storage#objectAccessControls", "items", items)).build();
     }
 
@@ -103,10 +102,9 @@ public class GcsObjectController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response insertObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath, Map<String, Object> body) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
         String entity = body != null ? (String) body.get("entity") : null;
         String role = body != null ? (String) body.get("role") : "READER";
-        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, entity, role);
+        StoredAcl acl = service.upsertObjectAcl(bucket, objectPath, entity, role);
         return Response.ok(acl).build();
     }
 
@@ -115,8 +113,7 @@ public class GcsObjectController {
     public Response getObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
-        return Response.ok(service.getObjectAcl(bucket, objectName, entity)).build();
+        return Response.ok(service.getObjectAcl(bucket, objectPath, entity)).build();
     }
 
     @PUT
@@ -125,9 +122,8 @@ public class GcsObjectController {
     public Response updateObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity, Map<String, Object> body) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
         String role = body != null ? (String) body.get("role") : "READER";
-        StoredAcl acl = service.upsertObjectAcl(bucket, objectName, entity, role);
+        StoredAcl acl = service.upsertObjectAcl(bucket, objectPath, entity, role);
         return Response.ok(acl).build();
     }
 
@@ -136,8 +132,7 @@ public class GcsObjectController {
     public Response deleteObjectAcl(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @PathParam("entity") String entity) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
-        service.deleteObjectAcl(bucket, objectName, entity);
+        service.deleteObjectAcl(bucket, objectPath, entity);
         return Response.noContent().build();
     }
 
@@ -149,22 +144,21 @@ public class GcsObjectController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             if ("media".equals(alt)) {
-                byte[] data = service.getObjectData(bucket, objectName, generation, customerEncryption);
-                GcsObjectMeta meta = service.getObjectMeta(bucket, objectName, generation);
+                byte[] data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
+                GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath, generation);
                 return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
             }
-            return Response.ok(service.getObjectMeta(bucket, objectName, generation)).build();
+            return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();
         }
         if ("media".equals(alt)) {
-            byte[] data = service.getObjectData(bucket, objectName, customerEncryption);
-            GcsObjectMeta meta = service.getObjectMeta(bucket, objectName);
+            byte[] data = service.getObjectData(bucket, objectPath, customerEncryption);
+            GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath);
             return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
         }
-        return Response.ok(service.getObjectMeta(bucket, objectName)).build();
+        return Response.ok(service.getObjectMeta(bucket, objectPath)).build();
     }
 
     @PATCH
@@ -177,8 +171,7 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
-        return Response.ok(service.patchObject(bucket, objectName, body,
+        return Response.ok(service.patchObject(bucket, objectPath, body,
                 preconditions(ifGenerationMatch, ifGenerationNotMatch,
                         ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
@@ -193,8 +186,7 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
-        return Response.ok(service.patchObject(bucket, objectName, body,
+        return Response.ok(service.patchObject(bucket, objectPath, body,
                 preconditions(ifGenerationMatch, ifGenerationNotMatch,
                         ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
@@ -211,8 +203,7 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            String objectName = GcsObjectNames.fromPathParam(objectPath);
-            return Response.ok(service.patchObject(bucket, objectName, body,
+            return Response.ok(service.patchObject(bucket, objectPath, body,
                     preconditions(ifGenerationMatch, ifGenerationNotMatch,
                             ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
         }
@@ -228,15 +219,14 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch) {
-        String objectName = GcsObjectNames.fromPathParam(objectPath);
         if (generation != null) {
-            service.deleteObjectVersion(bucket, objectName, generation);
+            service.deleteObjectVersion(bucket, objectPath, generation);
             return Response.noContent().build();
         }
-        if (!service.deleteObject(bucket, objectName,
+        if (!service.deleteObject(bucket, objectPath,
                 preconditions(ifGenerationMatch, ifGenerationNotMatch,
                         ifMetagenerationMatch, ifMetagenerationNotMatch))) {
-            throw GcpException.notFound("Object not found: " + objectName);
+            throw GcpException.notFound("Object not found: " + objectPath);
         }
         return Response.noContent().build();
     }
@@ -247,7 +237,6 @@ public class GcsObjectController {
     public Response composeObject(@PathParam("bucket") String bucket,
             @PathParam("destObject") String destObjectPath,
             @Context HttpHeaders headers, Map<String, Object> body) {
-        String destObject = GcsObjectNames.fromPathParam(destObjectPath);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> sourceObjects = body != null
                 ? (List<Map<String, Object>>) body.get("sourceObjects") : List.of();
@@ -257,7 +246,7 @@ public class GcsObjectController {
         String contentType = destReq != null ? (String) destReq.get("contentType") : null;
         List<String> sourceNames = sourceObjects == null ? List.of()
                 : sourceObjects.stream().map(s -> (String) s.get("name")).toList();
-        GcsObjectMeta meta = service.composeObject(bucket, destObject, sourceNames, contentType,
+        GcsObjectMeta meta = service.composeObject(bucket, destObjectPath, sourceNames, contentType,
                 requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
@@ -269,9 +258,7 @@ public class GcsObjectController {
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = GcsObjectNames.fromPathParam(srcObjectPath);
-        String dstObject = GcsObjectNames.fromPathParam(dstObjectPath);
-        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
+        GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
                 requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
@@ -283,9 +270,7 @@ public class GcsObjectController {
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
             @Context HttpHeaders headers) {
-        String srcObject = GcsObjectNames.fromPathParam(srcObjectPath);
-        String dstObject = GcsObjectNames.fromPathParam(dstObjectPath);
-        GcsObjectMeta meta = service.copyObject(srcBucket, srcObject, dstBucket, dstObject,
+        GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
                 requestBaseUrl(headers));
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#rewriteResponse");

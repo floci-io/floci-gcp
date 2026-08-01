@@ -31,6 +31,13 @@ public class RedpandaManager {
     private static final int ADMIN_PORT = 9644;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * Volume-name prefix used before names were persisted. Pinned for backfill only —
+     * pre-upgrade volumes must keep resolving to this exact prefix regardless of what the
+     * live naming helper produces.
+     */
+    private static final String LEGACY_VOLUME_PREFIX = "floci-gcp-kafka-";
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
@@ -71,8 +78,7 @@ public class RedpandaManager {
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
             ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
-                    "kafka", cluster.getVolumeId(), clusterId(cluster.getName()),
-                    "/var/lib/redpanda/data");
+                    volumeName(cluster), "/var/lib/redpanda/data");
         } else {
             String hostDataPath = Path.of(config.storage().hostPersistentPath(), "kafka", clusterId(cluster.getName()))
                     .toAbsolutePath().toString();
@@ -206,12 +212,27 @@ public class RedpandaManager {
     }
 
     public void removeClusterStorage(StoredCluster cluster) {
-        ContainerStorageHelper.removeStorage(config, lifecycleManager,
-                "kafka", cluster.getVolumeId(), clusterId(cluster.getName()));
+        ContainerStorageHelper.removeStorage(config, lifecycleManager, volumeName(cluster));
     }
 
-    private static String containerName(StoredCluster cluster) {
-        return "floci-kafka-" + clusterId(cluster.getName());
+    /**
+     * Pre-upgrade clusters persisted only a {@code volumeId}; their data lives under the pinned
+     * legacy name. The backfilled name is written back to the cluster, but persistence is
+     * best-effort (it reaches the store only when the cluster turns ACTIVE) — the resolver is
+     * deterministic, so recomputing on the next start is safe.
+     */
+    private String volumeName(StoredCluster cluster) {
+        if (cluster.getVolumeName() != null && !cluster.getVolumeName().isBlank()) {
+            return cluster.getVolumeName();
+        }
+        String legacy = LEGACY_VOLUME_PREFIX
+                + (cluster.getVolumeId() != null ? cluster.getVolumeId() : clusterId(cluster.getName()));
+        cluster.setVolumeName(legacy);
+        return legacy;
+    }
+
+    private String containerName(StoredCluster cluster) {
+        return ContainerStorageHelper.dockerName(config, "kafka-" + clusterId(cluster.getName()));
     }
 
     private static String clusterId(String name) {

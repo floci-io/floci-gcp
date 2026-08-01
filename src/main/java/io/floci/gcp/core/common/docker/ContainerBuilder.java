@@ -42,7 +42,46 @@ public class ContainerBuilder {
     }
 
     public Builder newContainer(String image) {
-        return new Builder(image, config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
+        return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer,
+                currentContainerNetworkResolver);
+    }
+
+    private String resolveImage(String image) {
+        return resolveImage(image, configuredImageRegistryBase(config));
+    }
+
+    /**
+     * Resolves an image reference under the configured registry base
+     * ({@code floci-gcp.docker.image-registry-base}), so every image floci-gcp launches can be
+     * redirected to a mirror or private registry. Already-prefixed references pass through.
+     */
+    static String resolveImage(String image, Optional<String> imageRegistryBase) {
+        if (image == null || image.isBlank()) {
+            return image;
+        }
+        return normalizeImageRegistryBase(imageRegistryBase)
+                .filter(base -> !image.startsWith(base + "/"))
+                .map(base -> base + "/" + image)
+                .orElse(image);
+    }
+
+    private static Optional<String> configuredImageRegistryBase(EmulatorConfig config) {
+        if (config == null || config.docker() == null) {
+            return Optional.empty();
+        }
+        return config.docker().imageRegistryBase();
+    }
+
+    private static Optional<String> normalizeImageRegistryBase(Optional<String> imageRegistryBase) {
+        return imageRegistryBase
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .map(value -> {
+                    while (value.endsWith("/")) {
+                        value = value.substring(0, value.length() - 1);
+                    }
+                    return value;
+                });
     }
 
     public static class Builder {
@@ -67,6 +106,9 @@ public class ContainerBuilder {
         private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
         private boolean privileged;
+        private String cgroupnsMode;
+        private String user;
+        private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -235,8 +277,54 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** Sets the Docker cgroup namespace mode (for example, {@code "host"}). */
+        public Builder withCgroupnsMode(String cgroupnsMode) {
+            this.cgroupnsMode = cgroupnsMode;
+            return this;
+        }
+
+        /**
+         * Sets the user the container process runs as, formatted {@code "uid[:gid]"}
+         * (Docker's top-level container user). Null or blank leaves the image {@code USER}
+         * in effect.
+         */
+        public Builder withUser(String user) {
+            this.user = user;
+            return this;
+        }
+
+        /**
+         * Adds a supplementary group id to the container process (Docker {@code --group-add}),
+         * so it can access group-owned resources without changing its primary uid/gid. Blank
+         * ids are ignored.
+         */
+        public Builder withGroupAdd(String groupId) {
+            if (groupId != null && !groupId.isBlank()) {
+                this.groupAdd.add(groupId);
+            }
+            return this;
+        }
+
+        /**
+         * Injects floci-gcp's embedded DNS server into the container so emulator hostnames
+         * resolve to floci-gcp's Docker network IP. No-op when the embedded DNS server is
+         * not running.
+         *
+         * <p>When {@code floci-gcp.dns.container-fallback-enabled} is set, the configured public
+         * fallback resolvers are appended after floci-gcp's IP so the container's own resolver
+         * can fall through for public hostnames if the embedded forwarder cannot answer.
+         */
         public Builder withEmbeddedDns() {
-            embeddedDnsServer.getServerIp().ifPresent(dnsServers::add);
+            embeddedDnsServer.getServerIp().ifPresent(flociIp -> {
+                dnsServers.add(flociIp);
+                if (config.dns().containerFallbackEnabled()) {
+                    for (String fallback : config.dns().containerFallbackServers()) {
+                        if (fallback != null && !fallback.isBlank() && !dnsServers.contains(fallback.trim())) {
+                            dnsServers.add(fallback.trim());
+                        }
+                    }
+                }
+            });
             return this;
         }
 
@@ -257,8 +345,11 @@ public class ContainerBuilder {
                     Map.copyOf(labels),
                     logConfig,
                     privileged,
+                    cgroupnsMode,
                     List.copyOf(dnsServers),
-                    workingDir
+                    workingDir,
+                    user,
+                    List.copyOf(groupAdd)
             );
         }
     }

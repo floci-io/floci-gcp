@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.RemoveVolumeCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import io.floci.gcp.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
@@ -42,6 +43,9 @@ class ContainerLifecycleManagerTest {
 
     @Mock
     ImageCacheService imageCacheService;
+
+    @Mock
+    EmulatorConfig config;
 
     @Mock
     RemoveContainerCmd removeContainerCmd;
@@ -88,7 +92,8 @@ class ContainerLifecycleManagerTest {
         when(inspectVolumeCmd.exec()).thenThrow(new NotFoundException("missing"));
         when(dockerClient.createVolumeCmd()).thenReturn(createVolumeCmd);
         when(createVolumeCmd.withName("volume-1")).thenReturn(createVolumeCmd);
-        when(createVolumeCmd.withLabels(Map.of("floci-gcp", "true"))).thenReturn(createVolumeCmd);
+        when(createVolumeCmd.withLabels(Map.of("floci", "true", "floci_emulator", "floci-gcp")))
+                .thenReturn(createVolumeCmd);
 
         manager().ensureVolume("volume-1");
 
@@ -129,6 +134,6 @@ class ContainerLifecycleManagerTest {
     private ContainerLifecycleManager manager(Duration apiTimeout) {
         when(dockerClients.client()).thenReturn(dockerClient);
         when(dockerClients.apiTimeout()).thenReturn(apiTimeout);
-        return new ContainerLifecycleManager(dockerClients, containerDetector, portAllocator, imageCacheService);
+        return new ContainerLifecycleManager(dockerClients, containerDetector, portAllocator, imageCacheService, config);
     }
 }

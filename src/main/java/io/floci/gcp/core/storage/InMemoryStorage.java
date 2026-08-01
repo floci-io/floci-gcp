@@ -8,6 +8,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
+/**
+ * Thread-safe in-memory storage backed by ConcurrentHashMap.
+ * No persistence — data is lost on shutdown unless explicitly flushed.
+ */
 public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
 
     private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
@@ -44,10 +48,14 @@ public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void flush() {}
+    public void flush() {
+        // No-op for in-memory storage
+    }
 
     @Override
-    public void load() {}
+    public void load() {
+        // No-op for in-memory storage
+    }
 
     @Override
     public void clear() {

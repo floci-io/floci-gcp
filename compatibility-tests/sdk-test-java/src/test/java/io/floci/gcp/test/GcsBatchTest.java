@@ -27,6 +27,7 @@ class GcsBatchTest {
     private static final String OBJ1 = "batch/object1.txt";
     private static final String OBJ2 = "batch/object2.txt";
     private static final String OBJ3 = "batch/object3.txt";
+    private static final String ENCODED_OBJECT = "batch/literal%2Fname.txt";
 
     private static Storage storage;
 
@@ -124,5 +125,26 @@ class GcsBatchTest {
         batch.submit();
 
         assertThat(result.get()).isFalse();
+    }
+
+    @Test
+    @Order(6)
+    void batchPreservesEncodedObjectName() {
+        BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, ENCODED_OBJECT)).build();
+        storage.create(blobInfo, "encoded name".getBytes(StandardCharsets.UTF_8));
+
+        StorageBatch batch = storage.batch();
+        StorageBatchResult<Blob> getResult = batch.get(blobInfo.getBlobId());
+        batch.submit();
+
+        assertThat(getResult.get()).isNotNull();
+        assertThat(getResult.get().getName()).isEqualTo(ENCODED_OBJECT);
+
+        StorageBatch deleteBatch = storage.batch();
+        StorageBatchResult<Boolean> deleteResult = deleteBatch.delete(blobInfo.getBlobId());
+        deleteBatch.submit();
+
+        assertThat(deleteResult.get()).isTrue();
+        assertThat(storage.get(blobInfo.getBlobId())).isNull();
     }
 }

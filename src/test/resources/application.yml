@@ -11,6 +11,8 @@ floci-gcp:
   storage:
     mode: memory
   services:
+    iamcredentials:
+      enabled: true
     datastore:
       enabled: true
     kafka:
@@ -30,7 +32,6 @@ floci-gcp:
         request-timeout: 300s
         operation-timeout: 300s
         cleanup-timeout: 15s
-        container-name-prefix: floci-cloudrun
         url-host-suffix:
     cloudfunctions:
       enabled: true
@@ -55,3 +56,4 @@ floci-gcp:
       enabled: true
   docker:
     api-timeout: 30s
+    resource-namespace: ""

@@ -9,6 +9,8 @@ import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.FirestoreOptions;
 import com.google.cloud.functions.v2.FunctionServiceClient;
 import com.google.cloud.functions.v2.FunctionServiceSettings;
+import com.google.cloud.iam.credentials.v1.IamCredentialsClient;
+import com.google.cloud.iam.credentials.v1.IamCredentialsSettings;
 import com.google.cloud.run.v2.RevisionsClient;
 import com.google.cloud.run.v2.RevisionsSettings;
 import com.google.cloud.run.v2.ServicesClient;
@@ -213,6 +215,14 @@ public final class TestFixtures {
                 // /sql/v1beta4/sql/v1beta4/... and miss the emulator routes.
                 .setServicePath("")
                 .build();
+    }
+
+    public static IamCredentialsClient iamCredentialsClient() throws IOException {
+        IamCredentialsSettings settings = IamCredentialsSettings.newHttpJsonBuilder()
+                .setEndpoint(endpoint())
+                .setCredentialsProvider(NoCredentialsProvider.create())
+                .build();
+        return IamCredentialsClient.create(settings);
     }
 
     /**

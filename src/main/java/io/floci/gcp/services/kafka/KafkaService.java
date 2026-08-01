@@ -6,6 +6,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.kafka.model.ClusterState;
@@ -88,6 +89,8 @@ public class KafkaService {
 
         StoredCluster cluster = new StoredCluster(name);
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        cluster.setVolumeName(ContainerStorageHelper.resourceName(
+                config, "kafka", cluster.getVolumeId(), clusterId));
 
         applyCapacityFromBody(cluster, body);
 

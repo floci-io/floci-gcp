@@ -10,6 +10,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
@@ -232,12 +233,10 @@ public class CloudRunRuntimeService {
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(Map.of(
-                        "floci-gcp", "true",
-                        "floci-gcp.service", "cloudrun",
-                        "floci-gcp.project", project,
-                        "floci-gcp.location", location,
-                        "floci-gcp.cloudrun.service", service.getName(),
-                        "floci-gcp.cloudrun.revision", revision.getName()));
+                        "floci_service", "cloudrun",
+                        "floci_project", project,
+                        "floci_location", location,
+                        "floci_resource", revision.getName()));
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
@@ -397,8 +396,9 @@ public class CloudRunRuntimeService {
 
     private MaterializedGcsVolume materializeGcsVolume(String bucket, String objectPrefix, boolean readOnly,
                                                        String revisionName, String volumeName) {
-        String dockerVolumeName = "floci-gcp-cloudrun-gcs-" + sanitize(lastSegment(revisionName))
-                + "-" + sanitize(volumeName) + "-" + UUID.randomUUID();
+        String dockerVolumeName = ContainerStorageHelper.dockerName(config,
+                "cloudrun-gcs-" + sanitize(lastSegment(revisionName))
+                        + "-" + sanitize(volumeName) + "-" + UUID.randomUUID());
         try {
             gcsService.getBucket(bucket);
             lifecycleManager.ensureVolume(dockerVolumeName);
@@ -570,7 +570,7 @@ public class CloudRunRuntimeService {
     }
 
     private void withGcsVolumeHelper(String volumeName, VolumeHelperAction action) {
-        String helperName = "floci-cloudrun-gcs-volume-" + UUID.randomUUID();
+        String helperName = ContainerStorageHelper.dockerName(config, "cloudrun-gcs-volume-" + UUID.randomUUID());
         String helperId = null;
         try {
             ContainerSpec helper = containerBuilder.newContainer(GCS_VOLUME_HELPER_IMAGE)
@@ -874,13 +874,12 @@ public class CloudRunRuntimeService {
     }
 
     private String containerName(String serviceName, Revision revision) {
-        String name = config.services().cloudrun().execution().containerNamePrefix()
-                + "-" + sanitize(lastSegment(serviceName))
+        String name = "cloudrun-" + sanitize(lastSegment(serviceName))
                 + "-" + sanitize(lastSegment(revision.getName()));
-        if (revision.getUid().isBlank()) {
-            return name;
+        if (!revision.getUid().isBlank()) {
+            name = name + "-" + sanitize(revision.getUid());
         }
-        return name + "-" + sanitize(revision.getUid());
+        return ContainerStorageHelper.dockerName(config, name);
     }
 
     private static String sanitize(String value) {

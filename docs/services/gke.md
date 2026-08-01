@@ -25,11 +25,29 @@ On real GCP, `container.googleapis.com` and other APIs share the canonical
 everything on one port, where that path also belongs to Managed Kafka, so GKE mounts under a
 `/container` prefix and a routing filter maps clients onto it two ways:
 
-- **Host mode (SDKs):** point the client endpoint host at `container.*` (e.g.
+- **Host mode (SDKs, Terraform/OpenTofu):** point the client endpoint host at `container.*` (e.g.
   `http://container.localhost:4588`). The first DNS label `container` triggers a rewrite of
-  `/v1/...` to `/container/v1/...`.
+  `/v1/...` to `/container/v1/...`. `container.localhost` resolves to loopback out of the box on
+  most systems (systemd-resolved's synthetic `*.localhost` wildcard on Linux; no `/etc/hosts` edit
+  needed on macOS either).
 - **Path mode (gcloud / direct):** call the `/container/v1/...` prefix directly, or set a
   custom endpoint base of `<endpoint>/container/v1/`.
+
+!!! warning "Terraform/OpenTofu must use host mode, not path mode"
+    The `hashicorp/google` provider's GKE client resolves its base URL through a
+    `RemoveBasePathVersion` helper that strips the *last path segment* of any custom endpoint,
+    on the assumption it is a stray API version suffix (`.../v1/`). Given a path-prefixed
+    endpoint like `<endpoint>/container/`, it incorrectly strips `container` too, so
+    `container_custom_endpoint = "<endpoint>/container/"` silently resolves to bare `<endpoint>/`
+    and every GKE call 404s or is routed to whatever other service happens to own that raw
+    `/v1/projects/.../locations/.../clusters` path (Managed Kafka, in this codebase). Set
+    `container_custom_endpoint = "http://container.localhost:4588/"` (host mode) instead. Not yet
+    wired into `compatibility-tests/compat-terraform`'s CI suite — that suite's floci-gcp
+    container is reached as `floci-gcp:4588` on the shared Docker network, so a `container.*`
+    host override needs a network alias (or `/etc/hosts` entry) for `container.floci-gcp` in
+    `compatibility.yml`, not just the `*.localhost` wildcard resolution local dev gets for free.
+    Verified manually against `./mvnw quarkus:dev` instead; see the PR description for the exact
+    commands.
 
 !!! note "SDK transport"
     The Cloud Client libraries default to gRPC, which the REST-only emulator does not serve
@@ -94,19 +112,92 @@ Set `FLOCI_GCP_SERVICES_GKE_MOCK=true` to create clusters in memory that report 
 immediately without starting a k3s container. Useful for CI and for tools that provision a
 cluster but never connect to its API server.
 
+## Node Pools
+
+Node pools are modeled as real, independent resources (not a static field on the cluster):
+`CreateCluster` provisions a `default-pool` node pool from the request's top-level
+`initialNodeCount`/`nodeConfig` (or from an explicit `nodePools[]` list), and it can be deleted
+and replaced with separately-managed pools — the standard
+`remove_default_node_pool = true` + standalone `google_container_node_pool` pattern used by
+Terraform, OpenTofu, and Pulumi all work end to end.
+
+`config`, `autoscaling`, `management`, `upgradeSettings` and `placementPolicy` are stored
+verbatim from the create/update request and echoed back unchanged on every read — floci-gcp does
+not run real node VMs or enforce autoscaling/repair/upgrade behavior, so there is nothing to act
+on semantically. This keeps every field a real client sends round-tripping consistently for
+Terraform's plan/refresh diff, without hand-modeling the full `NodeConfig` proto surface.
+
+!!! warning "`node_count` drifts on every `terraform plan` unless you set `ignore_node_count_changes`"
+    Real GKE's Terraform provider computes the live `node_count` value by querying **Compute
+    Engine Instance Group Manager** target sizes for the node pool's `instanceGroupUrls` — not
+    from any field the NodePool API itself returns. floci-gcp does not emulate Compute Engine, so
+    `instanceGroupUrls` is always empty and the provider reads `node_count` back as `0`, which it
+    then wants to "correct" on every plan. Set `ignore_node_count_changes = true` on
+    `google_container_node_pool` resources to skip that IGM-based read entirely and use
+    `initial_node_count` as the source of truth instead (the provider's own documented escape
+    hatch for exactly this situation).
+
 ## Supported Operations
 
-- `CreateCluster` (returns a synchronous, `DONE` Operation)
-- `GetCluster`
-- `ListClusters`
-- `DeleteCluster` (returns a `DONE` Operation)
+- `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`
+- `SetResourceLabels`, `SetMasterAuth`, `SetNetworkPolicy`, `SetAddonsConfig`,
+  `SetLoggingService`, `SetMonitoringService`, `SetLocations`, `SetLegacyAbac`,
+  `SetMaintenancePolicy`, `StartIPRotation`, `CompleteIPRotation`
+- `CreateNodePool`, `GetNodePool`, `ListNodePools`, `DeleteNodePool`, `UpdateNodePool`
+- `SetNodePoolAutoscaling`, `SetNodePoolManagement`, `SetNodePoolSize`,
+  `CompleteNodePoolUpgrade`, `RollbackNodePoolUpgrade`
+- `GetServerConfig`, `GetJSONWebKeys`, `ListUsableSubnetworks`,
+  `CheckAutopilotCompatibility`, `FetchClusterUpgradeInfo`, `FetchNodePoolUpgradeInfo`
 - `GetOperation` / `ListOperations`
+
+This is the full `container.v1` `ClusterManager` RPC surface except
+`CancelOperation` (operations are always synchronous/`DONE`, so there is
+nothing in flight to cancel).
+
+The five read-only RPCs above report honest stub data rather than fabricated
+analysis, since floci-gcp has no real infrastructure behind them to inspect:
+
+- `GetJSONWebKeys` returns an empty key set — floci-gcp accepts any bearer
+  token (no real credential validation), so there is no real signing key to
+  expose, and a fabricated one would misleadingly imply verifiable tokens are
+  possible.
+- `ListUsableSubnetworks` returns the single synthetic "default"
+  network/subnetwork every cluster in this emulator already defaults to —
+  floci-gcp does not emulate Compute Engine/VPC, so there is no real
+  subnetwork inventory.
+- `CheckAutopilotCompatibility` always reports no issues — there is no real
+  policy engine to evaluate a cluster's configuration against.
+- `FetchClusterUpgradeInfo`/`FetchNodePoolUpgradeInfo` report the current
+  version as both current and target with nothing pending — floci-gcp has a
+  single fixed master/node version, so there is never a real upgrade path.
+
+**Autopilot mode** (`autopilot.enabled`) and **Fleet/Anthos registration**
+(`fleet`) are not semantically modeled — floci-gcp does not run a real
+Autopilot node-management control loop or register with a real Fleet — but
+both round-trip correctly through `extraConfig` like every other config
+block the emulator doesn't act on, so tooling that merely checks
+`cluster.autopilot.enabled` or `cluster.fleet.project` works correctly.
+
+All mutations return a synchronous, `DONE` Operation (no real long-running operation lifecycle) —
+consistent across every RPC above, not just cluster create/delete as before.
+
+`StartIPRotation`/`CompleteIPRotation` acknowledge the request (bumping the cluster's
+fingerprint/etag) rather than performing a real dual-certificate rotation window — there is no
+live client traffic to migrate off an old certificate in this emulator.
+`CompleteNodePoolUpgrade`/`RollbackNodePoolUpgrade` validate the node pool exists and return the
+operation; there is no real node-version upgrade in flight to complete or roll back, since node
+pools don't run real node VMs. `GetServerConfig` reports this emulator's single supported
+master/node version across all three release channels (`RAPID`/`REGULAR`/`STABLE`) — there is no
+real multi-version fleet behind it.
 
 ## Limitations
 
-- Node pools, autoscaling, upgrades, and cluster IAM are not modeled.
-- Operations resolve synchronously (no real long-running operation lifecycle).
-- The Terraform/OpenTofu `google_container_cluster` resource is **not** supported: the
-  google provider expects a far richer cluster surface (node-pool reconciliation,
-  default-pool deletion, many computed fields) than the emulator implements. Use the Java
-  SDK (HttpJson) or gcloud instead.
+- Operations resolve synchronously (no real long-running operation lifecycle, no `CancelOperation`).
+- Node IAM is not modeled.
+- Real Autopilot node management and Compute Engine-backed node scaling (`node_count` read-back —
+  see the warning above) are out of scope; floci-gcp does not run real node VMs, so Autopilot mode
+  and Fleet registration round-trip as config but are not semantically enforced.
+- Cluster-level config blocks the emulator doesn't act on semantically (network policy
+  enforcement, binary authorization, private cluster networking, etc.) are stored and echoed back
+  verbatim rather than enforced — see the `config`/`autoscaling`/`management` note under Node
+  Pools above, which applies at the cluster level too (`extraConfig`).

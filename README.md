@@ -210,7 +210,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
-| **GKE (Kubernetes Engine)** | REST JSON | Clusters and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. Reached by SDKs/gcloud through host-based routing (`container.*`) or the `/container/v1` path prefix |
+| **GKE (Kubernetes Engine)** | REST JSON | Clusters, node pools, and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. `remove_default_node_pool` + standalone `google_container_node_pool` (Terraform/OpenTofu) works end to end. Reached by SDKs/gcloud/Terraform through host-based routing (`container.*`) or the `/container/v1` path prefix |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; control plane by default, experimental Docker-backed invocation when enabled |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 | **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |

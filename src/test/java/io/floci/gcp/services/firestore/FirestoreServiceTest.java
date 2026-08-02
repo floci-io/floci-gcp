@@ -2,14 +2,14 @@ package io.floci.gcp.services.firestore;
 
 import com.google.firestore.v1.Document;
 import com.google.firestore.v1.Precondition;
-import com.google.protobuf.Timestamp;
-import io.floci.gcp.core.common.GcpException;
-import io.grpc.Status;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
+import com.google.protobuf.Timestamp;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.firestore.model.StoredDocument;
+import io.grpc.Status;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -22,12 +22,14 @@ import static org.junit.jupiter.api.Assertions.*;
 class FirestoreServiceTest {
 
     private FirestoreService service;
+    private InMemoryStorage<String, StoredDocument> storage;
     private static final String DB = "projects/p1/databases/(default)";
     private static final String DOC_NAME = DB + "/documents/users/alice";
 
     @BeforeEach
     void setUp() {
-        service = new FirestoreService(new InMemoryStorage<>());
+        storage = new InMemoryStorage<>();
+        service = new FirestoreService(storage);
     }
 
     @Test
@@ -234,6 +236,49 @@ class FirestoreServiceTest {
         GcpException ex = assertThrows(GcpException.class, () -> service.commit(
                 List.of(upsert(DOC_NAME, "a", "2")), tx, Instant.now()));
         assertEquals(Status.Code.ABORTED, ex.getGrpcCode());
+    }
+
+    @Test
+    void recordedSnapshotVersionDetectsWriteRacingTheRead() {
+        service.applyWrite(upsert(DOC_NAME, "a", "1"), Instant.parse("2026-01-01T00:00:00Z"));
+        byte[] tx = service.beginTransaction();
+        String snapshotVersion = service.getDocument(DOC_NAME).orElseThrow().getUpdateTime();
+
+        // write lands between the read and the read being recorded
+        service.applyWrite(upsert(DOC_NAME, "a", "2"), Instant.parse("2026-01-02T00:00:00Z"));
+        service.recordTransactionRead(tx, DOC_NAME, snapshotVersion);
+
+        GcpException ex = assertThrows(GcpException.class, () -> service.commit(
+                List.of(upsert(DOC_NAME, "a", "3")), tx, Instant.now()));
+        assertEquals(Status.Code.ABORTED, ex.getGrpcCode());
+    }
+
+    @Test
+    void retriedCommitOfAbortedTransactionStillAborts() {
+        service.applyWrite(upsert(DOC_NAME, "a", "1"), Instant.now());
+        byte[] tx = service.beginTransaction();
+        service.recordTransactionRead(tx, DOC_NAME);
+        service.applyWrite(upsert(DOC_NAME, "a", "2"), Instant.now().plusSeconds(1));
+
+        List<Write> writes = List.of(upsert(DOC_NAME, "a", "3"));
+        assertThrows(GcpException.class, () -> service.commit(writes, tx, Instant.now()));
+        GcpException retry = assertThrows(GcpException.class,
+                () -> service.commit(writes, tx, Instant.now()));
+        assertEquals(Status.Code.ABORTED, retry.getGrpcCode());
+    }
+
+    @Test
+    void unparseableStoredUpdateTimeFailsPreconditionInsteadOfCrashing() {
+        storage.put(DOC_NAME, new StoredDocument(DOC_NAME, "not-a-timestamp", "not-a-timestamp", null));
+
+        Write update = upsert(DOC_NAME, "a", "1").toBuilder()
+                .setCurrentDocument(Precondition.newBuilder()
+                        .setUpdateTime(Timestamp.newBuilder().setSeconds(1).build())
+                        .build())
+                .build();
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.applyWrite(update, Instant.now()));
+        assertEquals(Status.Code.FAILED_PRECONDITION, ex.getGrpcCode());
     }
 
     @Test

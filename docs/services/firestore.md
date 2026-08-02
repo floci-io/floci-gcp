@@ -190,7 +190,10 @@ registration.remove();
   a transaction track only the documents they return, so phantom reads (a
   concurrent write creating a document that would have matched the query) do not
   abort the transaction.
+- `RunAggregationQuery` ignores `transaction` and `newTransaction`; aggregations
+  read outside the transaction and are not part of its read set.
 - Transactions expire after 15 minutes instead of Firestore's shorter
   server-side deadlines.
 - Transaction state is held in memory; transactions do not survive an emulator
-  restart.
+  restart. A commit against an unknown transaction id is applied without conflict
+  validation.

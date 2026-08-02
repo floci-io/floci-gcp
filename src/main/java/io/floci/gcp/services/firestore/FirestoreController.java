@@ -55,13 +55,14 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void getDocument(GetDocumentRequest request, StreamObserver<Document> responseObserver) {
         LOG.debugf("getDocument name=%s", request.getName());
         try {
+            Optional<StoredDocument> stored = service.getDocument(request.getName());
             if (!request.getTransaction().isEmpty()) {
-                service.recordTransactionRead(request.getTransaction().toByteArray(), request.getName());
+                service.recordTransactionRead(request.getTransaction().toByteArray(), request.getName(),
+                        stored.map(StoredDocument::getUpdateTime).orElse(null));
             }
-            StoredDocument stored = service.getDocument(request.getName())
-                    .orElseThrow(() -> io.floci.gcp.core.common.GcpException.notFound(
-                            "Document not found: " + request.getName()));
-            responseObserver.onNext(toProto(stored));
+            responseObserver.onNext(toProto(stored.orElseThrow(
+                    () -> io.floci.gcp.core.common.GcpException.notFound(
+                            "Document not found: " + request.getName()))));
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("getDocument failed: %s", e.getMessage());
@@ -82,10 +83,11 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
             }
             boolean first = true;
             for (String docName : request.getDocumentsList()) {
-                if (!txId.isEmpty()) {
-                    service.recordTransactionRead(txId.toByteArray(), docName);
-                }
                 Optional<StoredDocument> stored = service.getDocument(docName);
+                if (!txId.isEmpty()) {
+                    service.recordTransactionRead(txId.toByteArray(), docName,
+                            stored.map(StoredDocument::getUpdateTime).orElse(null));
+                }
                 BatchGetDocumentsResponse.Builder resp = BatchGetDocumentsResponse.newBuilder()
                         .setReadTime(toTimestamp(readTime.toString()));
                 if (newTransaction && first) {
@@ -98,6 +100,12 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
                     resp.setMissing(docName);
                 }
                 responseObserver.onNext(resp.build());
+            }
+            if (newTransaction && first) {
+                responseObserver.onNext(BatchGetDocumentsResponse.newBuilder()
+                        .setReadTime(toTimestamp(readTime.toString()))
+                        .setTransaction(txId)
+                        .build());
             }
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -121,7 +129,7 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
             boolean first = true;
             for (StoredDocument doc : results) {
                 if (!txId.isEmpty()) {
-                    service.recordTransactionRead(txId.toByteArray(), doc.getName());
+                    service.recordTransactionRead(txId.toByteArray(), doc.getName(), doc.getUpdateTime());
                 }
                 RunQueryResponse.Builder resp = RunQueryResponse.newBuilder()
                         .setDocument(toProto(doc))
@@ -283,12 +291,14 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
                         wr.setUpdateTime(toTimestamp(result.updateTime()));
                     }
                     resp.addWriteResults(wr.build());
-                    resp.addStatus(com.google.rpc.Status.newBuilder().setCode(0).build());
-                } catch (io.floci.gcp.core.common.GcpException e) {
+                    resp.addStatus(Status.newBuilder().setCode(0).build());
+                } catch (RuntimeException e) {
+                    io.grpc.Status mapped = GcpGrpcController.grpcException(e).getStatus();
+                    String message = mapped.getDescription();
                     resp.addWriteResults(WriteResult.getDefaultInstance());
-                    resp.addStatus(com.google.rpc.Status.newBuilder()
-                            .setCode(e.getGrpcCode().value())
-                            .setMessage(e.getMessage())
+                    resp.addStatus(Status.newBuilder()
+                            .setCode(mapped.getCode().value())
+                            .setMessage(message == null ? "" : message)
                             .build());
                 }
             }
@@ -345,8 +355,8 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
                     WriteResponse.Builder resp = WriteResponse.newBuilder()
                             .setStreamId(req.getStreamId())
                             .setCommitTime(toTimestamp(now.toString()));
-                    for (Write w : req.getWritesList()) {
-                        FirestoreService.WriteCommitResult r = service.applyWrite(w, now);
+                    for (FirestoreService.WriteCommitResult r
+                            : service.commit(req.getWritesList(), null, now)) {
                         WriteResult.Builder wr = WriteResult.newBuilder();
                         if (r.updateTime() != null) {
                             wr.setUpdateTime(toTimestamp(r.updateTime()));

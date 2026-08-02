@@ -27,9 +27,11 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,6 +102,7 @@ public class FirestoreService {
             for (Write write : writes) {
                 results.add(applyWriteUnchecked(write, commitTime));
             }
+            discardTransaction(transactionId);
             return results;
         }
     }
@@ -126,7 +129,7 @@ public class FirestoreService {
             case UPDATE_TIME -> {
                 Instant required = Instant.ofEpochSecond(
                         pre.getUpdateTime().getSeconds(), pre.getUpdateTime().getNanos());
-                Instant actual = existing.map(d -> Instant.parse(d.getUpdateTime())).orElse(null);
+                Instant actual = existing.map(d -> parseUpdateTime(d.getUpdateTime())).orElse(null);
                 if (!required.equals(actual)) {
                     throw GcpException.failedPrecondition("Document " + name
                             + " has changed: required update time " + required
@@ -134,6 +137,18 @@ public class FirestoreService {
                 }
             }
             default -> {}
+        }
+    }
+
+    /** Null for an absent or unparseable stored update time; that then fails any update-time precondition. */
+    private static Instant parseUpdateTime(String storedUpdateTime) {
+        if (storedUpdateTime == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(storedUpdateTime);
+        } catch (DateTimeParseException e) {
+            return null;
         }
     }
 
@@ -455,38 +470,55 @@ public class FirestoreService {
 
     public byte[] beginTransaction() {
         pruneExpiredTransactions();
-        String id = UUID.randomUUID().toString();
-        transactions.put(id, new TransactionState());
-        return id.getBytes(StandardCharsets.UTF_8);
+        byte[] id = UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8);
+        transactions.put(toTransactionKey(id), new TransactionState());
+        return id;
     }
 
     /** Records the version of a document read under a transaction (first read wins). */
     public void recordTransactionRead(byte[] transactionId, String docName) {
+        synchronized (writeLock) {
+            recordTransactionRead(transactionId, docName,
+                    documentStore.get(docName).map(StoredDocument::getUpdateTime).orElse(null));
+        }
+    }
+
+    /**
+     * Records a read against the transaction's read set. Callers must pass the version of the
+     * snapshot they returned to the client, not the store's current version: a write landing
+     * between the read and this call would otherwise go undetected at commit.
+     *
+     * @param updateTime the returned snapshot's update time, or null if the document was absent
+     */
+    public void recordTransactionRead(byte[] transactionId, String docName, String updateTime) {
+        if (transactionId == null || transactionId.length == 0) {
+            return;
+        }
         TransactionState state = transactions.get(toTransactionKey(transactionId));
         if (state == null) {
             return;
         }
         synchronized (writeLock) {
-            state.readVersions.putIfAbsent(docName,
-                    documentStore.get(docName).map(StoredDocument::getUpdateTime));
+            state.readVersions.putIfAbsent(docName, Optional.ofNullable(updateTime));
         }
     }
 
     public void rollback(byte[] transactionId) {
-        transactions.remove(toTransactionKey(transactionId));
+        discardTransaction(transactionId);
     }
 
     /**
      * Optimistic-concurrency check: every document read under the transaction must still
      * be at the version observed at read time, otherwise the commit aborts. Callers must
      * hold {@code writeLock}. Unknown transaction ids pass through unchecked (e.g. state
-     * lost across emulator restart).
+     * lost across emulator restart). The read set is retained on failure so a retried commit
+     * of the same transaction id is validated again.
      */
     private void validateTransaction(byte[] transactionId) {
         if (transactionId == null || transactionId.length == 0) {
             return;
         }
-        TransactionState state = transactions.remove(toTransactionKey(transactionId));
+        TransactionState state = transactions.get(toTransactionKey(transactionId));
         if (state == null) {
             return;
         }
@@ -501,13 +533,21 @@ public class FirestoreService {
         }
     }
 
+    private void discardTransaction(byte[] transactionId) {
+        if (transactionId == null || transactionId.length == 0) {
+            return;
+        }
+        transactions.remove(toTransactionKey(transactionId));
+    }
+
     private void pruneExpiredTransactions() {
         Instant cutoff = Instant.now().minus(TRANSACTION_TTL);
         transactions.values().removeIf(state -> state.startedAt.isBefore(cutoff));
     }
 
+    /** Transaction ids are opaque bytes from the client and need not be valid UTF-8. */
     private static String toTransactionKey(byte[] transactionId) {
-        return new String(transactionId, StandardCharsets.UTF_8);
+        return HexFormat.of().formatHex(transactionId);
     }
 
     // ── Filter evaluation ──────────────────────────────────────────────────────

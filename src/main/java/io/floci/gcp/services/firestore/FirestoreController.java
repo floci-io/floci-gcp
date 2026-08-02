@@ -33,8 +33,9 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
             CommitResponse.Builder response = CommitResponse.newBuilder()
                     .setCommitTime(toTimestamp(commitTime.toString()));
 
-            for (Write write : request.getWritesList()) {
-                FirestoreService.WriteCommitResult result = service.applyWrite(write, commitTime);
+            List<FirestoreService.WriteCommitResult> results = service.commit(
+                    request.getWritesList(), request.getTransaction().toByteArray(), commitTime);
+            for (FirestoreService.WriteCommitResult result : results) {
                 WriteResult.Builder wr = WriteResult.newBuilder();
                 if (result.updateTime() != null) {
                     wr.setUpdateTime(toTimestamp(result.updateTime()));
@@ -54,6 +55,9 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void getDocument(GetDocumentRequest request, StreamObserver<Document> responseObserver) {
         LOG.debugf("getDocument name=%s", request.getName());
         try {
+            if (!request.getTransaction().isEmpty()) {
+                service.recordTransactionRead(request.getTransaction().toByteArray(), request.getName());
+            }
             StoredDocument stored = service.getDocument(request.getName())
                     .orElseThrow(() -> io.floci.gcp.core.common.GcpException.notFound(
                             "Document not found: " + request.getName()));
@@ -71,10 +75,23 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
         LOG.debugf("batchGetDocuments database=%s docs=%d", request.getDatabase(), request.getDocumentsCount());
         try {
             Instant readTime = Instant.now();
+            ByteString txId = request.getTransaction();
+            boolean newTransaction = request.hasNewTransaction();
+            if (newTransaction) {
+                txId = ByteString.copyFrom(service.beginTransaction());
+            }
+            boolean first = true;
             for (String docName : request.getDocumentsList()) {
+                if (!txId.isEmpty()) {
+                    service.recordTransactionRead(txId.toByteArray(), docName);
+                }
                 Optional<StoredDocument> stored = service.getDocument(docName);
                 BatchGetDocumentsResponse.Builder resp = BatchGetDocumentsResponse.newBuilder()
                         .setReadTime(toTimestamp(readTime.toString()));
+                if (newTransaction && first) {
+                    resp.setTransaction(txId);
+                    first = false;
+                }
                 if (stored.isPresent()) {
                     resp.setFound(toProto(stored.get()));
                 } else {
@@ -94,20 +111,36 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
         LOG.debugf("runQuery parent=%s", request.getParent());
         try {
             Instant readTime = Instant.now();
+            ByteString txId = request.getTransaction();
+            boolean newTransaction = request.hasNewTransaction();
+            if (newTransaction) {
+                txId = ByteString.copyFrom(service.beginTransaction());
+            }
             List<StoredDocument> results = service.runQuery(request.getParent(), request.getStructuredQuery());
 
+            boolean first = true;
             for (StoredDocument doc : results) {
-                responseObserver.onNext(RunQueryResponse.newBuilder()
+                if (!txId.isEmpty()) {
+                    service.recordTransactionRead(txId.toByteArray(), doc.getName());
+                }
+                RunQueryResponse.Builder resp = RunQueryResponse.newBuilder()
                         .setDocument(toProto(doc))
-                        .setReadTime(toTimestamp(readTime.toString()))
-                        .build());
+                        .setReadTime(toTimestamp(readTime.toString()));
+                if (newTransaction && first) {
+                    resp.setTransaction(txId);
+                    first = false;
+                }
+                responseObserver.onNext(resp.build());
             }
 
             // terminal message
-            responseObserver.onNext(RunQueryResponse.newBuilder()
+            RunQueryResponse.Builder done = RunQueryResponse.newBuilder()
                     .setReadTime(toTimestamp(readTime.toString()))
-                    .setDone(true)
-                    .build());
+                    .setDone(true);
+            if (newTransaction && first) {
+                done.setTransaction(txId);
+            }
+            responseObserver.onNext(done.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("runQuery failed: %s", e.getMessage());
@@ -134,6 +167,7 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     @Override
     public void rollback(RollbackRequest request, StreamObserver<Empty> responseObserver) {
         LOG.debugf("rollback database=%s", request.getDatabase());
+        service.rollback(request.getTransaction().toByteArray());
         responseObserver.onNext(Empty.getDefaultInstance());
         responseObserver.onCompleted();
     }
@@ -163,11 +197,13 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void updateDocument(UpdateDocumentRequest request, StreamObserver<Document> responseObserver) {
         LOG.debugf("updateDocument name=%s", request.getDocument().getName());
         try {
-            Write write = Write.newBuilder()
+            Write.Builder write = Write.newBuilder()
                     .setUpdate(request.getDocument())
-                    .setUpdateMask(request.getUpdateMask())
-                    .build();
-            service.applyWrite(write, Instant.now());
+                    .setUpdateMask(request.getUpdateMask());
+            if (request.hasCurrentDocument()) {
+                write.setCurrentDocument(request.getCurrentDocument());
+            }
+            service.applyWrite(write.build(), Instant.now());
             StoredDocument stored = service.getDocument(request.getDocument().getName())
                     .orElseThrow();
             responseObserver.onNext(toProto(stored));
@@ -182,8 +218,11 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void deleteDocument(DeleteDocumentRequest request, StreamObserver<Empty> responseObserver) {
         LOG.debugf("deleteDocument name=%s", request.getName());
         try {
-            Write write = Write.newBuilder().setDelete(request.getName()).build();
-            service.applyWrite(write, Instant.now());
+            Write.Builder write = Write.newBuilder().setDelete(request.getName());
+            if (request.hasCurrentDocument()) {
+                write.setCurrentDocument(request.getCurrentDocument());
+            }
+            service.applyWrite(write.build(), Instant.now());
             responseObserver.onNext(Empty.getDefaultInstance());
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -201,7 +240,10 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
                     : request.getDocumentId();
             String name = request.getParent() + "/" + request.getCollectionId() + "/" + docId;
             Document doc = request.getDocument().toBuilder().setName(name).build();
-            Write write = Write.newBuilder().setUpdate(doc).build();
+            Write write = Write.newBuilder()
+                    .setUpdate(doc)
+                    .setCurrentDocument(Precondition.newBuilder().setExists(false).build())
+                    .build();
             service.applyWrite(write, Instant.now());
             responseObserver.onNext(toProto(service.getDocument(name).orElseThrow()));
             responseObserver.onCompleted();
@@ -232,14 +274,23 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
         try {
             Instant commitTime = Instant.now();
             BatchWriteResponse.Builder resp = BatchWriteResponse.newBuilder();
+            // BatchWrite is non-atomic: each write succeeds or fails independently
             for (Write write : request.getWritesList()) {
-                FirestoreService.WriteCommitResult result = service.applyWrite(write, commitTime);
-                WriteResult.Builder wr = WriteResult.newBuilder();
-                if (result.updateTime() != null) {
-                    wr.setUpdateTime(toTimestamp(result.updateTime()));
+                try {
+                    FirestoreService.WriteCommitResult result = service.applyWrite(write, commitTime);
+                    WriteResult.Builder wr = WriteResult.newBuilder();
+                    if (result.updateTime() != null) {
+                        wr.setUpdateTime(toTimestamp(result.updateTime()));
+                    }
+                    resp.addWriteResults(wr.build());
+                    resp.addStatus(com.google.rpc.Status.newBuilder().setCode(0).build());
+                } catch (io.floci.gcp.core.common.GcpException e) {
+                    resp.addWriteResults(WriteResult.getDefaultInstance());
+                    resp.addStatus(com.google.rpc.Status.newBuilder()
+                            .setCode(e.getGrpcCode().value())
+                            .setMessage(e.getMessage())
+                            .build());
                 }
-                resp.addWriteResults(wr.build());
-                resp.addStatus(com.google.rpc.Status.newBuilder().setCode(0).build());
             }
             responseObserver.onNext(resp.build());
             responseObserver.onCompleted();

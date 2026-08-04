@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **release:** one-button releases — new "Release Cut" workflow (`workflow_dispatch`, with a dry-run option) runs semantic-release from `main`: bumps `pom.xml`, writes `CHANGELOG.md`, commits, tags, and creates the GitHub Release; the tag then triggers the existing publishing workflow. `release/x.y.x` branches are retired for now
+
 ## [0.6.0] - 2026-08-04
 
 ### Added

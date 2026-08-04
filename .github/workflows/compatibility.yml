@@ -38,7 +38,7 @@ jobs:
       - name: Stage native binary for packaging
         run: |
           mkdir -p native/arm64
-          cp target/*-runner native/arm64/
+          cp target/*-runner native/arm64/application
           cp target/*.so native/arm64/ 2>/dev/null || true
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0

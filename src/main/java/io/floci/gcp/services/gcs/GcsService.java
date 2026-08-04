@@ -669,6 +669,15 @@ public class GcsService {
         return uploadId;
     }
 
+	public ResumableUpload getResumableUpload(String uploadId) {
+		ResumableUpload upload = resumableUploads.get(uploadId);
+		if (upload == null) {
+			LOG.warnf("getResumableUpload failed: upload not found uploadId=%s", uploadId);
+			throw GcpException.notFound("Resumable upload not found: " + uploadId);
+		}
+		return upload;
+	}
+
     public GcsObjectMeta completeResumableUpload(String uploadId, byte[] data, String baseUrl) {
         LOG.debugf("completeResumableUpload uploadId=%s size=%d", uploadId, data.length);
         ResumableUpload upload = resumableUploads.remove(uploadId);

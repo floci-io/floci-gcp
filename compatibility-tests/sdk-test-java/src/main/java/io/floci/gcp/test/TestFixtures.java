@@ -2,6 +2,7 @@ package io.floci.gcp.test;
 
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
+import com.google.auth.Credentials;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.datastore.Datastore;
 import com.google.cloud.datastore.DatastoreOptions;
@@ -65,6 +66,15 @@ public final class TestFixtures {
                 .build()
                 .getService();
     }
+
+	public static Storage storageClient(Credentials credentials) {
+		return StorageOptions.newBuilder()
+				.setHost(endpoint())
+				.setProjectId(projectId())
+				.setCredentials(credentials)
+				.build()
+				.getService();
+	}
 
     /**
      * Creates a Firestore client pointing at the emulator.

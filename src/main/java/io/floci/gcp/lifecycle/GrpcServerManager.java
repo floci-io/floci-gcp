@@ -38,11 +38,15 @@ public class GrpcServerManager {
             String method = ctx.request().method().name();
             String uri = ctx.request().uri();
             String contentType = ctx.request().getHeader("Content-Type");
-            LOG.infof("Incoming request: %s %s, content-type=%s", method, uri, contentType);
+            String path = ctx.request().path();
+            if ("/health".equals(path) || "/_floci-gcp/health".equals(path)) {
+                LOG.debugf("Incoming request: %s %s, content-type=%s", method, uri, contentType);
+            } else {
+                LOG.infof("Incoming request: %s %s, content-type=%s", method, uri, contentType);
+            }
             String ct = ctx.request().getHeader("Content-Type");
             if (ct != null && ct.startsWith("application/grpc")) {
                 long start = System.currentTimeMillis();
-                String path = ctx.request().path();
                 String remoteAddr = ctx.request().remoteAddress() != null ? ctx.request().remoteAddress().host() : "-";
                 ctx.request().response().endHandler(v ->
                         LOG.infof("%s gRPC %s %dms", remoteAddr, path, System.currentTimeMillis() - start));

@@ -25,16 +25,32 @@ class CredentialTokenServiceTest {
 
 	@Test
 	void storesAndRetrievesDownscopedToken() {
-		StoredCredentialToken token = service.mintDownscopedToken("source-token", rules());
+		CredentialTokenService.MintedDownscopedToken minted =
+				service.mintDownscopedToken("source-token", rules());
+		StoredCredentialToken token = minted.token();
 
 		Optional<StoredCredentialToken> resolved = service.lookupBearerToken(token.getTokenValue());
 
+		assertEquals(CredentialTokenService.DEFAULT_LIFETIME_SECONDS, minted.expiresInSeconds());
 		assertTrue(resolved.isPresent());
 		assertEquals(StoredCredentialToken.TokenKind.DOWNSCOPED, resolved.get().getTokenKind());
 		assertEquals(NOW.plusSeconds(CredentialTokenService.DEFAULT_LIFETIME_SECONDS),
 				resolved.get().getExpireTime());
 		assertNull(resolved.get().getSourceToken());
 		assertEquals("bucket", resolved.get().getGcsRules().getFirst().getBucket());
+	}
+
+	@Test
+	void capsDownscopedTokenLifetimeToStoredSourceExpiration() {
+		StoredCredentialToken source = service.mintImpersonatedToken(
+				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
+
+		CredentialTokenService.MintedDownscopedToken minted =
+				service.mintDownscopedToken(source.getTokenValue(), rules());
+
+		assertEquals(1200, minted.expiresInSeconds());
+		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
+		assertNull(minted.token().getSourceToken());
 	}
 
 	@Test

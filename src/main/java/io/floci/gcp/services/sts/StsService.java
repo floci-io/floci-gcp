@@ -64,19 +64,20 @@ public class StsService {
 			throw invalidRequest("options is required");
 		}
 
-		List<CredentialAccessBoundaryRule> rules;
+		CredentialTokenService.MintedDownscopedToken mintedToken;
 		try {
-			rules = cabParser.parse(options);
+			List<CredentialAccessBoundaryRule> rules = cabParser.parse(options);
+			mintedToken = tokenService.mintDownscopedToken(subjectToken, rules);
 		} catch (GcpException e) {
 			throw invalidGrant(e.getMessage());
 		}
 
-		StoredCredentialToken token = tokenService.mintDownscopedToken(subjectToken, rules);
+		StoredCredentialToken token = mintedToken.token();
 		Map<String, Object> response = new LinkedHashMap<>();
 		response.put("access_token", token.getTokenValue());
 		response.put("issued_token_type", ACCESS_TOKEN_TYPE);
 		response.put("token_type", BEARER_TOKEN_TYPE);
-		response.put("expires_in", CredentialTokenService.DEFAULT_LIFETIME_SECONDS);
+		response.put("expires_in", mintedToken.expiresInSeconds());
 		return response;
 	}
 

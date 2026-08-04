@@ -20,9 +20,6 @@ class StsTokenExchangeTest {
 
 	@Test
 	void downscopedCredentialsExchangeTokenWithCustomStsTransport() throws Exception {
-		GoogleCredentials sourceCredentials = GoogleCredentials.create(new AccessToken(
-				"source-token",
-				Date.from(Instant.now().plusSeconds(3600))));
 		CredentialAccessBoundary cab = CredentialAccessBoundary.newBuilder()
 				.addRule(CredentialAccessBoundary.AccessBoundaryRule.newBuilder()
 						.setAvailableResource("//storage.googleapis.com/projects/_/buckets/compat-bucket")
@@ -30,10 +27,28 @@ class StsTokenExchangeTest {
 						.setAvailabilityCondition(
 								CredentialAccessBoundary.AccessBoundaryRule.AvailabilityCondition.newBuilder()
 										.setExpression("resource.name.startsWith("
-												+ "'projects/_/buckets/compat-bucket/objects/allowed/')")
-										.build())
+											+ "'projects/_/buckets/compat-bucket/objects/allowed/')")
+									.build())
+							.build())
+					.build();
+		assertCanExchange(cab);
+	}
+
+	@Test
+	void downscopedCredentialsExchangeBucketWideRuleWithoutCondition() throws Exception {
+		CredentialAccessBoundary cab = CredentialAccessBoundary.newBuilder()
+				.addRule(CredentialAccessBoundary.AccessBoundaryRule.newBuilder()
+						.setAvailableResource("//storage.googleapis.com/projects/_/buckets/compat-bucket")
+						.setAvailablePermissions(List.of("inRole:roles/storage.objectViewer"))
 						.build())
 				.build();
+		assertCanExchange(cab);
+	}
+
+	private static void assertCanExchange(CredentialAccessBoundary cab) throws Exception {
+		GoogleCredentials sourceCredentials = GoogleCredentials.create(new AccessToken(
+				"source-token",
+				Date.from(Instant.now().plusSeconds(3600))));
 
 		DownscopedCredentials credentials = DownscopedCredentials.newBuilder()
 				.setSourceCredential(sourceCredentials)

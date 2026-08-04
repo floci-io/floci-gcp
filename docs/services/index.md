@@ -15,6 +15,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Cloud KMS](kms.md) | gRPC + REST JSON | `google.cloud.kms.v1.KeyManagementService`, `/v1/projects/{project}/locations/{location}/keyRings` |
 | [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts` |
 | [IAM Credentials](iam-credentials.md) | REST JSON | `/v1/projects/-/serviceAccounts/{sa}:generateAccessToken` |
+| [Security Token Service (STS)](sts.md) | REST JSON | `/v1/token` |
 | [Managed Kafka](managed-kafka.md) | REST JSON | `/v1/projects/{project}/locations/{location}/clusters` |
 | [GKE (Kubernetes Engine)](gke.md) | REST JSON | `container.*` host or `/container/v1/projects/{project}/locations/{location}/clusters` |
 | [Cloud SQL for PostgreSQL](cloud-sql-postgres.md) | REST JSON | `/v1/projects/{project}/instances` |

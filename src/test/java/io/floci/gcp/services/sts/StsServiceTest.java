@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,6 +55,60 @@ class StsServiceTest {
 								"inRole:roles/storage.legacyObjectReader", "inRole:roles/storage.admin")));
 
 		assertEquals("invalid_grant", ex.error());
+	}
+
+	@Test
+	void capsExpiryToStoredImpersonatedSubjectToken() {
+		StoredCredentialToken source = tokenService.mintImpersonatedToken(
+				"test@test-project.iam.gserviceaccount.com",
+				Instant.parse("2026-07-15T12:20:00Z"));
+
+		Map<String, Object> response = service.exchangeToken(
+				StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+				StsService.ACCESS_TOKEN_TYPE,
+				source.getTokenValue(),
+				StsService.ACCESS_TOKEN_TYPE,
+				cab());
+
+		assertEquals(1200L, response.get("expires_in"));
+		StoredCredentialToken downscoped = store.get((String) response.get("access_token")).orElseThrow();
+		assertEquals(source.getExpireTime(), downscoped.getExpireTime());
+	}
+
+	@Test
+	void rejectsUnknownFlociSubjectTokenAsInvalidGrant() {
+		StsException ex = assertThrows(StsException.class,
+				() -> service.exchangeToken(
+						StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+						StsService.ACCESS_TOKEN_TYPE,
+						CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "missing",
+						StsService.ACCESS_TOKEN_TYPE,
+						cab()));
+
+		assertEquals("invalid_grant", ex.error());
+	}
+
+	@Test
+	void rejectsExpiredFlociSubjectTokenAsInvalidGrant() {
+		StoredCredentialToken expired = new StoredCredentialToken(
+				CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "expired",
+				StoredCredentialToken.TokenKind.IMPERSONATED,
+				Instant.parse("2026-07-15T11:59:59Z"),
+				null,
+				"test@test-project.iam.gserviceaccount.com",
+				List.of());
+		store.put(expired.getTokenValue(), expired);
+
+		StsException ex = assertThrows(StsException.class,
+				() -> service.exchangeToken(
+						StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+						StsService.ACCESS_TOKEN_TYPE,
+						expired.getTokenValue(),
+						StsService.ACCESS_TOKEN_TYPE,
+						cab()));
+
+		assertEquals("invalid_grant", ex.error());
+		assertTrue(store.get(expired.getTokenValue()).isEmpty());
 	}
 
 	private Map<String, Object> validExchange() {

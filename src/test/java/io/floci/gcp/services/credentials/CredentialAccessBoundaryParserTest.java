@@ -61,6 +61,17 @@ class CredentialAccessBoundaryParserTest {
 	}
 
 	@Test
+	void parsesBucketWideRuleWithoutAvailabilityCondition() {
+		List<CredentialAccessBoundaryRule> rules = parser.parse(cabWithoutCondition(
+				"bucket", CredentialAccessBoundaryParser.OBJECT_VIEWER));
+
+		assertEquals("bucket", rules.getFirst().getBucket());
+		assertEquals("", rules.getFirst().getObjectPrefix());
+		assertEquals(List.of(CredentialAccessBoundaryParser.OBJECT_VIEWER),
+				rules.getFirst().getAvailablePermissions());
+	}
+
+	@Test
 	void preservesPrefixBoundaries() {
 		List<CredentialAccessBoundaryRule> rules = parser.parse(cab(
 				"bucket",
@@ -106,6 +117,14 @@ class CredentialAccessBoundaryParserTest {
 	}
 
 	@Test
+	void rejectsAvailabilityConditionWithoutExpression() {
+		assertInvalidGrant(cabWithoutCondition(
+				"bucket", CredentialAccessBoundaryParser.OBJECT_VIEWER)
+				.replace("\"availablePermissions\"", "\"availabilityCondition\": {},\n"
+						+ "        \"availablePermissions\""));
+	}
+
+	@Test
 	void rejectsMalformedJson() {
 		assertInvalidGrant("{not-json");
 	}
@@ -143,5 +162,20 @@ class CredentialAccessBoundaryParserTest {
 				  }
 				}
 				""".formatted(bucket, permission, expression.replace("\\", "\\\\").replace("\"", "\\\""));
+	}
+
+	private static String cabWithoutCondition(String bucket, String permission) {
+		return """
+				{
+				  "accessBoundary": {
+					"accessBoundaryRules": [
+					  {
+						"availableResource": "//storage.googleapis.com/projects/_/buckets/%s",
+						"availablePermissions": ["%s"]
+					  }
+					]
+				  }
+				}
+				""".formatted(bucket, permission);
 	}
 }

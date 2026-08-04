@@ -8,6 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -57,7 +58,7 @@ public class CredentialTokenService {
 		return token;
 	}
 
-	public StoredCredentialToken mintDownscopedToken(String sourceToken,
+	public MintedDownscopedToken mintDownscopedToken(String sourceToken,
 			List<CredentialAccessBoundaryRule> gcsRules) {
 		if (sourceToken == null || sourceToken.isBlank()) {
 			throw GcpException.invalidArgument("subject_token is required");
@@ -66,26 +67,37 @@ public class CredentialTokenService {
 			throw GcpException.invalidArgument("credential access boundary rules are required");
 		}
 
+		Instant now = clock.instant();
+		Instant expireTime = now.plusSeconds(DEFAULT_LIFETIME_SECONDS);
+		Optional<StoredCredentialToken> storedSource = lookupBearerToken(sourceToken, now);
+		if (storedSource.isPresent() && storedSource.get().getExpireTime().isBefore(expireTime)) {
+			expireTime = storedSource.get().getExpireTime();
+		}
+
 		String tokenValue = DOWNSCOPED_TOKEN_PREFIX + UUID.randomUUID();
 		StoredCredentialToken token = new StoredCredentialToken(
 				tokenValue,
 				StoredCredentialToken.TokenKind.DOWNSCOPED,
-				clock.instant().plusSeconds(DEFAULT_LIFETIME_SECONDS),
+				expireTime,
 				null,
 				null,
 				gcsRules);
 		tokenStore.put(tokenValue, token);
-		return token;
+		return new MintedDownscopedToken(token, Duration.between(now, expireTime).toSeconds());
 	}
 
 	public Optional<StoredCredentialToken> lookupBearerToken(String bearerToken) {
+		return lookupBearerToken(bearerToken, clock.instant());
+	}
+
+	private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
 		if (bearerToken == null || bearerToken.isBlank() || !bearerToken.startsWith(FLOCI_TOKEN_PREFIX)) {
 			return Optional.empty();
 		}
 
 		StoredCredentialToken token = tokenStore.get(bearerToken)
 				.orElseThrow(() -> GcpException.unauthenticated("Unknown Floci credential token"));
-		if (token.getExpireTime() == null || !token.getExpireTime().isAfter(clock.instant())) {
+		if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
 			tokenStore.delete(bearerToken);
 			throw GcpException.unauthenticated("Expired Floci credential token");
 		}
@@ -94,5 +106,8 @@ public class CredentialTokenService {
 
 	public void clear() {
 		tokenStore.clear();
+	}
+
+	public record MintedDownscopedToken(StoredCredentialToken token, long expiresInSeconds) {
 	}
 }

@@ -60,11 +60,15 @@ public class CredentialAccessBoundaryParser {
 		for (JsonNode ruleNode : rulesNode) {
 			String bucket = parseBucket(requiredText(ruleNode, "availableResource"));
 			List<String> permissions = parsePermissions(ruleNode.path("availablePermissions"));
-			String expression = ruleNode.path("availabilityCondition").path("expression").asText(null);
-			if (expression == null || expression.isBlank()) {
-				throw invalidGrant("availabilityCondition.expression is required");
+			JsonNode conditionNode = ruleNode.get("availabilityCondition");
+			String prefix = "";
+			if (conditionNode != null && !conditionNode.isNull()) {
+				String expression = conditionNode.path("expression").asText(null);
+				if (expression == null || expression.isBlank()) {
+					throw invalidGrant("availabilityCondition.expression is required");
+				}
+				prefix = parsePrefixExpression(bucket, expression);
 			}
-			String prefix = parsePrefixExpression(bucket, expression);
 			rules.add(new CredentialAccessBoundaryRule(bucket, prefix, permissions));
 		}
 		return rules;

@@ -11,6 +11,10 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+
 /**
  * Handles GCS XML API requests: GET/PUT /{bucket}/{object}.
  * Used by Go SDK (STORAGE_EMULATOR_HOST) and for signed URL access.
@@ -75,7 +79,18 @@ public class GcsXmlDownloadController {
         String host = headers.getHeaderString("Host");
         String baseUrl = host != null ? "http://" + host : config.baseUrl();
         GcsObjectMeta meta = service.putObject(bucket, objectPath, contentType, body != null ? body : new byte[0],
-                GcsCustomerEncryption.fromHeaders(headers), baseUrl);
+                GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), baseUrl);
         return Response.ok(meta).build();
+    }
+
+    private static Map<String, String> googMetaHeaders(HttpHeaders headers) {
+        var metadata = new LinkedHashMap<String, String>();
+        for (var headerName : headers.getRequestHeaders().keySet()) {
+            var lower = headerName.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("x-goog-meta-") && lower.length() > "x-goog-meta-".length()) {
+                metadata.put(lower.substring("x-goog-meta-".length()), headers.getHeaderString(headerName));
+            }
+        }
+        return metadata;
     }
 }

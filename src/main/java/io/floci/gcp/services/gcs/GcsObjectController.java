@@ -4,6 +4,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -171,9 +172,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
     }
 
     @PUT
@@ -186,9 +187,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+        GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
     }
 
     @POST
@@ -203,9 +204,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
+            GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                     ifMetagenerationMatch, ifMetagenerationNotMatch);
-            return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+            return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
         }
         throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
     }

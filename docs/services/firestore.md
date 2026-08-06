@@ -117,6 +117,25 @@ db.runTransaction(transaction -> {
 }).get();
 ```
 
+Transactions use optimistic concurrency, matching real Firestore: every document
+read inside a transaction is tracked, and the commit fails with `ABORTED` if any
+of those documents changed after being read. SDK clients retry aborted
+transactions automatically, so concurrent increments like the example above never
+lose updates.
+
+## Preconditions
+
+Write preconditions (`currentDocument`) are enforced on all write paths:
+
+- `create()` fails with `ALREADY_EXISTS` if the document exists
+- `update()` fails with `NOT_FOUND` if the document does not exist
+- `Precondition.updatedAt(...)` fails with `FAILED_PRECONDITION` if the
+  document's update time no longer matches
+
+`Commit` is atomic: if any write's precondition fails, no writes in the request
+are applied. `BatchWrite` is non-atomic and reports a per-write status, matching
+real Firestore.
+
 ## Batch Writes
 
 ```java
@@ -164,3 +183,17 @@ registration.remove();
 - `Write` (streaming)
 - `Listen` (real-time change streams)
 - `ListCollectionIds`
+
+## Deviations from real Firestore
+
+- Transaction conflict detection covers documents actually read. Queries inside
+  a transaction track only the documents they return, so phantom reads (a
+  concurrent write creating a document that would have matched the query) do not
+  abort the transaction.
+- `RunAggregationQuery` ignores `transaction` and `newTransaction`; aggregations
+  read outside the transaction and are not part of its read set.
+- Transactions expire after 15 minutes instead of Firestore's shorter
+  server-side deadlines.
+- Transaction state is held in memory; transactions do not survive an emulator
+  restart. A commit against an unknown transaction id is applied without conflict
+  validation.

@@ -13,6 +13,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @ApplicationScoped
@@ -172,29 +173,34 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
+        var userMetadata = extractUserMetadata(metadata);
         preconditions.check(service, bucket, objectName);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
-                GcsCustomerEncryption.fromHeaders(headers), requestBaseUrl(headers));
+                GcsCustomerEncryption.fromHeaders(headers), userMetadata, requestBaseUrl(headers));
         return Response.ok(meta).build();
     }
 
-    @SuppressWarnings("unchecked")
     private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, byte[] body,
             Preconditions preconditions) {
         String contentType = headers.getHeaderString("X-Upload-Content-Type");
         String name = nameParam;
+        Map<String, String> userMetadata = null;
 
         if (body != null && body.length > 0) {
+            Map<?, ?> meta = null;
             try {
-                Map<String, Object> meta = objectMapper.readValue(body, Map.class);
-                if (name == null) {
-                    name = (String) meta.get("name");
-                }
-                if (contentType == null) {
-                    contentType = (String) meta.get("contentType");
-                }
+                meta = objectMapper.readValue(body, Map.class);
             } catch (Exception ignored) {
+            }
+            if (meta != null) {
+                if (name == null && meta.get("name") instanceof String bodyName) {
+                    name = bodyName;
+                }
+                if (contentType == null && meta.get("contentType") instanceof String bodyContentType) {
+                    contentType = bodyContentType;
+                }
+                userMetadata = extractUserMetadata(meta);
             }
         }
 
@@ -207,7 +213,7 @@ public class GcsUploadController {
 
         preconditions.check(service, bucket, name);
         String uploadId = service.startResumableUpload(bucket, name, contentType,
-                GcsCustomerEncryption.fromHeaders(headers));
+                GcsCustomerEncryption.fromHeaders(headers), userMetadata);
         String location = requestBaseUrl(headers) + "/upload/storage/v1/b/" + bucket
                 + "/o?uploadType=resumable&upload_id=" + uploadId;
 
@@ -226,6 +232,29 @@ public class GcsUploadController {
     private String requestBaseUrl(HttpHeaders headers) {
         String host = headers.getHeaderString("Host");
         return host != null ? "http://" + host : config.baseUrl();
+    }
+
+    private static Map<String, String> extractUserMetadata(Map<?, ?> requestMetadata) {
+        var value = requestMetadata.get("metadata");
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?> entries)) {
+            throw GcpException.invalidArgument("metadata must be an object with string values");
+        }
+        var userMetadata = new LinkedHashMap<String, String>();
+        for (var entry : entries.entrySet()) {
+            var entryValue = entry.getValue();
+            if (entryValue == null) {
+                continue;
+            }
+            if (!(entryValue instanceof String stringValue)) {
+                throw GcpException.invalidArgument(
+                        "metadata value for key " + entry.getKey() + " must be a string");
+            }
+            userMetadata.put(String.valueOf(entry.getKey()), stringValue);
+        }
+        return userMetadata;
     }
 
     private static String[] parseMultipartRaw(String contentType, String bodyStr) {

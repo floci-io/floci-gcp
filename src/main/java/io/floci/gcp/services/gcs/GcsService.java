@@ -221,6 +221,11 @@ public class GcsService {
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, customerEncryption, null, baseUrl);
+    }
+
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata, String baseUrl) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -255,6 +260,9 @@ public class GcsService {
         meta.setSize(String.valueOf(data.length));
         meta.setContentType(contentType != null ? contentType : "application/octet-stream");
         meta.setCustomerEncryption(customerEncryption.metadata());
+        if (userMetadata != null && !userMetadata.isEmpty()) {
+            meta.setMetadata(new LinkedHashMap<>(userMetadata));
+        }
         meta.setStorageClass("STANDARD");
         meta.setTimeCreated(now);
         meta.setUpdated(now);
@@ -656,7 +664,7 @@ public class GcsService {
     }
 
     public String startResumableUpload(String bucket, String objectName, String contentType,
-            GcsCustomerEncryption customerEncryption) {
+            GcsCustomerEncryption customerEncryption, Map<String, String> metadata) {
         LOG.debugf("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("startResumableUpload failed: bucket not found bucket=%s", bucket);
@@ -664,7 +672,7 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata(), new byte[0]));
+                customerEncryption.metadata(), metadata, new byte[0]));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -677,7 +685,7 @@ public class GcsService {
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
     }
 
     public long appendResumableUpload(String uploadId, long start, byte[] data) {
@@ -688,7 +696,8 @@ public class GcsService {
         }
         byte[] combined = appendChunk(upload, start, data);
         resumableUploads.put(uploadId, new ResumableUpload(
-                upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(), combined));
+                upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(),
+                upload.metadata(), combined));
         return combined.length - 1L;
     }
 
@@ -714,7 +723,7 @@ public class GcsService {
         }
         resumableUploads.remove(uploadId);
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
     }
 
     public GcsObjectMeta completeResumableUpload(String uploadId, long start, byte[] data,
@@ -731,7 +740,7 @@ public class GcsService {
         }
         resumableUploads.remove(uploadId);
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), combined,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
     }
 
     private static byte[] appendChunk(ResumableUpload upload, long start, byte[] data) {

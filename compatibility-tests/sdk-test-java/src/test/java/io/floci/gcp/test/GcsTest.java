@@ -16,6 +16,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -70,6 +71,7 @@ class GcsTest {
         BlobId blobId = BlobId.of(BUCKET_NAME, OBJECT_NAME);
         BlobInfo blobInfo = BlobInfo.newBuilder(blobId)
                 .setContentType("text/plain")
+                .setMetadata(Map.of("originalname", "test.txt"))
                 .build();
 
         Blob blob = storage.create(blobInfo, OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8));
@@ -78,6 +80,7 @@ class GcsTest {
         assertThat(blob.getBucket()).isEqualTo(BUCKET_NAME);
         assertThat(blob.getContentType()).isEqualTo("text/plain");
         assertThat(blob.getSize()).isEqualTo(OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8).length);
+        assertThat(blob.getMetadata()).isEqualTo(Map.of("originalname", "test.txt"));
     }
 
     @Test
@@ -87,6 +90,7 @@ class GcsTest {
         assertThat(blob).isNotNull();
         assertThat(blob.getContentType()).isEqualTo("text/plain");
         assertThat(blob.getCreateTime()).isNotNull();
+        assertThat(blob.getMetadata()).isEqualTo(Map.of("originalname", "test.txt"));
     }
 
     @Test

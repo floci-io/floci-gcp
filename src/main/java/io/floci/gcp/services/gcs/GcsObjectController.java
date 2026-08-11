@@ -171,9 +171,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
-                ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
 
     @PUT
@@ -186,9 +186,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
-        service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
-                ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+        return Response.ok(service.patchObject(bucket, objectPath, body,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
     }
 
     @POST
@@ -203,9 +203,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            service.checkPreconditions(bucket, objectPath, ifGenerationMatch, ifGenerationNotMatch,
-                    ifMetagenerationMatch, ifMetagenerationNotMatch);
-            return Response.ok(service.patchObject(bucket, objectPath, body)).build();
+            return Response.ok(service.patchObject(bucket, objectPath, body,
+                    preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                            ifMetagenerationMatch, ifMetagenerationNotMatch))).build();
         }
         throw GcpException.invalidArgument("Unsupported method override: " + methodOverride);
     }
@@ -214,12 +214,18 @@ public class GcsObjectController {
     @Path("/{object: .+}")
     public Response deleteObject(@PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
-            @QueryParam("generation") String generation) {
+            @QueryParam("generation") String generation,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch) {
         if (generation != null) {
             service.deleteObjectVersion(bucket, objectPath, generation);
             return Response.noContent().build();
         }
-        if (!service.deleteObject(bucket, objectPath)) {
+        if (!service.deleteObject(bucket, objectPath,
+                preconditions(ifGenerationMatch, ifGenerationNotMatch,
+                        ifMetagenerationMatch, ifMetagenerationNotMatch))) {
             throw GcpException.notFound("Object not found: " + objectPath);
         }
         return Response.noContent().build();
@@ -278,5 +284,11 @@ public class GcsObjectController {
     private String requestBaseUrl(HttpHeaders headers) {
         String host = headers.getHeaderString("Host");
         return host != null ? "http://" + host : config.baseUrl();
+    }
+
+    private static GcsService.ObjectPreconditions preconditions(Long ifGenerationMatch,
+            Long ifGenerationNotMatch, Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
+        return new GcsService.ObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch);
     }
 }

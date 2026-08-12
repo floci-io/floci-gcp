@@ -147,16 +147,16 @@ public class GcsObjectController {
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
             if ("media".equals(alt)) {
-                byte[] data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
-                GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath, generation);
-                return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
+                var data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
+                var meta = service.getObjectMeta(bucket, objectPath, generation);
+                return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
             }
             return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();
         }
         if ("media".equals(alt)) {
-            byte[] data = service.getObjectData(bucket, objectPath, customerEncryption);
-            GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath);
-            return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
+            var data = service.getObjectData(bucket, objectPath, customerEncryption);
+            var meta = service.getObjectMeta(bucket, objectPath);
+            return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
         }
         return Response.ok(service.getObjectMeta(bucket, objectPath)).build();
     }

@@ -26,6 +26,7 @@ func TestGCS(t *testing.T) {
 		bkt := client.Bucket(bucketName)
 		bkt.Object(objectName).Delete(ctx)
 		bkt.Object("copy-" + objectName).Delete(ctx)
+		bkt.Object("meta-" + objectName).Delete(ctx)
 		bkt.Delete(ctx)
 	})
 
@@ -75,6 +76,31 @@ func TestGCS(t *testing.T) {
 		assert.Equal(t, objectName, attrs.Name)
 		assert.Equal(t, "text/plain", attrs.ContentType)
 		assert.Equal(t, int64(len(content)), attrs.Size)
+	})
+
+	t.Run("ObjectCustomMetadata", func(t *testing.T) {
+		metadata := map[string]string{"originalname": "test.txt", "reviewer": "jane"}
+		obj := client.Bucket(bucketName).Object("meta-" + objectName)
+
+		w := obj.NewWriter(ctx)
+		w.ContentType = "text/plain"
+		w.Metadata = metadata
+		_, err := io.WriteString(w, content)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+
+		attrs, err := obj.Attrs(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, metadata, attrs.Metadata)
+
+		r, err := obj.NewReader(ctx)
+		require.NoError(t, err)
+		defer r.Close()
+		// net/http canonicalizes the x-goog-meta-* header names, so the
+		// HTTP transport surfaces reader metadata keys in title case.
+		assert.Equal(t, map[string]string{"Originalname": "test.txt", "Reviewer": "jane"}, r.Metadata())
+
+		require.NoError(t, obj.Delete(ctx))
 	})
 
 	t.Run("ListObjects", func(t *testing.T) {

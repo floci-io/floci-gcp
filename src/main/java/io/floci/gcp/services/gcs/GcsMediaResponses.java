@@ -1,26 +1,38 @@
 package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Arrays;
 
 final class GcsMediaResponses {
 
+    static final String META_HEADER_PREFIX = "x-goog-meta-";
+
     private GcsMediaResponses() {}
 
-    static Response mediaResponse(byte[] data, String contentType, String rangeHeader) {
+    static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader) {
+        Response.ResponseBuilder builder;
         if (rangeHeader == null || rangeHeader.isBlank()) {
-            return Response.ok(data).type(contentType).build();
+            builder = Response.ok(data);
+        } else {
+            var range = parseRange(rangeHeader, data.length);
+            builder = Response.status(Response.Status.PARTIAL_CONTENT)
+                    .entity(Arrays.copyOfRange(data, range.start(), range.end() + 1))
+                    .header("Content-Range", "bytes " + range.start() + "-" + range.end() + "/" + data.length);
         }
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta).build();
+    }
 
-        Range range = parseRange(rangeHeader, data.length);
-        byte[] body = Arrays.copyOfRange(data, range.start(), range.end() + 1);
-        return Response.status(Response.Status.PARTIAL_CONTENT)
-                .entity(body)
-                .type(contentType)
-                .header("Content-Range", "bytes " + range.start() + "-" + range.end() + "/" + data.length)
-                .build();
+    private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta) {
+        var metadata = meta.getMetadata();
+        if (metadata != null) {
+            for (var entry : metadata.entrySet()) {
+                builder.header(META_HEADER_PREFIX + entry.getKey(), entry.getValue());
+            }
+        }
+        return builder;
     }
 
     private static Range parseRange(String rangeHeader, int length) {

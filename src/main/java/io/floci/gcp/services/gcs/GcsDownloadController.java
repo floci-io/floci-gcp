@@ -1,6 +1,5 @@
 package io.floci.gcp.services.gcs;
 
-import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -31,12 +30,12 @@ public class GcsDownloadController {
             @HeaderParam("Range") String rangeHeader) {
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if (generation != null) {
-            byte[] data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
-            GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath, generation);
-            return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
+            var data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
+            var meta = service.getObjectMeta(bucket, objectPath, generation);
+            return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
         }
-        byte[] data = service.getObjectData(bucket, objectPath, customerEncryption);
-        GcsObjectMeta meta = service.getObjectMeta(bucket, objectPath);
-        return GcsMediaResponses.mediaResponse(data, meta.getContentType(), rangeHeader);
+        var data = service.getObjectData(bucket, objectPath, customerEncryption);
+        var meta = service.getObjectMeta(bucket, objectPath);
+        return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
     }
 }

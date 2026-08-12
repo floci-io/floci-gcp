@@ -120,35 +120,31 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
         try {
             Instant readTime = Instant.now();
             ByteString txId = request.getTransaction();
-            boolean newTransaction = request.hasNewTransaction();
-            if (newTransaction) {
+            if (request.hasNewTransaction()) {
                 txId = ByteString.copyFrom(service.beginTransaction());
+                // per firestore.proto, the new transaction id is a first response of its own
+                // with no other fields set
+                responseObserver.onNext(RunQueryResponse.newBuilder()
+                        .setTransaction(txId)
+                        .build());
             }
             List<StoredDocument> results = service.runQuery(request.getParent(), request.getStructuredQuery());
 
-            boolean first = true;
             for (StoredDocument doc : results) {
                 if (!txId.isEmpty()) {
                     service.recordTransactionRead(txId.toByteArray(), doc.getName(), doc.getUpdateTime());
                 }
-                RunQueryResponse.Builder resp = RunQueryResponse.newBuilder()
+                responseObserver.onNext(RunQueryResponse.newBuilder()
                         .setDocument(toProto(doc))
-                        .setReadTime(toTimestamp(readTime.toString()));
-                if (newTransaction && first) {
-                    resp.setTransaction(txId);
-                    first = false;
-                }
-                responseObserver.onNext(resp.build());
+                        .setReadTime(toTimestamp(readTime.toString()))
+                        .build());
             }
 
             // terminal message
-            RunQueryResponse.Builder done = RunQueryResponse.newBuilder()
+            responseObserver.onNext(RunQueryResponse.newBuilder()
                     .setReadTime(toTimestamp(readTime.toString()))
-                    .setDone(true);
-            if (newTransaction && first) {
-                done.setTransaction(txId);
-            }
-            responseObserver.onNext(done.build());
+                    .setDone(true)
+                    .build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("runQuery failed: %s", e.getMessage());

@@ -54,14 +54,8 @@ public class GcsXmlDownloadController {
             @HeaderParam("Range") String rangeHeader) {
         GcsSignedUrl.checkNotExpired(uriInfo);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
-        if (generation != null) {
-            var data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
-            var meta = service.getObjectMeta(bucket, objectPath, generation);
-            return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
-        }
-        var data = service.getObjectData(bucket, objectPath, customerEncryption);
-        var meta = service.getObjectMeta(bucket, objectPath);
-        return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
+        var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+        return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
     }
 
     @PUT

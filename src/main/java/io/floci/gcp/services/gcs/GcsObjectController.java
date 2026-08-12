@@ -145,18 +145,12 @@ public class GcsObjectController {
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam("Range") String rangeHeader) {
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
-        if (generation != null) {
-            if ("media".equals(alt)) {
-                var data = service.getObjectData(bucket, objectPath, generation, customerEncryption);
-                var meta = service.getObjectMeta(bucket, objectPath, generation);
-                return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
-            }
-            return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();
-        }
         if ("media".equals(alt)) {
-            var data = service.getObjectData(bucket, objectPath, customerEncryption);
-            var meta = service.getObjectMeta(bucket, objectPath);
-            return GcsMediaResponses.mediaResponse(data, meta, rangeHeader);
+            var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+            return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
+        }
+        if (generation != null) {
+            return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();
         }
         return Response.ok(service.getObjectMeta(bucket, objectPath)).build();
     }

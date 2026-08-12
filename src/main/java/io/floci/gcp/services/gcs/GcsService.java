@@ -12,6 +12,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.gcs.model.GcsBucket;
+import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
@@ -366,6 +367,28 @@ public class GcsService {
         return data;
     }
 
+    public GcsObjectDownload getObjectForDownload(String bucket, String objectName, String generation,
+            GcsCustomerEncryption customerEncryption) {
+        if (generation != null) {
+            return new GcsObjectDownload(getObjectMeta(bucket, objectName, generation),
+                    getObjectData(bucket, objectName, generation, customerEncryption));
+        }
+        // Pin the data lookup to the resolved live generation so a concurrent
+        // overwrite cannot pair one generation's bytes with another's metadata.
+        // If that generation vanishes before the data lookup, re-resolve.
+        for (var attempt = 0; ; attempt++) {
+            var meta = getObjectMeta(bucket, objectName);
+            try {
+                return new GcsObjectDownload(meta,
+                        getObjectData(bucket, objectName, meta.getGeneration(), customerEncryption));
+            } catch (GcpException e) {
+                if (e.getHttpStatus() != 404 || attempt >= 2) {
+                    throw e;
+                }
+            }
+        }
+    }
+
     private static void checkCustomerEncryption(GcsObjectMeta meta, GcsCustomerEncryption customerEncryption) {
         if (meta == null || meta.getCustomerEncryption() == null) {
             return;
@@ -481,17 +504,21 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         byte[] composed = new byte[0];
+        GcsObjectMeta firstSourceMeta = null;
         for (String src : sourceNames) {
-            byte[] data = getObjectData(bucket, src, GcsCustomerEncryption.none());
-            byte[] merged = new byte[composed.length + data.length];
+            var source = getObjectForDownload(bucket, src, null, GcsCustomerEncryption.none());
+            if (firstSourceMeta == null) {
+                firstSourceMeta = source.meta();
+            }
+            var data = source.data();
+            var merged = new byte[composed.length + data.length];
             System.arraycopy(composed, 0, merged, 0, composed.length);
             System.arraycopy(data, 0, merged, composed.length, data.length);
             composed = merged;
         }
         String resolvedType = contentType;
-        if (resolvedType == null && !sourceNames.isEmpty()) {
-            resolvedType = objectMetaStore.get(objectKey(bucket, sourceNames.get(0)))
-                    .map(GcsObjectMeta::getContentType).orElse(null);
+        if (resolvedType == null && firstSourceMeta != null) {
+            resolvedType = firstSourceMeta.getContentType();
         }
         return putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
                 composed, GcsCustomerEncryption.none(), baseUrl);
@@ -530,9 +557,9 @@ public class GcsService {
 
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
-        GcsObjectMeta srcMeta = getObjectMeta(srcBucket, srcObject);
-        byte[] data = getObjectData(srcBucket, srcObject, GcsCustomerEncryption.none());
-        GcsObjectMeta dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), data,
+        var src = getObjectForDownload(srcBucket, srcObject, null, GcsCustomerEncryption.none());
+        var srcMeta = src.meta();
+        var dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
                 GcsCustomerEncryption.none(), baseUrl);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));

@@ -397,23 +397,16 @@ public class GcsService {
 
     public GcsObjectDownload getObjectForDownload(String bucket, String objectName, String generation,
             GcsCustomerEncryption customerEncryption) {
-        if (generation != null) {
-            return new GcsObjectDownload(getObjectMeta(bucket, objectName, generation),
-                    getObjectData(bucket, objectName, generation, customerEncryption));
-        }
-        // Pin the data lookup to the resolved live generation so a concurrent
-        // overwrite cannot pair one generation's bytes with another's metadata.
-        // If that generation vanishes before the data lookup, re-resolve.
-        for (var attempt = 0; ; attempt++) {
-            var meta = getObjectMeta(bucket, objectName);
-            try {
-                return new GcsObjectDownload(meta,
-                        getObjectData(bucket, objectName, meta.getGeneration(), customerEncryption));
-            } catch (GcpException e) {
-                if (e.getHttpStatus() != 404 || attempt >= 2) {
-                    throw e;
-                }
+        // Every mutation path holds this lock, so metadata and bytes resolved
+        // under it always come from the same generation.
+        synchronized (objectLock(bucket, objectName)) {
+            if (generation != null) {
+                return new GcsObjectDownload(getObjectMeta(bucket, objectName, generation),
+                        getObjectData(bucket, objectName, generation, customerEncryption));
             }
+            var meta = getObjectMeta(bucket, objectName);
+            return new GcsObjectDownload(meta,
+                    getObjectData(bucket, objectName, meta.getGeneration(), customerEncryption));
         }
     }
 
@@ -646,15 +639,17 @@ public class GcsService {
 
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
             GcsObjectPreconditions preconditions, String baseUrl) {
+        LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
+        // Read the source before taking the destination lock. Nesting two
+        // stripe locks could deadlock with a copy running in the other direction.
+        var src = getObjectForDownload(srcBucket, srcObject, null, GcsCustomerEncryption.none());
         synchronized (objectLock(dstBucket, dstObject)) {
             checkPreconditions(dstBucket, dstObject, preconditions);
-            return copyObjectLocked(srcBucket, srcObject, dstBucket, dstObject, baseUrl);
+            return copyObjectLocked(src, dstBucket, dstObject, baseUrl);
         }
     }
 
-    private GcsObjectMeta copyObjectLocked(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
-        LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
-        var src = getObjectForDownload(srcBucket, srcObject, null, GcsCustomerEncryption.none());
+    private GcsObjectMeta copyObjectLocked(GcsObjectDownload src, String dstBucket, String dstObject, String baseUrl) {
         var srcMeta = src.meta();
         var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
                 GcsCustomerEncryption.none(), null, baseUrl);

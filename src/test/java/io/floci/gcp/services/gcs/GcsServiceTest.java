@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -243,6 +244,40 @@ class GcsServiceTest {
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.getBucket("bucket"));
         assertEquals("NOT_FOUND", ex.getGcpStatus());
+    }
+
+    @Test
+    void concurrentOverwriteNeverMixesGenerations() throws Exception {
+        service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
+        var payloads = Map.of(
+                "a", "aaaaaaaa".getBytes(StandardCharsets.UTF_8),
+                "b", "bb".getBytes(StandardCharsets.UTF_8));
+        service.putObject("race-bucket", "obj.txt", "text/plain", payloads.get("a"),
+                GcsCustomerEncryption.none(), Map.of("tag", "a"), BASE_URL);
+
+        var stop = new AtomicBoolean(false);
+        var writer = new Thread(() -> {
+            var flip = false;
+            while (!stop.get()) {
+                var tag = flip ? "a" : "b";
+                service.putObject("race-bucket", "obj.txt", "text/plain", payloads.get(tag),
+                        GcsCustomerEncryption.none(), Map.of("tag", tag), BASE_URL);
+                flip = !flip;
+            }
+        });
+        writer.start();
+        try {
+            for (var i = 0; i < 2_000; i++) {
+                var download = service.getObjectForDownload(
+                        "race-bucket", "obj.txt", null, GcsCustomerEncryption.none());
+                var expected = payloads.get(download.meta().getMetadata().get("tag"));
+                assertArrayEquals(expected, download.data(),
+                        "bytes belong to a different generation than the metadata");
+            }
+        } finally {
+            stop.set(true);
+            writer.join();
+        }
     }
 
     private static GcsService persistentService(Path root) {

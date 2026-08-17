@@ -33,6 +33,22 @@ def test_upload_and_download_object(storage_client, unique_name):
         bucket.delete(force=True)
 
 
+def test_object_custom_metadata(storage_client, unique_name):
+    bucket_name = f"test-bucket-{unique_name}"
+    bucket = storage_client.create_bucket(storage_client.bucket(bucket_name))
+
+    try:
+        blob = bucket.blob("meta-object.txt")
+        blob.metadata = {"originalname": "test.txt", "reviewer": "jane"}
+        blob.upload_from_string("metadata content", content_type="text/plain")
+
+        fetched = bucket.get_blob("meta-object.txt")
+        assert fetched.metadata == {"originalname": "test.txt", "reviewer": "jane"}
+        assert fetched.download_as_text() == "metadata content"
+    finally:
+        bucket.delete(force=True)
+
+
 def test_list_objects_in_bucket(storage_client, unique_name):
     bucket_name = f"test-bucket-{unique_name}"
     bucket = storage_client.create_bucket(storage_client.bucket(bucket_name))

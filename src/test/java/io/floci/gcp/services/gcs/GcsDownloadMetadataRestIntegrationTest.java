@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @QuarkusTest
@@ -80,6 +81,38 @@ class GcsDownloadMetadataRestIntegrationTest {
                 .header("Content-Range", equalTo("bytes 0-4/14"))
                 .header("x-goog-meta-origname", equalTo("test.txt"))
                 .header("x-goog-meta-reviewer", equalTo("jane"));
+    }
+
+    @Test
+    void downloadSkipsMetadataEntriesIllegalInHeaders() {
+        ensureBucket();
+        given()
+                .contentType("text/plain")
+                .body("hello metadata")
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=media&name=illegal-meta-obj")
+                .then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body(Map.of("metadata", Map.of(
+                        "origname", "test.txt",
+                        "bad key", "space",
+                        "bad:key", "colon",
+                        "bad/key", "slash",
+                        "日本語", "non-ascii-key",
+                        "badvalue1", "line\nbreak",
+                        "badvalue2", "非ASCII値")))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/illegal-meta-obj")
+                .then().statusCode(200);
+
+        var response = given()
+                .when().get("/" + BUCKET + "/illegal-meta-obj")
+                .then().statusCode(200)
+                .header("x-goog-meta-origname", equalTo("test.txt"))
+                .extract();
+        var metaHeaders = response.headers().asList().stream()
+                .filter(header -> header.getName().toLowerCase(Locale.ROOT).startsWith("x-goog-meta-"))
+                .toList();
+        assertEquals(1, metaHeaders.size(), "only the valid metadata entry must be emitted");
     }
 
     @Test

@@ -64,6 +64,19 @@ describe('Cloud Storage (GCS)', () => {
     expect(Number(metadata.size)).toBeGreaterThan(0);
   });
 
+  it('should round-trip custom object metadata', async () => {
+    const metaObjectName = 'meta-test-object.txt';
+    await storage.bucket(bucketName).file(metaObjectName).save(objectContent, {
+      contentType: 'text/plain',
+      metadata: { metadata: { originalname: 'test.txt', reviewer: 'jane' } },
+    });
+    const [metadata] = await storage.bucket(bucketName).file(metaObjectName).getMetadata();
+    expect(metadata.metadata).toEqual({ originalname: 'test.txt', reviewer: 'jane' });
+    const [content] = await storage.bucket(bucketName).file(metaObjectName).download();
+    expect(content.toString()).toBe(objectContent);
+    await storage.bucket(bucketName).file(metaObjectName).delete();
+  });
+
   it('should list objects in bucket', async () => {
     const [files] = await storage.bucket(bucketName).getFiles();
     expect(files.some((f) => f.name === objectName)).toBe(true);

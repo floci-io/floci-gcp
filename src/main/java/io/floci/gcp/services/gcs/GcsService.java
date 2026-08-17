@@ -790,33 +790,42 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata(), metadata, preconditions, new byte[0]));
+                customerEncryption.metadata(), metadata, preconditions, new byte[0], null));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
 
     public GcsObjectMeta completeResumableUpload(String uploadId, byte[] data, String baseUrl) {
         LOG.debugf("completeResumableUpload uploadId=%s size=%d", uploadId, data.length);
-        ResumableUpload upload = resumableUploads.remove(uploadId);
+        ResumableUpload upload = resumableUploads.get(uploadId);
         if (upload == null) {
             LOG.warnf("completeResumableUpload failed: upload not found uploadId=%s", uploadId);
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
-        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
+        byte[] combined = appendChunk(upload, upload.data().length, data);
+        validateResumableTotalSize(upload, (long) combined.length);
+        resumableUploads.remove(uploadId);
+        return putObject(upload.bucket(), upload.objectName(), upload.contentType(), combined,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
                 upload.preconditions(), baseUrl);
     }
 
     public long appendResumableUpload(String uploadId, long start, byte[] data) {
+        return appendResumableUpload(uploadId, start, data, null);
+    }
+
+    public long appendResumableUpload(String uploadId, long start, byte[] data, Long totalSize) {
         ResumableUpload upload = resumableUploads.get(uploadId);
         if (upload == null) {
             LOG.warnf("appendResumableUpload failed: upload not found uploadId=%s", uploadId);
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
+        validateResumableTotalSize(upload, totalSize);
         byte[] combined = appendChunk(upload, start, data);
         resumableUploads.put(uploadId, new ResumableUpload(
                 upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(),
-                upload.metadata(), upload.preconditions(), combined));
+                upload.metadata(), upload.preconditions(), combined,
+                upload.totalSize() != null ? upload.totalSize() : totalSize));
         return combined.length - 1L;
     }
 
@@ -835,6 +844,7 @@ public class GcsService {
             LOG.warnf("completeBufferedResumableUpload failed: upload not found uploadId=%s", uploadId);
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
+        validateResumableTotalSize(upload, totalSize);
         byte[] data = upload.data();
         if (data.length != totalSize) {
             throw GcpException.invalidArgument(
@@ -853,6 +863,7 @@ public class GcsService {
             LOG.warnf("completeResumableUpload failed: upload not found uploadId=%s", uploadId);
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
+        validateResumableTotalSize(upload, totalSize);
         byte[] combined = appendChunk(upload, start, data);
         if (combined.length != totalSize) {
             throw GcpException.invalidArgument(
@@ -862,6 +873,13 @@ public class GcsService {
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), combined,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
                 upload.preconditions(), baseUrl);
+    }
+
+    private static void validateResumableTotalSize(ResumableUpload upload, Long totalSize) {
+        if (upload.totalSize() != null && totalSize != null && !upload.totalSize().equals(totalSize)) {
+            throw GcpException.invalidArgument(
+                    "Content-Range total size does not match previous chunks: " + totalSize);
+        }
     }
 
     private static byte[] appendChunk(ResumableUpload upload, long start, byte[] data) {

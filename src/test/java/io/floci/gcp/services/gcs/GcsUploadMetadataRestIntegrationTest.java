@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -76,6 +77,107 @@ class GcsUploadMetadataRestIntegrationTest {
                 .then().statusCode(200)
                 .body("contentType", equalTo("text/plain"))
                 .body("metadata.origname", equalTo("test.txt"));
+    }
+
+    @Test
+    void resumableInitFallsBackToRequestPortWhenHostHasNoPort() {
+        ensureBucket();
+
+        given()
+                .header("Host", "localhost")
+                .contentType("application/json")
+                .body(Map.of("name", "portless-host-obj"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable")
+                .then().statusCode(200)
+                .header("Location", matchesPattern(
+                        "http://localhost:4588/upload/storage/v1/b/" + BUCKET
+                                + "/o\\?uploadType=resumable&upload_id=.*"));
+    }
+
+    @Test
+    void resumableUploadAcceptsIntermediateChunkWithKnownTotalSize() {
+        ensureBucket();
+        var location = given()
+                .contentType("application/json")
+                .body(Map.of("name", "known-total-chunks-obj"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable")
+                .then().statusCode(200)
+                .extract().header("Location");
+
+        var uploadId = location.substring(location.indexOf("upload_id=") + "upload_id=".length());
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 0-3/6")
+                .body("test".getBytes(StandardCharsets.UTF_8))
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(308)
+                .header("Range", equalTo("bytes=0-3"));
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 4-5/6")
+                .body("ok".getBytes(StandardCharsets.UTF_8))
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(200)
+                .body("size", equalTo("6"));
+    }
+
+    @Test
+    void resumableUploadRejectsInconsistentStatusQueryTotal() {
+        ensureBucket();
+        var location = given()
+                .contentType("application/json")
+                .body(Map.of("name", "inconsistent-total-obj"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable")
+                .then().statusCode(200)
+                .extract().header("Location");
+
+        var uploadId = location.substring(location.indexOf("upload_id=") + "upload_id=".length());
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 0-3/6")
+                .body("test".getBytes(StandardCharsets.UTF_8))
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(308)
+                .header("Range", equalTo("bytes=0-3"));
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes */4")
+                .body(new byte[0])
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    @Test
+    void resumableUploadRejectsBodyOnlyCompletionWithInconsistentRetainedTotal() {
+        ensureBucket();
+        var location = given()
+                .contentType("application/json")
+                .body(Map.of("name", "body-only-inconsistent-total-obj"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable")
+                .then().statusCode(200)
+                .extract().header("Location");
+
+        var uploadId = location.substring(location.indexOf("upload_id=") + "upload_id=".length());
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 0-3/6")
+                .body("test".getBytes(StandardCharsets.UTF_8))
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(308)
+                .header("Range", equalTo("bytes=0-3"));
+
+        given()
+                .contentType("application/octet-stream")
+                .body("x".getBytes(StandardCharsets.UTF_8))
+                .when().put("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=resumable&upload_id=" + uploadId)
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
     }
 
     @Test

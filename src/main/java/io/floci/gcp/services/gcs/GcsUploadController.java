@@ -11,7 +11,9 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
+import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -46,15 +48,16 @@ public class GcsUploadController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @jakarta.ws.rs.core.Context HttpHeaders headers,
+            @jakarta.ws.rs.core.Context UriInfo uriInfo,
             byte[] body) {
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         if ("multipart".equals(uploadType)) {
-            return handleMultipart(bucket, nameParam, headers, body, preconditions);
+            return handleMultipart(bucket, nameParam, headers, uriInfo, body, preconditions);
         } else if ("resumable".equals(uploadType)) {
-            return handleStartResumable(bucket, nameParam, headers, body, preconditions);
+            return handleStartResumable(bucket, nameParam, headers, uriInfo, body, preconditions);
         } else if ("media".equals(uploadType)) {
-            return handleMedia(bucket, nameParam, headers, body, preconditions);
+            return handleMedia(bucket, nameParam, headers, uriInfo, body, preconditions);
         }
         throw GcpException.invalidArgument("unsupported uploadType: " + uploadType);
     }
@@ -65,6 +68,7 @@ public class GcsUploadController {
             @PathParam("bucket") String bucket,
             @QueryParam("upload_id") String uploadId,
             @jakarta.ws.rs.core.Context HttpHeaders headers,
+            @jakarta.ws.rs.core.Context UriInfo uriInfo,
             byte[] body) {
         if (uploadId == null) {
             throw GcpException.invalidArgument("missing upload_id query parameter");
@@ -76,7 +80,7 @@ public class GcsUploadController {
                 long uploadedLength = service.resumableUploadLength(uploadId);
                 if (range.totalSize() != null && uploadedLength == range.totalSize()) {
                     GcsObjectMeta meta = service.completeBufferedResumableUpload(
-                            uploadId, range.totalSize(), requestBaseUrl(headers));
+                            uploadId, range.totalSize(), requestBaseUrl(headers, uriInfo));
                     return Response.ok(meta).build();
                 }
                 Response.ResponseBuilder response = Response.status(308);
@@ -89,11 +93,15 @@ public class GcsUploadController {
                 long end = service.appendResumableUpload(uploadId, range.start(), body);
                 return Response.status(308).header("Range", "bytes=0-" + end).build();
             }
+            if (range.end() + 1 < range.totalSize()) {
+                long end = service.appendResumableUpload(uploadId, range.start(), body, range.totalSize());
+                return Response.status(308).header("Range", "bytes=0-" + end).build();
+            }
             GcsObjectMeta meta = service.completeResumableUpload(
-                    uploadId, range.start(), body, range.totalSize(), requestBaseUrl(headers));
+                    uploadId, range.start(), body, range.totalSize(), requestBaseUrl(headers, uriInfo));
             return Response.ok(meta).build();
         }
-        GcsObjectMeta meta = service.completeResumableUpload(uploadId, body, requestBaseUrl(headers));
+        GcsObjectMeta meta = service.completeResumableUpload(uploadId, body, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
     }
 
@@ -135,6 +143,9 @@ public class GcsUploadController {
         if (start < 0 || end < start || bodyLength != end - start + 1) {
             throw GcpException.invalidArgument("invalid Content-Range header: " + header);
         }
+        if (totalSize != null && end >= totalSize) {
+            throw GcpException.invalidArgument("invalid Content-Range header: " + header);
+        }
         return new ContentRange(start, end, totalSize, false);
     }
 
@@ -146,7 +157,7 @@ public class GcsUploadController {
         }
     }
 
-    private Response handleMultipart(String bucket, String nameParam, HttpHeaders headers, byte[] body,
+    private Response handleMultipart(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String[] rawParts = parseMultipartRaw(contentType, new String(body, ISO));
@@ -169,11 +180,11 @@ public class GcsUploadController {
         var userMetadata = extractUserMetadata(metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions, requestBaseUrl(headers));
+                GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
     }
 
-    private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, byte[] body,
+    private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString("X-Upload-Content-Type");
         String name = nameParam;
@@ -205,23 +216,39 @@ public class GcsUploadController {
 
         String uploadId = service.startResumableUpload(bucket, name, contentType,
                 GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions);
-        String location = requestBaseUrl(headers) + "/upload/storage/v1/b/" + bucket
+        String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
                 + "/o?uploadType=resumable&upload_id=" + uploadId;
 
         return Response.ok().header("Location", location).build();
     }
 
-    private Response handleMedia(String bucket, String name, HttpHeaders headers, byte[] body,
+    private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
-                GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers));
+                GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
     }
 
-    private String requestBaseUrl(HttpHeaders headers) {
+    private String requestBaseUrl(HttpHeaders headers, UriInfo uriInfo) {
         String host = headers.getHeaderString("Host");
-        return host != null ? "http://" + host : config.baseUrl();
+        if (host == null) {
+            return config.baseUrl();
+        }
+        if (hasPort(host)) {
+            return "http://" + host;
+        }
+        URI baseUrl = URI.create(config.baseUrl());
+        int port = baseUrl.getPort() >= 0 ? baseUrl.getPort() : config.port();
+        String scheme = baseUrl.getScheme() != null ? baseUrl.getScheme() : uriInfo.getBaseUri().getScheme();
+        return scheme + "://" + host + ":" + port;
+    }
+
+    private static boolean hasPort(String host) {
+        if (host.startsWith("[")) {
+            return host.indexOf("]:") > 0;
+        }
+        return host.indexOf(':') >= 0;
     }
 
     private static Map<String, String> extractUserMetadata(Map<?, ?> requestMetadata) {

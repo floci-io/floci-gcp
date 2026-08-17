@@ -4,4 +4,4 @@ import java.util.Map;
 
 public record ResumableUpload(String bucket, String objectName, String contentType,
         Map<String, String> customerEncryption, Map<String, String> metadata,
-        GcsObjectPreconditions preconditions, byte[] data) {}
+        GcsObjectPreconditions preconditions, byte[] data, Long totalSize) {}

@@ -58,7 +58,7 @@ class StsServiceTest {
 	}
 
 	@Test
-	void capsExpiryToStoredImpersonatedSubjectToken() {
+	void inheritsExpiryFromStoredImpersonatedSubjectToken() {
 		StoredCredentialToken source = tokenService.mintImpersonatedToken(
 				"test@test-project.iam.gserviceaccount.com",
 				Instant.parse("2026-07-15T12:20:00Z"));
@@ -71,6 +71,24 @@ class StsServiceTest {
 				cab());
 
 		assertEquals(1200L, response.get("expires_in"));
+		StoredCredentialToken downscoped = store.get((String) response.get("access_token")).orElseThrow();
+		assertEquals(source.getExpireTime(), downscoped.getExpireTime());
+	}
+
+	@Test
+	void returnsStoredSourceLifetimeBeyondDefaultLifetime() {
+		StoredCredentialToken source = tokenService.mintImpersonatedToken(
+				"test@test-project.iam.gserviceaccount.com",
+				Instant.parse("2026-07-15T14:00:00Z"));
+
+		Map<String, Object> response = service.exchangeToken(
+				StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+				StsService.ACCESS_TOKEN_TYPE,
+				source.getTokenValue(),
+				StsService.ACCESS_TOKEN_TYPE,
+				cab());
+
+		assertEquals(7200L, response.get("expires_in"));
 		StoredCredentialToken downscoped = store.get((String) response.get("access_token")).orElseThrow();
 		assertEquals(source.getExpireTime(), downscoped.getExpireTime());
 	}

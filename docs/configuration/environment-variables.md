@@ -61,6 +61,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Secret Manager |
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | IAM |
 | `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED` | `true` | IAM Service Account Credentials (`generateAccessToken`) |
+| `FLOCI_GCP_SERVICES_STS_ENABLED` | `true` | Security Token Service (STS) |
 | `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Cloud Logging |
 | `FLOCI_GCP_SERVICES_KMS_ENABLED` | `true` | Cloud KMS |
 | `FLOCI_GCP_SERVICES_MONITORING_ENABLED` | `true` | Cloud Monitoring |

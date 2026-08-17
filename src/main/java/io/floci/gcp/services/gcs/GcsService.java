@@ -14,6 +14,7 @@ import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.gcs.model.StoredNotification;
@@ -39,12 +40,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32C;
 
 @ApplicationScoped
 public class GcsService {
 
     private static final Logger LOG = Logger.getLogger(GcsService.class);
+    private static final int OBJECT_LOCK_COUNT = 256;
 
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
@@ -52,6 +55,8 @@ public class GcsService {
     private final StorageBackend<String, StoredAcl> aclStore;
     private final StorageBackend<String, StoredNotification> notificationStore;
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
+    private final Object[] objectLocks = createObjectLocks();
+    private final AtomicLong generationSequence;
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
@@ -74,6 +79,7 @@ public class GcsService {
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = storageFactory.createGlobal("gcs-object-data", "gcs-object-data.json",
                 new TypeReference<Map<String, byte[]>>() {});
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
@@ -97,6 +103,7 @@ public class GcsService {
             String defaultProjectId) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = objectDataStore;
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
@@ -222,10 +229,31 @@ public class GcsService {
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, String baseUrl) {
-        return putObject(bucket, objectName, contentType, data, customerEncryption, null, baseUrl);
+        return putObject(bucket, objectName, contentType, data, customerEncryption, null,
+                GcsObjectPreconditions.NONE, baseUrl);
     }
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, customerEncryption, userMetadata,
+                GcsObjectPreconditions.NONE, baseUrl);
+    }
+
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, GcsObjectPreconditions preconditions, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, customerEncryption, null, preconditions, baseUrl);
+    }
+
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
+            GcsObjectPreconditions preconditions, String baseUrl) {
+        synchronized (objectLock(bucket, objectName)) {
+            checkPreconditions(bucket, objectName, preconditions);
+            return putObjectLocked(bucket, objectName, contentType, data, customerEncryption, userMetadata, baseUrl);
+        }
+    }
+
+    private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata, String baseUrl) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
@@ -234,7 +262,6 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String key = objectKey(bucket, objectName);
-        long generation = System.currentTimeMillis();
         String now = nowTimestamp();
         String encodedName = urlEncode(objectName);
 
@@ -242,6 +269,7 @@ public class GcsService {
         if (existing != null && existing.getTimeDeleted() == null) {
             checkObjectMutable(existing);
         }
+        long generation = nextGeneration();
 
         if (isVersioningEnabled(bucket)) {
             if (existing != null) {
@@ -400,6 +428,17 @@ public class GcsService {
     }
 
     public boolean deleteObject(String bucket, String objectName) {
+        return deleteObject(bucket, objectName, GcsObjectPreconditions.NONE);
+    }
+
+    public boolean deleteObject(String bucket, String objectName, GcsObjectPreconditions preconditions) {
+        synchronized (objectLock(bucket, objectName)) {
+            checkPreconditions(bucket, objectName, preconditions);
+            return deleteObjectLocked(bucket, objectName);
+        }
+    }
+
+    private boolean deleteObjectLocked(String bucket, String objectName) {
         LOG.debugf("deleteObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta live = getLiveObjectMeta(bucket, objectName).orElse(null);
@@ -416,7 +455,7 @@ public class GcsService {
             archived.setIsLatest(false);
             objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
             objectMetaStore.put(archiveKey, archived);
-            long markerGen = System.currentTimeMillis() + 1;
+            long markerGen = nextGeneration();
             GcsObjectMeta marker = new GcsObjectMeta();
             marker.setName(objectName);
             marker.setBucket(bucket);
@@ -445,23 +484,50 @@ public class GcsService {
     }
 
     public void deleteObjectVersion(String bucket, String objectName, String generation) {
+        deleteObjectVersion(bucket, objectName, generation, GcsObjectPreconditions.NONE);
+    }
+
+    public void deleteObjectVersion(String bucket, String objectName, String generation,
+            GcsObjectPreconditions preconditions) {
+        synchronized (objectLock(bucket, objectName)) {
+            deleteObjectVersionLocked(bucket, objectName, generation, preconditions);
+        }
+    }
+
+    private void deleteObjectVersionLocked(String bucket, String objectName, String generation,
+            GcsObjectPreconditions preconditions) {
         LOG.debugf("deleteObjectVersion bucket=%s name=%s generation=%s", bucket, objectName, generation);
         String liveKey = objectKey(bucket, objectName);
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
+            checkPreconditions(Optional.of(live), preconditions);
             objectMetaStore.delete(liveKey);
             objectDataStore.delete(liveKey);
             return;
         }
         String archiveKey = liveKey + "\0" + generation;
-        if (objectMetaStore.get(archiveKey).isEmpty()) {
+        Optional<GcsObjectMeta> archived = objectMetaStore.get(archiveKey);
+        if (archived.isEmpty()) {
             throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
         }
+        checkPreconditions(archived, preconditions);
         objectMetaStore.delete(archiveKey);
         objectDataStore.delete(archiveKey);
     }
 
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch) {
+        return patchObject(bucket, objectName, patch, GcsObjectPreconditions.NONE);
+    }
+
+    public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch,
+            GcsObjectPreconditions preconditions) {
+        synchronized (objectLock(bucket, objectName)) {
+            checkPreconditions(bucket, objectName, preconditions);
+            return patchObjectLocked(bucket, objectName, patch);
+        }
+    }
+
+    private GcsObjectMeta patchObjectLocked(String bucket, String objectName, Map<String, Object> patch) {
         LOG.debugf("patchObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
@@ -499,6 +565,11 @@ public class GcsService {
 
     public GcsObjectMeta composeObject(String bucket, String destObject,
             List<String> sourceNames, String contentType, String baseUrl) {
+        return composeObject(bucket, destObject, sourceNames, contentType, GcsObjectPreconditions.NONE, baseUrl);
+    }
+
+    public GcsObjectMeta composeObject(String bucket, String destObject,
+            List<String> sourceNames, String contentType, GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sourceNames.size());
         if (bucketStore.get(bucket).isEmpty()) {
             throw GcpException.notFound("Bucket not found: " + bucket);
@@ -521,20 +592,34 @@ public class GcsService {
             resolvedType = firstSourceMeta.getContentType();
         }
         return putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
-                composed, GcsCustomerEncryption.none(), baseUrl);
+                composed, GcsCustomerEncryption.none(), preconditions, baseUrl);
     }
 
-    public void checkPreconditions(String bucket, String objectName,
-            Long ifGenerationMatch, Long ifGenerationNotMatch,
-            Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
-        if (ifGenerationMatch == null && ifGenerationNotMatch == null
-                && ifMetagenerationMatch == null && ifMetagenerationNotMatch == null) {
+    private void checkPreconditions(String bucket, String objectName,
+            GcsObjectPreconditions preconditions) {
+        checkPreconditions(getLiveObjectMeta(bucket, objectName), preconditions);
+    }
+
+    private void checkPreconditions(Optional<GcsObjectMeta> metaOpt, GcsObjectPreconditions preconditions) {
+        if (preconditions.isEmpty()) {
             return;
         }
-        Optional<GcsObjectMeta> metaOpt = getLiveObjectMeta(bucket, objectName);
+        Long ifGenerationMatch = preconditions.ifGenerationMatch();
+        Long ifGenerationNotMatch = preconditions.ifGenerationNotMatch();
+        Long ifMetagenerationMatch = preconditions.ifMetagenerationMatch();
+        Long ifMetagenerationNotMatch = preconditions.ifMetagenerationNotMatch();
         if (metaOpt.isEmpty()) {
             if (ifGenerationMatch != null && ifGenerationMatch != 0) {
                 throw GcpException.conditionNotMet("ifGenerationMatch: object does not exist");
+            }
+            if (ifGenerationNotMatch != null) {
+                throw GcpException.conditionNotMet("ifGenerationNotMatch: object does not exist");
+            }
+            if (ifMetagenerationMatch != null) {
+                throw GcpException.conditionNotMet("ifMetagenerationMatch: object does not exist");
+            }
+            if (ifMetagenerationNotMatch != null) {
+                throw GcpException.conditionNotMet("ifMetagenerationNotMatch: object does not exist");
             }
             return;
         }
@@ -556,11 +641,23 @@ public class GcsService {
     }
 
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
+        return copyObject(srcBucket, srcObject, dstBucket, dstObject, GcsObjectPreconditions.NONE, baseUrl);
+    }
+
+    public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
+            GcsObjectPreconditions preconditions, String baseUrl) {
+        synchronized (objectLock(dstBucket, dstObject)) {
+            checkPreconditions(dstBucket, dstObject, preconditions);
+            return copyObjectLocked(srcBucket, srcObject, dstBucket, dstObject, baseUrl);
+        }
+    }
+
+    private GcsObjectMeta copyObjectLocked(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         var src = getObjectForDownload(srcBucket, srcObject, null, GcsCustomerEncryption.none());
         var srcMeta = src.meta();
-        var dstMeta = putObject(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), baseUrl);
+        var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
+                GcsCustomerEncryption.none(), null, baseUrl);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }
@@ -692,6 +789,27 @@ public class GcsService {
 
     public String startResumableUpload(String bucket, String objectName, String contentType,
             GcsCustomerEncryption customerEncryption, Map<String, String> metadata) {
+        return startResumableUpload(bucket, objectName, contentType, customerEncryption, metadata,
+                GcsObjectPreconditions.NONE);
+    }
+
+    public String startResumableUpload(String bucket, String objectName, String contentType,
+            GcsCustomerEncryption customerEncryption, GcsObjectPreconditions preconditions) {
+        return startResumableUpload(bucket, objectName, contentType, customerEncryption, null, preconditions);
+    }
+
+    public String startResumableUpload(String bucket, String objectName, String contentType,
+            GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
+            GcsObjectPreconditions preconditions) {
+        synchronized (objectLock(bucket, objectName)) {
+            return startResumableUploadLocked(bucket, objectName, contentType, customerEncryption, metadata,
+                    preconditions);
+        }
+    }
+
+    private String startResumableUploadLocked(String bucket, String objectName, String contentType,
+            GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
+            GcsObjectPreconditions preconditions) {
         LOG.debugf("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("startResumableUpload failed: bucket not found bucket=%s", bucket);
@@ -699,7 +817,7 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata(), metadata, new byte[0]));
+                customerEncryption.metadata(), metadata, preconditions, new byte[0]));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -712,7 +830,8 @@ public class GcsService {
             throw GcpException.notFound("Resumable upload not found: " + uploadId);
         }
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
+                upload.preconditions(), baseUrl);
     }
 
     public long appendResumableUpload(String uploadId, long start, byte[] data) {
@@ -724,7 +843,7 @@ public class GcsService {
         byte[] combined = appendChunk(upload, start, data);
         resumableUploads.put(uploadId, new ResumableUpload(
                 upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(),
-                upload.metadata(), combined));
+                upload.metadata(), upload.preconditions(), combined));
         return combined.length - 1L;
     }
 
@@ -750,7 +869,8 @@ public class GcsService {
         }
         resumableUploads.remove(uploadId);
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
+                upload.preconditions(), baseUrl);
     }
 
     public GcsObjectMeta completeResumableUpload(String uploadId, long start, byte[] data,
@@ -767,7 +887,8 @@ public class GcsService {
         }
         resumableUploads.remove(uploadId);
         return putObject(upload.bucket(), upload.objectName(), upload.contentType(), combined,
-                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(), baseUrl);
+                GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
+                upload.preconditions(), baseUrl);
     }
 
     private static byte[] appendChunk(ResumableUpload upload, long start, byte[] data) {
@@ -1002,6 +1123,32 @@ public class GcsService {
         copy.setEventBasedHold(src.getEventBasedHold());
         copy.setRetentionExpirationTime(src.getRetentionExpirationTime());
         return copy;
+    }
+
+    private static Object[] createObjectLocks() {
+        Object[] locks = new Object[OBJECT_LOCK_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private Object objectLock(String bucket, String objectName) {
+        int index = Math.floorMod(objectKey(bucket, objectName).hashCode(), objectLocks.length);
+        return objectLocks[index];
+    }
+
+    private static long maxGeneration(StorageBackend<String, GcsObjectMeta> objectMetaStore) {
+        return objectMetaStore.scan(key -> true).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .filter(generation -> generation != null)
+                .mapToLong(Long::parseLong)
+                .max()
+                .orElse(0);
+    }
+
+    private long nextGeneration() {
+        return generationSequence.updateAndGet(previous -> Math.max(previous + 1, System.currentTimeMillis()));
     }
 
     private static String objectKey(String bucket, String objectName) {

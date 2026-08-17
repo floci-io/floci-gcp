@@ -48,6 +48,27 @@ describe('GCS preconditions', () => {
     await expectStatus(file.save('v2', { preconditionOpts: { ifGenerationMatch: 0 } }), 412);
   });
 
+  it('ifGenerationMatch=0 atomically creates an object', async () => {
+    const file = storage.bucket(bucketName).file('create-only');
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, index) =>
+          file.save(`writer-${index}`, { preconditionOpts: { ifGenerationMatch: 0 } }).then(
+            () => true,
+            (err) => {
+              expect(statusOf(err)).toBe(412);
+              return false;
+            },
+          ),
+        ),
+      );
+
+      expect(results.filter(Boolean)).toHaveLength(1);
+    } finally {
+      await file.delete().catch(() => {});
+    }
+  });
+
   it('a stale ifGenerationMatch fails with 412', async () => {
     const file = storage.bucket(bucketName).file(objectName);
 

@@ -63,6 +63,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(416, "OUT_OF_RANGE", Status.Code.OUT_OF_RANGE, message);
     }
 
+    public static GcpException aborted(String message) {
+        return new GcpException(409, "ABORTED", Status.Code.ABORTED, message);
+    }
+
     public static GcpException failedPrecondition(String message) {
         return new GcpException(400, "FAILED_PRECONDITION", Status.Code.FAILED_PRECONDITION, message);
     }
@@ -70,6 +74,10 @@ public class GcpException extends RuntimeException {
     public static GcpException permissionDenied(String message) {
         return new GcpException(403, "PERMISSION_DENIED", Status.Code.PERMISSION_DENIED, message);
     }
+
+	public static GcpException unauthenticated(String message) {
+		return new GcpException(401, "UNAUTHENTICATED", Status.Code.UNAUTHENTICATED, message);
+	}
 
     public static GcpException resourceExhausted(String message) {
         return new GcpException(429, "RESOURCE_EXHAUSTED", Status.Code.RESOURCE_EXHAUSTED, message);

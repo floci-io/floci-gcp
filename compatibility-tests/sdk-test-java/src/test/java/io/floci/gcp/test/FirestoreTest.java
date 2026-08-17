@@ -3,6 +3,7 @@ package io.floci.gcp.test;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.Precondition;
 import com.google.cloud.firestore.Query;
 import com.google.cloud.firestore.QueryDocumentSnapshot;
 import com.google.cloud.firestore.QuerySnapshot;
@@ -18,8 +19,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class FirestoreTest {
@@ -170,5 +173,81 @@ class FirestoreTest {
 
         DocumentSnapshot snapshot = docRef.get().get();
         assertThat(snapshot.exists()).isFalse();
+    }
+
+    @Test
+    @Order(7)
+    void createFailsWhenDocumentAlreadyExists() throws ExecutionException, InterruptedException {
+        DocumentReference docRef = firestore.collection(COLLECTION)
+                .document(TestFixtures.uniqueName("precond"));
+        docRef.create(Map.of("name", "Alice")).get();
+        try {
+            assertThatThrownBy(() -> docRef.create(Map.of("name", "Bob")).get())
+                    .isInstanceOf(ExecutionException.class)
+                    .cause()
+                    .hasMessageContaining("already exists");
+
+            DocumentSnapshot snapshot = docRef.get().get();
+            assertThat(snapshot.getString("name")).isEqualTo("Alice");
+        } finally {
+            docRef.delete().get();
+        }
+    }
+
+    @Test
+    @Order(8)
+    void updateFailsWhenDocumentMissing() {
+        DocumentReference docRef = firestore.collection(COLLECTION)
+                .document(TestFixtures.uniqueName("missing"));
+
+        assertThatThrownBy(() -> docRef.update("name", "Alice").get())
+                .isInstanceOf(ExecutionException.class)
+                .cause()
+                .hasMessageContaining("No document to update");
+    }
+
+    @Test
+    @Order(9)
+    void staleUpdateTimePreconditionFails() throws ExecutionException, InterruptedException {
+        DocumentReference docRef = firestore.collection(COLLECTION)
+                .document(TestFixtures.uniqueName("precond"));
+        WriteResult first = docRef.set(Map.of("version", 1L)).get();
+        WriteResult second = docRef.set(Map.of("version", 2L)).get();
+        try {
+            assertThatThrownBy(() -> docRef.update(
+                    Map.of("version", 3L), Precondition.updatedAt(first.getUpdateTime())).get())
+                    .isInstanceOf(ExecutionException.class);
+
+            // matching precondition succeeds
+            docRef.update(Map.of("version", 3L), Precondition.updatedAt(second.getUpdateTime())).get();
+            assertThat(docRef.get().get().getLong("version")).isEqualTo(3L);
+        } finally {
+            docRef.delete().get();
+        }
+    }
+
+    @Test
+    @Order(10)
+    void transactionRetriesOnConcurrentModification() throws ExecutionException, InterruptedException {
+        DocumentReference docRef = firestore.collection(COLLECTION)
+                .document(TestFixtures.uniqueName("counter"));
+        docRef.set(Map.of("count", 0L)).get();
+        AtomicInteger attempts = new AtomicInteger();
+        try {
+            firestore.runTransaction(transaction -> {
+                long current = transaction.get(docRef).get().getLong("count");
+                if (attempts.incrementAndGet() == 1) {
+                    // out-of-band write invalidates the transaction's read set
+                    docRef.update("count", 100L).get();
+                }
+                transaction.update(docRef, "count", current + 1);
+                return null;
+            }).get();
+
+            assertThat(attempts.get()).isEqualTo(2);
+            assertThat(docRef.get().get().getLong("count")).isEqualTo(101L);
+        } finally {
+            docRef.delete().get();
+        }
     }
 }

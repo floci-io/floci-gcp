@@ -48,6 +48,14 @@ class GcpExceptionTest {
         assertEquals(Status.Code.PERMISSION_DENIED, ex.getGrpcCode());
     }
 
+	@Test
+	void unauthenticated() {
+		GcpException ex = GcpException.unauthenticated("bad token");
+		assertEquals(401, ex.getHttpStatus());
+		assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+		assertEquals(Status.Code.UNAUTHENTICATED, ex.getGrpcCode());
+	}
+
     @Test
     void resourceExhausted() {
         GcpException ex = GcpException.resourceExhausted("quota exceeded");

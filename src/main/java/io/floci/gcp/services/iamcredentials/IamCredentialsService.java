@@ -5,6 +5,8 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.services.credentials.CredentialTokenService;
+import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -14,34 +16,37 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
-import java.util.UUID;
 
 @ApplicationScoped
 public class IamCredentialsService {
 
     static final String DEVSTORAGE_READ_WRITE_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
     static final String CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
-    static final String TOKEN_PREFIX = "floci-gcp-impersonated-";
+    static final String TOKEN_PREFIX = CredentialTokenService.IMPERSONATED_TOKEN_PREFIX;
     static final long DEFAULT_LIFETIME_SECONDS = 3600;
     static final long MAX_LIFETIME_SECONDS = 3600;
     private static final Set<String> SUPPORTED_SCOPES = Set.of(DEVSTORAGE_READ_WRITE_SCOPE, CLOUD_PLATFORM_SCOPE);
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final CredentialTokenService tokenService;
     private final Clock clock;
 
     @Inject
-    public IamCredentialsService(ServiceRegistry serviceRegistry, EmulatorConfig config) {
-        this(serviceRegistry, config, Clock.systemUTC());
+    public IamCredentialsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
+            CredentialTokenService tokenService) {
+        this(serviceRegistry, config, tokenService, Clock.systemUTC());
     }
 
-    IamCredentialsService(Clock clock) {
-        this(null, null, clock);
+    IamCredentialsService(CredentialTokenService tokenService, Clock clock) {
+        this(null, null, tokenService, clock);
     }
 
-    private IamCredentialsService(ServiceRegistry serviceRegistry, EmulatorConfig config, Clock clock) {
+    private IamCredentialsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
+            CredentialTokenService tokenService, Clock clock) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.tokenService = tokenService;
         this.clock = clock;
     }
 
@@ -62,7 +67,8 @@ public class IamCredentialsService {
 
         long lifetimeSeconds = parseLifetimeSeconds(lifetime);
         Instant expireTime = clock.instant().plusSeconds(lifetimeSeconds);
-        return new GeneratedAccessToken(TOKEN_PREFIX + UUID.randomUUID(), expireTime);
+        StoredCredentialToken token = tokenService.mintImpersonatedToken(serviceAccount, expireTime);
+        return new GeneratedAccessToken(token.getTokenValue(), expireTime);
     }
 
     private static void validateScopes(List<?> scopes) {

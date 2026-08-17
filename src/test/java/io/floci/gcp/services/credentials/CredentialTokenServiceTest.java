@@ -106,8 +106,10 @@ class CredentialTokenServiceTest {
 	}
 
 	@Test
-	void nonFlociTokenReturnsEmptyLookupForLaterBypassContract() {
+	void unmanagedTokenReturnsEmptyLookupForLaterBypassContract() {
 		assertTrue(service.lookupBearerToken("external-token").isEmpty());
+		assertTrue(service.lookupBearerToken(
+				CredentialTokenService.FLOCI_TOKEN_PREFIX + "oauth-token").isEmpty());
 		assertTrue(service.lookupBearerToken(null).isEmpty());
 	}
 

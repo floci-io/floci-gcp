@@ -90,7 +90,9 @@ public class CredentialTokenService {
 	}
 
 	private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
-		if (bearerToken == null || bearerToken.isBlank() || !bearerToken.startsWith(FLOCI_TOKEN_PREFIX)) {
+		if (bearerToken == null || bearerToken.isBlank()
+				|| (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
+						&& !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
 			return Optional.empty();
 		}
 

@@ -31,13 +31,16 @@ class GcsAuthorizationTest {
 	private final GcsAuthorizationService authorizationService = new GcsAuthorizationService(tokenService);
 
 	@Test
-	void missingAndStaticBearerTokensBypassAuthorization() {
+	void missingAndUnmanagedBearerTokensBypassAuthorization() {
 		assertTrue(authorizationService.isBypassed(null));
 		assertTrue(authorizationService.isBypassed("Bearer external-token"));
+		assertTrue(authorizationService.isBypassed("Bearer floci-gcp-oauth-token"));
 
 		assertDoesNotThrow(() -> authorizationService.requireObjectRead(null, "bucket", "outside/file.txt"));
 		assertDoesNotThrow(() -> authorizationService.requireObjectWrite(
 				"Bearer external-token", "bucket", "outside/file.txt"));
+		assertDoesNotThrow(() -> authorizationService.rejectDownscopedToken(
+				"Bearer floci-gcp-oauth-token"));
 	}
 
 	@Test

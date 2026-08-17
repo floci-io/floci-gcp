@@ -45,6 +45,27 @@ class StsTokenExchangeTest {
 		assertCanExchange(cab);
 	}
 
+	@Test
+	void downscopedCredentialsExchangeServiceAccountSourceToken() throws Exception {
+		var sourceCredentials = TestFixtures.serviceAccountCredentials();
+		CredentialAccessBoundary cab = CredentialAccessBoundary.newBuilder()
+				.addRule(CredentialAccessBoundary.AccessBoundaryRule.newBuilder()
+						.setAvailableResource("//storage.googleapis.com/projects/_/buckets/compat-bucket")
+						.setAvailablePermissions(List.of("inRole:roles/storage.objectViewer"))
+						.build())
+				.build();
+		DownscopedCredentials credentials = DownscopedCredentials.newBuilder()
+				.setSourceCredential(sourceCredentials)
+				.setCredentialAccessBoundary(cab)
+				.setHttpTransportFactory(stsTransportFactory())
+				.build();
+
+		AccessToken accessToken = credentials.refreshAccessToken();
+
+		assertThat(accessToken.getTokenValue()).startsWith("floci-gcp-downscoped-");
+		assertThat(accessToken.getExpirationTime()).isAfter(Date.from(Instant.now()));
+	}
+
 	private static void assertCanExchange(CredentialAccessBoundary cab) throws Exception {
 		GoogleCredentials sourceCredentials = GoogleCredentials.create(new AccessToken(
 				"source-token",

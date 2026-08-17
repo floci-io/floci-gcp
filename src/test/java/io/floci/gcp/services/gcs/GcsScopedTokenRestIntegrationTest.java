@@ -36,9 +36,10 @@ class GcsScopedTokenRestIntegrationTest {
 	}
 
 	@Test
-	void missingAndStaticBearerTokensPreserveExistingBypassBehavior() {
+	void missingAndUnmanagedBearerTokensPreserveExistingBypassBehavior() {
 		upload(null, "bypass/missing.txt", "missing").statusCode(200);
 		upload("Bearer static-token", "bypass/static.txt", "static").statusCode(200);
+		upload("Bearer floci-gcp-oauth-token", "bypass/oauth.txt", "oauth").statusCode(200);
 
 		given()
 				.header("Authorization", "Bearer static-token")

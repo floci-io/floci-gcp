@@ -58,7 +58,7 @@ public class GcsAuthorizationService {
 
 	public boolean isBypassed(String authorization) {
 		return bearerToken(authorization)
-				.map(token -> !token.startsWith(CredentialTokenService.FLOCI_TOKEN_PREFIX))
+				.map(token -> !token.startsWith(CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX))
 				.orElse(true);
 	}
 

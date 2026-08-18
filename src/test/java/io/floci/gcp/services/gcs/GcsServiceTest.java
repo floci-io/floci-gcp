@@ -7,6 +7,7 @@ import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -147,6 +148,61 @@ class GcsServiceTest {
         assertEquals("text/plain", copied.getContentType());
         assertEquals(Map.of("origname", "src.txt"), copied.getMetadata());
         assertArrayEquals(data, service.getObjectData("bucket", "dst.txt", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void moveObjectMovesDataContentTypeAndMetadata() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        byte[] data = "payload".getBytes(StandardCharsets.UTF_8);
+        GcsObjectMeta source = service.putObject("bucket", "source/name", "text/plain", data,
+                GcsCustomerEncryption.none(), Map.of("original", "source/name"), BASE_URL);
+        GcsObjectPreconditions sourcePreconditions = new GcsObjectPreconditions(
+                Long.parseLong(source.getGeneration()), null, null, null);
+        GcsObjectPreconditions destinationPreconditions = new GcsObjectPreconditions(0L, null, null, null);
+
+        GcsObjectMeta moved = service.moveObject("bucket", "source/name", "destination/name",
+                sourcePreconditions, destinationPreconditions, BASE_URL);
+
+        assertEquals("destination/name", moved.getName());
+        assertEquals("text/plain", moved.getContentType());
+        assertEquals(Map.of("original", "source/name"), moved.getMetadata());
+        assertNotEquals(source.getGeneration(), moved.getGeneration());
+        assertArrayEquals(data, service.getObjectData("bucket", "destination/name"));
+        GcpException exception = assertThrows(GcpException.class,
+                () -> service.getObjectMeta("bucket", "source/name"));
+        assertEquals(404, exception.getHttpStatus());
+    }
+
+    @Test
+    void moveObjectPreconditionFailureDoesNotChangeEitherObject() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "source", "text/plain", "source".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.putObject("bucket", "destination", "text/plain", "destination".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+        GcsObjectPreconditions destinationDoesNotExist = new GcsObjectPreconditions(0L, null, null, null);
+
+        GcpException exception = assertThrows(GcpException.class,
+                () -> service.moveObject("bucket", "source", "destination", GcsObjectPreconditions.NONE,
+                        destinationDoesNotExist, BASE_URL));
+
+        assertEquals(412, exception.getHttpStatus());
+        assertArrayEquals("source".getBytes(StandardCharsets.UTF_8), service.getObjectData("bucket", "source"));
+        assertArrayEquals("destination".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "destination"));
+    }
+
+    @Test
+    void moveObjectRejectsIdenticalNames() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "object", "text/plain", new byte[0], GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException exception = assertThrows(GcpException.class,
+                () -> service.moveObject("bucket", "object", "object", GcsObjectPreconditions.NONE,
+                        GcsObjectPreconditions.NONE, BASE_URL));
+
+        assertEquals(400, exception.getHttpStatus());
+        assertEquals("Source and destination object names must be different.", exception.getMessage());
     }
 
     @Test

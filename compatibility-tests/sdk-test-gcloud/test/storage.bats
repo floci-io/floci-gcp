@@ -58,6 +58,22 @@ setup() {
     done
 }
 
+@test "storage: move object" {
+    local f="${BATS_TEST_TMPDIR}/move.txt"
+    echo "move content" > "$f"
+    gcloud_cmd storage cp "$f" "gs://${BUCKET}/move/source" >/dev/null
+
+    run gcloud_cmd storage mv "gs://${BUCKET}/move/source" "gs://${BUCKET}/move/destination"
+    assert_success
+
+    run gcloud_cmd storage cat "gs://${BUCKET}/move/destination"
+    assert_success
+    assert_output --partial "move content"
+
+    run gcloud_cmd storage ls "gs://${BUCKET}/move/source"
+    assert_failure
+}
+
 @test "storage: delete object" {
     local f="${BATS_TEST_TMPDIR}/del.txt"
     echo "x" > "$f"

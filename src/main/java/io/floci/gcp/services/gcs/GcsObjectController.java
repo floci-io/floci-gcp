@@ -269,6 +269,29 @@ public class GcsObjectController {
     }
 
     @POST
+    @Path("/{srcObject: .+}/moveTo/o/{dstObject: .+}")
+    public Response moveObject(@PathParam("bucket") String bucket,
+            @PathParam("srcObject") String srcObjectPath,
+            @PathParam("dstObject") String dstObjectPath,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+            @QueryParam("ifSourceGenerationMatch") Long ifSourceGenerationMatch,
+            @QueryParam("ifSourceGenerationNotMatch") Long ifSourceGenerationNotMatch,
+            @QueryParam("ifSourceMetagenerationMatch") Long ifSourceMetagenerationMatch,
+            @QueryParam("ifSourceMetagenerationNotMatch") Long ifSourceMetagenerationNotMatch,
+            @Context HttpHeaders headers) {
+        GcsObjectPreconditions sourcePreconditions = new GcsObjectPreconditions(ifSourceGenerationMatch,
+                ifSourceGenerationNotMatch, ifSourceMetagenerationMatch, ifSourceMetagenerationNotMatch);
+        GcsObjectPreconditions destinationPreconditions = new GcsObjectPreconditions(ifGenerationMatch,
+                ifGenerationNotMatch, ifMetagenerationMatch, ifMetagenerationNotMatch);
+        GcsObjectMeta meta = service.moveObject(bucket, srcObjectPath, dstObjectPath,
+                sourcePreconditions, destinationPreconditions, requestBaseUrl(headers));
+        return Response.ok(meta).build();
+    }
+
+    @POST
     @Path("/{srcObject: .+}/rewriteTo/b/{dstBucket}/o/{dstObject: .+}")
     public Response rewriteObject(@PathParam("bucket") String srcBucket,
             @PathParam("srcObject") String srcObjectPath,

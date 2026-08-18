@@ -663,6 +663,31 @@ public class GcsService {
         return dstMeta;
     }
 
+    public GcsObjectMeta moveObject(String bucket, String srcObject, String dstObject,
+            GcsObjectPreconditions sourcePreconditions, GcsObjectPreconditions destinationPreconditions,
+            String baseUrl) {
+        LOG.debugf("moveObject bucket=%s src=%s dst=%s", bucket, srcObject, dstObject);
+        if (srcObject.equals(dstObject)) {
+            throw GcpException.invalidArgument("Source and destination object names must be different.");
+        }
+
+        int sourceLockIndex = objectLockIndex(bucket, srcObject);
+        int destinationLockIndex = objectLockIndex(bucket, dstObject);
+        // Lock stripes in a stable order so opposite-direction moves cannot deadlock.
+        synchronized (objectLocks[Math.min(sourceLockIndex, destinationLockIndex)]) {
+            synchronized (objectLocks[Math.max(sourceLockIndex, destinationLockIndex)]) {
+                var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
+                checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
+                checkObjectMutable(source.meta());
+                checkPreconditions(bucket, dstObject, destinationPreconditions);
+
+                GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
+                deleteObjectLocked(bucket, srcObject);
+                return moved;
+            }
+        }
+    }
+
     public List<GcsObjectMeta> listObjects(String bucket) {
         LOG.debugf("listObjects bucket=%s", bucket);
         if (bucketStore.get(bucket).isEmpty()) {
@@ -1147,8 +1172,11 @@ public class GcsService {
     }
 
     private Object objectLock(String bucket, String objectName) {
-        int index = Math.floorMod(objectKey(bucket, objectName).hashCode(), objectLocks.length);
-        return objectLocks[index];
+        return objectLocks[objectLockIndex(bucket, objectName)];
+    }
+
+    private int objectLockIndex(String bucket, String objectName) {
+        return Math.floorMod(objectKey(bucket, objectName).hashCode(), objectLocks.length);
     }
 
     private static long maxGeneration(StorageBackend<String, GcsObjectMeta> objectMetaStore) {

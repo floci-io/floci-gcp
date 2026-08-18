@@ -216,6 +216,7 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - `DeleteObject`
 - `ListObjects` (with `pageToken`, `prefix`, `delimiter` pagination)
 - `CopyObject`
+- `MoveObject`
 - `HeadObject`
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, custom metadata)
 - `ComposeObject` (concatenate up to 32 source objects)
@@ -238,6 +239,7 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 
 - `ifGenerationMatch` / `ifGenerationNotMatch`
 - `ifMetagenerationMatch` / `ifMetagenerationNotMatch`
+- `ifSourceGenerationMatch` / `ifSourceGenerationNotMatch` for object moves
+- `ifSourceMetagenerationMatch` / `ifSourceMetagenerationNotMatch` for object moves
 - Returns HTTP 412 on precondition failure
-- Enforced atomically on the write paths (insert, patch/update, resumable finalize) under a per-object lock, with a monotonic generation sequence — concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)
-- Not yet enforced on `delete`, `compose`, `copyTo`, and `rewriteTo` (params are accepted and ignored)
+- Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence — concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)

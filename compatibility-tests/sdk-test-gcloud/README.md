@@ -20,7 +20,7 @@ environment only (no `gcloud config` mutation):
 
 | Service | gcloud surface |
 |---|---|
-| Cloud Storage | `storage buckets create/list`, `storage cp/cat/ls/rm` |
+| Cloud Storage | `storage buckets create/list`, `storage cp/mv/cat/ls/rm` |
 | Secret Manager | `secrets create/list/versions add/versions access` |
 | Cloud KMS | `kms keyrings create/list`, `kms keys create/list/describe` |
 | IAM | `iam service-accounts create/list` |

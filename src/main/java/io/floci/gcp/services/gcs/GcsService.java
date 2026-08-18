@@ -569,11 +569,14 @@ public class GcsService {
         }
         byte[] composed = new byte[0];
         GcsObjectMeta firstSourceMeta = null;
+        var componentCount = 0;
         for (String src : sourceNames) {
             var source = getObjectForDownload(bucket, src, null, GcsCustomerEncryption.none());
             if (firstSourceMeta == null) {
                 firstSourceMeta = source.meta();
             }
+            var sourceComponents = source.meta().getComponentCount();
+            componentCount += sourceComponents != null ? sourceComponents : 1;
             var data = source.data();
             var merged = new byte[composed.length + data.length];
             System.arraycopy(composed, 0, merged, 0, composed.length);
@@ -584,8 +587,14 @@ public class GcsService {
         if (resolvedType == null && firstSourceMeta != null) {
             resolvedType = firstSourceMeta.getContentType();
         }
-        return putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
+        var meta = putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
                 composed, GcsCustomerEncryption.none(), preconditions, baseUrl);
+        // Real GCS composite objects report a componentCount and no md5Hash, and
+        // composing an already composite source adds its component count.
+        meta.setComponentCount(componentCount);
+        meta.setMd5Hash(null);
+        objectMetaStore.put(objectKey(bucket, destObject), meta);
+        return meta;
     }
 
     private void checkPreconditions(String bucket, String objectName,

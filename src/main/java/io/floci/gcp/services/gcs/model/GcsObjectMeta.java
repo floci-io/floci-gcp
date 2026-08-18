@@ -23,6 +23,7 @@ public class GcsObjectMeta {
     private String updated;
     private String crc32c;
     private String md5Hash;
+    private Integer componentCount;
     private String mediaLink;
     private String etag;
     private String contentDisposition;
@@ -72,6 +73,9 @@ public class GcsObjectMeta {
 
     public String getMd5Hash() { return md5Hash; }
     public void setMd5Hash(String md5Hash) { this.md5Hash = md5Hash; }
+
+    public Integer getComponentCount() { return componentCount; }
+    public void setComponentCount(Integer componentCount) { this.componentCount = componentCount; }
 
     public String getMediaLink() { return mediaLink; }
     public void setMediaLink(String mediaLink) { this.mediaLink = mediaLink; }

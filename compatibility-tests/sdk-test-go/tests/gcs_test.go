@@ -159,6 +159,42 @@ func TestGCS(t *testing.T) {
 		assert.Equal(t, content, buf.String())
 	})
 
+	t.Run("ComposeObject", func(t *testing.T) {
+		bucket := client.Bucket(bucketName)
+		part1 := bucket.Object("compose-part1")
+		part2 := bucket.Object("compose-part2")
+		w := part1.NewWriter(ctx)
+		_, err := io.WriteString(w, "hello ")
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		w = part2.NewWriter(ctx)
+		_, err = io.WriteString(w, "world")
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+
+		composed := bucket.Object("composed")
+		attrs, err := composed.ComposerFrom(part1, part2).Run(ctx)
+		require.NoError(t, err)
+
+		// Real GCS gives composite objects a componentCount and no MD5, so
+		// downloads validate crc32c only.
+		assert.Empty(t, attrs.MD5)
+		assert.EqualValues(t, 2, attrs.ComponentCount)
+		assert.NotZero(t, attrs.CRC32C)
+
+		r, err := composed.NewReader(ctx)
+		require.NoError(t, err)
+		defer r.Close()
+		var buf bytes.Buffer
+		_, err = buf.ReadFrom(r)
+		require.NoError(t, err)
+		assert.Equal(t, "hello world", buf.String())
+
+		require.NoError(t, part1.Delete(ctx))
+		require.NoError(t, part2.Delete(ctx))
+		require.NoError(t, composed.Delete(ctx))
+	})
+
 	t.Run("DeleteObject", func(t *testing.T) {
 		err := client.Bucket(bucketName).Object(objectName).Delete(ctx)
 		require.NoError(t, err)

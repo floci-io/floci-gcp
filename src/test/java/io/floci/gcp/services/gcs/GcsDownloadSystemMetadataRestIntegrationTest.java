@@ -3,11 +3,13 @@ package io.floci.gcp.services.gcs;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class GcsDownloadSystemMetadataRestIntegrationTest {
@@ -70,6 +72,27 @@ class GcsDownloadSystemMetadataRestIntegrationTest {
                 .header("x-goog-generation", equalTo(meta.get("generation")))
                 .header("x-goog-stored-content-length", equalTo(String.valueOf(BODY.length())))
                 .header("x-goog-hash", notNullValue());
+    }
+
+    @Test
+    void composedObjectOmitsMd5FromHashHeader() {
+        upload("compose-src-1");
+        upload("compose-src-2");
+
+        var composed = given()
+                .contentType("application/json")
+                .body(Map.of("sourceObjects",
+                        List.of(Map.of("name", "compose-src-1"), Map.of("name", "compose-src-2"))))
+                .when().post("/storage/v1/b/" + BUCKET + "/o/composed-obj/compose")
+                .then().statusCode(200)
+                .body("componentCount", equalTo(2))
+                .body("md5Hash", nullValue())
+                .extract().body().jsonPath().getMap("$");
+
+        given()
+                .when().get("/storage/v1/b/" + BUCKET + "/o/composed-obj?alt=media")
+                .then().statusCode(200)
+                .header("x-goog-hash", equalTo("crc32c=" + composed.get("crc32c")));
     }
 
     @Test

@@ -166,6 +166,29 @@ class GcsServiceTest {
     }
 
     @Test
+    void composeObjectOmitsMd5AndAccumulatesComponentCount() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "part1.txt", "text/plain", "foo".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.putObject("bucket", "part2.txt", "text/plain", "bar".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        var composed = service.composeObject("bucket", "all.txt", List.of("part1.txt", "part2.txt"),
+                null, BASE_URL);
+
+        assertNull(composed.getMd5Hash());
+        assertNotNull(composed.getCrc32c());
+        assertEquals(2, composed.getComponentCount());
+        assertNull(service.getObjectMeta("bucket", "part1.txt").getComponentCount());
+
+        // Composing an already composite source adds its component count.
+        var recomposed = service.composeObject("bucket", "all2.txt", List.of("all.txt", "part1.txt"),
+                null, BASE_URL);
+        assertEquals(3, recomposed.getComponentCount());
+        assertNull(service.getObjectMeta("bucket", "all.txt").getMd5Hash());
+    }
+
+    @Test
     void objectDataSurvivesPersistentStoreReload() {
         GcsService first = persistentService(tempDir);
         first.createBucket("bucket", "p1", BASE_URL, Map.of());

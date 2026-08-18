@@ -59,3 +59,7 @@ Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
   subset is accepted.
 - Non-floci source credentials are not validated, matching the emulator's
   general credential-bypass behavior.
+- A downscoped token minted by floci-gcp is enforced only for GCS requests:
+  the request must match one of the token's CAB rules. Other credentials,
+  including Floci-issued OAuth and impersonated tokens, remain accepted without
+  credential validation.

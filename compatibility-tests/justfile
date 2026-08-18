@@ -22,6 +22,7 @@ test-all:
     just test-python
     just test-node
     just test-go
+    just test-rust
 
 test-all-iac:
     just test-terraform
@@ -68,6 +69,16 @@ test-go:
 setup-go:
     go mod tidy
 
+# ── Rust ─────────────────────────────────────────────────────────────────────
+
+[working-directory: 'sdk-test-rust']
+test-rust:
+    cargo test --locked
+
+[working-directory: 'sdk-test-rust']
+setup-rust:
+    cargo fetch
+
 # ── gcloud CLI ───────────────────────────────────────────────────────────────
 
 [working-directory: 'sdk-test-gcloud']
@@ -110,7 +121,7 @@ setup-opentofu:
 
 # ── Combined setup ───────────────────────────────────────────────────────────
 
-setup: setup-java setup-python setup-node setup-go
+setup: setup-java setup-python setup-node setup-go setup-rust
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 

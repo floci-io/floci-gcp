@@ -70,6 +70,30 @@ func TestGCS(t *testing.T) {
 		assert.Equal(t, content, buf.String())
 	})
 
+	t.Run("DownloadReaderAttrs", func(t *testing.T) {
+		obj := client.Bucket(bucketName).Object(objectName)
+		attrs, err := obj.Attrs(ctx)
+		require.NoError(t, err)
+
+		r, err := obj.NewReader(ctx)
+		require.NoError(t, err)
+		defer r.Close()
+
+		// The reader attrs come from the x-goog-* headers of the media
+		// response, not from the object resource. Without them the values
+		// silently degrade here, and the Rust SDK fails every read.
+		assert.Equal(t, attrs.Generation, r.Attrs.Generation)
+		assert.Equal(t, attrs.Metageneration, r.Attrs.Metageneration)
+		assert.Equal(t, int64(len(content)), r.Attrs.Size)
+		assert.Equal(t, attrs.CRC32C, r.Attrs.CRC32C)
+		assert.NotZero(t, r.Attrs.CRC32C)
+
+		// A full read verifies the payload against the crc32c announced in
+		// x-goog-hash.
+		_, err = io.Copy(io.Discard, r)
+		require.NoError(t, err)
+	})
+
 	t.Run("ObjectMetadata", func(t *testing.T) {
 		attrs, err := client.Bucket(bucketName).Object(objectName).Attrs(ctx)
 		require.NoError(t, err)

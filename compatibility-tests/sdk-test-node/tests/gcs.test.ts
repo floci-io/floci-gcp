@@ -57,6 +57,39 @@ describe('Cloud Storage (GCS)', () => {
     expect(content.toString()).toBe(objectContent);
   });
 
+  it('should emit x-goog system metadata headers on media download', async () => {
+    const file = storage.bucket(bucketName).file(objectName);
+    const [metadata] = await file.getMetadata();
+
+    const stream = file.createReadStream({ validation: 'crc32c' });
+    const headersPromise = new Promise<Record<string, string>>((resolve) => {
+      stream.on('response', (res) => resolve(res.headers));
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk as Buffer);
+    }
+    const headers = await headersPromise;
+
+    expect(Buffer.concat(chunks).toString()).toBe(objectContent);
+    expect(headers['x-goog-generation']).toBe(String(metadata.generation));
+    expect(headers['x-goog-metageneration']).toBe(String(metadata.metageneration));
+    expect(headers['x-goog-stored-content-length']).toBe(String(metadata.size));
+    // Without this header the SDK silently skips checksum validation.
+    expect(headers['x-goog-stored-content-encoding']).toBe('identity');
+    expect(headers['x-goog-hash']).toContain(`crc32c=${metadata.crc32c}`);
+    expect(headers['x-goog-hash']).toContain(`md5=${metadata.md5Hash}`);
+  });
+
+  it('should verify md5 from x-goog-hash when requested', async () => {
+    // Fails with MD5_NOT_AVAILABLE when the x-goog-hash header is absent.
+    const [content] = await storage
+      .bucket(bucketName)
+      .file(objectName)
+      .download({ validation: 'md5' });
+    expect(content.toString()).toBe(objectContent);
+  });
+
   it('should get object metadata', async () => {
     const [metadata] = await storage.bucket(bucketName).file(objectName).getMetadata();
     expect(metadata.name).toBe(objectName);

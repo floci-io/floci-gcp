@@ -5,6 +5,7 @@ import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Arrays;
+import java.util.StringJoiner;
 
 final class GcsMediaResponses {
 
@@ -26,6 +27,14 @@ final class GcsMediaResponses {
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta) {
+        addHeaderIfPresent(builder, "ETag", meta.getEtag());
+        addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
+        addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
+        addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
+        builder.header("x-goog-stored-content-encoding",
+                meta.getContentEncoding() != null ? meta.getContentEncoding() : "identity");
+        addHeaderIfPresent(builder, "x-goog-storage-class", meta.getStorageClass());
+        addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
         var metadata = meta.getMetadata();
         if (metadata != null) {
             for (var entry : metadata.entrySet()) {
@@ -35,6 +44,24 @@ final class GcsMediaResponses {
             }
         }
         return builder;
+    }
+
+    private static void addHeaderIfPresent(Response.ResponseBuilder builder, String name, String value) {
+        if (value != null && !value.isEmpty()) {
+            builder.header(name, value);
+        }
+    }
+
+    // Real GCS lists crc32c before md5 and omits md5 for composite objects.
+    private static String hashHeader(GcsObjectMeta meta) {
+        var parts = new StringJoiner(",");
+        if (meta.getCrc32c() != null) {
+            parts.add("crc32c=" + meta.getCrc32c());
+        }
+        if (meta.getMd5Hash() != null) {
+            parts.add("md5=" + meta.getMd5Hash());
+        }
+        return parts.length() == 0 ? null : parts.toString();
     }
 
     // Metadata stored via the JSON API may contain characters that cannot appear in an

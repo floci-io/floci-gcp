@@ -33,6 +33,33 @@ def test_upload_and_download_object(storage_client, unique_name):
         bucket.delete(force=True)
 
 
+def test_download_populates_blob_from_response_headers(storage_client, unique_name):
+    bucket_name = f"test-bucket-{unique_name}"
+    object_name = "header-object.txt"
+    content = b"header extraction content"
+
+    bucket = storage_client.create_bucket(storage_client.bucket(bucket_name))
+
+    try:
+        bucket.blob(object_name).upload_from_string(content, content_type="text/plain")
+        canonical = bucket.get_blob(object_name)
+
+        # A fresh handle carries no properties. download_as_bytes fills them
+        # from the x-goog-* headers of the media response, and
+        # checksum="crc32c" verifies the payload against x-goog-hash.
+        blob = bucket.blob(object_name)
+        assert blob.download_as_bytes(checksum="crc32c") == content
+
+        assert blob.generation == canonical.generation
+        assert blob.metageneration == canonical.metageneration
+        assert blob.crc32c == canonical.crc32c
+        assert blob.md5_hash == canonical.md5_hash
+        assert blob.storage_class == canonical.storage_class
+        assert blob.etag == canonical.etag
+    finally:
+        bucket.delete(force=True)
+
+
 def test_object_custom_metadata(storage_client, unique_name):
     bucket_name = f"test-bucket-{unique_name}"
     bucket = storage_client.create_bucket(storage_client.bucket(bucket_name))

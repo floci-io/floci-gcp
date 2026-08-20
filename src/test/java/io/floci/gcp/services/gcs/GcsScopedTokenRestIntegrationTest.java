@@ -184,6 +184,31 @@ class GcsScopedTokenRestIntegrationTest {
 	}
 
 	@Test
+	void moveRequiresSourceReadAndDeleteAndDestinationWrite() {
+		upload(null, "allowed/move-source.txt", "source").statusCode(200);
+		String missingSourceDelete = bearer(mint(
+				new CredentialAccessBoundaryRule(bucket, "allowed/move-source.txt", List.of(READER)),
+				new CredentialAccessBoundaryRule(bucket, "allowed/move-destination.txt", List.of(WRITER))));
+
+		given()
+				.header("Authorization", missingSourceDelete)
+				.when().post("/storage/v1/b/{bucket}/o/{source}/moveTo/o/{destination}",
+						bucket, "allowed/move-source.txt", "allowed/move-destination.txt")
+				.then()
+				.statusCode(403);
+
+		String authorization = bearer(mint(
+				new CredentialAccessBoundaryRule(bucket, "allowed/move-source.txt", List.of(READER, WRITER)),
+				new CredentialAccessBoundaryRule(bucket, "allowed/move-destination.txt", List.of(WRITER))));
+		given()
+				.header("Authorization", authorization)
+				.when().post("/storage/v1/b/{bucket}/o/{source}/moveTo/o/{destination}",
+						bucket, "allowed/move-source.txt", "allowed/move-destination.txt")
+				.then()
+				.statusCode(200);
+	}
+
+	@Test
 	void resumableUploadRequiresCurrentTokenScopeForCompletion() {
 		String location = given()
 				.contentType("application/json")
@@ -277,8 +302,11 @@ class GcsScopedTokenRestIntegrationTest {
 	}
 
 	private String mint(String prefix, String... permissions) {
-		return tokenService.mintDownscopedToken("source-token",
-				List.of(new CredentialAccessBoundaryRule(bucket, prefix, List.of(permissions))))
+		return mint(new CredentialAccessBoundaryRule(bucket, prefix, List.of(permissions)));
+	}
+
+	private String mint(CredentialAccessBoundaryRule... rules) {
+		return tokenService.mintDownscopedToken("source-token", List.of(rules))
 				.token().getTokenValue();
 	}
 

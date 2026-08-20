@@ -316,6 +316,10 @@ public class GcsObjectController {
             @QueryParam("ifSourceMetagenerationMatch") Long ifSourceMetagenerationMatch,
             @QueryParam("ifSourceMetagenerationNotMatch") Long ifSourceMetagenerationNotMatch,
             @Context HttpHeaders headers) {
+        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
+        authorizationService.requireObjectRead(authorization, bucket, srcObjectPath);
+        authorizationService.requireObjectDelete(authorization, bucket, srcObjectPath);
+        authorizationService.requireObjectWrite(authorization, bucket, dstObjectPath);
         GcsObjectPreconditions sourcePreconditions = new GcsObjectPreconditions(ifSourceGenerationMatch,
                 ifSourceGenerationNotMatch, ifSourceMetagenerationMatch, ifSourceMetagenerationNotMatch);
         GcsObjectPreconditions destinationPreconditions = new GcsObjectPreconditions(ifGenerationMatch,

@@ -43,34 +43,34 @@ public class GcsBatchController {
                 .build();
     }
 
-	@POST
-	@Consumes(MediaType.WILDCARD)
-	@Produces(MediaType.WILDCARD)
-	public Response batch(@HeaderParam("Content-Type") String contentType,
-			@HeaderParam("Authorization") String authorization,
-			@Context UriInfo uriInfo, byte[] body) {
-		String boundary = extractBoundary(contentType);
-		if (boundary == null) {
-			return Response.status(400).entity("Missing multipart boundary").build();
-		}
+    @POST
+    @Consumes(MediaType.WILDCARD)
+    @Produces(MediaType.WILDCARD)
+    public Response batch(@HeaderParam("Content-Type") String contentType,
+            @HeaderParam("Authorization") String authorization,
+            @Context UriInfo uriInfo, byte[] body) {
+        String boundary = extractBoundary(contentType);
+        if (boundary == null) {
+            return Response.status(400).entity("Missing multipart boundary").build();
+        }
 
-		List<SubRequest> subRequests = parseMultipart(boundary, body);
-		LOG.debugf("batch: parsed %d sub-requests", subRequests.size());
+        List<SubRequest> subRequests = parseMultipart(boundary, body);
+        LOG.debugf("batch: parsed %d sub-requests", subRequests.size());
 
-		String responseBoundary = "batch_" + UUID.randomUUID().toString().replace("-", "");
-		StringBuilder responseBody = new StringBuilder();
+        String responseBoundary = "batch_" + UUID.randomUUID().toString().replace("-", "");
+        StringBuilder responseBody = new StringBuilder();
 
-		for (int i = 0; i < subRequests.size(); i++) {
-			SubRequest req = subRequests.get(i);
-			SubResponse resp = dispatch(req, authorization, requestPort(uriInfo));
-			appendResponsePart(responseBody, responseBoundary, i, req.contentId(), resp);
-		}
-		responseBody.append("--").append(responseBoundary).append("--\r\n");
+        for (int i = 0; i < subRequests.size(); i++) {
+            SubRequest req = subRequests.get(i);
+            SubResponse resp = dispatch(req, authorization, requestPort(uriInfo));
+            appendResponsePart(responseBody, responseBoundary, i, req.contentId(), resp);
+        }
+        responseBody.append("--").append(responseBoundary).append("--\r\n");
 
-		return Response.ok(responseBody.toString())
-				.type("multipart/mixed; boundary=" + responseBoundary)
-				.build();
-	}
+        return Response.ok(responseBody.toString())
+                .type("multipart/mixed; boundary=" + responseBoundary)
+                .build();
+    }
 
     private String extractBoundary(String contentType) {
         if (contentType == null) return null;
@@ -203,10 +203,10 @@ public class GcsBatchController {
                     }
                 }
             });
-			if (outerAuthorization != null && req.headers().keySet().stream()
-					.noneMatch(header -> header.equalsIgnoreCase("Authorization"))) {
-				builder.header("Authorization", outerAuthorization);
-			}
+            if (outerAuthorization != null && req.headers().keySet().stream()
+                    .noneMatch(header -> header.equalsIgnoreCase("Authorization"))) {
+                builder.header("Authorization", outerAuthorization);
+            }
             if (!req.body().isEmpty() && !req.headers().containsKey("Content-Type")) {
                 builder.header("Content-Type", "application/json");
             }
@@ -221,7 +221,7 @@ public class GcsBatchController {
             return new SubResponse(500,
                     "{\"error\":{\"code\":500,\"message\":\"Internal batch error\"}}");
         }
-        }
+    }
 
     private URI rewriteToLocalhost(URI original, int port) {
         String query = original.getRawQuery() == null ? "" : "?" + original.getRawQuery();

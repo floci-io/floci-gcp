@@ -11,7 +11,9 @@ public class StoredPolicy {
 
     private int version = 1;
     private List<Map<String, Object>> bindings = new ArrayList<>();
-    private String etag = "ACAB";
+    // Empty means "no etag provided"; IamService assigns one on write. Reads of an
+    // unset policy surface GCP's well-known empty-policy etag "ACAB" instead.
+    private String etag = "";
 
     public StoredPolicy() {}
 

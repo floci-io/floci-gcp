@@ -31,7 +31,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class IamService {
@@ -44,6 +47,7 @@ public class IamService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final AtomicLong uniqueIdSeq = new AtomicLong(100000000000000000L);
+    private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory) {
@@ -137,17 +141,82 @@ public class IamService {
 
     // ── IAM Policies ───────────────────────────────────────────────────────────
 
+    // GCP returns this fixed etag for a policy that has never been set.
+    static final String EMPTY_POLICY_ETAG = "ACAB";
+
+    /**
+     * Registers an existence check for policy resources matching {@code pattern},
+     * a slash-segmented template where {@code *} matches exactly one segment.
+     * The resolver throws {@link GcpException} not-found for missing resources.
+     * Resources matching no pattern skip the check, preserving permissive
+     * behavior for services that have not opted in.
+     */
+    public void registerPolicyResourceResolver(String pattern, Consumer<String> requireExists) {
+        policyResolvers.put(pattern, requireExists);
+    }
+
     public StoredPolicy getPolicy(String resource) {
-        return policyStore.get(policyKey(resource)).orElse(new StoredPolicy());
+        requireResourceExists(resource);
+        return policyStore.get(policyKey(resource)).orElseGet(IamService::emptyPolicy);
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
+        requireResourceExists(resource);
+        String currentEtag = policyStore.get(policyKey(resource))
+                .map(StoredPolicy::getEtag)
+                .orElse(EMPTY_POLICY_ETAG);
+        String requestEtag = policy.getEtag();
+        if (requestEtag != null && !requestEtag.isEmpty() && !requestEtag.equals(currentEtag)) {
+            throw GcpException.aborted(
+                    "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
+                            + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+        }
+        policy.setEtag(newEtag());
         policyStore.put(policyKey(resource), policy);
         return policy;
     }
 
+    public void deletePolicy(String resource) {
+        policyStore.delete(policyKey(resource));
+    }
+
     public List<String> testPermissions(List<String> permissions) {
         return permissions;
+    }
+
+    private void requireResourceExists(String resource) {
+        for (Map.Entry<String, Consumer<String>> entry : policyResolvers.entrySet()) {
+            if (matchesPattern(entry.getKey(), resource)) {
+                entry.getValue().accept(resource);
+                return;
+            }
+        }
+    }
+
+    private static boolean matchesPattern(String pattern, String resource) {
+        String[] p = pattern.split("/");
+        String[] r = resource.split("/");
+        if (p.length != r.length) {
+            return false;
+        }
+        for (int i = 0; i < p.length; i++) {
+            if (!p[i].equals("*") && !p[i].equals(r[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static StoredPolicy emptyPolicy() {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setEtag(EMPTY_POLICY_ETAG);
+        return policy;
+    }
+
+    private static String newEtag() {
+        byte[] bytes = new byte[8];
+        ThreadLocalRandom.current().nextBytes(bytes);
+        return Base64.getEncoder().encodeToString(bytes);
     }
 
     // ── Service Account Keys ───────────────────────────────────────────────────

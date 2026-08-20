@@ -81,6 +81,55 @@ func TestPubSub(t *testing.T) {
 		assert.True(t, found, "created subscription should appear in list")
 	})
 
+	t.Run("TopicIAMPolicy", func(t *testing.T) {
+		handle := topic.IAM()
+
+		policy, err := handle.Policy(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, policy.Roles(), "unset policy should be empty, not an error")
+
+		member := "serviceAccount:worker@" + testutil.ProjectID() + ".iam.gserviceaccount.com"
+		policy.Add(member, "roles/pubsub.publisher")
+		require.NoError(t, handle.SetPolicy(ctx, policy))
+
+		read, err := handle.Policy(ctx)
+		require.NoError(t, err)
+		assert.True(t, read.HasRole(member, "roles/pubsub.publisher"), "granted binding should read back")
+	})
+
+	t.Run("SubscriptionIAMPolicy", func(t *testing.T) {
+		handle := sub.IAM()
+
+		policy, err := handle.Policy(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, policy.Roles())
+
+		member := "user:analyst@example.com"
+		policy.Add(member, "roles/pubsub.subscriber")
+		require.NoError(t, handle.SetPolicy(ctx, policy))
+
+		read, err := handle.Policy(ctx)
+		require.NoError(t, err)
+		assert.True(t, read.HasRole(member, "roles/pubsub.subscriber"))
+
+		topicPolicy, err := topic.IAM().Policy(ctx)
+		require.NoError(t, err)
+		assert.False(t, topicPolicy.HasRole(member, "roles/pubsub.subscriber"),
+			"subscription grant must not leak onto the topic")
+	})
+
+	t.Run("IAMPolicyOnMissingTopicIsNotFound", func(t *testing.T) {
+		_, err := client.Topic(uniqueName("go-never-created")).IAM().Policy(ctx)
+		assert.Equal(t, codes.NotFound, status.Code(err))
+	})
+
+	t.Run("TestIAMPermissionsEchoes", func(t *testing.T) {
+		perms := []string{"pubsub.topics.publish", "pubsub.topics.get"}
+		granted, err := topic.IAM().TestPermissions(ctx, perms)
+		require.NoError(t, err)
+		assert.Equal(t, perms, granted)
+	})
+
 	t.Run("PublishAndReceive", func(t *testing.T) {
 		messages := []string{"Hello from Go!", "Second Go message"}
 

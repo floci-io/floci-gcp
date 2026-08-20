@@ -46,8 +46,8 @@ variable "cloud_run_replace_token" {
 # floci-gcp ignores auth headers unconditionally).
 #
 # Custom endpoints redirect each service API to the local emulator.
-# Services that only expose gRPC (Pub/Sub, Firestore, Datastore) are not
-# reachable via OpenTofu custom endpoints — they need REST transcoding.
+# Services that only expose gRPC (Firestore, Datastore) are not reachable via
+# OpenTofu custom endpoints — they need REST transcoding.
 provider "google" {
   project = var.project
   region  = var.region
@@ -62,6 +62,7 @@ provider "google" {
   cloud_run_v2_custom_endpoint   = "${var.endpoint}/v2/"
   sql_custom_endpoint            = "${var.endpoint}/sql/v1beta4/"
   kms_custom_endpoint            = "${var.endpoint}/v1/"
+  pubsub_custom_endpoint         = "${var.endpoint}/v1/"
 
   # Service Usage + the Cloud Resource Manager v1 project lookup that
   # google_project_service performs on every read.

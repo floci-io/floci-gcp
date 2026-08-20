@@ -299,7 +299,41 @@ setup() {
 
 # ── State Integrity ───────────────────────────────────────────────────────────
 
+# ── Pub/Sub Spot Checks ───────────────────────────────────────────────────────
+
+@test "OpenTofu: Pub/Sub topic created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-topic-tofu'
+}
+
+@test "OpenTofu: Pub/Sub subscription created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/subscriptions/floci-compat-sub-tofu"
+    assert_success
+    assert_output --partial 'floci-compat-sub-tofu'
+}
+
+# Both google_pubsub_topic_iam_member grants must survive the provider's
+# read-modify-write; a frozen etag would let the second write clobber the first.
+@test "OpenTofu: Pub/Sub topic IAM policy holds both member grants" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic-tofu:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.publisher'* ]]
+    [[ "$result" == *'roles/pubsub.viewer'* ]]
+    [[ "$result" == *'floci-compat-sa-tofu@'* ]]
+    [[ "$result" == *'user:compat-viewer@example.com'* ]]
+}
+
+@test "OpenTofu: Pub/Sub subscription IAM policy holds subscriber grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/subscriptions/floci-compat-sub-tofu:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.subscriber'* ]]
+}
+
+@test "OpenTofu: Pub/Sub topic policy does not leak subscription grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic-tofu:getIamPolicy")
+    [[ "$result" != *'roles/pubsub.subscriber'* ]]
+}
+
 @test "OpenTofu: all managed resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 13 ]
+    [ "$count" -ge 18 ]
 }

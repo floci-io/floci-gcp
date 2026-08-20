@@ -169,12 +169,14 @@ public class IamService {
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
-        requireResourceExists(resource);
         String key = policyKey(resource);
-        // Serializes the etag read-compare-write per resource so two concurrent
-        // setPolicy calls can't both pass the etag check against the same
-        // currentEtag and silently clobber one another.
+        // Serializes existence check + etag read-compare-write per resource, both
+        // against concurrent setPolicy (two writers passing the etag check on the
+        // same currentEtag would silently clobber one another) and against
+        // deletePolicy (a write slipping in after resource deletion would
+        // resurrect the policy when the same name is recreated).
         synchronized (policyLock(key)) {
+            requireResourceExists(resource);
             String currentEtag = policyStore.get(key)
                     .map(StoredPolicy::getEtag)
                     .orElse(EMPTY_POLICY_ETAG);
@@ -191,7 +193,10 @@ public class IamService {
     }
 
     public void deletePolicy(String resource) {
-        policyStore.delete(policyKey(resource));
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            policyStore.delete(key);
+        }
     }
 
     public List<String> testPermissions(List<String> permissions) {

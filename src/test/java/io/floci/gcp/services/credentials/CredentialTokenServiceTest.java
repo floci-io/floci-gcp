@@ -41,7 +41,7 @@ class CredentialTokenServiceTest {
 	}
 
 	@Test
-	void capsDownscopedTokenLifetimeToStoredSourceExpiration() {
+	void inheritsStoredSourceExpiration() {
 		StoredCredentialToken source = service.mintImpersonatedToken(
 				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
 
@@ -51,6 +51,18 @@ class CredentialTokenServiceTest {
 		assertEquals(1200, minted.expiresInSeconds());
 		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
 		assertNull(minted.token().getSourceToken());
+	}
+
+	@Test
+	void inheritsStoredSourceExpirationBeyondDefaultLifetime() {
+		StoredCredentialToken source = service.mintImpersonatedToken(
+				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(7200));
+
+		CredentialTokenService.MintedDownscopedToken minted =
+				service.mintDownscopedToken(source.getTokenValue(), rules());
+
+		assertEquals(7200, minted.expiresInSeconds());
+		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
 	}
 
 	@Test
@@ -94,8 +106,10 @@ class CredentialTokenServiceTest {
 	}
 
 	@Test
-	void nonFlociTokenReturnsEmptyLookupForLaterBypassContract() {
+	void unmanagedTokenReturnsEmptyLookupForLaterBypassContract() {
 		assertTrue(service.lookupBearerToken("external-token").isEmpty());
+		assertTrue(service.lookupBearerToken(
+				CredentialTokenService.FLOCI_TOKEN_PREFIX + "oauth-token").isEmpty());
 		assertTrue(service.lookupBearerToken(null).isEmpty());
 	}
 

@@ -3,8 +3,10 @@ package io.floci.gcp.services.gcs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.ResumableUpload;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -29,12 +31,15 @@ public class GcsUploadController {
     private final GcsService service;
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
+	private final GcsAuthorizationService authorizationService;
 
     @Inject
-    public GcsUploadController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper) {
+	public GcsUploadController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper,
+			GcsAuthorizationService authorizationService) {
         this.service = service;
         this.config = config;
         this.objectMapper = objectMapper;
+		this.authorizationService = authorizationService;
     }
 
     @POST
@@ -73,6 +78,9 @@ public class GcsUploadController {
         if (uploadId == null) {
             throw GcpException.invalidArgument("missing upload_id query parameter");
         }
+		ResumableUpload upload = service.getResumableUpload(uploadId);
+		authorizationService.requireObjectWrite(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), upload.bucket(), upload.objectName());
         String contentRange = headers.getHeaderString("Content-Range");
         if (contentRange != null && !contentRange.isBlank()) {
             ContentRange range = parseContentRange(contentRange, body.length);
@@ -177,6 +185,8 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
+        authorizationService.requireObjectWrite(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
         var userMetadata = extractUserMetadata(metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
@@ -214,6 +224,8 @@ public class GcsUploadController {
             contentType = "application/octet-stream";
         }
 
+        authorizationService.requireObjectWrite(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         String uploadId = service.startResumableUpload(bucket, name, contentType,
                 GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions);
         String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
@@ -225,6 +237,8 @@ public class GcsUploadController {
     private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
+        authorizationService.requireObjectWrite(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
                 GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();

@@ -68,11 +68,10 @@ public class CredentialTokenService {
 		}
 
 		Instant now = clock.instant();
-		Instant expireTime = now.plusSeconds(DEFAULT_LIFETIME_SECONDS);
 		Optional<StoredCredentialToken> storedSource = lookupBearerToken(sourceToken, now);
-		if (storedSource.isPresent() && storedSource.get().getExpireTime().isBefore(expireTime)) {
-			expireTime = storedSource.get().getExpireTime();
-		}
+		Instant expireTime = storedSource
+				.map(StoredCredentialToken::getExpireTime)
+				.orElseGet(() -> now.plusSeconds(DEFAULT_LIFETIME_SECONDS));
 
 		String tokenValue = DOWNSCOPED_TOKEN_PREFIX + UUID.randomUUID();
 		StoredCredentialToken token = new StoredCredentialToken(
@@ -91,7 +90,9 @@ public class CredentialTokenService {
 	}
 
 	private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
-		if (bearerToken == null || bearerToken.isBlank() || !bearerToken.startsWith(FLOCI_TOKEN_PREFIX)) {
+		if (bearerToken == null || bearerToken.isBlank()
+				|| (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
+						&& !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
 			return Optional.empty();
 		}
 

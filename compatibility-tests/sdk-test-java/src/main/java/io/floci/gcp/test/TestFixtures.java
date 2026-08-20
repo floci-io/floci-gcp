@@ -2,6 +2,8 @@ package io.floci.gcp.test;
 
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
+import com.google.auth.Credentials;
+import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.datastore.Datastore;
 import com.google.cloud.datastore.DatastoreOptions;
@@ -33,6 +35,10 @@ import com.google.api.services.sqladmin.SQLAdmin;
 
 import java.io.IOException;
 import java.net.URI;
+import java.security.GeneralSecurityException;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.util.List;
 import java.util.UUID;
 
 public final class TestFixtures {
@@ -52,6 +58,20 @@ public final class TestFixtures {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    public static ServiceAccountCredentials serviceAccountCredentials() throws GeneralSecurityException {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        return ServiceAccountCredentials.newBuilder()
+                .setClientId("123456789")
+                .setClientEmail("storage-test@test-project.iam.gserviceaccount.com")
+                .setPrivateKey(keyPair.getPrivate())
+                .setPrivateKeyId("test-key")
+                .setScopes(List.of("https://www.googleapis.com/auth/cloud-platform"))
+                .setTokenServerUri(URI.create(endpoint() + "/token"))
+                .build();
+    }
+
     /**
      * Creates a GCS Storage client.
      * The STORAGE_EMULATOR_HOST env var is auto-detected by the GCP SDK.
@@ -65,6 +85,15 @@ public final class TestFixtures {
                 .build()
                 .getService();
     }
+
+	public static Storage storageClient(Credentials credentials) {
+		return StorageOptions.newBuilder()
+				.setHost(endpoint())
+				.setProjectId(projectId())
+				.setCredentials(credentials)
+				.build()
+				.getService();
+	}
 
     /**
      * Creates a Firestore client pointing at the emulator.

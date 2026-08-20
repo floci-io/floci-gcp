@@ -113,7 +113,7 @@ Both gRPC and REST are served on port **4588** via ALPN negotiation:
 
 ### Auth bypass
 
-GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. floci-gcp does not validate credentials; it accepts all requests unconditionally.
+GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. The exception is an emulator-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
 
 ### Project ID as multi-tenancy key
 

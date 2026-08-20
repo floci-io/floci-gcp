@@ -73,7 +73,7 @@ export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are available at `http://localhost:4588`. Credentials are not validated.
+All GCP services are available at `http://localhost:4588`. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
 
 <details>
 <summary>Using Docker directly?</summary>

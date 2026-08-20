@@ -49,8 +49,8 @@ prefix.
 
 Tokens exchanged from arbitrary external source credentials have a one-hour
 lifetime. When the source is an unexpired impersonated or downscoped token
-issued by floci-gcp, the new token cannot outlive that source token. Unknown or
-expired floci-gcp source tokens are rejected with `invalid_grant`.
+issued by floci-gcp, the new token inherits that source token's expiration time.
+Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
 
 ## Scope and deviations
 
@@ -59,3 +59,7 @@ expired floci-gcp source tokens are rejected with `invalid_grant`.
   subset is accepted.
 - Non-floci source credentials are not validated, matching the emulator's
   general credential-bypass behavior.
+- A downscoped token minted by floci-gcp is enforced only for GCS requests:
+  the request must match one of the token's CAB rules. Other credentials,
+  including Floci-issued OAuth and impersonated tokens, remain accepted without
+  credential validation.

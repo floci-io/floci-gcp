@@ -1,6 +1,6 @@
 # GCP CLI & SDK Setup
 
-floci-gcp accepts all requests unconditionally — no real GCP credentials are needed. GCP SDKs automatically skip credential validation when `*_EMULATOR_HOST` environment variables are set.
+floci-gcp does not require real GCP credentials, and GCP SDKs automatically skip credential validation when `*_EMULATOR_HOST` environment variables are set. Requests with no credential, external credentials, and Floci-issued OAuth or impersonated tokens are accepted. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
 
 ## Environment Variables
 

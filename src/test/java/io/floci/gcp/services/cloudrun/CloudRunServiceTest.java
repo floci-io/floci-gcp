@@ -468,6 +468,7 @@ class CloudRunServiceTest {
         assertTrue(operation.getDone());
         assertThrows(GcpException.class, () -> service.getService(name));
         assertThrows(GcpException.class, () -> service.getRevision(revision));
+        verify(iamService).deletePolicy(name);
     }
 
     @Test

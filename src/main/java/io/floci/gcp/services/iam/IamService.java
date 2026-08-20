@@ -170,18 +170,24 @@ public class IamService {
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
         requireResourceExists(resource);
-        String currentEtag = policyStore.get(policyKey(resource))
-                .map(StoredPolicy::getEtag)
-                .orElse(EMPTY_POLICY_ETAG);
-        String requestEtag = policy.getEtag();
-        if (requestEtag != null && !requestEtag.isEmpty() && !requestEtag.equals(currentEtag)) {
-            throw GcpException.aborted(
-                    "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
-                            + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+        String key = policyKey(resource);
+        // Serializes the etag read-compare-write per resource so two concurrent
+        // setPolicy calls can't both pass the etag check against the same
+        // currentEtag and silently clobber one another.
+        synchronized (policyLock(key)) {
+            String currentEtag = policyStore.get(key)
+                    .map(StoredPolicy::getEtag)
+                    .orElse(EMPTY_POLICY_ETAG);
+            String requestEtag = policy.getEtag();
+            if (requestEtag != null && !requestEtag.isEmpty() && !requestEtag.equals(currentEtag)) {
+                throw GcpException.aborted(
+                        "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
+                                + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+            }
+            policy.setEtag(newEtag());
+            policyStore.put(key, policy);
+            return policy;
         }
-        policy.setEtag(newEtag());
-        policyStore.put(policyKey(resource), policy);
-        return policy;
     }
 
     public void deletePolicy(String resource) {
@@ -213,6 +219,21 @@ public class IamService {
             }
         }
         return true;
+    }
+
+    private static final int POLICY_LOCK_COUNT = 64;
+    private static final Object[] POLICY_LOCKS = createPolicyLocks();
+
+    private static Object[] createPolicyLocks() {
+        Object[] locks = new Object[POLICY_LOCK_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private static Object policyLock(String key) {
+        return POLICY_LOCKS[Math.floorMod(key.hashCode(), POLICY_LOCKS.length)];
     }
 
     private static StoredPolicy emptyPolicy() {

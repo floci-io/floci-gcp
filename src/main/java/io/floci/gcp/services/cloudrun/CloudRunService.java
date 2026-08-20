@@ -570,6 +570,7 @@ public class CloudRunService {
         revisionStore.keys().stream()
                 .filter(k -> k.startsWith(revisionPrefix))
                 .forEach(revisionStore::delete);
+        iamService.deletePolicy(name);
     }
 
     private static Condition readyCondition(Timestamp now) {

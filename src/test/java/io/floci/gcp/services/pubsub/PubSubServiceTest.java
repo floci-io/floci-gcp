@@ -5,6 +5,8 @@ import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
@@ -19,15 +21,18 @@ import static org.junit.jupiter.api.Assertions.*;
 class PubSubServiceTest {
 
     private PubSubService service;
+    private IamService iamService;
     private InMemoryStorage<String, StoredSubscription> subStore;
 
     @BeforeEach
     void setUp() {
         subStore = new InMemoryStorage<>();
+        iamService = IamServices.inMemory();
         service = new PubSubService(
                 new InMemoryStorage<>(),
                 subStore,
-                new InMemoryStorage<>());
+                new InMemoryStorage<>(),
+                iamService);
     }
 
     @Test

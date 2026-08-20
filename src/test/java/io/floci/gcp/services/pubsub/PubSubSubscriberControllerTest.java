@@ -6,6 +6,7 @@ import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Subscription;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.iam.IamServices;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -34,7 +35,8 @@ class PubSubSubscriberControllerTest {
         service = new PubSubService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>());
+                new InMemoryStorage<>(),
+                IamServices.inMemory());
         controller = new PubSubSubscriberController(service);
     }
 

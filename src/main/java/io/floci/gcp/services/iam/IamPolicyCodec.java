@@ -19,6 +19,24 @@ public final class IamPolicyCodec {
 
     private IamPolicyCodec() {}
 
+    @SuppressWarnings("unchecked")
+    public static StoredPolicy fromJsonMap(Map<String, Object> policyMap) {
+        StoredPolicy policy = new StoredPolicy();
+        if (policyMap == null) {
+            return policy;
+        }
+        if (policyMap.containsKey("version")) {
+            policy.setVersion(((Number) policyMap.get("version")).intValue());
+        }
+        if (policyMap.containsKey("bindings")) {
+            policy.setBindings((List<Map<String, Object>>) policyMap.get("bindings"));
+        }
+        if (policyMap.containsKey("etag")) {
+            policy.setEtag((String) policyMap.get("etag"));
+        }
+        return policy;
+    }
+
     public static StoredPolicy toStoredPolicy(Policy policy) {
         StoredPolicy stored = new StoredPolicy();
         stored.setVersion(policy.getVersion());

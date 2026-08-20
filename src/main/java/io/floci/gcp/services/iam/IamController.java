@@ -169,7 +169,7 @@ public class IamController {
             }
             case "setIamPolicy" -> {
                 Map<String, Object> policyMap = body != null ? (Map<String, Object>) body.get("policy") : null;
-                StoredPolicy policy = parsePolicy(policyMap);
+                StoredPolicy policy = IamPolicyCodec.fromJsonMap(policyMap);
                 yield Response.ok(service.setPolicy(resource, policy)).build();
             }
             case "testIamPermissions" -> {
@@ -205,24 +205,6 @@ public class IamController {
         String description = (String) saProps.get("description");
         StoredServiceAccount sa = service.createServiceAccount(project, accountId, displayName, description);
         return Response.ok(sa).build();
-    }
-
-    @SuppressWarnings("unchecked")
-    private static StoredPolicy parsePolicy(Map<String, Object> policyMap) {
-        StoredPolicy policy = new StoredPolicy();
-        if (policyMap == null) {
-            return policy;
-        }
-        if (policyMap.containsKey("version")) {
-            policy.setVersion(((Number) policyMap.get("version")).intValue());
-        }
-        if (policyMap.containsKey("bindings")) {
-            policy.setBindings((List<Map<String, Object>>) policyMap.get("bindings"));
-        }
-        if (policyMap.containsKey("etag")) {
-            policy.setEtag((String) policyMap.get("etag"));
-        }
-        return policy;
     }
 
     // ── Path parsing ───────────────────────────────────────────────────────────

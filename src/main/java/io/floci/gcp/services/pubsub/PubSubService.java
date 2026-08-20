@@ -13,6 +13,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.pubsub.model.StoredMessage;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
@@ -56,16 +57,18 @@ public class PubSubService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final IamService iamService;
 
     @Inject
     jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
 
     @Inject
     public PubSubService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
+        this.iamService = iamService;
         this.topicStore = storageFactory.createGlobal("pubsub-topics", "pubsub-topics.json",
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.subStore = storageFactory.createGlobal("pubsub-subs", "pubsub-subs.json",
@@ -76,13 +79,16 @@ public class PubSubService {
 
     PubSubService(StorageBackend<String, StoredTopic> topicStore,
             StorageBackend<String, StoredSubscription> subStore,
-            StorageBackend<String, StoredSnapshot> snapshotStore) {
+            StorageBackend<String, StoredSnapshot> snapshotStore,
+            IamService iamService) {
         this.topicStore = topicStore;
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
+        this.iamService = iamService;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        registerPolicyResolvers();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -95,6 +101,13 @@ public class PubSubService {
                 .build());
         grpcServerManager.bind(new PubSubPublisherController(this));
         grpcServerManager.bind(new PubSubSubscriberController(this));
+        registerPolicyResolvers();
+    }
+
+    private void registerPolicyResolvers() {
+        iamService.registerPolicyResourceResolver("projects/*/topics/*", this::getTopic);
+        iamService.registerPolicyResourceResolver("projects/*/subscriptions/*", this::getSubscription);
+        iamService.registerPolicyResourceResolver("projects/*/snapshots/*", this::getSnapshot);
     }
 
     // ── Topics ─────────────────────────────────────────────────────────────────
@@ -172,6 +185,7 @@ public class PubSubService {
             throw GcpException.notFound("Topic not found: " + name);
         }
         topicStore.delete(name);
+        iamService.deletePolicy(name);
     }
 
     // ── Subscriptions ──────────────────────────────────────────────────────────
@@ -371,6 +385,7 @@ public class PubSubService {
         queues.remove(name);
         delivered.remove(name);
         listeners.remove(name);
+        iamService.deletePolicy(name);
     }
 
     public void detachSubscription(String name) {
@@ -609,6 +624,7 @@ public class PubSubService {
         snapshotStore.get(snapshotName)
                 .orElseThrow(() -> GcpException.notFound("Snapshot not found: " + snapshotName));
         snapshotStore.delete(snapshotName);
+        iamService.deletePolicy(snapshotName);
     }
 
     public void seek(String subscriptionName, String snapshotName) {

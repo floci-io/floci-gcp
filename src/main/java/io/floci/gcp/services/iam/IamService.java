@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
@@ -46,13 +47,16 @@ public class IamService {
     private final StorageBackend<String, StoredPolicy> policyStore;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final GrpcServerManager grpcServerManager;
     private final AtomicLong uniqueIdSeq = new AtomicLong(100000000000000000L);
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
-    public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory) {
+    public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
+            GrpcServerManager grpcServerManager) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.grpcServerManager = grpcServerManager;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -69,6 +73,7 @@ public class IamService {
         this.policyStore = policyStore;
         this.serviceRegistry = null;
         this.config = null;
+        this.grpcServerManager = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -78,6 +83,9 @@ public class IamService {
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(IamController.class)
                 .build());
+        // Serves the google.iam.v1.IAMPolicy mixin for all services; not gated on
+        // the iam REST toggle so Pub/Sub IAM keeps working when iam is disabled.
+        grpcServerManager.bind(new IamPolicyGrpcController(this));
     }
 
     // ── Service Accounts ───────────────────────────────────────────────────────

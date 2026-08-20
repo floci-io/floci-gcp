@@ -106,6 +106,12 @@
             <version>1.152.0</version>
         </dependency>
 
+        <!-- google.iam.v1.IAMPolicy gRPC stub (IAMPolicyGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-iam-v1</artifactId>
+        </dependency>
+
         <!-- Secret Manager gRPC stubs (SecretManagerServiceGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

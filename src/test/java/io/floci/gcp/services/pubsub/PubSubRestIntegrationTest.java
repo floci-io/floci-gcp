@@ -7,6 +7,7 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 
@@ -362,5 +363,163 @@ class PubSubRestIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    // Regression: before IAM routing existed, :getIamPolicy fell into the plain
+    // topic GET route and reported an existing topic as "Topic not found".
+    @Test
+    void getIamPolicyOnExistingTopicReturnsEmptyPolicyNotTopicNotFound() {
+        String project = "pubsub-rest-iam-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/iam-target").then().statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/topics/iam-target:getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("etag", equalTo("ACAB"))
+                .body("bindings", empty());
+    }
+
+    @Test
+    void topicIamPolicySetReadBackAndClearedOnDelete() {
+        String project = "pubsub-rest-iam-crud-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/orders").then().statusCode(200);
+
+        String etag = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("""
+                        {
+                          "policy": {
+                            "bindings": [
+                              {
+                                "role": "roles/pubsub.publisher",
+                                "members": ["serviceAccount:worker@%s.iam.gserviceaccount.com"]
+                              }
+                            ]
+                          }
+                        }
+                        """.formatted(project))
+                .when().post(base + "/topics/orders:setIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("bindings[0].role", equalTo("roles/pubsub.publisher"))
+                .extract().path("etag");
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/topics/orders:getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("etag", equalTo(etag))
+                .body("bindings[0].members[0]",
+                        equalTo("serviceAccount:worker@" + project + ".iam.gserviceaccount.com"));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"policy\": {\"etag\": \"bm90LXRoZS1ldGFn\"}}")
+                .when().post(base + "/topics/orders:setIamPolicy")
+                .then()
+                .statusCode(409)
+                .body("error.status", equalTo("ABORTED"));
+
+        given().when().delete(base + "/topics/orders").then().statusCode(200);
+        given().when().put(base + "/topics/orders").then().statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/topics/orders:getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("etag", equalTo("ACAB"))
+                .body("bindings", empty());
+    }
+
+    @Test
+    void iamPolicyOnMissingTopicIsNotFound() {
+        String project = "pubsub-rest-iam-missing-it";
+        String base = "/v1/projects/" + project;
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/topics/never-created:getIamPolicy")
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"policy\": {}}")
+                .when().post(base + "/topics/never-created:setIamPolicy")
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
+    }
+
+    @Test
+    void subscriptionIamPolicyIndependentOfTopic() {
+        String project = "pubsub-rest-iam-sub-it";
+        String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/shared").then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/shared\"}")
+                .when().put(base + "/subscriptions/shared")
+                .then()
+                .statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("""
+                        {
+                          "policy": {
+                            "bindings": [
+                              {"role": "roles/pubsub.subscriber", "members": ["user:sub@example.com"]}
+                            ]
+                          }
+                        }
+                        """)
+                .when().post(base + "/subscriptions/shared:setIamPolicy")
+                .then()
+                .statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/topics/shared:getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("bindings", empty());
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(base + "/subscriptions/shared:getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("bindings[0].role", equalTo("roles/pubsub.subscriber"));
+    }
+
+    @Test
+    void testIamPermissionsEchoesRequestedPermissions() {
+        String project = "pubsub-rest-iam-perm-it";
+        String base = "/v1/projects/" + project;
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"permissions\": [\"pubsub.topics.publish\", \"pubsub.topics.get\"]}")
+                .when().post(base + "/topics/any:testIamPermissions")
+                .then()
+                .statusCode(200)
+                .body("permissions[0]", equalTo("pubsub.topics.publish"))
+                .body("permissions[1]", equalTo("pubsub.topics.get"));
     }
 }

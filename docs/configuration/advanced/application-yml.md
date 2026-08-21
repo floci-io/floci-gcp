@@ -160,6 +160,7 @@ floci-gcp:
     iam:
       enabled: false
       authorization-mode: disabled # disabled | enforce
+      # bootstrap-admin-member: serviceAccount:admin@example.iam.gserviceaccount.com
 ```
 
 Via environment variable:

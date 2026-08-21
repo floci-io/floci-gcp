@@ -60,7 +60,8 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Datastore |
 | `FLOCI_GCP_SERVICES_SECRETMANAGER_ENABLED` | `true` | Secret Manager |
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | IAM |
-| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` is reserved for the forthcoming supported evaluation surface |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` filters supported bucket `testIamPermissions` responses |
+| `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
 | `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED` | `true` | IAM Service Account Credentials (`generateAccessToken`) |
 | `FLOCI_GCP_SERVICES_STS_ENABLED` | `true` | Security Token Service (STS) |
 | `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Cloud Logging |

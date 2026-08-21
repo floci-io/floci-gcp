@@ -7,12 +7,31 @@ floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
-| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves current no-auth behavior; `enforce` is reserved for the forthcoming supported evaluation surface |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` filters supported bucket `testIamPermissions` responses |
+| `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
 
 `authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
 responses remain available in that mode, but they do not restrict requests. The
-setting is introduced ahead of the evaluator; this slice does not enforce
-policies even when it is configured as `enforce`.
+In `enforce` mode, bucket `testIamPermissions` returns only permissions granted
+by the stored bucket policy. Bucket metadata, bucket IAM-policy, retention-lock,
+storage-layout, and notification operations are also checked against their
+documented bucket permissions. GCS object and ACL operations are not yet
+restricted by IAM allow policies.
+
+## Enforcement bootstrap
+
+When Floci can resolve a new bucket's caller from a valid Floci-issued
+impersonated token, it persists a bucket-level `roles/storage.admin` binding for
+that service-account member. This lets the creator manage the bucket after the
+emulator is started with `authorization-mode: enforce`.
+
+For callers without a resolvable identity, set
+`FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` to an IAM member such as
+`serviceAccount:admin@example.iam.gserviceaccount.com`. That member receives
+`roles/storage.admin` on every subsequently created bucket. Treat this setting
+as an administrator credential: it is deliberately powerful, and an `allUsers`
+value makes every new bucket publicly manageable. The setting accepts only
+`serviceAccount:` members, `allAuthenticatedUsers`, or `allUsers`.
 
 ## Quick Start
 

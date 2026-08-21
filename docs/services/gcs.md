@@ -191,6 +191,11 @@ the session URL in the `Location` header. Chunks go to that URL with a `Content-
 header, using either `PUT` or `POST`, the Java, Node and Python SDKs send `PUT`, the Go
 SDK sends `POST`, and both are handled the same way.
 
+The session URL is an authorization token. After the opening request is authorized,
+status queries and chunks need only the session URL and may omit the `Authorization`
+header. Keep session URLs secret and share them only with clients that may complete
+the upload.
+
 Session behavior matches GCS:
 
 | Request to the session URL | Response |
@@ -364,7 +369,16 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 **Object ACLs (REST JSON):**
 
 - `ListObjectAcl` / `CreateObjectAcl`
+
 - `GetObjectAcl` / `UpdateObjectAcl` / `DeleteObjectAcl`
+
+## IAM allow-policy enforcement
+
+Set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` to evaluate supported
+bucket IAM allow policies for bucket and object operations. The default remains
+`disabled`, preserving the emulator's no-auth behavior. See the [IAM service](iam.md)
+for supported principals, roles, conditions, bootstrap administration, and
+intentional exclusions.
 
 **Conditional requests (preconditions):**
 

@@ -198,8 +198,27 @@ public class IamService {
     }
 
     public <T> T withPolicyLock(String resource, Supplier<T> action) {
-        synchronized (policyLock(policyKey(resource))) {
+        return withPolicyLocks(List.of(resource), action);
+    }
+
+    /** Acquires the policy-lock stripes in canonical order before running {@code action}. */
+    public <T> T withPolicyLocks(List<String> resources, Supplier<T> action) {
+        List<Object> locks = resources.stream()
+                .map(IamService::policyKey)
+                .map(IamService::policyLockIndex)
+                .distinct()
+                .sorted()
+                .map(index -> POLICY_LOCKS[index])
+                .toList();
+        return withPolicyLocks(locks, 0, action);
+    }
+
+    private static <T> T withPolicyLocks(List<Object> locks, int index, Supplier<T> action) {
+        if (index == locks.size()) {
             return action.get();
+        }
+        synchronized (locks.get(index)) {
+            return withPolicyLocks(locks, index + 1, action);
         }
     }
 
@@ -348,7 +367,11 @@ public class IamService {
     }
 
     private static Object policyLock(String key) {
-        return POLICY_LOCKS[Math.floorMod(key.hashCode(), POLICY_LOCKS.length)];
+        return POLICY_LOCKS[policyLockIndex(key)];
+    }
+
+    private static int policyLockIndex(String key) {
+        return Math.floorMod(key.hashCode(), POLICY_LOCKS.length);
     }
 
     private static StoredPolicy emptyPolicy() {

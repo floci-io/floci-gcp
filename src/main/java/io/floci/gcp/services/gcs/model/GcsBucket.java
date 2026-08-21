@@ -31,6 +31,7 @@ public class GcsBucket {
     // Presence of a policy with a non-zero retentionDurationSeconds turns on soft delete:
     // a deleted object is retained and can be restored until it is hard-deleted.
     private Map<String, Object> softDeletePolicy;
+    private Map<String, Object> iamConfiguration;
     private Boolean defaultEventBasedHold;
 
     public String getKind() { return kind; }
@@ -87,6 +88,11 @@ public class GcsBucket {
 
     public Map<String, Object> getSoftDeletePolicy() { return softDeletePolicy; }
     public void setSoftDeletePolicy(Map<String, Object> softDeletePolicy) { this.softDeletePolicy = softDeletePolicy; }
+
+    public Map<String, Object> getIamConfiguration() { return iamConfiguration; }
+    public void setIamConfiguration(Map<String, Object> iamConfiguration) {
+        this.iamConfiguration = iamConfiguration;
+    }
 
     public Boolean getDefaultEventBasedHold() { return defaultEventBasedHold; }
     public void setDefaultEventBasedHold(Boolean defaultEventBasedHold) { this.defaultEventBasedHold = defaultEventBasedHold; }

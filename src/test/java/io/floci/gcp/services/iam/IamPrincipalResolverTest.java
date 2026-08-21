@@ -60,6 +60,20 @@ class IamPrincipalResolverTest {
     }
 
     @Test
+    void resolvesPrincipalPreservedOnDownscopedImpersonatedToken() {
+		StoredCredentialToken source = tokenService.mintImpersonatedToken(
+				"projects/-/serviceAccounts/reader@example.test", NOW.plusSeconds(60));
+		StoredCredentialToken token = tokenService.mintDownscopedToken(source.getTokenValue(), List.of(
+				new CredentialAccessBoundaryRule("bucket", "", List.of(
+						"inRole:roles/storage.objectViewer")))).token();
+
+		IamPrincipalResolver.Resolution resolution = resolver.resolve("Bearer " + token.getTokenValue());
+
+		assertTrue(resolution.downscoped());
+		assertEquals("serviceAccount:reader@example.test", resolution.principal().member());
+    }
+
+    @Test
     void preservesInvalidKnownFlociTokenAuthenticationError() {
         assertThrows(GcpException.class,
                 () -> resolver.resolve("Bearer " + CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "missing"));

@@ -31,7 +31,7 @@ public class IamPrincipalResolver {
             return Resolution.anonymous();
         }
         if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
-            return Resolution.downscopedToken();
+			return Resolution.downscopedToken(token.get().getPrincipal());
         }
         return Resolution.authenticated(IamPrincipal.serviceAccount(normalizeServiceAccount(token.get().getPrincipal())));
     }
@@ -63,9 +63,12 @@ public class IamPrincipalResolver {
             return new Resolution(IamPrincipal.anonymous(), false);
         }
 
-        private static Resolution downscopedToken() {
-            return new Resolution(IamPrincipal.anonymous(), true);
-        }
+		private static Resolution downscopedToken(String principal) {
+			if (principal == null || principal.isBlank()) {
+				return new Resolution(IamPrincipal.anonymous(), true);
+			}
+			return new Resolution(IamPrincipal.serviceAccount(normalizeServiceAccount(principal)), true);
+		}
 
         private static Resolution authenticated(IamPrincipal principal) {
             return new Resolution(principal, false);

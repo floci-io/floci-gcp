@@ -27,6 +27,7 @@ import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.gcs.model.StoredNotification;
+import io.floci.gcp.services.iam.IamBucketLifecycleService;
 import io.floci.gcp.services.pubsub.PubSubService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -93,6 +94,7 @@ public class GcsService {
     private final GrpcServerManager grpcServerManager;
     private final GcsAuthorizationService authorizationService;
     private final GcsGrpcAuthorizationInterceptor grpcAuthorizationInterceptor;
+    private final IamBucketLifecycleService bucketLifecycleService;
 
     @Inject
     jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
@@ -103,7 +105,8 @@ public class GcsService {
     public GcsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
             StorageFactory storageFactory, PubSubService pubSubService,
             GrpcServerManager grpcServerManager, GcsAuthorizationService authorizationService,
-            GcsGrpcAuthorizationInterceptor grpcAuthorizationInterceptor) {
+            GcsGrpcAuthorizationInterceptor grpcAuthorizationInterceptor,
+            IamBucketLifecycleService bucketLifecycleService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.defaultProjectId = config.defaultProjectId();
@@ -111,6 +114,7 @@ public class GcsService {
         this.grpcServerManager = grpcServerManager;
         this.authorizationService = authorizationService;
         this.grpcAuthorizationInterceptor = grpcAuthorizationInterceptor;
+        this.bucketLifecycleService = bucketLifecycleService;
         this.bucketStore = storageFactory.createGlobal("gcs-buckets", "gcs-buckets.json",
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
@@ -152,9 +156,11 @@ public class GcsService {
         this.grpcServerManager = null;
         this.authorizationService = null;
         this.grpcAuthorizationInterceptor = null;
+        this.bucketLifecycleService = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
+        bucketLifecycleService.registerBucketResolver(this::getBucket);
         serviceRegistry.register(ServiceDescriptor.builder("gcs")
                 .enabled(config.services().gcs().enabled())
                 .storageKey("gcs")
@@ -177,63 +183,81 @@ public class GcsService {
     @SuppressWarnings("unchecked")
     public GcsBucket createBucket(String name, String projectId, String baseUrl,
             Map<String, Object> body) {
+        return createBucket(name, projectId, baseUrl, body, null);
+    }
+
+    public GcsBucket createBucket(String name, String projectId, String baseUrl,
+            Map<String, Object> body, String authorization) {
+        GcsBucketNames.validate(name);
+        if (bucketLifecycleService == null) {
+            return createBucketUncoordinated(name, projectId, baseUrl, body);
+        }
+        return bucketLifecycleService.createBucket(name, authorization,
+                () -> createBucketUncoordinated(name, projectId, baseUrl, body));
+    }
+
+    @SuppressWarnings("unchecked")
+    private GcsBucket createBucketUncoordinated(String name, String projectId, String baseUrl,
+            Map<String, Object> body) {
         LOG.debugf("createBucket name=%s project=%s", name, projectId);
         // Validate before the existence check: a malformed name is a 400 regardless of
         // whether something with that name happens to exist.
         GcsBucketNames.validate(name);
-        if (bucketStore.get(name).isPresent()) {
-            LOG.warnf("createBucket failed: bucket already exists name=%s", name);
-            // GCS documents `conflict` as the only 409 reason, and client code branches
-            // on it; the generic ALREADY_EXISTS mapping would emit `alreadyExists`.
-            throw GcpException.alreadyExists(
-                    "You already own this bucket. Please select another name.").withReason("conflict");
+        synchronized (bucketLock(name)) {
+            if (bucketStore.get(name).isPresent()) {
+                LOG.warnf("createBucket failed: bucket already exists name=%s", name);
+                // GCS documents `conflict` as the only 409 reason, and client code branches
+                // on it; the generic ALREADY_EXISTS mapping would emit `alreadyExists`.
+                throw GcpException.alreadyExists(
+                        "You already own this bucket. Please select another name.").withReason("conflict");
+            }
+            String now = nowTimestamp();
+            GcsBucket bucket = new GcsBucket();
+            bucket.setId(name);
+            bucket.setName(name);
+            bucket.setProjectId(projectId != null ? projectId : defaultProjectId);
+            bucket.setProjectNumber("1");
+            String location = body != null && body.containsKey("location")
+                    ? (String) body.get("location") : "US";
+            bucket.setLocation(location.toUpperCase());
+            String storageClass = body != null && body.containsKey("storageClass")
+                    ? (String) body.get("storageClass") : "STANDARD";
+            bucket.setStorageClass(storageClass);
+            bucket.setTimeCreated(now);
+            bucket.setUpdated(now);
+            bucket.setSelfLink(baseUrl + "/storage/v1/b/" + name);
+            bucket.setEtag("CAE=");
+            if (body != null) {
+                if (body.containsKey("labels")) {
+                    bucket.setLabels((Map<String, String>) body.get("labels"));
+                }
+                if (body.containsKey("versioning")) {
+                    bucket.setVersioning((Map<String, Object>) body.get("versioning"));
+                }
+                if (body.containsKey("lifecycle")) {
+                    bucket.setLifecycle((Map<String, Object>) body.get("lifecycle"));
+                }
+                if (body.containsKey("cors")) {
+                    bucket.setCors((List<Map<String, Object>>) body.get("cors"));
+                }
+                if (body.containsKey("retentionPolicy")) {
+                    bucket.setRetentionPolicy(
+                            withEffectiveTime((Map<String, Object>) body.get("retentionPolicy")));
+                }
+                if (body.containsKey("softDeletePolicy")) {
+                    bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
+                }
+                if (body.containsKey("iamConfiguration")) {
+                    bucket.setIamConfiguration(updateIamConfiguration(
+                            null, (Map<String, Object>) body.get("iamConfiguration"), true));
+                }
+                if (body.containsKey("defaultEventBasedHold")) {
+                    bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
+                }
+            }
+            bucketStore.put(name, bucket);
+            return bucket;
         }
-        String now = nowTimestamp();
-        GcsBucket bucket = new GcsBucket();
-        bucket.setId(name);
-        bucket.setName(name);
-        bucket.setProjectId(projectId != null ? projectId : defaultProjectId);
-        bucket.setProjectNumber("1");
-        String location = body != null && body.containsKey("location")
-                ? (String) body.get("location") : "US";
-        bucket.setLocation(location.toUpperCase());
-        String storageClass = body != null && body.containsKey("storageClass")
-                ? (String) body.get("storageClass") : "STANDARD";
-        bucket.setStorageClass(storageClass);
-        bucket.setTimeCreated(now);
-        bucket.setUpdated(now);
-        bucket.setSelfLink(baseUrl + "/storage/v1/b/" + name);
-        bucket.setEtag("CAE=");
-        if (body != null) {
-            if (body.containsKey("labels")) {
-                bucket.setLabels((Map<String, String>) body.get("labels"));
-            }
-            if (body.containsKey("versioning")) {
-                bucket.setVersioning((Map<String, Object>) body.get("versioning"));
-            }
-            if (body.containsKey("lifecycle")) {
-                bucket.setLifecycle((Map<String, Object>) body.get("lifecycle"));
-            }
-            if (body.containsKey("cors")) {
-                bucket.setCors((List<Map<String, Object>>) body.get("cors"));
-            }
-            if (body.containsKey("retentionPolicy")) {
-                bucket.setRetentionPolicy(
-                        withEffectiveTime((Map<String, Object>) body.get("retentionPolicy")));
-            }
-            if (body.containsKey("softDeletePolicy")) {
-                bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
-            }
-            if (body.containsKey("iamConfiguration")) {
-                bucket.setIamConfiguration(updateIamConfiguration(
-                        null, (Map<String, Object>) body.get("iamConfiguration"), true));
-            }
-            if (body.containsKey("defaultEventBasedHold")) {
-                bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
-            }
-        }
-        bucketStore.put(name, bucket);
-        return bucket;
     }
 
     public GcsBucket getBucket(String name) {
@@ -254,47 +278,64 @@ public class GcsService {
     @SuppressWarnings("unchecked")
     private GcsBucket applyBucketUpdate(String name, Map<String, Object> patch,
             boolean replaceIamConfiguration) {
+        if (bucketLifecycleService == null) {
+            return applyBucketUpdateUncoordinated(name, patch, replaceIamConfiguration);
+        }
+        return bucketLifecycleService.updateBucket(name,
+                () -> applyBucketUpdateUncoordinated(name, patch, replaceIamConfiguration));
+    }
+
+    @SuppressWarnings("unchecked")
+    private GcsBucket applyBucketUpdateUncoordinated(String name, Map<String, Object> patch,
+            boolean replaceIamConfiguration) {
         LOG.debugf("updateBucket name=%s", name);
-        GcsBucket bucket = getBucket(name);
-        Map<String, Object> updatedIamConfiguration = patch.containsKey("iamConfiguration")
-                ? updateIamConfiguration(
-                        bucket.getCanonicalIamConfiguration(),
-                        (Map<String, Object>) patch.get("iamConfiguration"),
-                        replaceIamConfiguration)
-                : null;
-        if (patch.containsKey("labels")) {
-            bucket.setLabels((Map<String, String>) patch.get("labels"));
+        synchronized (bucketLock(name)) {
+            GcsBucket bucket = getBucket(name);
+            Map<String, Object> updatedIamConfiguration = patch.containsKey("iamConfiguration")
+                    ? updateIamConfiguration(
+                            bucket.getCanonicalIamConfiguration(),
+                            (Map<String, Object>) patch.get("iamConfiguration"),
+                            replaceIamConfiguration)
+                    : null;
+            if (updatedIamConfiguration != null && bucketLifecycleService != null) {
+                bucketLifecycleService.validateIamConfiguration(name, updatedIamConfiguration);
+            } else if (patch.containsKey("iamConfiguration") && bucketLifecycleService != null) {
+                bucketLifecycleService.validateIamConfiguration(name, null);
+            }
+            if (patch.containsKey("labels")) {
+                bucket.setLabels((Map<String, String>) patch.get("labels"));
+            }
+            if (patch.containsKey("versioning")) {
+                bucket.setVersioning((Map<String, Object>) patch.get("versioning"));
+            }
+            if (patch.containsKey("lifecycle")) {
+                bucket.setLifecycle((Map<String, Object>) patch.get("lifecycle"));
+            }
+            if (patch.containsKey("cors")) {
+                bucket.setCors((List<Map<String, Object>>) patch.get("cors"));
+            }
+            if (patch.containsKey("retentionPolicy")) {
+                bucket.setRetentionPolicy(
+                        withEffectiveTime((Map<String, Object>) patch.get("retentionPolicy")));
+            }
+            if (patch.containsKey("softDeletePolicy")) {
+                bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
+            }
+            if (patch.containsKey("iamConfiguration")) {
+                bucket.setIamConfiguration(updatedIamConfiguration);
+            }
+            if (patch.containsKey("storageClass")) {
+                bucket.setStorageClass((String) patch.get("storageClass"));
+            }
+            if (patch.containsKey("defaultEventBasedHold")) {
+                bucket.setDefaultEventBasedHold((Boolean) patch.get("defaultEventBasedHold"));
+            }
+            long metageneration = Long.parseLong(bucket.getMetageneration());
+            bucket.setMetageneration(Long.toString(metageneration + 1));
+            bucket.setUpdated(nowTimestamp());
+            bucketStore.put(name, bucket);
+            return bucket;
         }
-        if (patch.containsKey("versioning")) {
-            bucket.setVersioning((Map<String, Object>) patch.get("versioning"));
-        }
-        if (patch.containsKey("lifecycle")) {
-            bucket.setLifecycle((Map<String, Object>) patch.get("lifecycle"));
-        }
-        if (patch.containsKey("cors")) {
-            bucket.setCors((List<Map<String, Object>>) patch.get("cors"));
-        }
-        if (patch.containsKey("retentionPolicy")) {
-            bucket.setRetentionPolicy(
-                    withEffectiveTime((Map<String, Object>) patch.get("retentionPolicy")));
-        }
-        if (patch.containsKey("softDeletePolicy")) {
-            bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
-        }
-        if (patch.containsKey("iamConfiguration")) {
-            bucket.setIamConfiguration(updatedIamConfiguration);
-        }
-        if (patch.containsKey("storageClass")) {
-            bucket.setStorageClass((String) patch.get("storageClass"));
-        }
-        if (patch.containsKey("defaultEventBasedHold")) {
-            bucket.setDefaultEventBasedHold((Boolean) patch.get("defaultEventBasedHold"));
-        }
-        long metageneration = Long.parseLong(bucket.getMetageneration());
-        bucket.setMetageneration(Long.toString(metageneration + 1));
-        bucket.setUpdated(nowTimestamp());
-        bucketStore.put(name, bucket);
-        return bucket;
     }
 
     private Map<String, Object> updateIamConfiguration(Map<String, Object> current,
@@ -416,6 +457,14 @@ public class GcsService {
     }
 
     public boolean deleteBucketIfEmpty(String name) {
+        if (bucketLifecycleService != null) {
+            return bucketLifecycleService.deleteBucketIfEmpty(name,
+                    () -> deleteBucketIfEmptyUncoordinated(name));
+        }
+        return deleteBucketIfEmptyUncoordinated(name);
+    }
+
+    private boolean deleteBucketIfEmptyUncoordinated(String name) {
         synchronized (bucketLock(name)) {
             if (bucketStore.get(name).isEmpty()) {
                 LOG.warnf("deleteBucket failed: bucket not found name=%s", name);

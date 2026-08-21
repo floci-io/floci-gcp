@@ -37,6 +37,7 @@ class CredentialTokenServiceTest {
 		assertEquals(NOW.plusSeconds(CredentialTokenService.DEFAULT_LIFETIME_SECONDS),
 				resolved.get().getExpireTime());
 		assertNull(resolved.get().getSourceToken());
+		assertNull(resolved.get().getPrincipal());
 		assertEquals("bucket", resolved.get().getGcsRules().getFirst().getBucket());
 	}
 
@@ -51,6 +52,7 @@ class CredentialTokenServiceTest {
 		assertEquals(1200, minted.expiresInSeconds());
 		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
 		assertNull(minted.token().getSourceToken());
+		assertEquals(source.getPrincipal(), minted.token().getPrincipal());
 	}
 
 	@Test
@@ -63,6 +65,16 @@ class CredentialTokenServiceTest {
 
 		assertEquals(7200, minted.expiresInSeconds());
 		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
+	}
+
+	@Test
+	void rejectsDownscopedTokenAsSource() {
+		String sourceToken = service.mintDownscopedToken("external-token", rules()).token().getTokenValue();
+
+		GcpException ex = assertThrows(GcpException.class,
+				() -> service.mintDownscopedToken(sourceToken, rules()));
+
+		assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
 	}
 
 	@Test

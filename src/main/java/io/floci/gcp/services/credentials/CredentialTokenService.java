@@ -69,9 +69,19 @@ public class CredentialTokenService {
 
 		Instant now = clock.instant();
 		Optional<StoredCredentialToken> storedSource = lookupBearerToken(sourceToken, now);
+		if (storedSource.isPresent()
+				&& storedSource.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
+			throw GcpException.invalidArgument("A downscoped token cannot be used as a subject token");
+		}
 		Instant expireTime = storedSource
 				.map(StoredCredentialToken::getExpireTime)
 				.orElseGet(() -> now.plusSeconds(DEFAULT_LIFETIME_SECONDS));
+		String principal = storedSource
+				.map(StoredCredentialToken::getPrincipal)
+				.orElse(null);
+		if (storedSource.isPresent() && (principal == null || principal.isBlank())) {
+			throw GcpException.invalidArgument("Floci impersonated subject token has no principal");
+		}
 
 		String tokenValue = DOWNSCOPED_TOKEN_PREFIX + UUID.randomUUID();
 		StoredCredentialToken token = new StoredCredentialToken(
@@ -79,7 +89,7 @@ public class CredentialTokenService {
 				StoredCredentialToken.TokenKind.DOWNSCOPED,
 				expireTime,
 				null,
-				null,
+				principal,
 				gcsRules);
 		tokenStore.put(tokenValue, token);
 		return new MintedDownscopedToken(token, Duration.between(now, expireTime).toSeconds());

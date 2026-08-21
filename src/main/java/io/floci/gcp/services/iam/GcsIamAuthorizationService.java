@@ -32,11 +32,51 @@ public class GcsIamAuthorizationService {
 
     public void requireBucketPermission(String authorization, String bucket, String permission) {
         cabAuthorization.rejectDownscopedToken(authorization);
+        requirePermission(authorization, permission, IamResource.gcsBucket(bucket));
+    }
+
+    public void requireObjectRead(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorization, bucket, object);
+        requirePermission(authorization, "storage.objects.get", IamResource.gcsObject(bucket, object));
+    }
+
+    public void requireObjectList(String authorization, String bucket, String prefix) {
+        cabAuthorization.requireObjectList(authorization, bucket, prefix);
+        requirePermission(authorization, "storage.objects.list", IamResource.gcsBucket(bucket));
+    }
+
+    public void requireObjectWrite(String authorization, String bucket, String object, String permission) {
+        cabAuthorization.requireObjectWrite(authorization, bucket, object);
+        requirePermission(authorization, permission, IamResource.gcsObject(bucket, object));
+    }
+
+	/**
+	 * Authorizes object creation and returns the additional check to run atomically if the
+	 * destination exists when the mutation is committed.
+	 */
+	public Runnable authorizeObjectCreate(String authorization, String bucket, String object) {
+		requireObjectWrite(authorization, bucket, object, "storage.objects.create");
+		return () -> requireObjectDelete(authorization, bucket, object);
+	}
+
+    public void requireObjectDelete(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectDelete(authorization, bucket, object);
+        requirePermission(authorization, "storage.objects.delete", IamResource.gcsObject(bucket, object));
+    }
+
+	public Runnable authorizeObjectRestore(String authorization, String bucket, String object) {
+		cabAuthorization.requireObjectWrite(authorization, bucket, object);
+		IamResource resource = IamResource.gcsObject(bucket, object);
+		requirePermission(authorization, "storage.objects.restore", resource);
+		requirePermission(authorization, "storage.objects.create", resource);
+		return () -> requireObjectDelete(authorization, bucket, object);
+    }
+
+    private void requirePermission(String authorization, String permission, IamResource resource) {
         if (config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.DISABLED) {
             return;
         }
 
-        IamResource resource = IamResource.gcsBucket(bucket);
         try {
             IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
             IamPolicy policy = IamPolicyNormalizer.normalize(iamService.getPolicy(resource.policyResource()));

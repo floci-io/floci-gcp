@@ -81,7 +81,7 @@ export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are available at `http://localhost:4588`. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+All GCP services are available at `http://localhost:4588`. Credentials are not cryptographically validated by default. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); setting `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` also evaluates supported GCS REST bucket and object operations against stored bucket IAM allow policies. See the [IAM service guide](docs/services/iam.md) for scope and exclusions.
 
 <details>
 <summary>Using Docker directly?</summary>
@@ -217,7 +217,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, object compose, ACLs, bucket IAM with opt-in allow-policy enforcement, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |

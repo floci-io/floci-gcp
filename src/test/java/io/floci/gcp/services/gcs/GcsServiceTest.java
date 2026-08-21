@@ -148,6 +148,40 @@ class GcsServiceTest {
         assertArrayEquals(data, retrieved);
     }
 
+	@Test
+	void overwritePermissionIsCheckedInsideTheDestinationMutation() {
+		service.createBucket("bucket", "p1", BASE_URL, Map.of());
+		service.putObject("bucket", "object", "text/plain", "original".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), BASE_URL);
+		AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+		GcpException exception = assertThrows(GcpException.class, () -> service.putObject(
+				"bucket", "object", "text/plain", "replacement".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL, () -> {
+					overwriteCheckInvoked.set(true);
+					throw GcpException.permissionDenied("overwrite denied");
+				}));
+
+		assertEquals(403, exception.getHttpStatus());
+		assertTrue(overwriteCheckInvoked.get());
+		assertArrayEquals("original".getBytes(StandardCharsets.UTF_8),
+				service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+	}
+
+	@Test
+	void overwritePermissionIsNotRequiredForANewDestination() {
+		service.createBucket("bucket", "p1", BASE_URL, Map.of());
+		AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+		service.putObject("bucket", "object", "text/plain", "created".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL,
+				() -> overwriteCheckInvoked.set(true));
+
+		assertFalse(overwriteCheckInvoked.get());
+		assertArrayEquals("created".getBytes(StandardCharsets.UTF_8),
+				service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+	}
+
     @Test
     void getObjectForDownloadReturnsMatchingMetaAndData() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());

@@ -14,12 +14,12 @@ public class IamRoleCatalog {
     private static final Set<String> OBJECT_CREATOR = Set.of("storage.objects.create");
     private static final Set<String> OBJECT_ADMIN = Set.of(
             "storage.objects.get", "storage.objects.list", "storage.objects.create",
-            "storage.objects.delete", "storage.objects.update", "storage.objects.move");
+			"storage.objects.delete", "storage.objects.update", "storage.objects.move", "storage.objects.restore");
     private static final Set<String> STORAGE_ADMIN = Set.of(
             "storage.buckets.get", "storage.buckets.update", "storage.buckets.delete",
             "storage.buckets.getIamPolicy", "storage.buckets.setIamPolicy",
             "storage.objects.get", "storage.objects.list", "storage.objects.create",
-            "storage.objects.delete", "storage.objects.update", "storage.objects.move");
+			"storage.objects.delete", "storage.objects.update", "storage.objects.move", "storage.objects.restore");
 
     private final Map<String, Set<String>> permissionsByRole;
 

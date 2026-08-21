@@ -7,7 +7,7 @@ floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
-| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` filters supported bucket `testIamPermissions` responses |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` evaluates supported GCS REST bucket and object operations |
 | `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
 
 `authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
@@ -15,8 +15,26 @@ responses remain available in that mode, but they do not restrict requests. In
 `enforce` mode, bucket `testIamPermissions` returns only permissions granted
 by the stored bucket policy. Bucket metadata, bucket IAM-policy, retention-lock,
 storage-layout, and notification operations are also checked against their
-documented bucket permissions. GCS object and ACL operations are not yet
-restricted by IAM allow policies.
+documented bucket permissions. JSON/XML object reads, writes, updates, deletes,
+listing, compose, copy, rewrite, move, restore, and resumable uploads are checked
+against the documented object permissions. Restore requires `storage.objects.restore`
+and `storage.objects.create`, plus `storage.objects.delete` when it replaces a live
+object. ACL operations are not restricted by IAM allow policies.
+
+The initial role catalog supports `roles/storage.objectViewer`,
+`roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
+`roles/storage.admin` for the explicitly enforced permissions. Bucket policies
+inherit to objects. Conditions support `resource.name` equality,
+`startsWith`, `endsWith`, and timestamp comparisons; regex, `extract`,
+macros, and undeclared attributes are rejected.
+
+Object-list conditions authorize the bucket-level `storage.objects.list`
+permission but do not filter returned objects. ACLs, signed-URL identity,
+project policies, deny policies, custom roles, groups, and the full UBLA
+lifecycle remain outside this evaluator. Conditional bindings require UBLA, and a
+bucket update cannot disable, remove, or partially clear UBLA while conditional
+bindings remain configured. Downscoped tokens cannot use enforce mode until
+IAM-aware principal propagation is enabled.
 
 ## Enforcement bootstrap
 

@@ -61,7 +61,7 @@ gcloud config set project floci-local
 
 ## Auth Bypass
 
-floci-gcp does not cryptographically validate credentials. Requests with no credential, external credentials, and Floci-issued OAuth or impersonated tokens are accepted. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB). This otherwise matches the behavior of GCP official emulators when `*_EMULATOR_HOST` is set.
+With the default IAM authorization mode, floci-gcp does not cryptographically validate credentials. Requests with no credential, external credentials, and Floci-issued OAuth or impersonated tokens are accepted. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); in enforce mode, supported GCS REST bucket and object operations also evaluate stored bucket IAM allow policies. This otherwise matches the behavior of GCP official emulators when `*_EMULATOR_HOST` is set. See the [IAM service guide](iam.md) for scope and exclusions.
 
 ## Multi-Project Isolation
 

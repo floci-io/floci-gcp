@@ -142,8 +142,7 @@ public class GcsIamAuthorizationService {
 
         return () -> {
             try {
-                if (!resolution.downscoped() && policyEvaluator.isAllowed(
-                        resolution.principal(), "storage.objects.delete", resource,
+                if (policyEvaluator.isAllowed(resolution.principal(), "storage.objects.delete", resource,
                         Map.of(resource.policyResource(), policy))) {
                     return;
                 }
@@ -172,10 +171,10 @@ public class GcsIamAuthorizationService {
             return;
         }
 
+        IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
         try {
-            IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
             IamPolicy policy = IamPolicyNormalizer.normalize(iamService.getPolicy(resource.policyResource()));
-            if (!resolution.downscoped() && policyEvaluator.isAllowed(resolution.principal(), permission, resource,
+            if (policyEvaluator.isAllowed(resolution.principal(), permission, resource,
                     Map.of(resource.policyResource(), policy))) {
                 return;
             }

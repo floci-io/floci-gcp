@@ -184,8 +184,7 @@ public class PubSubService {
             LOG.warnf("deleteTopic failed: topic not found name=%s", name);
             throw GcpException.notFound("Topic not found: " + name);
         }
-        topicStore.delete(name);
-        iamService.deletePolicy(name);
+        iamService.deleteResourceAndPolicy(name, () -> topicStore.delete(name));
     }
 
     // ── Subscriptions ──────────────────────────────────────────────────────────
@@ -381,11 +380,10 @@ public class PubSubService {
             LOG.warnf("deleteSubscription failed: subscription not found name=%s", name);
             throw GcpException.notFound("Subscription not found: " + name);
         }
-        subStore.delete(name);
+        iamService.deleteResourceAndPolicy(name, () -> subStore.delete(name));
         queues.remove(name);
         delivered.remove(name);
         listeners.remove(name);
-        iamService.deletePolicy(name);
     }
 
     public void detachSubscription(String name) {
@@ -623,8 +621,7 @@ public class PubSubService {
         LOG.infof("deleteSnapshot name=%s", snapshotName);
         snapshotStore.get(snapshotName)
                 .orElseThrow(() -> GcpException.notFound("Snapshot not found: " + snapshotName));
-        snapshotStore.delete(snapshotName);
-        iamService.deletePolicy(snapshotName);
+        iamService.deleteResourceAndPolicy(snapshotName, () -> snapshotStore.delete(snapshotName));
     }
 
     public void seek(String subscriptionName, String snapshotName) {

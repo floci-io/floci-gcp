@@ -164,8 +164,11 @@ public class IamService {
     }
 
     public StoredPolicy getPolicy(String resource) {
-        requireResourceExists(resource);
-        return policyStore.get(policyKey(resource)).orElseGet(IamService::emptyPolicy);
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            requireResourceExists(resource);
+            return policyStore.get(key).orElseGet(IamService::emptyPolicy);
+        }
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
@@ -195,6 +198,23 @@ public class IamService {
     public void deletePolicy(String resource) {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
+            policyStore.delete(key);
+        }
+    }
+
+    /**
+     * Runs {@code deleteResource} and removes the resource's policy under the
+     * same lock that guards policy reads and writes. Owning services call this
+     * from their delete paths so no policy operation can interleave between
+     * resource removal and policy cleanup — a write landing in that gap (e.g.
+     * on a just-recreated name) would otherwise be silently erased by the
+     * trailing cleanup, and a read could see the previous name-holder's
+     * bindings.
+     */
+    public void deleteResourceAndPolicy(String resource, Runnable deleteResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            deleteResource.run();
             policyStore.delete(key);
         }
     }

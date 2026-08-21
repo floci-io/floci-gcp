@@ -41,6 +41,12 @@ class CloudRunServiceTest {
     @BeforeEach
     void setUp() {
         iamService = mock(IamService.class);
+        // The mock must still run the resource-deletion callback or delete paths
+        // would silently stop removing services and revisions.
+        doAnswer(invocation -> {
+            invocation.getArgument(1, Runnable.class).run();
+            return null;
+        }).when(iamService).deleteResourceAndPolicy(anyString(), any(Runnable.class));
         service = new CloudRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), operationsMock(), iamService);
     }
 
@@ -468,7 +474,7 @@ class CloudRunServiceTest {
         assertTrue(operation.getDone());
         assertThrows(GcpException.class, () -> service.getService(name));
         assertThrows(GcpException.class, () -> service.getRevision(revision));
-        verify(iamService).deletePolicy(name);
+        verify(iamService).deleteResourceAndPolicy(eq(name), any(Runnable.class));
     }
 
     @Test

@@ -565,12 +565,13 @@ public class CloudRunService {
     }
 
     private void deleteMetadata(String name) {
-        serviceStore.delete(name);
-        String revisionPrefix = name + "/revisions/";
-        revisionStore.keys().stream()
-                .filter(k -> k.startsWith(revisionPrefix))
-                .forEach(revisionStore::delete);
-        iamService.deletePolicy(name);
+        iamService.deleteResourceAndPolicy(name, () -> {
+            serviceStore.delete(name);
+            String revisionPrefix = name + "/revisions/";
+            revisionStore.keys().stream()
+                    .filter(k -> k.startsWith(revisionPrefix))
+                    .forEach(revisionStore::delete);
+        });
     }
 
     private static Condition readyCondition(Timestamp now) {

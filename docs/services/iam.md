@@ -7,6 +7,12 @@ floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves current no-auth behavior; `enforce` is reserved for the forthcoming supported evaluation surface |
+
+`authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
+responses remain available in that mode, but they do not restrict requests. The
+setting is introduced ahead of the evaluator; this slice does not enforce
+policies even when it is configured as `enforce`.
 
 ## Quick Start
 

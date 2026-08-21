@@ -49,6 +49,21 @@ class GcsServiceTest {
     }
 
     @Test
+    void uniformBucketLevelAccessRoundTripsOnCreateAndPatch() {
+        service.createBucket("my-bucket", "p1", BASE_URL, Map.of(
+                "iamConfiguration", Map.of("uniformBucketLevelAccess", Map.of("enabled", true))));
+
+        assertEquals(Map.of("uniformBucketLevelAccess", Map.of("enabled", true)),
+                service.getBucket("my-bucket").getIamConfiguration());
+
+        service.updateBucket("my-bucket", Map.of(
+                "iamConfiguration", Map.of("uniformBucketLevelAccess", Map.of("enabled", false))));
+
+        assertEquals(Map.of("uniformBucketLevelAccess", Map.of("enabled", false)),
+                service.getBucket("my-bucket").getIamConfiguration());
+    }
+
+    @Test
     void timestampsUseAtMostMicrosecondPrecision() {
         service.createBucket("ts-bucket", "p1", BASE_URL, Map.of());
         GcsObjectMeta meta = service.putObject("ts-bucket", "obj.txt", "text/plain",

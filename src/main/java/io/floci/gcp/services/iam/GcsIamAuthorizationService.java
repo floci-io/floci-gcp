@@ -32,11 +32,34 @@ public class GcsIamAuthorizationService {
 
     public void requireBucketPermission(String authorization, String bucket, String permission) {
         cabAuthorization.rejectDownscopedToken(authorization);
+        requirePermission(authorization, permission, IamResource.gcsBucket(bucket));
+    }
+
+    public void requireObjectRead(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorization, bucket, object);
+        requirePermission(authorization, "storage.objects.get", IamResource.gcsObject(bucket, object));
+    }
+
+    public void requireObjectList(String authorization, String bucket, String prefix) {
+        cabAuthorization.requireObjectList(authorization, bucket, prefix);
+        requirePermission(authorization, "storage.objects.list", IamResource.gcsBucket(bucket));
+    }
+
+    public void requireObjectWrite(String authorization, String bucket, String object, String permission) {
+        cabAuthorization.requireObjectWrite(authorization, bucket, object);
+        requirePermission(authorization, permission, IamResource.gcsObject(bucket, object));
+    }
+
+    public void requireObjectDelete(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectDelete(authorization, bucket, object);
+        requirePermission(authorization, "storage.objects.delete", IamResource.gcsObject(bucket, object));
+    }
+
+    private void requirePermission(String authorization, String permission, IamResource resource) {
         if (config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.DISABLED) {
             return;
         }
 
-        IamResource resource = IamResource.gcsBucket(bucket);
         try {
             IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
             IamPolicy policy = IamPolicyNormalizer.normalize(iamService.getPolicy(resource.policyResource()));

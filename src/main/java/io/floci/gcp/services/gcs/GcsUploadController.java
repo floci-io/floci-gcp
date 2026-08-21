@@ -6,6 +6,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
@@ -35,14 +36,16 @@ public class GcsUploadController {
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
 	public GcsUploadController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper,
-			GcsAuthorizationService authorizationService) {
+			GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
         this.objectMapper = objectMapper;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @POST
@@ -105,8 +108,7 @@ public class GcsUploadController {
             bucket = completed.bucket();
             objectName = completed.objectName();
         }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
+        requireObjectCreate(headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
 
         String contentRange = headers.getHeaderString("Content-Range");
         GcsContentRange range = contentRange != null && !contentRange.isBlank()
@@ -203,8 +205,7 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
+        requireObjectCreate(headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
         var userMetadata = extractUserMetadata(metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
@@ -246,8 +247,7 @@ public class GcsUploadController {
             contentType = "application/octet-stream";
         }
 
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
+        requireObjectCreate(headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         String uploadId = service.startResumableUpload(bucket, name, contentType,
                 GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions);
         String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
@@ -259,8 +259,7 @@ public class GcsUploadController {
     private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
+        requireObjectCreate(headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
                 GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
@@ -287,6 +286,13 @@ public class GcsUploadController {
         int port = baseUrl.getPort() >= 0 ? baseUrl.getPort() : config.port();
         String scheme = baseUrl.getScheme() != null ? baseUrl.getScheme() : uriInfo.getBaseUri().getScheme();
         return scheme + "://" + host + ":" + port;
+    }
+
+    private void requireObjectCreate(String authorization, String bucket, String objectName) {
+        iamAuthorizationService.requireObjectWrite(authorization, bucket, objectName, "storage.objects.create");
+        if (service.objectExists(bucket, objectName)) {
+            iamAuthorizationService.requireObjectDelete(authorization, bucket, objectName);
+        }
     }
 
     private static boolean hasPort(String host) {

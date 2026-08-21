@@ -1143,6 +1143,10 @@ public class GcsService {
                 .filter(meta -> isReadableLiveObject(key, meta));
     }
 
+    public boolean objectExists(String bucket, String objectName) {
+        return getLiveObjectMeta(bucket, objectName).isPresent();
+    }
+
     private boolean isReadableLiveObject(String key, GcsObjectMeta meta) {
         if (meta.getTimeDeleted() != null) {
             return false;

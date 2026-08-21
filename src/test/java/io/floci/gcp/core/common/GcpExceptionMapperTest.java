@@ -90,5 +90,7 @@ class GcpExceptionMapperTest {
                 GcpExceptionMapper.ErrorDetail.of(403, "x", "PERMISSION_DENIED").errors().get(0).reason());
         assertEquals("backendError",
                 GcpExceptionMapper.ErrorDetail.of(503, "x", "UNAVAILABLE").errors().get(0).reason());
+        assertEquals("aborted",
+                GcpExceptionMapper.ErrorDetail.of(409, "x", "ABORTED").errors().get(0).reason());
     }
 }

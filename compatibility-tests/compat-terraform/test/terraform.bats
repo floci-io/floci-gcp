@@ -299,9 +299,43 @@ setup() {
     assert_output --partial 'run.googleapis.com'
 }
 
+# ── Pub/Sub Spot Checks ───────────────────────────────────────────────────────
+
+@test "Terraform: Pub/Sub topic created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic"
+    assert_success
+    assert_output --partial 'floci-compat-topic'
+}
+
+@test "Terraform: Pub/Sub subscription created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/subscriptions/floci-compat-sub"
+    assert_success
+    assert_output --partial 'floci-compat-sub'
+}
+
+# Both google_pubsub_topic_iam_member grants must survive the provider's
+# read-modify-write; a frozen etag would let the second write clobber the first.
+@test "Terraform: Pub/Sub topic IAM policy holds both member grants" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.publisher'* ]]
+    [[ "$result" == *'roles/pubsub.viewer'* ]]
+    [[ "$result" == *'floci-compat-sa@'* ]]
+    [[ "$result" == *'user:compat-viewer@example.com'* ]]
+}
+
+@test "Terraform: Pub/Sub subscription IAM policy holds subscriber grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/subscriptions/floci-compat-sub:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.subscriber'* ]]
+}
+
+@test "Terraform: Pub/Sub topic policy does not leak subscription grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/topics/floci-compat-topic:getIamPolicy")
+    [[ "$result" != *'roles/pubsub.subscriber'* ]]
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
 @test "Terraform: all managed resources tracked in state" {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 13 ]
+    [ "$count" -ge 18 ]
 }

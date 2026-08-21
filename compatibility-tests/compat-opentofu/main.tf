@@ -161,9 +161,53 @@ resource "google_kms_crypto_key" "compat" {
   purpose  = "ENCRYPT_DECRYPT"
 }
 
+# ── Pub/Sub ───────────────────────────────────────────────────────────────────
+resource "google_pubsub_topic" "compat" {
+  name = "floci-compat-topic-tofu"
+
+  labels = {
+    env = "compat-test"
+  }
+}
+
+resource "google_pubsub_subscription" "compat" {
+  name  = "floci-compat-sub-tofu"
+  topic = google_pubsub_topic.compat.id
+
+  ack_deadline_seconds = 20
+}
+
+# Two members on one topic exercise the getIamPolicy → merge → setIamPolicy
+# read-modify-write flow; both grants must survive.
+resource "google_pubsub_topic_iam_member" "publisher" {
+  topic  = google_pubsub_topic.compat.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${google_service_account.compat.email}"
+}
+
+resource "google_pubsub_topic_iam_member" "viewer" {
+  topic  = google_pubsub_topic.compat.name
+  role   = "roles/pubsub.viewer"
+  member = "user:compat-viewer@example.com"
+}
+
+resource "google_pubsub_subscription_iam_member" "subscriber" {
+  subscription = google_pubsub_subscription.compat.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.compat.email}"
+}
+
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "key_ring_name" {
   value = google_kms_key_ring.compat.name
+}
+
+output "pubsub_topic_name" {
+  value = google_pubsub_topic.compat.name
+}
+
+output "pubsub_subscription_name" {
+  value = google_pubsub_subscription.compat.name
 }
 
 output "crypto_key_name" {

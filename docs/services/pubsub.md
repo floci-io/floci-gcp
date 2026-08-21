@@ -43,6 +43,18 @@ The REST surface supports topic and subscription create/read/list/update/delete,
 - `POST /v1/projects/{project}/subscriptions/{subscription}:pull`
 - `POST /v1/projects/{project}/subscriptions/{subscription}:acknowledge`
 
+IAM policy methods are served for topics, subscriptions, and snapshots:
+
+- `GET /v1/projects/{project}/topics/{topic}:getIamPolicy`
+- `POST /v1/projects/{project}/topics/{topic}:setIamPolicy`
+- `POST /v1/projects/{project}/topics/{topic}:testIamPermissions`
+- `GET /v1/projects/{project}/subscriptions/{subscription}:getIamPolicy`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:setIamPolicy`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:testIamPermissions`
+- `GET /v1/projects/{project}/snapshots/{snapshot}:getIamPolicy`
+- `POST /v1/projects/{project}/snapshots/{snapshot}:setIamPolicy`
+- `POST /v1/projects/{project}/snapshots/{snapshot}:testIamPermissions`
+
 ## Quick Start
 
 === "gcloud CLI"
@@ -260,6 +272,49 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
     .build());
 ```
 
+## IAM Policies
+
+IAM policies on topics, subscriptions, and snapshots are **stored and returned,
+never enforced**. `setIamPolicy` followed by `getIamPolicy` returns exactly the
+bindings that were set — including `condition` blocks, which are stored verbatim
+and never evaluated — but no request is ever denied because of a policy. Do not
+build authorization tests on top of the emulator.
+
+Policy semantics:
+
+- `getIamPolicy` on an existing resource with no policy returns an empty policy
+  with the well-known etag `ACAB`, matching GCP.
+- `getIamPolicy` / `setIamPolicy` against a resource that does not exist fail
+  with `NOT_FOUND`.
+- The etag rotates on every write. A `setIamPolicy` carrying a stale etag fails
+  with `ABORTED` (HTTP 409), so read-modify-write flows such as Terraform's
+  `google_pubsub_topic_iam_member` behave as they do against real GCP. Omitting
+  the etag performs a blind write.
+- Deleting a resource deletes its policy; recreating the same name starts empty.
+- `testIamPermissions` echoes the requested permissions without consulting
+  stored bindings, and performs no existence check (the real API fails open for
+  missing resources).
+- Schemas are not implemented, so schema IAM paths are not served.
+
+Over gRPC these methods are served by the standalone `google.iam.v1.IAMPolicy`
+service (Pub/Sub declares IAM as a service-config mixin), which the Pub/Sub
+SDKs call transparently via `TopicAdminClient` / `SubscriptionAdminClient`.
+
+```java
+// Grant a worker publish access to a topic, then read it back
+TopicName topic = TopicName.of("floci-local", "my-topic");
+Policy policy = topicAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
+    .setResource(topic.toString()).build());
+Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
+    .setResource(topic.toString())
+    .setPolicy(policy.toBuilder()
+        .addBindings(Binding.newBuilder()
+            .setRole("roles/pubsub.publisher")
+            .addMembers("serviceAccount:worker@floci-local.iam.gserviceaccount.com"))
+        .build())
+    .build());
+```
+
 ## Supported Operations
 
 **Publisher:**
@@ -290,3 +345,9 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
 - `UpdateSnapshot`
 - `DeleteSnapshot`
 - `Seek`
+
+**IAM (`google.iam.v1.IAMPolicy` mixin — stored, never enforced):**
+
+- `GetIamPolicy`
+- `SetIamPolicy`
+- `TestIamPermissions` (echoes requested permissions)

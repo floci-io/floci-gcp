@@ -4,6 +4,8 @@ import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,14 +40,17 @@ public class PubSubRestController {
     private static final Logger LOG = Logger.getLogger(PubSubRestController.class);
 
     private final PubSubService service;
+    private final IamService iamService;
 
     PubSubRestController() {
         this.service = null;
+        this.iamService = null;
     }
 
     @Inject
-    public PubSubRestController(PubSubService service) {
+    public PubSubRestController(PubSubService service, IamService iamService) {
         this.service = service;
+        this.iamService = iamService;
     }
 
     @PUT
@@ -226,8 +231,99 @@ public class PubSubRestController {
         return Response.ok(Map.of()).build();
     }
 
+    // ── IAM policies (google.iam.v1.IAMPolicy mixin) ───────────────────────────
+    // More-literal templates win over /topics/{topic} etc. during JAX-RS sorting,
+    // the same mechanism the :publish and :pull routes rely on.
+
+    @GET
+    @Path("/topics/{topic}:getIamPolicy")
+    public Response getTopicIamPolicy(@PathParam("project") String project,
+                                      @PathParam("topic") String topicId) {
+        return Response.ok(iamService.getPolicy(topicName(project, topicId))).build();
+    }
+
+    @POST
+    @Path("/topics/{topic}:setIamPolicy")
+    public Response setTopicIamPolicy(@PathParam("project") String project,
+                                      @PathParam("topic") String topicId,
+                                      Map<String, Object> body) {
+        return setIamPolicy(topicName(project, topicId), body);
+    }
+
+    @POST
+    @Path("/topics/{topic}:testIamPermissions")
+    public Response testTopicIamPermissions(@PathParam("project") String project,
+                                            @PathParam("topic") String topicId,
+                                            Map<String, Object> body) {
+        return testIamPermissions(body);
+    }
+
+    @GET
+    @Path("/subscriptions/{subscription}:getIamPolicy")
+    public Response getSubscriptionIamPolicy(@PathParam("project") String project,
+                                             @PathParam("subscription") String subscriptionId) {
+        return Response.ok(iamService.getPolicy(subscriptionName(project, subscriptionId))).build();
+    }
+
+    @POST
+    @Path("/subscriptions/{subscription}:setIamPolicy")
+    public Response setSubscriptionIamPolicy(@PathParam("project") String project,
+                                             @PathParam("subscription") String subscriptionId,
+                                             Map<String, Object> body) {
+        return setIamPolicy(subscriptionName(project, subscriptionId), body);
+    }
+
+    @POST
+    @Path("/subscriptions/{subscription}:testIamPermissions")
+    public Response testSubscriptionIamPermissions(@PathParam("project") String project,
+                                                   @PathParam("subscription") String subscriptionId,
+                                                   Map<String, Object> body) {
+        return testIamPermissions(body);
+    }
+
+    @GET
+    @Path("/snapshots/{snapshot}:getIamPolicy")
+    public Response getSnapshotIamPolicy(@PathParam("project") String project,
+                                         @PathParam("snapshot") String snapshotId) {
+        return Response.ok(iamService.getPolicy(snapshotName(project, snapshotId))).build();
+    }
+
+    @POST
+    @Path("/snapshots/{snapshot}:setIamPolicy")
+    public Response setSnapshotIamPolicy(@PathParam("project") String project,
+                                         @PathParam("snapshot") String snapshotId,
+                                         Map<String, Object> body) {
+        return setIamPolicy(snapshotName(project, snapshotId), body);
+    }
+
+    @POST
+    @Path("/snapshots/{snapshot}:testIamPermissions")
+    public Response testSnapshotIamPermissions(@PathParam("project") String project,
+                                               @PathParam("snapshot") String snapshotId,
+                                               Map<String, Object> body) {
+        return testIamPermissions(body);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Response setIamPolicy(String resource, Map<String, Object> body) {
+        LOG.infof("REST setIamPolicy resource=%s", resource);
+        Map<String, Object> policyMap = body != null ? (Map<String, Object>) body.get("policy") : null;
+        return Response.ok(iamService.setPolicy(resource, IamPolicyCodec.fromJsonMap(policyMap))).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Response testIamPermissions(Map<String, Object> body) {
+        List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
+        List<String> granted = iamService.testPermissions(requested != null ? requested : List.of());
+        return Response.ok(Map.of("permissions", granted)).build();
+    }
+
     private static String topicName(String project, String topicId) {
         return "projects/" + project + "/topics/" + topicId;
+    }
+
+    private static String snapshotName(String project, String snapshotId) {
+        return "projects/" + project + "/snapshots/" + snapshotId;
     }
 
     private static String subscriptionName(String project, String subscriptionId) {

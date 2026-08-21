@@ -5,6 +5,9 @@ import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.IamServices;
+import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
@@ -19,15 +22,18 @@ import static org.junit.jupiter.api.Assertions.*;
 class PubSubServiceTest {
 
     private PubSubService service;
+    private IamService iamService;
     private InMemoryStorage<String, StoredSubscription> subStore;
 
     @BeforeEach
     void setUp() {
         subStore = new InMemoryStorage<>();
+        iamService = IamServices.inMemory();
         service = new PubSubService(
                 new InMemoryStorage<>(),
                 subStore,
-                new InMemoryStorage<>());
+                new InMemoryStorage<>(),
+                iamService);
     }
 
     @Test
@@ -453,6 +459,118 @@ class PubSubServiceTest {
 
         List<ReceivedMessage> second = service.pull("projects/p1/subscriptions/s1", 10);
         assertTrue(second.isEmpty());
+    }
+
+    // ── IAM policies ───────────────────────────────────────────────────────────
+
+    @Test
+    void topicPolicyRoundTripsWithBindingOrderPreserved() {
+        service.createTopic("projects/p1/topics/t1");
+
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(
+                Map.of("role", "roles/pubsub.publisher", "members", List.of("serviceAccount:a@p1.iam.gserviceaccount.com")),
+                Map.of("role", "roles/pubsub.viewer", "members", List.of("user:b@example.com", "user:c@example.com"))));
+        iamService.setPolicy("projects/p1/topics/t1", policy);
+
+        StoredPolicy read = iamService.getPolicy("projects/p1/topics/t1");
+        assertEquals(2, read.getBindings().size());
+        assertEquals("roles/pubsub.publisher", read.getBindings().get(0).get("role"));
+        assertEquals("roles/pubsub.viewer", read.getBindings().get(1).get("role"));
+        assertEquals(List.of("user:b@example.com", "user:c@example.com"), read.getBindings().get(1).get("members"));
+    }
+
+    @Test
+    void subscriptionPolicyIndependentOfTopicWithSameShortName() {
+        service.createTopic("projects/p1/topics/shared");
+        service.createSubscription("projects/p1/subscriptions/shared", "projects/p1/topics/shared", 10);
+
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of("role", "roles/pubsub.subscriber", "members", List.of("user:s@example.com"))));
+        iamService.setPolicy("projects/p1/subscriptions/shared", policy);
+
+        assertTrue(iamService.getPolicy("projects/p1/topics/shared").getBindings().isEmpty());
+        assertEquals(1, iamService.getPolicy("projects/p1/subscriptions/shared").getBindings().size());
+    }
+
+    @Test
+    void unsetPolicyOnExistingTopicReturnsEmptyNotError() {
+        service.createTopic("projects/p1/topics/t1");
+
+        StoredPolicy policy = iamService.getPolicy("projects/p1/topics/t1");
+        assertTrue(policy.getBindings().isEmpty());
+        assertEquals("ACAB", policy.getEtag());
+    }
+
+    @Test
+    void policyOnMissingTopicIsNotFound() {
+        GcpException get = assertThrows(GcpException.class,
+                () -> iamService.getPolicy("projects/p1/topics/missing"));
+        assertEquals(404, get.getHttpStatus());
+
+        GcpException set = assertThrows(GcpException.class,
+                () -> iamService.setPolicy("projects/p1/topics/missing", new StoredPolicy()));
+        assertEquals(404, set.getHttpStatus());
+    }
+
+    @Test
+    void policiesAreProjectScoped() {
+        service.createTopic("projects/p1/topics/t");
+        service.createTopic("projects/p2/topics/t");
+
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of("role", "roles/pubsub.publisher", "members", List.of("user:p1@example.com"))));
+        iamService.setPolicy("projects/p1/topics/t", policy);
+
+        assertEquals(1, iamService.getPolicy("projects/p1/topics/t").getBindings().size());
+        assertTrue(iamService.getPolicy("projects/p2/topics/t").getBindings().isEmpty());
+    }
+
+    @Test
+    void deletingTopicClearsPolicySoRecreateStartsEmpty() {
+        service.createTopic("projects/p1/topics/t1");
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of("role", "roles/pubsub.publisher", "members", List.of("user:x@example.com"))));
+        iamService.setPolicy("projects/p1/topics/t1", policy);
+
+        service.deleteTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/t1");
+
+        assertTrue(iamService.getPolicy("projects/p1/topics/t1").getBindings().isEmpty());
+    }
+
+    @Test
+    void deletingSubscriptionClearsPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of("role", "roles/pubsub.subscriber", "members", List.of("user:x@example.com"))));
+        iamService.setPolicy("projects/p1/subscriptions/s1", policy);
+
+        service.deleteSubscription("projects/p1/subscriptions/s1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        assertTrue(iamService.getPolicy("projects/p1/subscriptions/s1").getBindings().isEmpty());
+    }
+
+    @Test
+    void conditionBlockRoundTripsUnchanged() {
+        service.createTopic("projects/p1/topics/t1");
+
+        Map<String, Object> condition = Map.of(
+                "expression", "request.time < timestamp('2030-01-01T00:00:00Z')",
+                "title", "expiry",
+                "description", "temporary grant",
+                "location", "policy.tf:12");
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of(
+                "role", "roles/pubsub.publisher",
+                "members", List.of("user:x@example.com"),
+                "condition", condition)));
+        iamService.setPolicy("projects/p1/topics/t1", policy);
+
+        StoredPolicy read = iamService.getPolicy("projects/p1/topics/t1");
+        assertEquals(condition, read.getBindings().get(0).get("condition"));
     }
 
     private void createFilteredSubscription(String name, String topic, String filter) {

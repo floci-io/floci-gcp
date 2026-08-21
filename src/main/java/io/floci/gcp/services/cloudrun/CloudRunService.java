@@ -8,15 +8,12 @@ import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.TrafficTarget;
 import com.google.cloud.run.v2.TrafficTargetAllocationType;
 import com.google.cloud.run.v2.TrafficTargetStatus;
-import com.google.iam.v1.Binding;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.longrunning.Operation;
-import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
-import com.google.type.Expr;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
@@ -28,6 +25,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
+import io.floci.gcp.services.iam.IamPolicyCodec;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
@@ -42,7 +40,6 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -369,11 +366,11 @@ public class CloudRunService {
     }
 
     public Policy getIamPolicy(String resource) {
-        return toProtoPolicy(iamService.getPolicy(resource));
+        return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
     }
 
     public Policy setIamPolicy(String resource, Policy policy) {
-        return toProtoPolicy(iamService.setPolicy(resource, toStoredPolicy(policy)));
+        return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, IamPolicyCodec.toStoredPolicy(policy)));
     }
 
     public TestIamPermissionsResponse testIamPermissions(List<String> permissions) {
@@ -568,11 +565,13 @@ public class CloudRunService {
     }
 
     private void deleteMetadata(String name) {
-        serviceStore.delete(name);
-        String revisionPrefix = name + "/revisions/";
-        revisionStore.keys().stream()
-                .filter(k -> k.startsWith(revisionPrefix))
-                .forEach(revisionStore::delete);
+        iamService.deleteResourceAndPolicy(name, () -> {
+            serviceStore.delete(name);
+            String revisionPrefix = name + "/revisions/";
+            revisionStore.keys().stream()
+                    .filter(k -> k.startsWith(revisionPrefix))
+                    .forEach(revisionStore::delete);
+        });
     }
 
     private static Condition readyCondition(Timestamp now) {
@@ -641,70 +640,6 @@ public class CloudRunService {
         return transientOnly
                 ? operations.doneTransient(parent, response, metadata)
                 : operations.done(parent, response, metadata);
-    }
-
-    private static StoredPolicy toStoredPolicy(Policy policy) {
-        StoredPolicy stored = new StoredPolicy();
-        stored.setVersion(policy.getVersion());
-        if (!policy.getEtag().isEmpty()) {
-            stored.setEtag(policy.getEtag().toStringUtf8());
-        }
-        stored.setBindings(policy.getBindingsList().stream()
-                .map(CloudRunService::bindingToMap)
-                .toList());
-        return stored;
-    }
-
-    private static Policy toProtoPolicy(StoredPolicy stored) {
-        Policy.Builder builder = Policy.newBuilder()
-                .setVersion(stored.getVersion());
-        if (stored.getEtag() != null) {
-            builder.setEtag(ByteString.copyFromUtf8(stored.getEtag()));
-        }
-        if (stored.getBindings() != null) {
-            for (Map<String, Object> binding : stored.getBindings()) {
-                builder.addBindings(mapToBinding(binding));
-            }
-        }
-        return builder.build();
-    }
-
-    private static Map<String, Object> bindingToMap(Binding binding) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("role", binding.getRole());
-        map.put("members", List.copyOf(binding.getMembersList()));
-        if (binding.hasCondition()) {
-            Map<String, Object> condition = new LinkedHashMap<>();
-            condition.put("expression", binding.getCondition().getExpression());
-            condition.put("title", binding.getCondition().getTitle());
-            condition.put("description", binding.getCondition().getDescription());
-            condition.put("location", binding.getCondition().getLocation());
-            map.put("condition", condition);
-        }
-        return map;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Binding mapToBinding(Map<String, Object> map) {
-        Binding.Builder builder = Binding.newBuilder()
-                .setRole((String) map.getOrDefault("role", ""));
-        Object members = map.get("members");
-        if (members instanceof List<?> list) {
-            for (Object member : list) {
-                builder.addMembers(String.valueOf(member));
-            }
-        }
-        Object condition = map.get("condition");
-        if (condition instanceof Map<?, ?> raw) {
-            Map<String, Object> c = (Map<String, Object>) raw;
-            builder.setCondition(Expr.newBuilder()
-                    .setExpression((String) c.getOrDefault("expression", ""))
-                    .setTitle((String) c.getOrDefault("title", ""))
-                    .setDescription((String) c.getOrDefault("description", ""))
-                    .setLocation((String) c.getOrDefault("location", ""))
-                    .build());
-        }
-        return builder.build();
     }
 
     private static String firstPresent(String first, String second) {

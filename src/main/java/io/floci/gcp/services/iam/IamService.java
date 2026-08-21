@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
@@ -31,7 +32,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class IamService {
@@ -43,12 +47,16 @@ public class IamService {
     private final StorageBackend<String, StoredPolicy> policyStore;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final GrpcServerManager grpcServerManager;
     private final AtomicLong uniqueIdSeq = new AtomicLong(100000000000000000L);
+    private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
-    public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory) {
+    public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
+            GrpcServerManager grpcServerManager) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.grpcServerManager = grpcServerManager;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -65,6 +73,7 @@ public class IamService {
         this.policyStore = policyStore;
         this.serviceRegistry = null;
         this.config = null;
+        this.grpcServerManager = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -74,6 +83,9 @@ public class IamService {
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(IamController.class)
                 .build());
+        // Serves the google.iam.v1.IAMPolicy mixin for all services; not gated on
+        // the iam REST toggle so Pub/Sub IAM keeps working when iam is disabled.
+        grpcServerManager.bind(new IamPolicyGrpcController(this));
     }
 
     // ── Service Accounts ───────────────────────────────────────────────────────
@@ -137,17 +149,128 @@ public class IamService {
 
     // ── IAM Policies ───────────────────────────────────────────────────────────
 
+    // GCP returns this fixed etag for a policy that has never been set.
+    static final String EMPTY_POLICY_ETAG = "ACAB";
+
+    /**
+     * Registers an existence check for policy resources matching {@code pattern},
+     * a slash-segmented template where {@code *} matches exactly one segment.
+     * The resolver throws {@link GcpException} not-found for missing resources.
+     * Resources matching no pattern skip the check, preserving permissive
+     * behavior for services that have not opted in.
+     */
+    public void registerPolicyResourceResolver(String pattern, Consumer<String> requireExists) {
+        policyResolvers.put(pattern, requireExists);
+    }
+
     public StoredPolicy getPolicy(String resource) {
-        return policyStore.get(policyKey(resource)).orElse(new StoredPolicy());
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            requireResourceExists(resource);
+            return policyStore.get(key).orElseGet(IamService::emptyPolicy);
+        }
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
-        policyStore.put(policyKey(resource), policy);
-        return policy;
+        String key = policyKey(resource);
+        // Serializes existence check + etag read-compare-write per resource, both
+        // against concurrent setPolicy (two writers passing the etag check on the
+        // same currentEtag would silently clobber one another) and against
+        // deletePolicy (a write slipping in after resource deletion would
+        // resurrect the policy when the same name is recreated).
+        synchronized (policyLock(key)) {
+            requireResourceExists(resource);
+            String currentEtag = policyStore.get(key)
+                    .map(StoredPolicy::getEtag)
+                    .orElse(EMPTY_POLICY_ETAG);
+            String requestEtag = policy.getEtag();
+            if (requestEtag != null && !requestEtag.isEmpty() && !requestEtag.equals(currentEtag)) {
+                throw GcpException.aborted(
+                        "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
+                                + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+            }
+            policy.setEtag(newEtag());
+            policyStore.put(key, policy);
+            return policy;
+        }
+    }
+
+    public void deletePolicy(String resource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            policyStore.delete(key);
+        }
+    }
+
+    /**
+     * Runs {@code deleteResource} and removes the resource's policy under the
+     * same lock that guards policy reads and writes. Owning services call this
+     * from their delete paths so no policy operation can interleave between
+     * resource removal and policy cleanup — a write landing in that gap (e.g.
+     * on a just-recreated name) would otherwise be silently erased by the
+     * trailing cleanup, and a read could see the previous name-holder's
+     * bindings.
+     */
+    public void deleteResourceAndPolicy(String resource, Runnable deleteResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            deleteResource.run();
+            policyStore.delete(key);
+        }
     }
 
     public List<String> testPermissions(List<String> permissions) {
         return permissions;
+    }
+
+    private void requireResourceExists(String resource) {
+        for (Map.Entry<String, Consumer<String>> entry : policyResolvers.entrySet()) {
+            if (matchesPattern(entry.getKey(), resource)) {
+                entry.getValue().accept(resource);
+                return;
+            }
+        }
+    }
+
+    private static boolean matchesPattern(String pattern, String resource) {
+        String[] p = pattern.split("/");
+        String[] r = resource.split("/");
+        if (p.length != r.length) {
+            return false;
+        }
+        for (int i = 0; i < p.length; i++) {
+            if (!p[i].equals("*") && !p[i].equals(r[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static final int POLICY_LOCK_COUNT = 64;
+    private static final Object[] POLICY_LOCKS = createPolicyLocks();
+
+    private static Object[] createPolicyLocks() {
+        Object[] locks = new Object[POLICY_LOCK_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private static Object policyLock(String key) {
+        return POLICY_LOCKS[Math.floorMod(key.hashCode(), POLICY_LOCKS.length)];
+    }
+
+    private static StoredPolicy emptyPolicy() {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setEtag(EMPTY_POLICY_ETAG);
+        return policy;
+    }
+
+    private static String newEtag() {
+        byte[] bytes = new byte[8];
+        ThreadLocalRandom.current().nextBytes(bytes);
+        return Base64.getEncoder().encodeToString(bytes);
     }
 
     // ── Service Account Keys ───────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.InvalidArgumentException;
+import com.google.api.gax.rpc.NotFoundException;
 import com.google.api.gax.rpc.TransportChannelProvider;
 import com.google.cloud.pubsub.v1.Publisher;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
@@ -12,6 +13,12 @@ import com.google.cloud.pubsub.v1.TopicAdminClient;
 import com.google.cloud.pubsub.v1.TopicAdminSettings;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
 import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
+import com.google.iam.v1.Binding;
+import com.google.iam.v1.GetIamPolicyRequest;
+import com.google.iam.v1.Policy;
+import com.google.iam.v1.SetIamPolicyRequest;
+import com.google.iam.v1.TestIamPermissionsRequest;
+import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.FieldMask;
 import com.google.pubsub.v1.AcknowledgeRequest;
@@ -562,6 +569,63 @@ class PubSubTest {
             try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
             try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
         }
+    }
+
+    @Test
+    @Order(18)
+    void iamPolicyRoundTripOnTopicAndSubscription() {
+        String topicId = TestFixtures.uniqueName("iam-topic");
+        String subId = TestFixtures.uniqueName("iam-sub");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, subId);
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(
+                subName, topicName, PushConfig.getDefaultInstance(), 10);
+        try {
+            Policy unset = topicAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
+                    .setResource(topicName.toString()).build());
+            assertThat(unset.getBindingsList()).isEmpty();
+
+            Policy granted = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
+                    .setResource(topicName.toString())
+                    .setPolicy(Policy.newBuilder()
+                            .addBindings(Binding.newBuilder()
+                                    .setRole("roles/pubsub.publisher")
+                                    .addMembers("serviceAccount:worker@" + PROJECT_ID
+                                            + ".iam.gserviceaccount.com"))
+                            .build())
+                    .build());
+            assertThat(granted.getEtag().toStringUtf8()).isNotEmpty();
+
+            Policy readBack = topicAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
+                    .setResource(topicName.toString()).build());
+            assertThat(readBack.getBindingsList()).isEqualTo(granted.getBindingsList());
+            assertThat(readBack.getEtag()).isEqualTo(granted.getEtag());
+
+            Policy subPolicy = subscriptionAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
+                    .setResource(subName.toString()).build());
+            assertThat(subPolicy.getBindingsList()).isEmpty();
+
+            TestIamPermissionsResponse perms = topicAdminClient.testIamPermissions(
+                    TestIamPermissionsRequest.newBuilder()
+                            .setResource(topicName.toString())
+                            .addPermissions("pubsub.topics.publish")
+                            .build());
+            assertThat(perms.getPermissionsList()).containsExactly("pubsub.topics.publish");
+        } finally {
+            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
+            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(19)
+    void iamPolicyOnMissingTopicIsNotFound() {
+        ProjectTopicName missing = ProjectTopicName.of(PROJECT_ID, TestFixtures.uniqueName("iam-missing"));
+        assertThatThrownBy(() -> topicAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
+                .setResource(missing.toString()).build()))
+                .isInstanceOf(NotFoundException.class);
     }
 
     @Test

@@ -1,6 +1,6 @@
 # GCP CLI & SDK Setup
 
-floci-gcp does not require real GCP credentials, and GCP SDKs automatically skip credential validation when `*_EMULATOR_HOST` environment variables are set. Requests with no credential, external credentials, and Floci-issued OAuth or impersonated tokens are accepted. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+floci-gcp does not require real GCP credentials, and GCP SDKs automatically skip credential validation when `*_EMULATOR_HOST` environment variables are set. With the default IAM authorization mode, requests with no credential, external credentials, and Floci-issued OAuth or impersonated tokens are accepted. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); in enforce mode, supported GCS REST bucket and object operations also evaluate stored bucket IAM allow policies. See the [IAM service guide](../services/iam.md) for scope and exclusions.
 
 ## Environment Variables
 

@@ -81,7 +81,7 @@ export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All emulated GCP APIs are available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+All emulated GCP APIs are available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints. Credentials are not cryptographically validated by default. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); setting `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` also evaluates supported GCS REST bucket and object operations against stored bucket IAM allow policies. See the [IAM service guide](docs/services/iam.md) for scope and exclusions.
 
 <details>
 <summary>Using Docker directly?</summary>
@@ -225,7 +225,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Service | Protocol | Notable features |
 |---|---|---|
 | **[Compute Engine](docs/services/compute.md)** | REST JSON | Scoped operations, synthetic catalogs, VPC/subnets/firewalls/addresses, VM and disk lifecycle, images/snapshots, NEGs and global HTTP load-balancer configuration; no guest execution or traffic forwarding |
-| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, compose, rewrite, move, soft delete and restore, ACLs, bucket IAM, HMAC keys, conditional requests, versioning, lifecycle, CORS, decompressive transcoding, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, compose, rewrite, move, soft delete and restore, ACLs, bucket IAM with opt-in allow-policy enforcement, HMAC keys, conditional requests, versioning, lifecycle, CORS, decompressive transcoding, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, structured queries with filters, ordering, and cursors, field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | gRPC + HTTP/protobuf | Entity operations and structured queries over both transports; GQL queries and COUNT aggregation over HTTP/protobuf; transaction RPCs with limited semantics |

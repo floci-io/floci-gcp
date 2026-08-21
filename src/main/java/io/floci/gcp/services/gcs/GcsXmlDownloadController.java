@@ -3,8 +3,9 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.core.common.XmlBuilder;
-import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -23,6 +24,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Function;
 
 /**
  * Handles GCS XML API requests: GET on a bucket (list objects) and GET/PUT/DELETE on an object.
@@ -36,15 +38,15 @@ public class GcsXmlDownloadController {
     private final GcsService service;
     private final EmulatorConfig config;
     private final GcsXmlMultipartHandler multipart;
-	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
-	public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
-			GcsAuthorizationService authorizationService, GcsXmlMultipartHandler multipart) {
+    public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
+            GcsXmlMultipartHandler multipart, GcsIamAuthorizationService iamAuthorizationService) {
         this.multipart = multipart;
         this.service = service;
         this.config = config;
-		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @POST
@@ -81,7 +83,7 @@ public class GcsXmlDownloadController {
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectRead(authorization, bucket, objectPath);
+        iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
@@ -99,13 +101,17 @@ public class GcsXmlDownloadController {
             byte[] body) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("PUT", bucket, objectPath, uriInfo, headers, body); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String baseUrl = RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port());
-        GcsObjectMeta meta = service.putObject(bucket, objectPath, contentType, body != null ? body : new byte[0],
-                GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), baseUrl);
-        return Response.ok(meta).build();
+        Function<GcsIamAuthorizationService.OverwriteAuthorization, Response> upload = overwriteAuthorization -> {
+            GcsObjectMeta meta = service.putObject(
+                    bucket, objectPath, contentType, body != null ? body : new byte[0],
+                    GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), null,
+                    GcsObjectPreconditions.NONE, baseUrl, overwriteAuthorization::require);
+            return Response.ok(meta).build();
+        };
+        return iamAuthorizationService.authorizeObjectCreate(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath, upload);
     }
 
     /**
@@ -123,7 +129,7 @@ public class GcsXmlDownloadController {
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("DELETE", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectDelete(authorization, bucket, objectPath);
+        iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath);
         if (generation != null && !generation.isBlank()) {
             service.deleteObjectVersion(bucket, objectPath, generation);
         } else if (!service.deleteObject(bucket, objectPath)) {
@@ -151,7 +157,7 @@ public class GcsXmlDownloadController {
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectList(authorization, bucket, prefix);
+        iamAuthorizationService.requireObjectList(authorization, bucket, prefix);
         service.getBucket(bucket);
 
         // "The object name after which you want to start listing objects. Objects whose names

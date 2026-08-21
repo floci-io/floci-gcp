@@ -19,7 +19,6 @@ final class GcsSignedUrl {
             .ofPattern("yyyyMMdd'T'HHmmss'Z'")
             .withZone(ZoneOffset.UTC);
     private static final long MAX_EXPIRES_SECONDS = 604_800;
-
     private GcsSignedUrl() {}
 
     static void checkNotExpired(UriInfo uriInfo) {

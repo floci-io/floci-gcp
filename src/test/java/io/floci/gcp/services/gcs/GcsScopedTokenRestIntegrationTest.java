@@ -209,7 +209,7 @@ class GcsScopedTokenRestIntegrationTest {
 	}
 
 	@Test
-	void resumableUploadRequiresCurrentTokenScopeForCompletion() {
+	void resumableUploadSessionUriAuthorizesHeaderlessCompletion() {
 		String location = given()
 				.contentType("application/json")
 				.queryParam("uploadType", "resumable")
@@ -222,16 +222,13 @@ class GcsScopedTokenRestIntegrationTest {
 				.extract().header("Location");
 
 		String uploadId = location.substring(location.indexOf("upload_id=") + "upload_id=".length());
-		String otherAuthorization = bearer(mint("other/", READER, VIEWER, WRITER));
-
 		given()
-				.header("Authorization", otherAuthorization)
 				.contentType("text/plain")
 				.queryParam("upload_id", uploadId)
-				.body("denied")
+				.body("completed")
 				.when().put("/upload/storage/v1/b/{bucket}/o", bucket)
 				.then()
-				.statusCode(403);
+				.statusCode(200);
 	}
 
 	@Test

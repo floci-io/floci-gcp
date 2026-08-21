@@ -296,6 +296,112 @@ class GcsServiceTest {
     }
 
     @Test
+    void overwritePermissionIsCheckedInsideTheDestinationMutation() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "object", "text/plain", "original".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+        AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+        GcpException exception = assertThrows(GcpException.class, () -> service.putObject(
+                "bucket", "object", "text/plain", "replacement".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL, () -> {
+                    overwriteCheckInvoked.set(true);
+                    throw GcpException.permissionDenied("overwrite denied");
+                }));
+
+        assertEquals(403, exception.getHttpStatus());
+        assertTrue(overwriteCheckInvoked.get());
+        assertArrayEquals("original".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void overwritePermissionIsNotRequiredForANewDestination() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+        service.putObject("bucket", "object", "text/plain", "created".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL,
+                () -> overwriteCheckInvoked.set(true));
+
+        assertFalse(overwriteCheckInvoked.get());
+        assertArrayEquals("created".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void resumableSessionCanReplaceAnObjectCreatedAfterInitiationWhenAuthorized() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload(
+                "bucket", "object", "text/plain", GcsCustomerEncryption.none(), null, null,
+                GcsObjectPreconditions.NONE, true);
+        service.putObject("bucket", "object", "text/plain", "competing".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.applyResumableChunk(
+                uploadId, null, "replacement".getBytes(StandardCharsets.UTF_8), BASE_URL);
+
+        assertArrayEquals("replacement".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void resumableSessionCannotStartOverExistingObjectWhenNotAuthorized() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "object", "text/plain", "original".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException exception = assertThrows(GcpException.class, () -> service.startResumableUpload(
+                "bucket", "object", "text/plain", GcsCustomerEncryption.none(), null, null,
+                GcsObjectPreconditions.NONE, false));
+
+        assertEquals(403, exception.getHttpStatus());
+        assertArrayEquals("original".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void resumableSessionCannotReplaceAnObjectCreatedAfterInitiationWithoutDeletePermission() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload(
+                "bucket", "object", "text/plain", GcsCustomerEncryption.none(), null, null,
+                GcsObjectPreconditions.NONE, false);
+        service.putObject("bucket", "object", "text/plain", "competing".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException exception = assertThrows(GcpException.class, () -> service.applyResumableChunk(
+                uploadId, null, "replacement".getBytes(StandardCharsets.UTF_8), BASE_URL));
+
+        assertEquals(403, exception.getHttpStatus());
+        assertArrayEquals("competing".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void resumableSessionCannotWriteToRecreatedBucket() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "object", "text/plain", "old".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+        String uploadId = service.startResumableUpload(
+                "bucket", "object", "text/plain", GcsCustomerEncryption.none(), null, null,
+                GcsObjectPreconditions.NONE, true);
+        assertTrue(service.deleteObject("bucket", "object"));
+        service.deleteBucket("bucket");
+
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "object", "text/plain", "new".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException exception = assertThrows(GcpException.class, () -> service.applyResumableChunk(
+                uploadId, null, "stale".getBytes(StandardCharsets.UTF_8), BASE_URL));
+
+        assertEquals(404, exception.getHttpStatus());
+        assertNull(service.findResumableUpload(uploadId));
+        assertArrayEquals("new".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+    }
+
+    @Test
     void getObjectForDownloadReturnsMatchingMetaAndData() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
         var data = "payload".getBytes(StandardCharsets.UTF_8);

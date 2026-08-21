@@ -70,6 +70,30 @@ class GcsResumableSessionRestIntegrationTest {
     }
 
     @Test
+    void sessionReplacesObjectCreatedAfterInitiationWhenAuthorizationIsDisabled() {
+        ensureBucket();
+        String objectName = "late-replacement-disabled";
+        String uploadId = startUpload(objectName);
+
+        given()
+                .contentType("text/plain")
+                .body("competing")
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=media&name=" + objectName)
+                .then().statusCode(200);
+
+        given()
+                .contentType("text/plain")
+                .body("replacement")
+                .when().put(sessionPath(uploadId))
+                .then().statusCode(200);
+
+        given()
+                .when().get("/storage/v1/b/" + BUCKET + "/o/" + objectName + "?alt=media")
+                .then().statusCode(200)
+                .body(equalTo("replacement"));
+    }
+
+    @Test
     void postStatusQueryReportsReceivedBytes() {
         ensureBucket();
         var uploadId = startUpload("post-status-obj");

@@ -168,6 +168,7 @@ floci-gcp:
       enabled: false
     iam:
       enabled: false
+      authorization-mode: disabled # disabled | enforce
 ```
 
 Via environment variable:
@@ -175,6 +176,7 @@ Via environment variable:
 ```bash
 FLOCI_GCP_SERVICES_DATASTORE_ENABLED=false
 FLOCI_GCP_SERVICES_IAM_ENABLED=false
+FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=disabled
 ```
 
 ## Logging

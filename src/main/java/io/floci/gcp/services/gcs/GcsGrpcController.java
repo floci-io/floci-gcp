@@ -128,9 +128,9 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             if (request.getUpdateMask().getPathsCount() == 0) {
                 throw GcpException.invalidArgument("update_mask is required");
             }
-            return GcsGrpcMapper.toProto(service.updateBucket(bucketId,
+            return GcsGrpcMapper.toProto(service.updateBucketWithResolvedFields(bucketId,
                     GcsGrpcMapper.bucketUpdateFields(
-                            request.getBucket(), request.getUpdateMask().getPathsList())));
+                            current, request.getBucket(), request.getUpdateMask().getPathsList())));
         });
     }
 

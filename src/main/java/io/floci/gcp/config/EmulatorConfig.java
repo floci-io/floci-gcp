@@ -264,6 +264,14 @@ public interface EmulatorConfig {
     interface IamServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("disabled")
+        IamAuthorizationMode authorizationMode();
+    }
+
+    enum IamAuthorizationMode {
+        DISABLED,
+        ENFORCE
     }
 
     interface IamCredentialsServiceConfig {

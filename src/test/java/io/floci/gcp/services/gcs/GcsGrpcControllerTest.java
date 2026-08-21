@@ -49,6 +49,8 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -91,6 +93,222 @@ class GcsGrpcControllerTest {
                 .build(), updated);
         assertNull(updated.error);
         assertEquals("true", updated.single().getLabelsOrThrow("updated"));
+    }
+
+    @Test
+    void bucketIamConfigurationRoundTripsThroughGrpcCreate() {
+        RecordingObserver<Bucket> created = new RecordingObserver<>();
+        controller.createBucket(CreateBucketRequest.newBuilder()
+                .setParent("projects/_")
+                .setBucketId("grpc-iam-config")
+                .setBucket(Bucket.newBuilder().setProject("projects/test-project")
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setUniformBucketLevelAccess(Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                                        .setEnabled(true)
+                                        .setLockTime(Timestamp.newBuilder().setSeconds(4_102_444_800L)))
+                                .setPublicAccessPrevention("enforced")))
+                .build(), created);
+
+        assertNull(created.error);
+        assertTrue(created.single().getIamConfig().getUniformBucketLevelAccess().getEnabled());
+        assertTrue(created.single().getIamConfig().getUniformBucketLevelAccess().hasLockTime());
+        assertNotEquals(4_102_444_800L, created.single().getIamConfig()
+                .getUniformBucketLevelAccess().getLockTime().getSeconds());
+        assertEquals("enforced", service.getBucket("grpc-iam-config")
+                .getIamConfiguration().get("publicAccessPrevention"));
+    }
+
+    @Test
+    void invalidPublicAccessPreventionIsRejectedThroughGrpc() {
+        RecordingObserver<Bucket> created = new RecordingObserver<>();
+        controller.createBucket(CreateBucketRequest.newBuilder()
+                .setParent("projects/_")
+                .setBucketId("grpc-invalid-pap")
+                .setBucket(Bucket.newBuilder().setProject("projects/test-project")
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setPublicAccessPrevention("invalid")))
+                .build(), created);
+
+        assertEquals(Status.Code.INVALID_ARGUMENT,
+                Status.fromThrowable(created.error).getCode());
+
+        service.createBucket("grpc-invalid-pap-update", "test-project", BASE_URL, Map.of());
+        RecordingObserver<Bucket> updated = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName("grpc-invalid-pap-update"))
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setPublicAccessPrevention("invalid")))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.public_access_prevention"))
+                .build(), updated);
+
+        assertEquals(Status.Code.INVALID_ARGUMENT,
+                Status.fromThrowable(updated.error).getCode());
+    }
+
+    @Test
+    void nestedBucketIamConfigurationUpdatesHonorFieldMask() {
+        String bucketName = "grpc-iam-config-update";
+        service.createBucket(bucketName, "test-project", BASE_URL, Map.of(
+                "iamConfiguration", Map.of(
+                        "uniformBucketLevelAccess", Map.of(
+                                "enabled", true,
+                                "lockedTime", "2027-01-15T08:00:00Z"),
+                        "publicAccessPrevention", "enforced")));
+        String name = GcsGrpcMapper.bucketName(bucketName);
+        long originalLockTime = GcsGrpcMapper.toProto(service.getBucket(bucketName))
+                .getIamConfig().getUniformBucketLevelAccess().getLockTime().getSeconds();
+
+        RecordingObserver<Bucket> publicAccessUpdate = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(name)
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setPublicAccessPrevention("inherited")))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.public_access_prevention"))
+                .build(), publicAccessUpdate);
+
+        assertNull(publicAccessUpdate.error);
+        assertTrue(publicAccessUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().getEnabled());
+        assertTrue(publicAccessUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().hasLockTime());
+
+        RecordingObserver<Bucket> lockTimeUpdate = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(name)
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setUniformBucketLevelAccess(
+                                        Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                                                .setLockTime(Timestamp.newBuilder()
+                                                        .setSeconds(1_900_000_000)))))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.uniform_bucket_level_access.lock_time"))
+                .build(), lockTimeUpdate);
+
+        assertNull(lockTimeUpdate.error);
+        assertTrue(lockTimeUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().getEnabled());
+        assertEquals("inherited", lockTimeUpdate.single().getIamConfig()
+                .getPublicAccessPrevention());
+        assertEquals(originalLockTime, lockTimeUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().getLockTime().getSeconds());
+
+        RecordingObserver<Bucket> enabledUpdate = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(name)
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setUniformBucketLevelAccess(
+                                        Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                                                .setEnabled(false))))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.uniform_bucket_level_access.enabled"))
+                .build(), enabledUpdate);
+
+        assertNull(enabledUpdate.error);
+        assertFalse(enabledUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().getEnabled());
+        assertFalse(enabledUpdate.single().getIamConfig()
+                .getUniformBucketLevelAccess().hasLockTime());
+        assertEquals("inherited", enabledUpdate.single().getIamConfig()
+                .getPublicAccessPrevention());
+
+        RecordingObserver<Bucket> clearLockTime = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(name)
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setUniformBucketLevelAccess(
+                                        Bucket.IamConfig.UniformBucketLevelAccess.newBuilder())))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.uniform_bucket_level_access.lock_time"))
+                .build(), clearLockTime);
+
+        assertNull(clearLockTime.error);
+        assertFalse(clearLockTime.single().getIamConfig()
+                .getUniformBucketLevelAccess().getEnabled());
+        assertFalse(clearLockTime.single().getIamConfig()
+                .getUniformBucketLevelAccess().hasLockTime());
+
+        RecordingObserver<Bucket> clearPublicAccess = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(name)
+                        .setIamConfig(Bucket.IamConfig.newBuilder()))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("iam_config.public_access_prevention"))
+                .build(), clearPublicAccess);
+
+        assertNull(clearPublicAccess.error);
+        assertEquals("", clearPublicAccess.single().getIamConfig()
+                .getPublicAccessPrevention());
+        assertEquals(Map.of(
+                "uniformBucketLevelAccess", Map.of("enabled", false),
+                "bucketPolicyOnly", Map.of("enabled", false)),
+                service.getBucket(bucketName).getIamConfiguration());
+    }
+
+    @Test
+    void iamConfigurationMessageMaskMergesIntoStoredMessage() {
+        assertMessageMaskDisablesUniformAccessWithoutClearingSiblingFields(
+                "grpc-iam-parent-mask", "iam_config");
+    }
+
+    @Test
+    void uniformAccessMessageMaskMergesIntoStoredMessage() {
+        assertMessageMaskDisablesUniformAccessWithoutClearingSiblingFields(
+                "grpc-ubla-parent-mask", "iam_config.uniform_bucket_level_access");
+    }
+
+    @Test
+    void wildcardMaskClearsOmittedIamConfiguration() {
+        String bucketName = "grpc-iam-wildcard-mask";
+        service.createBucket(bucketName, "test-project", BASE_URL, Map.of(
+                "iamConfiguration", Map.of(
+                        "uniformBucketLevelAccess", Map.of("enabled", true),
+                        "publicAccessPrevention", "enforced")));
+
+        RecordingObserver<Bucket> updated = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName(bucketName)))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("*"))
+                .build(), updated);
+
+        assertNull(updated.error);
+        assertFalse(updated.single().hasIamConfig());
+        assertEquals(Map.of(), service.getBucket(bucketName).getIamConfiguration());
+    }
+
+    private void assertMessageMaskDisablesUniformAccessWithoutClearingSiblingFields(
+            String bucketName, String mask) {
+        service.createBucket(bucketName, "test-project", BASE_URL, Map.of(
+                "iamConfiguration", Map.of(
+                        "uniformBucketLevelAccess", Map.of("enabled", true),
+                        "publicAccessPrevention", "enforced")));
+
+        RecordingObserver<Bucket> updated = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName(bucketName))
+                        .setIamConfig(Bucket.IamConfig.newBuilder()
+                                .setUniformBucketLevelAccess(
+                                        Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                                                .setEnabled(false))))
+                .setUpdateMask(FieldMask.newBuilder().addPaths(mask))
+                .build(), updated);
+
+        assertNull(updated.error);
+        assertFalse(updated.single().getIamConfig()
+                .getUniformBucketLevelAccess().getEnabled());
+        assertFalse(updated.single().getIamConfig()
+                .getUniformBucketLevelAccess().hasLockTime());
+        assertEquals("enforced", updated.single().getIamConfig()
+                .getPublicAccessPrevention());
     }
 
     @Test

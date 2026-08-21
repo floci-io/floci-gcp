@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,6 +32,7 @@ public class GcsBucket {
     // Presence of a policy with a non-zero retentionDurationSeconds turns on soft delete:
     // a deleted object is retained and can be restored until it is hard-deleted.
     private Map<String, Object> softDeletePolicy;
+    private Map<String, Object> iamConfiguration;
     private Boolean defaultEventBasedHold;
 
     public String getKind() { return kind; }
@@ -87,6 +89,36 @@ public class GcsBucket {
 
     public Map<String, Object> getSoftDeletePolicy() { return softDeletePolicy; }
     public void setSoftDeletePolicy(Map<String, Object> softDeletePolicy) { this.softDeletePolicy = softDeletePolicy; }
+
+    public Map<String, Object> getIamConfiguration() {
+        if (iamConfiguration == null) {
+            return null;
+        }
+        Map<String, Object> response = new LinkedHashMap<>(iamConfiguration);
+        if (iamConfiguration.containsKey("uniformBucketLevelAccess")) {
+            response.put("bucketPolicyOnly", iamConfiguration.get("uniformBucketLevelAccess"));
+        }
+        return response;
+    }
+
+    @JsonIgnore
+    public Map<String, Object> getCanonicalIamConfiguration() {
+        return iamConfiguration;
+    }
+
+    public void setIamConfiguration(Map<String, Object> iamConfiguration) {
+        if (iamConfiguration == null) {
+            this.iamConfiguration = null;
+            return;
+        }
+        Map<String, Object> canonical = new LinkedHashMap<>(iamConfiguration);
+        boolean hasBucketPolicyOnly = canonical.containsKey("bucketPolicyOnly");
+        Object bucketPolicyOnly = canonical.remove("bucketPolicyOnly");
+        if (!canonical.containsKey("uniformBucketLevelAccess") && hasBucketPolicyOnly) {
+            canonical.put("uniformBucketLevelAccess", bucketPolicyOnly);
+        }
+        this.iamConfiguration = canonical;
+    }
 
     public Boolean getDefaultEventBasedHold() { return defaultEventBasedHold; }
     public void setDefaultEventBasedHold(Boolean defaultEventBasedHold) { this.defaultEventBasedHold = defaultEventBasedHold; }

@@ -25,7 +25,7 @@ public final class IamPolicyNormalizer {
         if (storedPolicy == null) {
             throw invalidPolicy("policy is required");
         }
-        int version = storedPolicy.getVersion();
+        int version = storedPolicy.getVersion() == 0 ? VERSION_1 : storedPolicy.getVersion();
         if (version != VERSION_1 && version != VERSION_3) {
             throw invalidPolicy("policy version must be 1 or 3");
         }

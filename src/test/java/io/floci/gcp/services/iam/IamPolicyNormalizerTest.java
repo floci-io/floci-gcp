@@ -31,6 +31,16 @@ class IamPolicyNormalizerTest {
     }
 
     @Test
+    void treatsOmittedPolicyVersionAsVersionOne() {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of(
+                "role", "roles/storage.objectViewer",
+                "members", List.of("allUsers"))));
+
+        assertEquals(1, IamPolicyNormalizer.normalize(policy).version());
+    }
+
+    @Test
     void normalizesVersionThreeConditionalBinding() {
         StoredPolicy policy = policy(3, List.of(Map.of(
                 "role", "roles/storage.objectViewer",

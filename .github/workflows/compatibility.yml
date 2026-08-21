@@ -146,6 +146,39 @@ jobs:
             -v "$(pwd)/test-results:/results" \
             compat-${{ matrix.test }}
 
+      - name: Run downscoped IAM SDK test
+        if: matrix.test == 'sdk-test-java'
+        timeout-minutes: 10
+        run: |
+          docker stop floci-gcp
+          docker rm floci-gcp
+          DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+          docker run -d --name floci-gcp --network compat-net \
+            --network-alias container.localhost.floci.io \
+            -p 4588:4588 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$DOCKER_GID" \
+            -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 \
+            -e FLOCI_GCP_HOSTNAME=floci-gcp \
+            -e FLOCI_GCP_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_GCP_SERVICES_KAFKA_MOCK=true \
+            -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false \
+            -e FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce \
+            -e FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER=allUsers \
+            floci-gcp:test-native
+          timeout 60 bash -c 'until curl -sf http://localhost:4588/health >/dev/null 2>&1; do sleep 1; done'
+          docker run --rm --network compat-net \
+            -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 \
+            -e FLOCI_ENDPOINT=http://floci-gcp:4588 \
+            -e FLOCI_HOST=floci-gcp:4588 \
+            -e FLOCI_PROJECT=test-project \
+            -e FLOCI_GCP_CLOUDRUN_EXECUTION_ENABLED=true \
+            -e FLOCI_GCP_IAM_ENFORCEMENT_COMPAT=true \
+            -v "$(pwd)/test-results:/results" \
+            --entrypoint /bin/bash \
+            compat-sdk-test-java \
+            -c 'mvn test -Dtest=GcsDownscopedTokenTest#storageClientEnforcesIamPolicyForDownscopedImpersonatedToken; status=$?; mkdir -p /results; cp -r target/surefire-reports/*.xml /results/ 2>/dev/null || true; exit $status'
+
       - name: Generate test summary
         if: always() && steps.tests.outcome != 'skipped'
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2

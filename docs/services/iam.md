@@ -11,12 +11,34 @@ floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
 | `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
 
 `authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
-responses remain available in that mode, but they do not restrict requests. The
-In `enforce` mode, bucket `testIamPermissions` returns only permissions granted
+responses remain available in that mode, but they do not restrict requests. In
+`enforce` mode, bucket `testIamPermissions` returns only permissions granted
 by the stored bucket policy. Bucket metadata, bucket IAM-policy, retention-lock,
 storage-layout, and notification operations are also checked against their
-documented bucket permissions. GCS object and ACL operations are not yet
-restricted by IAM allow policies.
+documented bucket permissions. JSON/XML object reads, writes, updates, deletes,
+listing, compose, copy, rewrite, move, and resumable uploads are checked against
+the documented object permissions. ACL operations are not restricted by IAM
+allow policies.
+
+The initial role catalog supports `roles/storage.objectViewer`,
+`roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
+`roles/storage.admin` for the explicitly enforced permissions. Bucket policies
+inherit to objects. Conditions support `resource.name` equality,
+`startsWith`, `endsWith`, and timestamp comparisons; regex, `extract`,
+macros, and undeclared attributes are rejected.
+
+Object-list conditions authorize the bucket-level `storage.objects.list`
+permission but do not filter returned objects. ACLs, signed-URL identity,
+project policies, deny policies, custom roles, groups, and the full UBLA
+lifecycle remain outside this evaluator.
+
+For a downscoped token derived from a Floci-issued IAM Credentials impersonated
+token, Floci preserves the source service-account identity. Object requests
+first satisfy the token's Credential Access Boundary (CAB), then satisfy the
+bucket policy for that service account. Consequently, a bucket policy cannot
+extend a CAB grant, and a CAB cannot extend a bucket-policy grant. A downscoped
+token from an external source credential has no named IAM identity and, in
+`enforce` mode, can match only an `allUsers` binding.
 
 ## Enforcement bootstrap
 

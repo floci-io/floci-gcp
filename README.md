@@ -209,7 +209,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, opt-in bucket IAM allow-policy enforcement, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |

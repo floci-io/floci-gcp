@@ -169,6 +169,8 @@ Via environment variable:
 FLOCI_GCP_SERVICES_DATASTORE_ENABLED=false
 FLOCI_GCP_SERVICES_IAM_ENABLED=false
 FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=disabled
+# Optional: grant the named member roles/storage.admin on newly created buckets.
+# FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER=serviceAccount:admin@example.iam.gserviceaccount.com
 ```
 
 ## Logging

@@ -48,9 +48,13 @@ prefix.
 ## Token lifetime
 
 Tokens exchanged from arbitrary external source credentials have a one-hour
-lifetime. When the source is an unexpired impersonated or downscoped token
-issued by floci-gcp, the new token inherits that source token's expiration time.
-Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
+lifetime. When the source is an unexpired Floci-issued IAM Credentials
+impersonated token, the new token inherits that source token's expiration time
+and service-account principal. A subsequent GCS object request must satisfy
+both the CAB and that principal's bucket IAM policy when IAM enforcement is
+enabled. Unknown or expired Floci-issued source tokens are rejected with
+`invalid_grant`. A Floci-issued downscoped token is also rejected as a subject
+token until recursive CAB intersection is implemented.
 
 ## Scope and deviations
 
@@ -63,3 +67,5 @@ Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
   the request must match one of the token's CAB rules. Other credentials,
   including Floci-issued OAuth and impersonated tokens, remain accepted without
   credential validation.
+- STS has no separate IAM-policy surface. CAB is an upper bound on the source
+  credential's GCS authority, not an authorization policy for token exchange.

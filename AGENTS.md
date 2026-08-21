@@ -113,7 +113,7 @@ Both gRPC and REST are served on port **4588** via ALPN negotiation:
 
 ### Auth bypass
 
-GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. With the default `iam.authorization-mode=disabled`, floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. Floci-issued downscoped GCS tokens are always constrained by their Credential Access Boundary (CAB); in `enforce` mode, supported GCS REST bucket and object operations apply stored bucket IAM allow policies through `GcsIamAuthorizationService`. Downscoped tokens cannot use enforce mode until IAM-aware principal propagation is enabled. ACLs, signed-URL identity, project policies, GCS gRPC, custom roles, groups, deny policies, and the full UBLA lifecycle remain outside that enforcement surface; see `docs/services/iam.md` for details.
+GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. With the default `iam.authorization-mode=disabled`, floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. Floci-issued downscoped GCS tokens are always constrained by their Credential Access Boundary (CAB); in `enforce` mode, supported GCS REST bucket and object operations apply stored bucket IAM allow policies after CAB through `GcsIamAuthorizationService`. ACLs, signed-URL identity, project policies, GCS gRPC, custom roles, groups, deny policies, and the full UBLA lifecycle remain outside that enforcement surface; see `docs/services/iam.md` for details.
 
 ### Project ID as multi-tenancy key
 

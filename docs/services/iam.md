@@ -33,8 +33,15 @@ permission but do not filter returned objects. ACLs, signed-URL identity,
 project policies, deny policies, custom roles, groups, and the full UBLA
 lifecycle remain outside this evaluator. Conditional bindings require UBLA, and a
 bucket update cannot disable, remove, or partially clear UBLA while conditional
-bindings remain configured. Downscoped tokens cannot use enforce mode until
-IAM-aware principal propagation is enabled.
+bindings remain configured.
+
+For a downscoped token derived from a Floci-issued IAM Credentials impersonated
+token, Floci preserves the source service-account identity. Object requests
+first satisfy the token's Credential Access Boundary (CAB), then satisfy the
+bucket policy for that service account. Consequently, a bucket policy cannot
+extend a CAB grant, and a CAB cannot extend a bucket-policy grant. A downscoped
+token from an external source credential has no named IAM identity and, in
+`enforce` mode, can match only an `allUsers` binding.
 
 ## Enforcement bootstrap
 

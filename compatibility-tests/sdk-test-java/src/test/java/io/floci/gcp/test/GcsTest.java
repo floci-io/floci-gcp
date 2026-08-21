@@ -130,6 +130,15 @@ class GcsTest {
 
     @Test
     @Order(9)
+    void testIamPermissionsUsesCanonicalStorageRoute() {
+        List<Boolean> granted = storage.testIamPermissions(BUCKET_NAME,
+                List.of("storage.objects.get", "storage.buckets.get"));
+
+        assertThat(granted).containsExactly(true, true);
+    }
+
+    @Test
+    @Order(10)
     void deleteObjectsAndBucket() {
         assertThat(storage.delete(BlobId.of(BUCKET_NAME, OBJECT_NAME))).isTrue();
         assertThat(storage.get(BlobId.of(BUCKET_NAME, OBJECT_NAME))).isNull();
@@ -143,7 +152,7 @@ class GcsTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void rejectsDeletionOfNonEmptyBucket() {
         String bucketName = TestFixtures.uniqueName("non-empty-bucket");
         BlobId blobId = BlobId.of(bucketName, "object.txt");

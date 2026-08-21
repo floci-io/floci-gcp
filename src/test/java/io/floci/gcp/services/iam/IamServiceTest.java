@@ -10,6 +10,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -215,5 +223,70 @@ class IamServiceTest {
 
         assertDoesNotThrow(() -> service.getPolicy("projects/p1/gadgets/g1"));
         assertDoesNotThrow(() -> service.getPolicy("projects/p1/widgets/w1/sub/s1"));
+    }
+
+    @Test
+    void deleteSerializesPolicyCleanupAgainstAConcurrentWriter() throws Exception {
+        String resource = "buckets/concurrent-bucket";
+        AtomicBoolean exists = new AtomicBoolean(true);
+        service.registerPolicyResourceResolver("buckets/*", ignored -> {
+            if (!exists.get()) {
+                throw GcpException.notFound("Bucket not found");
+            }
+        });
+        StoredPolicy initial = new StoredPolicy();
+        initial.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
+        service.setPolicy(resource, initial);
+
+        CountDownLatch resourceDeleted = new CountDownLatch(1);
+        CountDownLatch allowDeleteToFinish = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> deletion = executor.submit(() -> service.deleteResourceAndPolicy(resource, () -> {
+                exists.set(false);
+                resourceDeleted.countDown();
+                await(allowDeleteToFinish);
+            }));
+            assertTrue(resourceDeleted.await(5, TimeUnit.SECONDS));
+
+            StoredPolicy concurrent = new StoredPolicy();
+            concurrent.setBindings(List.of(Map.of(
+                    "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
+            Future<?> writer = executor.submit(() -> service.setPolicy(resource, concurrent));
+            assertThrows(TimeoutException.class, () -> writer.get(100, TimeUnit.MILLISECONDS));
+
+            allowDeleteToFinish.countDown();
+            deletion.get(5, TimeUnit.SECONDS);
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> writer.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(GcpException.class, error.getCause());
+            assertEquals(404, ((GcpException) error.getCause()).getHttpStatus());
+        } finally {
+            allowDeleteToFinish.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void createClearsPolicyLeftByAnOlderResourceWithTheSameName() {
+        String resource = "buckets/recreated-bucket";
+        StoredPolicy stale = new StoredPolicy();
+        stale.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
+        service.setPolicy(resource, stale);
+
+        String created = service.createResourceAndPolicy(resource, null, () -> "created");
+
+        assertEquals("created", created);
+        assertTrue(service.getPolicy(resource).getBindings().isEmpty());
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while awaiting test latch", e);
+        }
     }
 }

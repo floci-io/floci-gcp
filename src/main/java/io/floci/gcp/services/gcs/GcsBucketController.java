@@ -8,7 +8,8 @@ import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.StoredAcl;
-import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
+import io.floci.gcp.services.iam.IamBucketPolicyService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -37,18 +38,21 @@ public class GcsBucketController {
 
     private final GcsService service;
     private final EmulatorConfig config;
-    private final IamService iamService;
+    private final IamBucketPolicyService bucketPolicyService;
     private final ObjectMapper objectMapper;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
-    public GcsBucketController(GcsService service, EmulatorConfig config, IamService iamService,
-			ObjectMapper objectMapper, GcsAuthorizationService authorizationService) {
+    public GcsBucketController(GcsService service, EmulatorConfig config,
+            IamBucketPolicyService bucketPolicyService, ObjectMapper objectMapper,
+            GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
-        this.iamService = iamService;
+        this.bucketPolicyService = bucketPolicyService;
         this.objectMapper = objectMapper;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @OPTIONS
@@ -72,7 +76,8 @@ public class GcsBucketController {
         if (name == null || name.isBlank()) {
             throw GcpException.invalidArgument("bucket name is required");
         }
-        GcsBucket bucket = service.createBucket(name, project, requestBaseUrl(headers), parsed);
+        GcsBucket bucket = service.createBucket(name, project, requestBaseUrl(headers), parsed,
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION));
         return Response.ok(bucket).build();
     }
 
@@ -111,7 +116,7 @@ public class GcsBucketController {
     @Path("/{bucket}")
 	public Response getBucket(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.get");
         return Response.ok(service.getBucket(bucket)).build();
     }
 
@@ -120,7 +125,7 @@ public class GcsBucketController {
     @Consumes(MediaType.APPLICATION_JSON)
 	public Response patchBucket(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.update");
         return Response.ok(service.updateBucket(bucket, body)).build();
     }
 
@@ -131,7 +136,7 @@ public class GcsBucketController {
             @HeaderParam("X-HTTP-Method-Override") String methodOverride,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.update");
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
             return Response.ok(service.updateBucket(bucket, body)).build();
         }
@@ -142,7 +147,7 @@ public class GcsBucketController {
     @Path("/{bucket}")
 	public Response deleteBucket(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.delete");
         service.deleteBucket(bucket);
         return Response.noContent().build();
     }
@@ -152,7 +157,7 @@ public class GcsBucketController {
     public Response lockRetentionPolicy(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.update");
         return Response.ok(service.lockRetentionPolicy(bucket, ifMetagenerationMatch)).build();
     }
 
@@ -160,7 +165,7 @@ public class GcsBucketController {
     @Path("/{bucket}/storageLayout")
 	public Response getStorageLayout(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.get");
         GcsBucket b = service.getBucket(bucket);
         String location = b.getLocation() != null ? b.getLocation() : "US";
         Map<String, Object> response = new LinkedHashMap<>();
@@ -185,9 +190,9 @@ public class GcsBucketController {
     @Path("/{bucket}/iam")
 	public Response getBucketIamPolicy(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.getIamPolicy");
         service.getBucket(bucket);
-        StoredPolicy policy = iamService.getPolicy("buckets/" + bucket);
+        StoredPolicy policy = bucketPolicyService.getPolicy(bucket);
         return Response.ok(bucketIamResponse(bucket, policy)).build();
     }
 
@@ -196,10 +201,10 @@ public class GcsBucketController {
     @Consumes(MediaType.APPLICATION_JSON)
 	public Response setBucketIamPolicy(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
-		authorizationService.rejectDownscopedToken(authorization);
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.setIamPolicy");
         service.getBucket(bucket);
         StoredPolicy policy = parsePolicy(body);
-        iamService.setPolicy("buckets/" + bucket, policy);
+        bucketPolicyService.setPolicy(bucket, policy);
         return Response.ok(bucketIamResponse(bucket, policy)).build();
     }
 
@@ -211,6 +216,7 @@ public class GcsBucketController {
     public Response testBucketIamPermissions(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("permissions") List<String> permissions) {
+        validateTestPermissions(permissions);
         return testPermissionsResponse(bucket, authorization, permissions);
     }
 
@@ -226,12 +232,24 @@ public class GcsBucketController {
     }
 
     private Response testPermissionsResponse(String bucket, String authorization, List<String> requested) {
-		authorizationService.rejectDownscopedToken(authorization);
+        authorizationService.rejectDownscopedToken(authorization);
         service.getBucket(bucket);
-        List<String> granted = iamService.testPermissions("buckets/" + bucket, requested != null ? requested : List.of());
+        List<String> granted = bucketPolicyService.testPermissions(bucket, authorization,
+                requested != null ? requested : List.of());
         return Response.ok(Map.of(
                 "kind", "storage#testIamPermissionsResponse",
                 "permissions", granted)).build();
+    }
+
+    private static void validateTestPermissions(List<String> permissions) {
+        if (permissions == null || permissions.isEmpty()) {
+            throw GcpException.invalidArgument("permissions is required");
+        }
+        if (permissions.contains("storage.buckets.create")
+                || permissions.contains("storage.buckets.list")) {
+            throw GcpException.invalidArgument(
+                    "storage.buckets.create and storage.buckets.list are project-level permissions");
+        }
     }
 
     // ── Bucket ACLs ───────────────────────────────────────────────────────────
@@ -354,20 +372,32 @@ public class GcsBucketController {
         return resp;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     private static StoredPolicy parsePolicy(Map<String, Object> body) {
         StoredPolicy policy = new StoredPolicy();
         if (body == null) {
             return policy;
         }
         if (body.containsKey("version")) {
-            policy.setVersion(((Number) body.get("version")).intValue());
+            Object version = body.get("version");
+            if (!(version instanceof Number number)) {
+                throw GcpException.invalidArgument("Policy version must be a number");
+            }
+            policy.setVersion(number.intValue());
         }
         if (body.containsKey("bindings")) {
-            policy.setBindings((List<Map<String, Object>>) body.get("bindings"));
+            Object bindings = body.get("bindings");
+            if (!(bindings instanceof List<?>)) {
+                throw GcpException.invalidArgument("Policy bindings must be a list");
+            }
+            policy.setBindings((List) bindings);
         }
         if (body.containsKey("etag")) {
-            policy.setEtag((String) body.get("etag"));
+            Object etag = body.get("etag");
+            if (etag != null && !(etag instanceof String)) {
+                throw GcpException.invalidArgument("Policy etag must be a string");
+            }
+            policy.setEtag((String) etag);
         }
         return policy;
     }

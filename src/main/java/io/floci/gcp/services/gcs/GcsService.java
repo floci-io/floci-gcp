@@ -861,13 +861,8 @@ public class GcsService {
         return uploadId;
     }
 
-	public ResumableUpload getResumableUpload(String uploadId) {
-		ResumableUpload upload = resumableUploads.get(uploadId);
-		if (upload == null) {
-			LOG.warnf("getResumableUpload failed: upload not found uploadId=%s", uploadId);
-			throw GcpException.notFound("Resumable upload not found: " + uploadId);
-		}
-		return upload;
+	public ResumableUpload findResumableUpload(String uploadId) {
+		return resumableUploads.get(uploadId);
 	}
 
     public GcsObjectMeta completeResumableUpload(String uploadId, byte[] data, String baseUrl) {
@@ -945,8 +940,8 @@ public class GcsService {
         return completedResumableUploads.get(uploadId);
     }
 
-    // The completed session is recorded before the active one is dropped, so a retry that
-    // overlaps persistence always finds the upload id in one of the two maps.
+    // The completed session is recorded before the active one is dropped. Callers rely on
+    // that order: a miss on the active map means the completed entry is already visible.
     private GcsObjectMeta finishResumableUpload(String uploadId, ResumableUpload upload, byte[] data, String baseUrl) {
         GcsObjectMeta meta = putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),

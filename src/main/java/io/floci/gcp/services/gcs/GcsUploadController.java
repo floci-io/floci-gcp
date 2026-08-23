@@ -87,13 +87,18 @@ public class GcsUploadController {
     }
 
     private Response resumableChunk(String uploadId, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
-        CompletedResumableUpload completed = service.completedResumableUpload(uploadId);
-        if (completed != null) {
+        ResumableUpload upload = service.findResumableUpload(uploadId);
+        if (upload == null) {
+            // The active session is dropped only after the completed one is recorded, so
+            // reading the completed map after this miss cannot land in a gap.
+            CompletedResumableUpload completed = service.completedResumableUpload(uploadId);
+            if (completed == null) {
+                throw GcpException.notFound("Resumable upload not found: " + uploadId);
+            }
             authorizationService.requireObjectWrite(
                     headers.getHeaderString(HttpHeaders.AUTHORIZATION), completed.bucket(), completed.objectName());
             return Response.ok(completed.meta()).build();
         }
-		ResumableUpload upload = service.getResumableUpload(uploadId);
 		authorizationService.requireObjectWrite(
 				headers.getHeaderString(HttpHeaders.AUTHORIZATION), upload.bucket(), upload.objectName());
         String contentRange = headers.getHeaderString("Content-Range");

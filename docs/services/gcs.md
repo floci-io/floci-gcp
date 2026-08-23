@@ -151,6 +151,39 @@ and Bearer tokens are not validated.
 
 floci-gcp supports multipart (resumable) upload — the standard GCS mechanism for large objects. The GCP SDK uses this automatically for objects above a threshold.
 
+## Resumable Upload Sessions
+
+`POST /upload/storage/v1/b/{bucket}/o?uploadType=resumable` opens a session and returns
+the session URL in the `Location` header. Chunks go to that URL with a `Content-Range`
+header, using either `PUT` or `POST` — the Java, Node and Python SDKs send `PUT`, the Go
+SDK sends `POST`, and both are handled the same way.
+
+Session behavior matches GCS:
+
+| Request to the session URL | Response |
+|---|---|
+| Chunk that leaves bytes missing | `308` with `Range: bytes=0-<last received byte>` |
+| Chunk that completes the object | `200` with the object metadata |
+| Status query (`Content-Range: bytes */<total>` or `bytes */*`) | `308` with the received range, or `200` with the object metadata once complete |
+| Chunk already received in full | `308` with the unchanged received range, without appending it again |
+| Chunk starting past the received bytes | `503`, so the client re-syncs with a status query |
+| Any request after completion | `200` with the stored object metadata |
+| Unknown or expired `upload_id` | `404` |
+
+The Go SDK sends `X-GUploader-No-308: yes` because `308` collides with the RFC 7238
+"Permanent Redirect" semantics. floci-gcp answers those requests the way GCS does: `200`
+with `X-HTTP-Status-Code-Override: 308` and the same `Range` header. Other status codes
+are unaffected by the header.
+
+Documented deviations from real GCS:
+
+- GCS requires every non-final chunk to be a multiple of 256 KiB; floci-gcp accepts any
+  chunk size.
+- GCS answers a chunk `POST` that carries no `uploadType` with `405`; floci-gcp accepts
+  it, since the `upload_id` alone identifies the session.
+- Completed sessions are remembered for the most recent 1024 uploads rather than for a
+  week.
+
 ## Object Versioning
 
 Enable versioning on a bucket:

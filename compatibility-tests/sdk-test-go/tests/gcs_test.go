@@ -195,6 +195,35 @@ func TestGCS(t *testing.T) {
 		require.NoError(t, composed.Delete(ctx))
 	})
 
+	// The Go SDK sends resumable chunks as POST requests to the session URL, so a
+	// payload larger than ChunkSize exercises multi-chunk session tracking.
+	t.Run("ChunkedResumableUpload", func(t *testing.T) {
+		chunkedName := "chunked-" + objectName
+		obj := client.Bucket(bucketName).Object(chunkedName)
+		payload := randomBytes(1024 * 1024)
+
+		w := obj.NewWriter(ctx)
+		w.ChunkSize = 256 * 1024
+		_, err := w.Write(payload)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+
+		attrs, err := obj.Attrs(ctx)
+		require.NoError(t, err)
+		assert.EqualValues(t, len(payload), attrs.Size)
+
+		r, err := obj.NewReader(ctx)
+		require.NoError(t, err)
+		defer r.Close()
+
+		var buf bytes.Buffer
+		_, err = buf.ReadFrom(r)
+		require.NoError(t, err)
+		assert.Equal(t, payload, buf.Bytes())
+
+		require.NoError(t, obj.Delete(ctx))
+	})
+
 	t.Run("DeleteObject", func(t *testing.T) {
 		err := client.Bucket(bucketName).Object(objectName).Delete(ctx)
 		require.NoError(t, err)

@@ -198,4 +198,117 @@ class GcsResumableUploadRawTest {
         assertThat(download.statusCode()).isEqualTo(200);
         assertThat(download.body()).containsExactly(data);
     }
+
+    // Session semantics below were verified against live GCS on 2026-08-23: POST to the
+    // session URL behaves exactly like PUT, a resent chunk is acknowledged without
+    // appending, and a completed session keeps replaying the stored object metadata.
+    @Test
+    void resumableUploadTracksPostChunksAcrossTheSameSession() throws Exception {
+        String objectName = "post-chunked.bin";
+        int chunkSize = 256 * 1024;
+        int totalSize = chunkSize * 2;
+        byte[] first = new byte[chunkSize];
+        byte[] second = new byte[chunkSize];
+        Arrays.fill(first, (byte) 'a');
+        Arrays.fill(second, (byte) 'b');
+
+        HttpResponse<String> init = CLIENT.send(
+                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                                + "/upload/storage/v1/b/" + BUCKET
+                                + "/o?uploadType=resumable&name=" + objectName))
+                        .header("X-Upload-Content-Type", "application/octet-stream")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(init.statusCode()).isEqualTo(200);
+        URI uploadUri = URI.create(init.headers().firstValue("Location").orElseThrow());
+
+        HttpResponse<String> firstChunk = CLIENT.send(
+                HttpRequest.newBuilder(uploadUri)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", "bytes 0-" + (chunkSize - 1) + "/" + totalSize)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(first))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(firstChunk.statusCode()).isEqualTo(308);
+        assertThat(firstChunk.headers().firstValue("Range")).contains("bytes=0-" + (chunkSize - 1));
+
+        HttpResponse<String> resentChunk = CLIENT.send(
+                HttpRequest.newBuilder(uploadUri)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", "bytes 0-" + (chunkSize - 1) + "/" + totalSize)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(first))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resentChunk.statusCode()).isEqualTo(308);
+        assertThat(resentChunk.headers().firstValue("Range")).contains("bytes=0-" + (chunkSize - 1));
+
+        HttpResponse<String> finalChunk = CLIENT.send(
+                HttpRequest.newBuilder(uploadUri)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", "bytes " + chunkSize + "-" + (totalSize - 1) + "/" + totalSize)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(second))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(finalChunk.statusCode()).isEqualTo(200);
+        assertThat(finalChunk.body()).contains("\"size\":\"" + totalSize + "\"");
+
+        HttpResponse<String> statusAfterCompletion = CLIENT.send(
+                HttpRequest.newBuilder(uploadUri)
+                        .header("Content-Range", "bytes */" + totalSize)
+                        .POST(HttpRequest.BodyPublishers.noBody())
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(statusAfterCompletion.statusCode()).isEqualTo(200);
+        assertThat(statusAfterCompletion.body()).contains("\"size\":\"" + totalSize + "\"");
+
+        HttpResponse<byte[]> download = CLIENT.send(
+                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                                + "/storage/v1/b/" + BUCKET + "/o/" + objectName + "?alt=media"))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+
+        assertThat(download.statusCode()).isEqualTo(200);
+        assertThat(download.body()).hasSize(totalSize);
+        assertThat(download.body()[0]).isEqualTo((byte) 'a');
+        assertThat(download.body()[chunkSize]).isEqualTo((byte) 'b');
+    }
+
+    @Test
+    void resumableUploadRejectsChunkPastTheReceivedBytes() throws Exception {
+        String objectName = "gap-chunk.bin";
+        int chunkSize = 256 * 1024;
+        byte[] data = new byte[chunkSize];
+        Arrays.fill(data, (byte) 'c');
+
+        HttpResponse<String> init = CLIENT.send(
+                HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
+                                + "/upload/storage/v1/b/" + BUCKET
+                                + "/o?uploadType=resumable&name=" + objectName))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(init.statusCode()).isEqualTo(200);
+        URI uploadUri = URI.create(init.headers().firstValue("Location").orElseThrow());
+
+        HttpResponse<String> gap = CLIENT.send(
+                HttpRequest.newBuilder(uploadUri)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", "bytes " + chunkSize + "-" + (2 * chunkSize - 1)
+                                + "/" + (2 * chunkSize))
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(data))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(gap.statusCode()).isEqualTo(503);
+    }
 }

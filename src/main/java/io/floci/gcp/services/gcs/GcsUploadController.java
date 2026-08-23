@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
@@ -47,6 +48,7 @@ public class GcsUploadController {
     public Response upload(
             @PathParam("bucket") String bucket,
             @QueryParam("uploadType") String uploadType,
+            @QueryParam("upload_id") String uploadId,
             @QueryParam("name") String nameParam,
             @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
@@ -55,6 +57,9 @@ public class GcsUploadController {
             @jakarta.ws.rs.core.Context HttpHeaders headers,
             @jakarta.ws.rs.core.Context UriInfo uriInfo,
             byte[] body) {
+        if (uploadId != null && !uploadId.isBlank()) {
+            return resumableChunk(uploadId, headers, uriInfo, body);
+        }
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         if ("multipart".equals(uploadType)) {
@@ -75,8 +80,18 @@ public class GcsUploadController {
             @jakarta.ws.rs.core.Context HttpHeaders headers,
             @jakarta.ws.rs.core.Context UriInfo uriInfo,
             byte[] body) {
-        if (uploadId == null) {
+        if (uploadId == null || uploadId.isBlank()) {
             throw GcpException.invalidArgument("missing upload_id query parameter");
+        }
+        return resumableChunk(uploadId, headers, uriInfo, body);
+    }
+
+    private Response resumableChunk(String uploadId, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
+        CompletedResumableUpload completed = service.completedResumableUpload(uploadId);
+        if (completed != null) {
+            authorizationService.requireObjectWrite(
+                    headers.getHeaderString(HttpHeaders.AUTHORIZATION), completed.bucket(), completed.objectName());
+            return Response.ok(completed.meta()).build();
         }
 		ResumableUpload upload = service.getResumableUpload(uploadId);
 		authorizationService.requireObjectWrite(
@@ -91,7 +106,7 @@ public class GcsUploadController {
                             uploadId, range.totalSize(), requestBaseUrl(headers, uriInfo));
                     return Response.ok(meta).build();
                 }
-                Response.ResponseBuilder response = Response.status(308);
+                Response.ResponseBuilder response = resumeIncomplete(headers);
                 if (uploadedLength > 0) {
                     response.header("Range", "bytes=0-" + (uploadedLength - 1));
                 }
@@ -99,11 +114,11 @@ public class GcsUploadController {
             }
             if (range.totalSize() == null) {
                 long end = service.appendResumableUpload(uploadId, range.start(), body);
-                return Response.status(308).header("Range", "bytes=0-" + end).build();
+                return resumeIncomplete(headers).header("Range", "bytes=0-" + end).build();
             }
             if (range.end() + 1 < range.totalSize()) {
                 long end = service.appendResumableUpload(uploadId, range.start(), body, range.totalSize());
-                return Response.status(308).header("Range", "bytes=0-" + end).build();
+                return resumeIncomplete(headers).header("Range", "bytes=0-" + end).build();
             }
             GcsObjectMeta meta = service.completeResumableUpload(
                     uploadId, range.start(), body, range.totalSize(), requestBaseUrl(headers, uriInfo));
@@ -111,6 +126,15 @@ public class GcsUploadController {
         }
         GcsObjectMeta meta = service.completeResumableUpload(uploadId, body, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
+    }
+
+    // The Go SDK sets X-GUploader-No-308 because 308 collides with the RFC 7238
+    // "Permanent Redirect" semantics, and expects 200 with the override header instead.
+    private static Response.ResponseBuilder resumeIncomplete(HttpHeaders headers) {
+        if ("yes".equalsIgnoreCase(headers.getHeaderString("X-GUploader-No-308"))) {
+            return Response.ok().header("X-HTTP-Status-Code-Override", "308");
+        }
+        return Response.status(308);
     }
 
     private record ContentRange(long start, long end, Long totalSize, boolean statusQuery) {}
@@ -196,6 +220,10 @@ public class GcsUploadController {
 
     private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions) {
+        String requestContentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
+        if (body != null && body.length > 0 && !isJsonContentType(requestContentType)) {
+            throw GcpException.invalidArgument("Unsupported content with type: " + mediaType(requestContentType));
+        }
         String contentType = headers.getHeaderString("X-Upload-Content-Type");
         String name = nameParam;
         Map<String, String> userMetadata = null;
@@ -242,6 +270,15 @@ public class GcsUploadController {
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
                 GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
+    }
+
+    private static String mediaType(String contentType) {
+        int parameters = contentType.indexOf(';');
+        return parameters < 0 ? contentType.trim() : contentType.substring(0, parameters).trim();
+    }
+
+    private static boolean isJsonContentType(String contentType) {
+        return contentType == null || contentType.isBlank() || contentType.toLowerCase().contains("json");
     }
 
     private String requestBaseUrl(HttpHeaders headers, UriInfo uriInfo) {

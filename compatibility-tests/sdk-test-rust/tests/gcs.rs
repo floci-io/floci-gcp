@@ -213,3 +213,33 @@ async fn resumable_upload_round_trips() -> anyhow::Result<()> {
     assert_eq!(read_all(&mut response).await?, payload.as_ref());
     Ok(())
 }
+
+#[tokio::test]
+async fn resumable_upload_sends_multiple_chunks() -> anyhow::Result<()> {
+    let endpoint = endpoint();
+    ensure_bucket(&endpoint).await?;
+    let client = storage_client(&endpoint).await?;
+
+    let bucket_path = format!("projects/_/buckets/{BUCKET}");
+    // The SDK flushes its 8 MiB buffer as soon as it fills, so a larger payload
+    // is split across several chunks that share one resumable session. Each
+    // intermediate chunk declares the total size.
+    let payload = bytes::Bytes::from(vec![b'y'; 9 * 1024 * 1024]);
+
+    let upload = client
+        .write_object(&bucket_path, "resumable-chunked.bin", payload.clone())
+        .with_resumable_upload_threshold(0_usize)
+        .send_buffered();
+    let uploaded = tokio::time::timeout(std::time::Duration::from_secs(60), upload).await??;
+    assert_eq!(uploaded.size, payload.len() as i64);
+
+    let mut response = client
+        .read_object(&bucket_path, "resumable-chunked.bin")
+        .send()
+        .await?;
+    assert_eq!(response.object().size, payload.len() as i64);
+    let downloaded = read_all(&mut response).await?;
+    assert_eq!(downloaded.len(), payload.len());
+    assert!(downloaded.iter().all(|byte| *byte == b'y'));
+    Ok(())
+}

@@ -33,6 +33,29 @@ def test_upload_and_download_object(storage_client, unique_name):
         bucket.delete(force=True)
 
 
+def test_chunked_resumable_upload(storage_client, unique_name):
+    """A chunk_size smaller than the payload makes the SDK send several chunks
+    against one resumable session, each acknowledged with 308."""
+    bucket_name = f"test-bucket-{unique_name}"
+    object_name = "chunked-object.bin"
+    chunk_size = 256 * 1024
+    payload = b"p" * (4 * chunk_size)
+
+    bucket = storage_client.create_bucket(storage_client.bucket(bucket_name))
+
+    try:
+        blob = bucket.blob(object_name)
+        with blob.open("wb", chunk_size=chunk_size) as writer:
+            writer.write(payload)
+
+        assert blob.download_as_bytes() == payload
+
+        blob.reload()
+        assert blob.size == len(payload)
+    finally:
+        bucket.delete(force=True)
+
+
 def test_download_populates_blob_from_response_headers(storage_client, unique_name):
     bucket_name = f"test-bucket-{unique_name}"
     object_name = "header-object.txt"

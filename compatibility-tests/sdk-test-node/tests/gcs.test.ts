@@ -52,6 +52,28 @@ describe('Cloud Storage (GCS)', () => {
     await storage.bucket(bucketName).file(largeObjectName).delete();
   });
 
+  // save() sends the whole body in one request. A chunkSize makes the SDK split
+  // the payload across several requests against one resumable session.
+  it('should upload an object in chunks against one resumable session', async () => {
+    const chunkSize = 256 * 1024;
+    const chunkedContent = Buffer.alloc(4 * chunkSize, 'c');
+    const chunkedObjectName = 'chunked-test-object.bin';
+    const file = storage.bucket(bucketName).file(chunkedObjectName);
+
+    await new Promise<void>((resolve, reject) => {
+      file
+        .createWriteStream({ resumable: true, chunkSize, contentType: 'application/octet-stream' })
+        .on('error', reject)
+        .on('finish', resolve)
+        .end(chunkedContent);
+    });
+
+    const [downloaded] = await file.download();
+    expect(downloaded.length).toBe(chunkedContent.length);
+    expect(downloaded.equals(chunkedContent)).toBe(true);
+    await file.delete();
+  });
+
   it('should download and verify object content', async () => {
     const [content] = await storage.bucket(bucketName).file(objectName).download();
     expect(content.toString()).toBe(objectContent);

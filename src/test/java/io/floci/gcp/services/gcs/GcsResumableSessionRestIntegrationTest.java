@@ -5,9 +5,13 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @QuarkusTest
 class GcsResumableSessionRestIntegrationTest {
@@ -211,6 +215,37 @@ class GcsResumableSessionRestIntegrationTest {
                 .body("ok".getBytes(StandardCharsets.UTF_8))
                 .when().post(sessionPath(uploadId))
                 .then().statusCode(503);
+    }
+
+    @Test
+    void statusQueriesOverlappingFinalizationNeverSeeAMissingSession() throws Exception {
+        ensureBucket();
+        var uploadId = startUpload("concurrent-finalize-obj");
+        var payload = new byte[4 * 1024 * 1024];
+        Set<Integer> observed = ConcurrentHashMap.newKeySet();
+        var finalized = new AtomicBoolean(false);
+
+        var poller = new Thread(() -> {
+            while (!finalized.get()) {
+                observed.add(given()
+                        .header("Content-Range", "bytes */" + payload.length)
+                        .when().post(sessionPath(uploadId))
+                        .getStatusCode());
+            }
+        });
+        poller.start();
+
+        given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 0-" + (payload.length - 1) + "/" + payload.length)
+                .body(payload)
+                .when().post(sessionPath(uploadId))
+                .then().statusCode(200);
+
+        finalized.set(true);
+        poller.join();
+
+        assertFalse(observed.contains(404), "a status query saw the session disappear: " + observed);
     }
 
     @Test

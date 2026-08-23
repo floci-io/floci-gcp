@@ -945,13 +945,15 @@ public class GcsService {
         return completedResumableUploads.get(uploadId);
     }
 
+    // The completed session is recorded before the active one is dropped, so a retry that
+    // overlaps persistence always finds the upload id in one of the two maps.
     private GcsObjectMeta finishResumableUpload(String uploadId, ResumableUpload upload, byte[] data, String baseUrl) {
-        resumableUploads.remove(uploadId);
         GcsObjectMeta meta = putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
                 upload.preconditions(), baseUrl);
         completedResumableUploads.put(uploadId,
                 new CompletedResumableUpload(upload.bucket(), upload.objectName(), meta));
+        resumableUploads.remove(uploadId);
         LOG.debugf("finishResumableUpload uploadId=%s size=%d", uploadId, data.length);
         return meta;
     }

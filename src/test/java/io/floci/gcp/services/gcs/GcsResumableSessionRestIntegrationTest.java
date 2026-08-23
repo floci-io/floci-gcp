@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @QuarkusTest
@@ -246,6 +247,37 @@ class GcsResumableSessionRestIntegrationTest {
         poller.join();
 
         assertFalse(observed.contains(404), "a status query saw the session disappear: " + observed);
+    }
+
+    @Test
+    void concurrentFinalChunksStoreTheObjectOnce() throws Exception {
+        ensureBucket();
+        var uploadId = startUpload("concurrent-final-obj");
+        var payload = new byte[2 * 1024 * 1024];
+        Set<String> generations = ConcurrentHashMap.newKeySet();
+
+        Runnable finalChunk = () -> generations.add(given()
+                .contentType("application/octet-stream")
+                .header("Content-Range", "bytes 0-" + (payload.length - 1) + "/" + payload.length)
+                .body(payload)
+                .when().post(sessionPath(uploadId))
+                .then().statusCode(200)
+                .extract().path("generation").toString());
+
+        var first = new Thread(finalChunk);
+        var second = new Thread(finalChunk);
+        first.start();
+        second.start();
+        first.join();
+        second.join();
+
+        assertEquals(1, generations.size(), "the session was persisted more than once: " + generations);
+
+        given()
+                .when().get("/storage/v1/b/" + BUCKET + "/o/concurrent-final-obj")
+                .then().statusCode(200)
+                .body("generation", equalTo(generations.iterator().next()))
+                .body("size", equalTo(String.valueOf(payload.length)));
     }
 
     @Test

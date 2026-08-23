@@ -5,8 +5,10 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
+import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -88,49 +90,38 @@ public class GcsUploadController {
 
     private Response resumableChunk(String uploadId, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         ResumableUpload upload = service.findResumableUpload(uploadId);
-        if (upload == null) {
+        String bucket;
+        String objectName;
+        if (upload != null) {
+            bucket = upload.bucket();
+            objectName = upload.objectName();
+        } else {
             // The active session is dropped only after the completed one is recorded, so
             // reading the completed map after this miss cannot land in a gap.
             CompletedResumableUpload completed = service.completedResumableUpload(uploadId);
             if (completed == null) {
                 throw GcpException.notFound("Resumable upload not found: " + uploadId);
             }
-            authorizationService.requireObjectWrite(
-                    headers.getHeaderString(HttpHeaders.AUTHORIZATION), completed.bucket(), completed.objectName());
-            return Response.ok(completed.meta()).build();
+            bucket = completed.bucket();
+            objectName = completed.objectName();
         }
-		authorizationService.requireObjectWrite(
-				headers.getHeaderString(HttpHeaders.AUTHORIZATION), upload.bucket(), upload.objectName());
+        authorizationService.requireObjectWrite(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
+
         String contentRange = headers.getHeaderString("Content-Range");
-        if (contentRange != null && !contentRange.isBlank()) {
-            ContentRange range = parseContentRange(contentRange, body.length);
-            if (range.statusQuery()) {
-                long uploadedLength = service.resumableUploadLength(uploadId);
-                if (range.totalSize() != null && uploadedLength == range.totalSize()) {
-                    GcsObjectMeta meta = service.completeBufferedResumableUpload(
-                            uploadId, range.totalSize(), requestBaseUrl(headers, uriInfo));
-                    return Response.ok(meta).build();
-                }
-                Response.ResponseBuilder response = resumeIncomplete(headers);
-                if (uploadedLength > 0) {
-                    response.header("Range", "bytes=0-" + (uploadedLength - 1));
-                }
-                return response.build();
-            }
-            if (range.totalSize() == null) {
-                long end = service.appendResumableUpload(uploadId, range.start(), body);
-                return resumeIncomplete(headers).header("Range", "bytes=0-" + end).build();
-            }
-            if (range.end() + 1 < range.totalSize()) {
-                long end = service.appendResumableUpload(uploadId, range.start(), body, range.totalSize());
-                return resumeIncomplete(headers).header("Range", "bytes=0-" + end).build();
-            }
-            GcsObjectMeta meta = service.completeResumableUpload(
-                    uploadId, range.start(), body, range.totalSize(), requestBaseUrl(headers, uriInfo));
-            return Response.ok(meta).build();
+        GcsContentRange range = contentRange != null && !contentRange.isBlank()
+                ? parseContentRange(contentRange, body.length)
+                : null;
+        ResumableChunkOutcome outcome = service.applyResumableChunk(
+                uploadId, range, body, requestBaseUrl(headers, uriInfo));
+        if (outcome.completed() != null) {
+            return Response.ok(outcome.completed()).build();
         }
-        GcsObjectMeta meta = service.completeResumableUpload(uploadId, body, requestBaseUrl(headers, uriInfo));
-        return Response.ok(meta).build();
+        Response.ResponseBuilder response = resumeIncomplete(headers);
+        if (outcome.receivedLength() > 0) {
+            response.header("Range", "bytes=0-" + (outcome.receivedLength() - 1));
+        }
+        return response.build();
     }
 
     // The Go SDK sets X-GUploader-No-308 because 308 collides with the RFC 7238
@@ -142,9 +133,7 @@ public class GcsUploadController {
         return Response.status(308);
     }
 
-    private record ContentRange(long start, long end, Long totalSize, boolean statusQuery) {}
-
-    private static ContentRange parseContentRange(String header, int bodyLength) {
+    private static GcsContentRange parseContentRange(String header, int bodyLength) {
         if (!header.startsWith("bytes ")) {
             throw GcpException.invalidArgument("invalid Content-Range header: " + header);
         }
@@ -155,7 +144,7 @@ public class GcsUploadController {
             }
             String totalValue = value.substring(2);
             Long totalSize = "*".equals(totalValue) ? null : parseLong(totalValue, header);
-            return new ContentRange(0, -1, totalSize, true);
+            return new GcsContentRange(0, -1, totalSize, true);
         }
         int dash = value.indexOf('-');
         int slash = value.indexOf('/');
@@ -183,7 +172,7 @@ public class GcsUploadController {
         if (totalSize != null && end >= totalSize) {
             throw GcpException.invalidArgument("invalid Content-Range header: " + header);
         }
-        return new ContentRange(start, end, totalSize, false);
+        return new GcsContentRange(start, end, totalSize, false);
     }
 
     private static long parseLong(String value, String header) {

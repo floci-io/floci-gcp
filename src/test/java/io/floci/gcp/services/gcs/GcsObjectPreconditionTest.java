@@ -98,8 +98,8 @@ class GcsObjectPreconditionTest {
         service.putObject(BUCKET, OBJECT, "text/plain", competing, BASE_URL);
 
         GcpException exception = assertThrows(GcpException.class,
-                () -> service.completeResumableUpload(
-                        uploadId, "original".getBytes(StandardCharsets.UTF_8), BASE_URL));
+                () -> service.applyResumableChunk(
+                        uploadId, null, "original".getBytes(StandardCharsets.UTF_8), BASE_URL));
 
         assertEquals(412, exception.getHttpStatus());
         assertArrayEquals(competing, service.getObjectData(BUCKET, OBJECT));
@@ -113,8 +113,8 @@ class GcsObjectPreconditionTest {
         String uploadId = service.startResumableUpload(BUCKET, OBJECT, "text/plain", GcsCustomerEncryption.none(), createOnly);
 
         GcpException exception = assertThrows(GcpException.class,
-                () -> service.completeResumableUpload(
-                        uploadId, "replacement".getBytes(StandardCharsets.UTF_8), BASE_URL));
+                () -> service.applyResumableChunk(
+                        uploadId, null, "replacement".getBytes(StandardCharsets.UTF_8), BASE_URL));
         assertEquals(412, exception.getHttpStatus());
         assertArrayEquals("existing".getBytes(StandardCharsets.UTF_8), service.getObjectData(BUCKET, OBJECT));
     }

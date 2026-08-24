@@ -106,7 +106,8 @@ public class CloudRunController {
                                        @PathParam("serviceId") String serviceId,
                                        String body) {
         TestIamPermissionsRequest request = ProtoJson.merge(body, TestIamPermissionsRequest.newBuilder()).build();
-        return json(ProtoJson.print(service.testIamPermissions(request.getPermissionsList())));
+        return json(ProtoJson.print(service.testIamPermissions(
+                serviceName(project, location, serviceId), request.getPermissionsList())));
     }
 
     @GET

@@ -174,7 +174,7 @@ public class IamController {
             }
             case "testIamPermissions" -> {
                 List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
-                List<String> granted = service.testPermissions(requested != null ? requested : List.of());
+                List<String> granted = service.testPermissions(resource, requested != null ? requested : List.of());
                 yield Response.ok(Map.of("permissions", granted)).build();
             }
             case "signBlob" -> {

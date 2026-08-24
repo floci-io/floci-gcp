@@ -291,9 +291,10 @@ Policy semantics:
   `google_pubsub_topic_iam_member` behave as they do against real GCP. Omitting
   the etag performs a blind write.
 - Deleting a resource deletes its policy; recreating the same name starts empty.
-- `testIamPermissions` echoes the requested permissions without consulting
-  stored bindings, and performs no existence check (the real API fails open for
-  missing resources).
+- `testIamPermissions` echoes the requested permissions for an existing
+  resource, never consulting stored bindings. For a resource that does not
+  exist it fails open with an empty permission set — not `NOT_FOUND` — matching
+  the service config.
 - Schemas are not implemented, so schema IAM paths are not served.
 
 Over gRPC these methods are served by the standalone `google.iam.v1.IAMPolicy`
@@ -350,4 +351,4 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 
 - `GetIamPolicy`
 - `SetIamPolicy`
-- `TestIamPermissions` (echoes requested permissions)
+- `TestIamPermissions` (echoes requested permissions; empty set for missing resources)

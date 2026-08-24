@@ -373,9 +373,9 @@ public class CloudRunService {
         return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, IamPolicyCodec.toStoredPolicy(policy)));
     }
 
-    public TestIamPermissionsResponse testIamPermissions(List<String> permissions) {
+    public TestIamPermissionsResponse testIamPermissions(String resource, List<String> permissions) {
         return TestIamPermissionsResponse.newBuilder()
-                .addAllPermissions(iamService.testPermissions(permissions))
+                .addAllPermissions(iamService.testPermissions(resource, permissions))
                 .build();
     }
 

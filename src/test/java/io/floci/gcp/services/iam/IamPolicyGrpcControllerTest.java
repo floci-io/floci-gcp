@@ -117,10 +117,16 @@ class IamPolicyGrpcControllerTest {
     }
 
     @Test
-    void testIamPermissionsEchoesRequestedPermissions() {
+    void testIamPermissionsEchoesForExistingResource() {
+        iamService.registerPolicyResourceResolver("projects/*/topics/*", resource -> {
+            if (resource.endsWith("/missing")) {
+                throw GcpException.notFound("Topic not found: " + resource);
+            }
+        });
+
         RecordingObserver<TestIamPermissionsResponse> observer = new RecordingObserver<>();
         controller.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                .setResource("projects/p/topics/never-created")
+                .setResource("projects/p/topics/exists")
                 .addPermissions("pubsub.topics.publish")
                 .addPermissions("pubsub.topics.get")
                 .build(), observer);
@@ -128,6 +134,22 @@ class IamPolicyGrpcControllerTest {
         assertNull(observer.error.get());
         assertEquals(List.of("pubsub.topics.publish", "pubsub.topics.get"),
                 observer.values.get(0).getPermissionsList());
+    }
+
+    @Test
+    void testIamPermissionsFailsOpenWithEmptySetForMissingResource() {
+        iamService.registerPolicyResourceResolver("projects/*/topics/*", resource -> {
+            throw GcpException.notFound("Topic not found: " + resource);
+        });
+
+        RecordingObserver<TestIamPermissionsResponse> observer = new RecordingObserver<>();
+        controller.testIamPermissions(TestIamPermissionsRequest.newBuilder()
+                .setResource("projects/p/topics/never-created")
+                .addPermissions("pubsub.topics.publish")
+                .build(), observer);
+
+        assertNull(observer.error.get());
+        assertEquals(List.of(), observer.values.get(0).getPermissionsList());
     }
 
     private static final class RecordingObserver<T> implements StreamObserver<T> {

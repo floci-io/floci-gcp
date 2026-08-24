@@ -626,6 +626,13 @@ class PubSubTest {
         assertThatThrownBy(() -> topicAdminClient.getIamPolicy(GetIamPolicyRequest.newBuilder()
                 .setResource(missing.toString()).build()))
                 .isInstanceOf(NotFoundException.class);
+
+        TestIamPermissionsResponse perms = topicAdminClient.testIamPermissions(
+                TestIamPermissionsRequest.newBuilder()
+                        .setResource(missing.toString())
+                        .addPermissions("pubsub.topics.publish")
+                        .build());
+        assertThat(perms.getPermissionsList()).isEmpty();
     }
 
     @Test

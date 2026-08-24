@@ -173,6 +173,21 @@ class IamServiceTest {
     }
 
     @Test
+    void testPermissionsEchoesWhenNoResolverMatches() {
+        assertEquals(List.of("a.b.c", "d.e.f"),
+                service.testPermissions("projects/p1/gadgets/g1", List.of("a.b.c", "d.e.f")));
+    }
+
+    @Test
+    void testPermissionsFailsOpenEmptyForMissingResolvedResource() {
+        service.registerPolicyResourceResolver("projects/*/widgets/*", resource -> {
+            throw GcpException.notFound("Widget not found: " + resource);
+        });
+
+        assertEquals(List.of(), service.testPermissions("projects/p1/widgets/w1", List.of("a.b.c")));
+    }
+
+    @Test
     void policiesSurviveServiceRestart() {
         InMemoryStorage<String, StoredPolicy> policyStore = new InMemoryStorage<>();
         IamService first = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);

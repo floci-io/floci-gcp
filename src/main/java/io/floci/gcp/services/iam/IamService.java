@@ -219,7 +219,21 @@ public class IamService {
         }
     }
 
-    public List<String> testPermissions(List<String> permissions) {
+    /**
+     * Echoes the requested permissions for an existing resource. For a resource
+     * a registered resolver reports missing, fails open with an empty set — the
+     * real API returns "an empty set of permissions, not a NOT_FOUND error"
+     * (pubsub_v1.yaml). Stored bindings are never consulted.
+     */
+    public List<String> testPermissions(String resource, List<String> permissions) {
+        try {
+            requireResourceExists(resource);
+        } catch (GcpException e) {
+            if (e.getHttpStatus() == 404) {
+                return List.of();
+            }
+            throw e;
+        }
         return permissions;
     }
 

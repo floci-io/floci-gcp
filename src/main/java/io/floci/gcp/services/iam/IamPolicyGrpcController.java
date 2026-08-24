@@ -17,8 +17,8 @@ import org.jboss.logging.Logger;
  * such service on the single emulator port.
  *
  * <p>Policies are stored and returned, never enforced. {@code testIamPermissions}
- * echoes the requested permissions and performs no existence check, matching the
- * real API's fail-open behavior for missing resources.
+ * echoes the requested permissions for existing resources and returns an empty
+ * set for missing ones, matching the real API's fail-open behavior.
  */
 public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
 
@@ -63,7 +63,8 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
         LOG.debugf("testIamPermissions resource=%s", request.getResource());
         try {
             responseObserver.onNext(TestIamPermissionsResponse.newBuilder()
-                    .addAllPermissions(iamService.testPermissions(request.getPermissionsList()))
+                    .addAllPermissions(iamService.testPermissions(
+                            request.getResource(), request.getPermissionsList()))
                     .build());
             responseObserver.onCompleted();
         } catch (Exception e) {

@@ -182,7 +182,7 @@ public class GcsBucketController {
         service.getBucket(bucket);
         @SuppressWarnings("unchecked")
         List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
-        List<String> granted = iamService.testPermissions(requested != null ? requested : List.of());
+        List<String> granted = iamService.testPermissions("buckets/" + bucket, requested != null ? requested : List.of());
         return Response.ok(Map.of("permissions", granted)).build();
     }
 

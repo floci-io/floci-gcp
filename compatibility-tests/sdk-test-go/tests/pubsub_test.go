@@ -130,6 +130,13 @@ func TestPubSub(t *testing.T) {
 		assert.Equal(t, perms, granted)
 	})
 
+	t.Run("TestIAMPermissionsFailsOpenForMissingTopic", func(t *testing.T) {
+		granted, err := client.Topic(uniqueName("go-perm-missing")).IAM().TestPermissions(ctx,
+			[]string{"pubsub.topics.publish"})
+		require.NoError(t, err, "missing resource should fail open, not error")
+		assert.Empty(t, granted)
+	})
+
 	t.Run("PublishAndReceive", func(t *testing.T) {
 		messages := []string{"Hello from Go!", "Second Go message"}
 

@@ -508,18 +508,30 @@ class PubSubRestIntegrationTest {
     }
 
     @Test
-    void testIamPermissionsEchoesRequestedPermissions() {
+    void testIamPermissionsEchoesForExistingTopicAndFailsOpenEmptyForMissing() {
         String project = "pubsub-rest-iam-perm-it";
         String base = "/v1/projects/" + project;
+
+        given().when().put(base + "/topics/perm-target").then().statusCode(200);
 
         given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
                 .body("{\"permissions\": [\"pubsub.topics.publish\", \"pubsub.topics.get\"]}")
-                .when().post(base + "/topics/any:testIamPermissions")
+                .when().post(base + "/topics/perm-target:testIamPermissions")
                 .then()
                 .statusCode(200)
                 .body("permissions[0]", equalTo("pubsub.topics.publish"))
                 .body("permissions[1]", equalTo("pubsub.topics.get"));
+
+        // Missing resource fails open: empty permission set, not NOT_FOUND.
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"permissions\": [\"pubsub.topics.publish\"]}")
+                .when().post(base + "/topics/never-created:testIamPermissions")
+                .then()
+                .statusCode(200)
+                .body("permissions", empty());
     }
 }

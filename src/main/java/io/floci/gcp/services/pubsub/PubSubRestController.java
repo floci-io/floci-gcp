@@ -255,7 +255,7 @@ public class PubSubRestController {
     public Response testTopicIamPermissions(@PathParam("project") String project,
                                             @PathParam("topic") String topicId,
                                             Map<String, Object> body) {
-        return testIamPermissions(body);
+        return testIamPermissions(topicName(project, topicId), body);
     }
 
     @GET
@@ -278,7 +278,7 @@ public class PubSubRestController {
     public Response testSubscriptionIamPermissions(@PathParam("project") String project,
                                                    @PathParam("subscription") String subscriptionId,
                                                    Map<String, Object> body) {
-        return testIamPermissions(body);
+        return testIamPermissions(subscriptionName(project, subscriptionId), body);
     }
 
     @GET
@@ -301,7 +301,7 @@ public class PubSubRestController {
     public Response testSnapshotIamPermissions(@PathParam("project") String project,
                                                @PathParam("snapshot") String snapshotId,
                                                Map<String, Object> body) {
-        return testIamPermissions(body);
+        return testIamPermissions(snapshotName(project, snapshotId), body);
     }
 
     @SuppressWarnings("unchecked")
@@ -312,9 +312,9 @@ public class PubSubRestController {
     }
 
     @SuppressWarnings("unchecked")
-    private Response testIamPermissions(Map<String, Object> body) {
+    private Response testIamPermissions(String resource, Map<String, Object> body) {
         List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
-        List<String> granted = iamService.testPermissions(requested != null ? requested : List.of());
+        List<String> granted = iamService.testPermissions(resource, requested != null ? requested : List.of());
         return Response.ok(Map.of("permissions", granted)).build();
     }
 

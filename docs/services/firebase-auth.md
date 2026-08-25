@@ -21,6 +21,7 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
 | `POST` | `/identitytoolkit.googleapis.com/v1/accounts:signUp` \| `:signInWithPassword` \| `:signInWithCustomToken` \| `:lookup` \| `:update` \| `:delete` (client, `?key=` any non-empty API key) |
 | `POST` | `/identitytoolkit.googleapis.com/v1/projects/{project}/accounts[:lookup\|:update\|:delete\|:batchDelete]` (admin, `Authorization: Bearer owner`) |
 | `GET` | `/identitytoolkit.googleapis.com/v1/projects/{project}/accounts:batchGet` (admin listUsers) |
+| `POST` | `/identitytoolkit.googleapis.com/v1/projects/{project}:createSessionCookie` (admin, `Authorization: Bearer owner`) |
 | `POST` | `/securetoken.googleapis.com/v1/token` (refresh; JSON or form-urlencoded) |
 | `DELETE` | `/emulator/v1/projects/{project}/accounts` (test helper: delete all users) |
 
@@ -36,6 +37,13 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
   fail with `TOKEN_EXPIRED` (wall-clock `exp` is intentionally not enforced, like the emulator).
 - Custom tokens: Admin SDK JWTs (signed or unsigned) and the emulator's strict-JSON form
   (`{"uid": "...", "claims": {...}}`) are both accepted.
+- Session cookies: `createSessionCookie` re-issues a verified ID token's payload with a fresh
+  `iat`/`exp` window and `iss=https://session.firebase.google.com/{project}`. `validDuration`
+  is in **seconds** and must fall in `[300, 1209600]` (5 minutes – 14 days), else
+  `INVALID_DURATION`. Like the official emulator, a value that is not a non-zero number —
+  absent, `0`, or a string such as `"3600s"` — silently falls back to the 14-day maximum
+  rather than being rejected. There is no verification endpoint: the Admin SDKs verify
+  session cookies locally, and `checkRevoked` goes through `accounts:lookup`.
 
 ## Quick Start
 
@@ -55,6 +63,11 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
     String customToken = auth.createCustomToken("alice");
     // client exchanges it at accounts:signInWithCustomToken, then:
     FirebaseToken decoded = auth.verifyIdToken(idToken);
+
+    // server-rendered apps: swap the ID token for an HttpOnly session cookie
+    String cookie = auth.createSessionCookie(idToken,
+            SessionCookieOptions.builder().setExpiresIn(TimeUnit.HOURS.toMillis(1)).build());
+    FirebaseToken session = auth.verifySessionCookie(cookie, true);
     ```
 
 === "REST"
@@ -68,6 +81,11 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
     # refresh
     curl -X POST 'http://localhost:4588/securetoken.googleapis.com/v1/token?key=fake-api-key' \
       -d 'grant_type=refresh_token&refresh_token=<refreshToken>'
+
+    # session cookie (validDuration is seconds, not a duration string)
+    curl -X POST 'http://localhost:4588/identitytoolkit.googleapis.com/v1/projects/floci-local:createSessionCookie' \
+      -H 'Content-Type: application/json' -H 'Authorization: Bearer owner' \
+      -d '{"idToken":"<idToken>","validDuration":3600}'
     ```
 
 ## Scope and deviations
@@ -76,9 +94,10 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
   (`floci-gcp.default-project-id`), mirroring the official emulator's single-project model.
 - Phase 1 covers email/password, anonymous, and custom-token flows plus the admin user CRUD
   surface (create/lookup/update/delete/batchGet/batchDelete). Not yet implemented: OOB codes
-  (email verification / password reset), email-link, IdP, phone, MFA, passkeys, tenants,
-  session cookies, and the legacy v3 `relyingparty` paths — these return 404 (the official
-  emulator returns 501 for unimplemented operations).
+  (email verification / password reset), email-link, IdP, phone, MFA, passkeys, tenants
+  (including the tenant-scoped `projects/{p}/tenants/{t}:createSessionCookie`), and the
+  legacy v3 `relyingparty` paths — these return 404 (the official emulator returns 501 for
+  unimplemented operations).
 - Passwords are stored in the emulator's literal `fakeHash:salt=...:password=...` format —
   a dev fixture, not a security boundary, identical to the official emulator.
 - `securetoken` responses report `project_id: "12345"`, the emulator's hardcoded project number.

@@ -25,7 +25,8 @@ class FirebaseAuthRestIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String CLIENT = "/identitytoolkit.googleapis.com/v1/accounts";
-    private static final String ADMIN = "/identitytoolkit.googleapis.com/v1/projects/test-project/accounts";
+    private static final String PROJECT = "/identitytoolkit.googleapis.com/v1/projects/test-project";
+    private static final String ADMIN = String.format("%s/accounts", PROJECT);
 
     @Test
     void signUpSignInAndRefreshRoundtrip() throws Exception {
@@ -396,6 +397,168 @@ class FirebaseAuthRestIntegrationTest {
         Map<String, Object> payload = decodeSegment(idToken, 1);
         assertEquals("anonymous", payload.get("provider_id"));
         assertEquals("anonymous", ((Map<?, ?>) payload.get("firebase")).get("sign_in_provider"));
+    }
+
+    @Test
+    void createSessionCookieMintsCookieWithSessionIssuer() throws Exception {
+        Map<String, Object> signUp = signUpClient("cookie@example.com");
+        String idToken = (String) signUp.get("idToken");
+
+        String cookie = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("idToken", idToken, "validDuration", 3600))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(200)
+                .body("sessionCookie", notNullValue())
+                .extract().path("sessionCookie");
+
+        Map<String, Object> header = decodeSegment(cookie, 0);
+        Map<String, Object> payload = decodeSegment(cookie, 1);
+        assertEquals("none", header.get("alg"));
+        assertTrue(cookie.endsWith("."));
+        assertEquals("https://session.firebase.google.com/test-project", payload.get("iss"));
+        assertEquals("test-project", payload.get("aud"));
+        assertEquals(signUp.get("localId"), payload.get("sub"));
+        assertEquals(signUp.get("localId"), payload.get("user_id"));
+        assertEquals("cookie@example.com", payload.get("email"));
+        assertEquals("password", ((Map<?, ?>) payload.get("firebase")).get("sign_in_provider"));
+        assertEquals(3600L, num(payload.get("exp")) - num(payload.get("iat")));
+
+        Map<String, Object> idPayload = decodeSegment(idToken, 1);
+        assertEquals(idPayload.get("auth_time"), payload.get("auth_time"));
+    }
+
+    @Test
+    void createSessionCookieDefaultsToFourteenDaysForNonNumericDuration() throws Exception {
+        String idToken = (String) signUpClient("cookie-default@example.com").get("idToken");
+
+        for (Object duration : new Object[]{"3600s", 0, "not-a-number"}) {
+            String cookie = given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .header("Authorization", "Bearer owner")
+                    .body(Map.of("idToken", idToken, "validDuration", duration))
+                    .when().post(PROJECT + ":createSessionCookie")
+                    .then().statusCode(200)
+                    .extract().path("sessionCookie");
+            Map<String, Object> payload = decodeSegment(cookie, 1);
+            assertEquals(14L * 24 * 60 * 60, num(payload.get("exp")) - num(payload.get("iat")));
+        }
+
+        String cookie = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("idToken", idToken))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then().statusCode(200)
+                .extract().path("sessionCookie");
+        Map<String, Object> payload = decodeSegment(cookie, 1);
+        assertEquals(14L * 24 * 60 * 60, num(payload.get("exp")) - num(payload.get("iat")));
+    }
+
+    @Test
+    void createSessionCookieRejectsBadRequests() {
+        String idToken = (String) signUpClient("cookie-errors@example.com").get("idToken");
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("validDuration", 3600))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(400)
+                .body("error.message", equalTo("MISSING_ID_TOKEN"));
+
+        for (Object duration : new Object[]{299, -1, 14 * 24 * 60 * 60 + 1}) {
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .header("Authorization", "Bearer owner")
+                    .body(Map.of("idToken", idToken, "validDuration", duration))
+                    .when().post(PROJECT + ":createSessionCookie")
+                    .then()
+                    .statusCode(400)
+                    .body("error.message", equalTo("INVALID_DURATION"));
+        }
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("idToken", "garbage", "validDuration", 1))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(400)
+                .body("error.message", equalTo("INVALID_DURATION"));
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("idToken", "garbage", "validDuration", 3600))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(400)
+                .body("error.message", equalTo("INVALID_ID_TOKEN"));
+    }
+
+    @Test
+    void createSessionCookieRequiresPrivilegedCaller() {
+        String idToken = (String) signUpClient("cookie-auth@example.com").get("idToken");
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(Map.of("idToken", idToken, "validDuration", 3600))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(401)
+                .body("error.status", equalTo("UNAUTHENTICATED"));
+    }
+
+    @Test
+    void createSessionCookieRespectsRevocation() {
+        Map<String, Object> signUp = signUpClient("cookie-revoked@example.com");
+        String idToken = (String) signUp.get("idToken");
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("localId", signUp.get("localId"), "validSince", "9999999999"))
+                .when().post(ADMIN + ":update")
+                .then().statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("Authorization", "Bearer owner")
+                .body(Map.of("idToken", idToken, "validDuration", 3600))
+                .when().post(PROJECT + ":createSessionCookie")
+                .then()
+                .statusCode(400)
+                .body("error.message", equalTo("TOKEN_EXPIRED"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> signUpClient(String email) {
+        return given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .queryParam("key", "fake-api-key")
+                .body(Map.of("email", email, "password", "secret123"))
+                .when().post(CLIENT + ":signUp")
+                .then().statusCode(200)
+                .extract().as(Map.class);
+    }
+
+    private static long num(Object value) {
+        return ((Number) value).longValue();
     }
 
     @SuppressWarnings("unchecked")

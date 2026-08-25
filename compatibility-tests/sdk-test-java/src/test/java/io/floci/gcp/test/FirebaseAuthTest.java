@@ -7,6 +7,7 @@ import com.google.firebase.FirebaseOptions;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
 import com.google.firebase.auth.FirebaseToken;
+import com.google.firebase.auth.SessionCookieOptions;
 import com.google.firebase.auth.UserRecord;
 import com.google.firebase.internal.EmulatorCredentials;
 import com.google.firebase.internal.FirebaseProcessEnvironment;
@@ -24,6 +25,7 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -127,6 +129,20 @@ class FirebaseAuthTest {
 
     @Test
     @Order(4)
+    void createAndVerifySessionCookie() throws Exception {
+        String cookie = auth.createSessionCookie(signedInIdToken,
+                SessionCookieOptions.builder().setExpiresIn(TimeUnit.HOURS.toMillis(1)).build());
+
+        FirebaseToken decoded = auth.verifySessionCookie(cookie, true);
+        assertThat(decoded.getUid()).isEqualTo(UID);
+        assertThat(decoded.getClaims().get("premium")).isEqualTo(true);
+        assertThat(decoded.getClaims().get("role")).isEqualTo("tester");
+        assertThat(decoded.getClaims().get("iss"))
+                .isEqualTo("https://session.firebase.google.com/" + PROJECT_ID);
+    }
+
+    @Test
+    @Order(5)
     void listUsersContainsCreatedUser() throws Exception {
         List<String> uids = new ArrayList<>();
         auth.listUsers(null).iterateAll().forEach(user -> uids.add(user.getUid()));
@@ -135,7 +151,7 @@ class FirebaseAuthTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void revokeRefreshTokensInvalidatesIdToken() throws Exception {
         Thread.sleep(1100);
         auth.revokeRefreshTokens(UID);
@@ -145,7 +161,7 @@ class FirebaseAuthTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void deleteUserRemovesAccount() throws Exception {
         auth.deleteUser(UID);
 

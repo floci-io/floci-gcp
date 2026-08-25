@@ -46,6 +46,8 @@ public class FirebaseAuthService {
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int PASSWORD_MIN_LENGTH = 6;
     private static final long TOKEN_EXPIRES_IN_SECONDS = 3600;
+    private static final long SESSION_COOKIE_MIN_VALID_DURATION = 5 * 60;
+    private static final long SESSION_COOKIE_MAX_VALID_DURATION = 14 * 24 * 60 * 60;
     private static final String PROJECT_NUMBER = "12345";
     static final String CUSTOM_TOKEN_AUDIENCE =
             "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit";
@@ -486,6 +488,43 @@ public class FirebaseAuthService {
         return response;
     }
 
+    // ── session cookies ───────────────────────────────────────────────────────
+
+    public Map<String, Object> createSessionCookie(String project, Map<String, Object> body) {
+        String idToken = str(body.get("idToken"));
+        check(idToken != null && !idToken.isEmpty(), "MISSING_ID_TOKEN");
+
+        long validDuration = sessionCookieDuration(body.get("validDuration"));
+        check(validDuration >= SESSION_COOKIE_MIN_VALID_DURATION
+                && validDuration <= SESSION_COOKIE_MAX_VALID_DURATION, "INVALID_DURATION");
+
+        Map<String, Object> payload = new LinkedHashMap<>(verifyIdToken(project, idToken).payload());
+        long iat = Instant.now().getEpochSecond();
+        payload.put("iat", iat);
+        payload.put("exp", iat + validDuration);
+        payload.put("iss", "https://session.firebase.google.com/" + str(payload.get("aud")));
+
+        LOG.debugf("firebaseauth createSessionCookie project=%s localId=%s validDuration=%d",
+                project, payload.get("user_id"), validDuration);
+        return Map.of("sessionCookie", FirebaseJwt.sign(payload));
+    }
+
+    private static long sessionCookieDuration(Object validDuration) {
+        if (validDuration instanceof Number number) {
+            return number.longValue() == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : number.longValue();
+        }
+        String text = str(validDuration);
+        if (text == null || text.isBlank()) {
+            return SESSION_COOKIE_MAX_VALID_DURATION;
+        }
+        try {
+            long parsed = (long) Double.parseDouble(text.trim());
+            return parsed == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : parsed;
+        } catch (NumberFormatException e) {
+            return SESSION_COOKIE_MAX_VALID_DURATION;
+        }
+    }
+
     // ── securetoken grantToken ────────────────────────────────────────────────
 
     public Map<String, Object> grantToken(String project, String grantType, String refreshToken) {
@@ -619,7 +658,13 @@ public class FirebaseAuthService {
         return FirebaseJwt.sign(payload);
     }
 
+    record VerifiedIdToken(StoredUser user, Map<String, Object> payload) {}
+
     StoredUser parseIdToken(String project, String idToken) {
+        return verifyIdToken(project, idToken).user();
+    }
+
+    VerifiedIdToken verifyIdToken(String project, String idToken) {
         Map<String, Object> payload = FirebaseJwt.decodePayload(idToken);
         check(payload != null, "INVALID_ID_TOKEN");
         StoredUser user = getUser(project, str(payload.get("user_id")));
@@ -628,7 +673,7 @@ public class FirebaseAuthService {
             check(iat.longValue() >= Long.parseLong(user.getValidSince()), "TOKEN_EXPIRED");
         }
         check(!user.isDisabled(), "USER_DISABLED");
-        return user;
+        return new VerifiedIdToken(user, payload);
     }
 
     // ── claims validation ─────────────────────────────────────────────────────

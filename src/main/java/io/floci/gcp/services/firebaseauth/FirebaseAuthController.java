@@ -156,6 +156,15 @@ public class FirebaseAuthController {
         return json(service.batchDelete(project, safe(body)));
     }
 
+    @POST
+    @Path("/projects/{project}:createSessionCookie")
+    public Response createSessionCookie(@HeaderParam("Authorization") String authorization,
+                                        @PathParam("project") String project,
+                                        Map<String, Object> body) {
+        requirePrivileged(authorization);
+        return json(service.createSessionCookie(project, safe(body)));
+    }
+
     // ── auth model (matches the Auth emulator) ────────────────────────────────
 
     static boolean isPrivileged(String authorization) {

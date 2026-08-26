@@ -19,6 +19,11 @@ the API endpoint / transport channel and disabling credentials:
 - **gRPC** (Java/Python/Go/Node): build the v3 `MetricServiceClient` with a plaintext channel to
   `localhost:4588` and anonymous/no credentials (see Quick Start).
 - **REST**: `/v3/projects/{project}/...` (metric descriptors, monitored resource descriptors, time series).
+- **TLS-only clients**: some tooling always dials gRPC over TLS with no plaintext option (for
+  example the OpenTelemetry Collector's `googlecloudmonitoring` receiver, built on
+  `google-cloud-go`). Point those at the TLS listener on `localhost:4589` and trust the
+  emulator's certificate, retrievable at `GET http://localhost:4588/_floci-gcp/tls/cert`
+  (see [Single-Port Design → TLS listener](index.md#tls-listener)).
 
 ## Scope
 

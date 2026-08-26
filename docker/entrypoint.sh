@@ -28,4 +28,33 @@ if [ "$(id -u)" = '0' ]; then
     exec gosu floci "$0" "$@"
 fi
 
+# TLS: generate a self-signed certificate on first start unless one was provided,
+# so the TLS listener (default 4589) comes up alongside the plaintext port.
+# FLOCI_GCP_TLS_ENABLED=false skips generation, leaving the TLS listener closed.
+# Extra subjectAltNames: FLOCI_GCP_TLS_EXTRA_SANS=DNS:myhost,IP:10.0.0.5
+if [ "${FLOCI_GCP_TLS_ENABLED:-true}" != 'false' ] && [ -z "${FLOCI_GCP_TLS_CERTIFICATE:-}" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+        tls_dir="${FLOCI_GCP_TLS_DIR:-/app/tls}"
+        if [ ! -f "$tls_dir/cert.pem" ] || [ ! -f "$tls_dir/key.pem" ]; then
+            mkdir -p "$tls_dir"
+            sans='DNS:localhost,DNS:floci-gcp,DNS:host.docker.internal,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1'
+            if [ -n "${FLOCI_GCP_TLS_EXTRA_SANS:-}" ]; then
+                sans="$sans,${FLOCI_GCP_TLS_EXTRA_SANS}"
+            fi
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -sha256 \
+                -days 3650 -nodes -subj '/CN=floci-gcp' -addext "subjectAltName=$sans" \
+                -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" 2>/dev/null \
+                || echo 'floci-gcp: TLS certificate generation failed' >&2
+        fi
+        if [ -f "$tls_dir/cert.pem" ] && [ -f "$tls_dir/key.pem" ]; then
+            export FLOCI_GCP_TLS_CERTIFICATE="$tls_dir/cert.pem"
+            export FLOCI_GCP_TLS_CERTIFICATE_KEY="$tls_dir/key.pem"
+        else
+            echo 'floci-gcp: TLS listener disabled' >&2
+        fi
+    else
+        echo 'floci-gcp: openssl not found; TLS listener disabled' >&2
+    fi
+fi
+
 exec "$@"

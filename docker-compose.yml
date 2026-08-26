@@ -6,6 +6,7 @@ services:
     tty: true
     ports:
       - "4588:4588"
+      - "4589:4589"
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock

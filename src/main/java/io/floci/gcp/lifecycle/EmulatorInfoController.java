@@ -15,6 +15,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -60,6 +62,30 @@ public class EmulatorInfoController {
                 "version", HealthController.resolveVersion(),
                 "port", config.port(),
                 "defaultProject", config.defaultProjectId())).build();
+    }
+
+    @GET
+    @Path("/tls/cert")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response tlsCert() {
+        var certificate = config.tls().certificate();
+        if (certificate.isEmpty()) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(Map.of("error", Map.of(
+                            "code", 404, "message", "TLS is not enabled", "status", "NOT_FOUND")))
+                    .build();
+        }
+        try {
+            return Response.ok(Files.readString(java.nio.file.Path.of(certificate.get()))).build();
+        } catch (IOException e) {
+            LOG.errorf(e, "Failed to read TLS certificate %s", certificate.get());
+            return Response.serverError()
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(Map.of("error", Map.of(
+                            "code", 500, "message", "Failed to read TLS certificate", "status", "INTERNAL")))
+                    .build();
+        }
     }
 
     @GET

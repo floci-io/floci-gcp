@@ -4,10 +4,15 @@ quarkus:
     category:
       "io.floci.gcp":
         level: INFO
+  http:
+    test-ssl-port: 4599
 
 floci-gcp:
   port: 4588
   default-project-id: test-project
+  tls:
+    certificate: src/test/resources/tls/cert.pem
+    certificate-key: src/test/resources/tls/key.pem
   storage:
     mode: memory
   services:

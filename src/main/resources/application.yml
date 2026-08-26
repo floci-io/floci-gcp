@@ -11,6 +11,12 @@ quarkus:
     port: ${floci-gcp.port}
     host: 0.0.0.0
     http2: true
+    insecure-requests: enabled
+    ssl-port: ${floci-gcp.tls.port}
+    ssl:
+      certificate:
+        files: ${floci-gcp.tls.certificate:}
+        key-files: ${floci-gcp.tls.certificate-key:}
     limits:
       max-body-size: ${floci-gcp.max-request-size}M
 
@@ -36,6 +42,13 @@ floci-gcp:
   port: 4588
   max-request-size: 512
   base-url: "http://localhost:4588"
+  tls:
+    port: 4589
+    # The TLS listener opens only when both PEM paths are set. In Docker the entrypoint
+    # generates a self-signed pair and sets these automatically (FLOCI_GCP_TLS_ENABLED=false
+    # to opt out); outside Docker, point them at your own certificate to enable TLS.
+    # certificate:            # FLOCI_GCP_TLS_CERTIFICATE=/path/cert.pem
+    # certificate-key:        # FLOCI_GCP_TLS_CERTIFICATE_KEY=/path/key.pem
   default-project-id: floci-local
   storage:
     mode: memory

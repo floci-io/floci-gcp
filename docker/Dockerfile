@@ -21,7 +21,7 @@ ENV GOSU_VERSION=1.17
 ENV GOSU_AMD64_SHA256=bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3
 ENV GOSU_ARM64_SHA256=c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b
 RUN set -eux; \
-    apk add --no-cache shadow ca-certificates; \
+    apk add --no-cache shadow ca-certificates openssl; \
     useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci; \
     arch="$(apk --print-arch)"; \
     case "$arch" in \
@@ -56,7 +56,7 @@ LABEL org.opencontainers.image.title="floci-gcp" \
       description="Local GCP emulator — open-source alternative to GCP-provided emulators" \
       io.k8s.description="Local GCP emulator" \
       io.k8s.display-name="floci-gcp" \
-      io.openshift.expose-services="4588:tcp" \
+      io.openshift.expose-services="4588:tcp,4589:tcp" \
       io.openshift.tags="floci-gcp gcp-emulator" \
       maintainer="Floci <https://github.com/floci-io/floci-gcp>" \
       name="floci/floci-gcp" \
@@ -64,7 +64,7 @@ LABEL org.opencontainers.image.title="floci-gcp" \
       url="https://floci.io" \
       vendor="Floci"
 
-EXPOSE 4588
+EXPOSE 4588 4589
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
     CMD wget -q --spider http://localhost:4588/_floci-gcp/health || exit 1

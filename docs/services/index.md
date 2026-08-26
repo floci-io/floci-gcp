@@ -39,6 +39,18 @@ All services — gRPC and REST — are available on port **4588** via ALPN negot
 
 Clients using plain HTTP/1.1 are served REST endpoints. Clients using HTTP/2 (gRPC) are served gRPC endpoints. No separate ports or proxy configuration is required.
 
+### TLS listener
+
+The same gRPC + REST surface is also served over TLS on port **4589**, for clients that
+refuse plaintext connections (for example Go clients built on `google-cloud-go`, such as the
+OpenTelemetry Collector's `googlecloudmonitoring` receiver). In Docker the entrypoint
+generates a self-signed certificate on first start; fetch it from
+`GET http://localhost:4588/_floci-gcp/tls/cert` and add it to the client's trust store. The
+generated certificate covers `localhost`, `floci-gcp`, `host.docker.internal`, and the
+loopback IPs; add more names via `FLOCI_GCP_TLS_EXTRA_SANS`, disable the listener with
+`FLOCI_GCP_TLS_ENABLED=false`, or supply your own PEM pair via `FLOCI_GCP_TLS_CERTIFICATE` /
+`FLOCI_GCP_TLS_CERTIFICATE_KEY` (outside Docker the listener only opens when these are set).
+
 ## Common Setup
 
 Before calling any service, set the appropriate emulator environment variable:

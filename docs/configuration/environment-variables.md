@@ -18,6 +18,21 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 
 ---
 
+## TLS
+
+The full gRPC + REST surface is also served over TLS (HTTP/2 ALPN) on a second port, for clients that refuse plaintext connections. The listener opens only when a certificate is configured; in Docker the entrypoint generates a self-signed pair on first start, retrievable at `GET /_floci-gcp/tls/cert` on the plaintext port.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_TLS_PORT` | `4589` | Port for the TLS listener |
+| `FLOCI_GCP_TLS_CERTIFICATE` | _(entrypoint-generated)_ | Path to a PEM certificate (leaf first, then any chain). Set to use your own instead of the generated one |
+| `FLOCI_GCP_TLS_CERTIFICATE_KEY` | _(entrypoint-generated)_ | Path to the PEM private key matching the certificate |
+| `FLOCI_GCP_TLS_ENABLED` | `true` | Docker entrypoint only: set `false` to skip certificate generation, leaving the TLS listener closed |
+| `FLOCI_GCP_TLS_DIR` | `/app/tls` | Docker entrypoint only: directory the generated pair is written to (reused if already present) |
+| `FLOCI_GCP_TLS_EXTRA_SANS` | _(none)_ | Docker entrypoint only: extra subjectAltNames for the generated certificate, e.g. `DNS:myhost,IP:10.0.0.5`. Defaults cover `localhost`, `floci-gcp`, `host.docker.internal`, and loopback IPs |
+
+---
+
 ## Storage
 
 | Variable | Default | Description |

@@ -30,6 +30,8 @@ public interface EmulatorConfig {
                 .orElse(baseUrl());
     }
 
+    TlsConfig tls();
+
     DnsConfig dns();
 
     StorageConfig storage();
@@ -39,6 +41,24 @@ public interface EmulatorConfig {
     DockerConfig docker();
 
     InitHooksConfig initHooks();
+
+    interface TlsConfig {
+
+        /**
+         * Port for the TLS listener. Serves the same gRPC + REST surface as the plaintext
+         * port, over HTTPS with HTTP/2 ALPN. Only opened when {@link #certificate()} and
+         * {@link #certificateKey()} are both set — the Docker entrypoint sets them to a
+         * generated self-signed pair unless {@code FLOCI_GCP_TLS_ENABLED=false}.
+         */
+        @WithDefault("4589")
+        int port();
+
+        /** Path to a PEM certificate (leaf first, then any chain). */
+        Optional<String> certificate();
+
+        /** Path to the PEM private key matching {@link #certificate()}. */
+        Optional<String> certificateKey();
+    }
 
     interface DnsConfig {
         Optional<List<String>> extraSuffixes();

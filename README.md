@@ -98,7 +98,7 @@ Run GCP-compatible services locally without a GCP account, service account key, 
 <details>
 <summary><strong>Single port for everything</strong></summary>
 
-All GCP services — gRPC and REST — share a single port (`4588`) via HTTP/2 ALPN negotiation. No per-service daemon setup, no port management.
+All GCP services — gRPC and REST — share a single port (`4588`). No per-service daemon setup, no port management. The same surface is also served over TLS on `4589` (self-signed certificate generated on first start, retrievable at `GET /_floci-gcp/tls/cert`) for clients that refuse plaintext connections.
 
 </details>
 

@@ -402,10 +402,10 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
                         append(upload, request.getWriteOffset(), request.hasChecksummedData()
                                 ? request.getChecksummedData() : ChecksummedData.getDefaultInstance());
                         if (request.getFinishWrite()) {
-                            validateFullChecksums(upload, request.hasObjectChecksums()
-                                    ? request.getObjectChecksums() : null);
-                            GcsObjectMeta stored = service.finalizeStreamingUpload(uploadId, baseUrl);
+                            GcsObjectMeta stored = finalizeUpload(uploadId, upload,
+                                    request.hasObjectChecksums() ? request.getObjectChecksums() : null);
                             finished = true;
+                            releaseNonResumableUpload(uploadId, resumable);
                             observer.onNext(WriteObjectResponse.newBuilder()
                                     .setResource(GcsGrpcMapper.toProto(stored)).build());
                             observer.onCompleted();
@@ -444,6 +444,7 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             @Override
             public void onError(Throwable t) {
                 finished = true;
+                releaseNonResumableUpload(uploadId, resumable);
             }
 
             @Override
@@ -468,6 +469,7 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             private void fail(Throwable t) {
                 if (!finished) {
                     finished = true;
+                    releaseNonResumableUpload(uploadId, resumable);
                     GcpGrpcController.grpcError(observer, t);
                 }
             }
@@ -499,10 +501,10 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
                         append(upload, request.getWriteOffset(), request.hasChecksummedData()
                                 ? request.getChecksummedData() : ChecksummedData.getDefaultInstance());
                         if (request.getFinishWrite()) {
-                            validateFullChecksums(upload, request.hasObjectChecksums()
-                                    ? request.getObjectChecksums() : null);
-                            GcsObjectMeta stored = service.finalizeStreamingUpload(uploadId, baseUrl);
+                            GcsObjectMeta stored = finalizeUpload(uploadId, upload,
+                                    request.hasObjectChecksums() ? request.getObjectChecksums() : null);
                             finished = true;
+                            releaseNonResumableUpload(uploadId, resumable);
                             observer.onNext(BidiWriteObjectResponse.newBuilder()
                                     .setResource(GcsGrpcMapper.toProto(stored)).build());
                             observer.onCompleted();
@@ -547,6 +549,7 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             @Override
             public void onError(Throwable t) {
                 finished = true;
+                releaseNonResumableUpload(uploadId, resumable);
             }
 
             @Override
@@ -575,10 +578,28 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             private void fail(Throwable t) {
                 if (!finished) {
                     finished = true;
+                    releaseNonResumableUpload(uploadId, resumable);
                     GcpGrpcController.grpcError(observer, t);
                 }
             }
         };
+    }
+
+    private GcsObjectMeta finalizeUpload(String uploadId, GcsStreamingUpload upload,
+            ObjectChecksums suppliedChecksums) {
+        try {
+            validateFullChecksums(upload, suppliedChecksums);
+            return service.finalizeStreamingUpload(uploadId, baseUrl);
+        } catch (Exception e) {
+            service.abortStreamingUpload(uploadId);
+            throw e;
+        }
+    }
+
+    private void releaseNonResumableUpload(String uploadId, boolean resumable) {
+        if (uploadId != null && !resumable) {
+            service.abortStreamingUpload(uploadId);
+        }
     }
 
     private static void append(GcsStreamingUpload upload, long offset, ChecksummedData data) {

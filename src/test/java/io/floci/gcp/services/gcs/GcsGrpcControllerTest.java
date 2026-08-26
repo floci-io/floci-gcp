@@ -212,6 +212,47 @@ class GcsGrpcControllerTest {
                 .setFinishWrite(true).build());
 
         assertEquals(Status.Code.DATA_LOSS, Status.fromThrowable(response.error).getCode());
+        assertEquals(0, service.streamingUploadCount());
+    }
+
+    @Test
+    void abortedNonResumableWriteReleasesStreamingUpload() {
+        createBucket("aborted-write-bucket");
+        RecordingObserver<WriteObjectResponse> response = new RecordingObserver<>();
+        StreamObserver<WriteObjectRequest> stream = controller.writeObject(response);
+
+        stream.onNext(WriteObjectRequest.newBuilder()
+                .setWriteObjectSpec(WriteObjectSpec.newBuilder()
+                        .setResource(object("aborted-write-bucket", "object")))
+                .setChecksummedData(data("partial".getBytes(StandardCharsets.UTF_8)))
+                .build());
+        assertEquals(1, service.streamingUploadCount());
+
+        stream.onError(Status.CANCELLED.asRuntimeException());
+
+        assertEquals(0, service.streamingUploadCount());
+    }
+
+    @Test
+    void failedResumableFinalizationReleasesStreamingUpload() {
+        createBucket("failed-resume-bucket");
+        RecordingObserver<StartResumableWriteResponse> started = new RecordingObserver<>();
+        controller.startResumableWrite(StartResumableWriteRequest.newBuilder()
+                .setWriteObjectSpec(WriteObjectSpec.newBuilder()
+                        .setResource(object("failed-resume-bucket", "object"))
+                        .setObjectSize(1))
+                .build(), started);
+        String uploadId = started.single().getUploadId();
+
+        RecordingObserver<WriteObjectResponse> response = new RecordingObserver<>();
+        controller.writeObject(response).onNext(WriteObjectRequest.newBuilder()
+                .setUploadId(uploadId)
+                .setChecksummedData(data("too large".getBytes(StandardCharsets.UTF_8)))
+                .setFinishWrite(true)
+                .build());
+
+        assertEquals(Status.Code.OUT_OF_RANGE, Status.fromThrowable(response.error).getCode());
+        assertEquals(0, service.streamingUploadCount());
     }
 
     @Test

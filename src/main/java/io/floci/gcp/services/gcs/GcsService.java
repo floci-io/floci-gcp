@@ -154,10 +154,12 @@ public class GcsService {
                         GcsXmlDownloadController.class, GcsNotificationController.class,
                         GcsBatchController.class, GcsGrpcController.class)
                 .build());
-        GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
-        BindableService intercepted = () -> ServerInterceptors.intercept(
-                controller, grpcAuthorizationInterceptor);
-        grpcServerManager.bind(intercepted);
+        if (config.services().gcs().enabled()) {
+            GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
+            BindableService intercepted = () -> ServerInterceptors.intercept(
+                    controller, grpcAuthorizationInterceptor);
+            grpcServerManager.bind(intercepted);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -917,6 +919,14 @@ public class GcsService {
             throw GcpException.notFound("Streaming upload not found: " + uploadId);
         }
         return upload;
+    }
+
+    void abortStreamingUpload(String uploadId) {
+        streamingUploads.remove(uploadId);
+    }
+
+    int streamingUploadCount() {
+        return streamingUploads.size();
     }
 
     public GcsObjectMeta finalizeStreamingUpload(String uploadId, String baseUrl) {

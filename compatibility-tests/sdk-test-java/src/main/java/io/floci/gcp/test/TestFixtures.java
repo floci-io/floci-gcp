@@ -86,6 +86,15 @@ public final class TestFixtures {
                 .getService();
     }
 
+    public static Storage storageGrpcClient() {
+        return StorageOptions.grpc()
+                .setHost(endpoint())
+                .setProjectId(projectId())
+                .setCredentials(NoCredentials.getInstance())
+                .build()
+                .getService();
+    }
+
 	public static Storage storageClient(Credentials credentials) {
 		return StorageOptions.newBuilder()
 				.setHost(endpoint())

@@ -42,6 +42,16 @@ func StorageClient(ctx context.Context) *storage.Client {
 	return client
 }
 
+// StorageGRPCClient returns a Cloud Storage v2 gRPC client configured for the emulator.
+// Reads STORAGE_EMULATOR_HOST_GRPC (e.g. localhost:4588).
+func StorageGRPCClient(ctx context.Context) *storage.Client {
+	client, err := storage.NewGRPCClient(ctx)
+	if err != nil {
+		panic("failed to create gRPC storage client: " + err.Error())
+	}
+	return client
+}
+
 // PubSubClient returns a Pub/Sub client configured for the emulator.
 // Reads PUBSUB_EMULATOR_HOST (e.g. localhost:4588).
 func PubSubClient(ctx context.Context) *pubsub.Client {

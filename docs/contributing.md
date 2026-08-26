@@ -75,7 +75,7 @@ Quick summary:
 
 1. Identify the GCP wire protocol (gRPC or REST)
 2. Create `src/main/java/io/floci/gcp/services/<service>/` with a Controller, Service, and `model/` package
-3. For gRPC: extend `GcpGrpcController`; for REST: use JAX-RS `@Path` resources
+3. For gRPC: extend the generated `*Grpc.*ImplBase` and use `GcpGrpcController.grpcError` for shared error mapping; for REST: use JAX-RS `@Path` resources
 4. Register the service in `ServiceRegistry`
 5. Add config in `EmulatorConfig.java` and `application.yml`
 6. Add `*IntegrationTest.java` tests

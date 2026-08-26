@@ -1,6 +1,6 @@
 package io.floci.gcp.services.gcs;
 
-import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import io.floci.gcp.services.gcs.model.StoredNotification;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -18,26 +18,26 @@ import java.util.Map;
 public class GcsNotificationController {
 
     private final GcsService service;
-	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
-	public GcsNotificationController(GcsService service, GcsAuthorizationService authorizationService) {
+    public GcsNotificationController(GcsService service, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
-		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
 	public Response createNotification(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
-		authorizationService.rejectDownscopedToken(authorization);
+		iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.update");
         return Response.ok(service.createNotification(bucket, body)).build();
     }
 
     @GET
 	public Response listNotifications(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-		authorizationService.rejectDownscopedToken(authorization);
+		iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.get");
         List<StoredNotification> items = service.listNotifications(bucket);
         return Response.ok(Map.of("kind", "storage#notifications", "items", items)).build();
     }
@@ -47,7 +47,7 @@ public class GcsNotificationController {
     public Response getNotification(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("notification") String notificationId) {
-		authorizationService.rejectDownscopedToken(authorization);
+		iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.get");
         return Response.ok(service.getNotification(bucket, notificationId)).build();
     }
 
@@ -56,7 +56,7 @@ public class GcsNotificationController {
     public Response deleteNotification(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @PathParam("notification") String notificationId) {
-		authorizationService.rejectDownscopedToken(authorization);
+		iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.update");
         service.deleteNotification(bucket, notificationId);
         return Response.noContent().build();
     }

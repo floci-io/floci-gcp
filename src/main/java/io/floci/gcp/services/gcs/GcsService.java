@@ -178,6 +178,9 @@ public class GcsService {
             if (body.containsKey("retentionPolicy")) {
                 bucket.setRetentionPolicy((Map<String, Object>) body.get("retentionPolicy"));
             }
+            if (body.containsKey("iamConfiguration")) {
+                bucket.setIamConfiguration((Map<String, Object>) body.get("iamConfiguration"));
+            }
             if (body.containsKey("defaultEventBasedHold")) {
                 bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
             }
@@ -210,6 +213,9 @@ public class GcsService {
         }
         if (patch.containsKey("retentionPolicy")) {
             bucket.setRetentionPolicy((Map<String, Object>) patch.get("retentionPolicy"));
+        }
+        if (patch.containsKey("iamConfiguration")) {
+            bucket.setIamConfiguration((Map<String, Object>) patch.get("iamConfiguration"));
         }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
@@ -1135,6 +1141,10 @@ public class GcsService {
         String key = objectKey(bucket, objectName);
         return objectMetaStore.get(key)
                 .filter(meta -> isReadableLiveObject(key, meta));
+    }
+
+    public boolean objectExists(String bucket, String objectName) {
+        return getLiveObjectMeta(bucket, objectName).isPresent();
     }
 
     private boolean isReadableLiveObject(String key, GcsObjectMeta meta) {

@@ -34,6 +34,24 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <dependency>
+                <groupId>org.projectnessie.cel</groupId>
+                <artifactId>cel-bom</artifactId>
+                <version>0.8.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- CEL 0.8.0 generated protobuf classes require a 4.35.1 runtime. -->
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>4.35.1</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java-util</artifactId>
+                <version>4.35.1</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -195,6 +213,14 @@
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectnessie.cel</groupId>
+            <artifactId>cel-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectnessie.cel</groupId>
+            <artifactId>cel-generated-pb</artifactId>
         </dependency>
 
         <!-- Docker client -->

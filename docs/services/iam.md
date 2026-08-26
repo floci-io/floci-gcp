@@ -7,6 +7,53 @@ floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves no-auth behavior; `enforce` filters supported bucket `testIamPermissions` responses |
+| `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
+
+`authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
+responses remain available in that mode, but they do not restrict requests. In
+`enforce` mode, bucket `testIamPermissions` returns only permissions granted
+by the stored bucket policy. Bucket metadata, bucket IAM-policy, retention-lock,
+storage-layout, and notification operations are also checked against their
+documented bucket permissions. JSON/XML object reads, writes, updates, deletes,
+listing, compose, copy, rewrite, move, and resumable uploads are checked against
+the documented object permissions. ACL operations are not restricted by IAM
+allow policies.
+
+The initial role catalog supports `roles/storage.objectViewer`,
+`roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
+`roles/storage.admin` for the explicitly enforced permissions. Bucket policies
+inherit to objects. Conditions support `resource.name` equality,
+`startsWith`, `endsWith`, and timestamp comparisons; regex, `extract`,
+macros, and undeclared attributes are rejected.
+
+Object-list conditions authorize the bucket-level `storage.objects.list`
+permission but do not filter returned objects. ACLs, signed-URL identity,
+project policies, deny policies, custom roles, groups, and the full UBLA
+lifecycle remain outside this evaluator.
+
+For a downscoped token derived from a Floci-issued IAM Credentials impersonated
+token, Floci preserves the source service-account identity. Object requests
+first satisfy the token's Credential Access Boundary (CAB), then satisfy the
+bucket policy for that service account. Consequently, a bucket policy cannot
+extend a CAB grant, and a CAB cannot extend a bucket-policy grant. A downscoped
+token from an external source credential has no named IAM identity and, in
+`enforce` mode, can match only an `allUsers` binding.
+
+## Enforcement bootstrap
+
+When Floci can resolve a new bucket's caller from a valid Floci-issued
+impersonated token, it persists a bucket-level `roles/storage.admin` binding for
+that service-account member. This lets the creator manage the bucket after the
+emulator is started with `authorization-mode: enforce`.
+
+For callers without a resolvable identity, set
+`FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` to an IAM member such as
+`serviceAccount:admin@example.iam.gserviceaccount.com`. That member receives
+`roles/storage.admin` on every subsequently created bucket. Treat this setting
+as an administrator credential: it is deliberately powerful, and an `allUsers`
+value makes every new bucket publicly manageable. The setting accepts only
+`serviceAccount:` members, `allAuthenticatedUsers`, or `allUsers`.
 
 ## Quick Start
 

@@ -55,6 +55,7 @@ floci-gcp:
       enabled: true
     iam:
       enabled: true
+      authorization-mode: disabled
     iamcredentials:
       enabled: true
     sts:

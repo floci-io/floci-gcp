@@ -11,6 +11,9 @@ floci-gcp:
   storage:
     mode: memory
   services:
+    iam:
+      enabled: true
+      authorization-mode: disabled
     iamcredentials:
       enabled: true
     sts:

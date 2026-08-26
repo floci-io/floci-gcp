@@ -4,6 +4,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.StoredAcl;
@@ -31,13 +32,15 @@ public class GcsObjectController {
     private final GcsService service;
     private final EmulatorConfig config;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
 	public GcsObjectController(GcsService service, EmulatorConfig config,
-			GcsAuthorizationService authorizationService) {
+			GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @OPTIONS
@@ -55,7 +58,7 @@ public class GcsObjectController {
 			@QueryParam("startOffset") String startOffset,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
-		authorizationService.requireObjectList(authorization, bucket, prefix);
+		iamAuthorizationService.requireObjectList(authorization, bucket, prefix);
         List<GcsObjectMeta> all = includeVersions
                 ? service.listObjectVersions(bucket, prefix)
                 : service.listObjects(bucket);
@@ -162,7 +165,7 @@ public class GcsObjectController {
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader) {
-        authorizationService.requireObjectRead(authorization, bucket, objectPath);
+		iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if ("media".equals(alt)) {
             var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
@@ -185,7 +188,7 @@ public class GcsObjectController {
 			@QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
-        authorizationService.requireObjectWrite(authorization, bucket, objectPath);
+		iamAuthorizationService.requireObjectWrite(authorization, bucket, objectPath, "storage.objects.update");
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
@@ -202,7 +205,7 @@ public class GcsObjectController {
 			@QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
-        authorizationService.requireObjectWrite(authorization, bucket, objectPath);
+		iamAuthorizationService.requireObjectWrite(authorization, bucket, objectPath, "storage.objects.update");
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
@@ -221,7 +224,7 @@ public class GcsObjectController {
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            authorizationService.requireObjectWrite(authorization, bucket, objectPath);
+			iamAuthorizationService.requireObjectWrite(authorization, bucket, objectPath, "storage.objects.update");
             GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                     ifMetagenerationMatch, ifMetagenerationNotMatch);
             return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
@@ -239,7 +242,7 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch) {
-        authorizationService.requireObjectDelete(authorization, bucket, objectPath);
+		iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         if (generation != null) {
@@ -271,9 +274,9 @@ public class GcsObjectController {
         List<String> sourceNames = sourceObjects == null ? List.of()
                 : sourceObjects.stream().map(s -> (String) s.get("name")).toList();
         for (String sourceName : sourceNames) {
-            authorizationService.requireObjectRead(authorization, bucket, sourceName);
+            iamAuthorizationService.requireObjectRead(authorization, bucket, sourceName);
         }
-        authorizationService.requireObjectWrite(authorization, bucket, destObjectPath);
+        requireObjectCreate(authorization, bucket, destObjectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, null,
                 ifMetagenerationMatch, null);
         GcsObjectMeta meta = service.composeObject(bucket, destObjectPath, sourceNames, contentType,
@@ -292,9 +295,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @Context HttpHeaders headers) {
-        authorizationService.requireSourceReadAndDestinationWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
-                srcBucket, srcObjectPath, dstBucket, dstObjectPath);
+        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
+        iamAuthorizationService.requireObjectRead(authorization, srcBucket, srcObjectPath);
+        requireObjectCreate(authorization, dstBucket, dstObjectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
@@ -317,9 +320,9 @@ public class GcsObjectController {
             @QueryParam("ifSourceMetagenerationNotMatch") Long ifSourceMetagenerationNotMatch,
             @Context HttpHeaders headers) {
         String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        authorizationService.requireObjectRead(authorization, bucket, srcObjectPath);
-        authorizationService.requireObjectDelete(authorization, bucket, srcObjectPath);
-        authorizationService.requireObjectWrite(authorization, bucket, dstObjectPath);
+        iamAuthorizationService.requireObjectRead(authorization, bucket, srcObjectPath);
+        iamAuthorizationService.requireObjectDelete(authorization, bucket, srcObjectPath);
+        requireObjectCreate(authorization, bucket, dstObjectPath);
         GcsObjectPreconditions sourcePreconditions = new GcsObjectPreconditions(ifSourceGenerationMatch,
                 ifSourceGenerationNotMatch, ifSourceMetagenerationMatch, ifSourceMetagenerationNotMatch);
         GcsObjectPreconditions destinationPreconditions = new GcsObjectPreconditions(ifGenerationMatch,
@@ -340,9 +343,9 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @Context HttpHeaders headers) {
-        authorizationService.requireSourceReadAndDestinationWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
-                srcBucket, srcObjectPath, dstBucket, dstObjectPath);
+        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
+        iamAuthorizationService.requireObjectRead(authorization, srcBucket, srcObjectPath);
+        requireObjectCreate(authorization, dstBucket, dstObjectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
@@ -359,5 +362,12 @@ public class GcsObjectController {
     private String requestBaseUrl(HttpHeaders headers) {
         String host = headers.getHeaderString("Host");
         return host != null ? "http://" + host : config.baseUrl();
+    }
+
+    private void requireObjectCreate(String authorization, String bucket, String objectPath) {
+        iamAuthorizationService.requireObjectWrite(authorization, bucket, objectPath, "storage.objects.create");
+        if (service.objectExists(bucket, objectPath)) {
+            iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath);
+        }
     }
 }

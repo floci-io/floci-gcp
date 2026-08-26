@@ -3,6 +3,7 @@ package io.floci.gcp.lifecycle;
 import io.grpc.BindableService;
 import io.quarkus.runtime.Startup;
 import io.vertx.ext.web.Router;
+import io.vertx.grpc.server.GrpcServerOptions;
 import io.vertx.grpcio.server.GrpcIoServer;
 import io.vertx.grpcio.server.GrpcIoServiceBridge;
 import jakarta.annotation.PostConstruct;
@@ -16,6 +17,7 @@ import org.jboss.logging.Logger;
 public class GrpcServerManager {
 
     private static final Logger LOG = Logger.getLogger(GrpcServerManager.class);
+    private static final long MAX_INBOUND_MESSAGE_SIZE = 4L * 1024 * 1024;
 
     private final io.vertx.core.Vertx vertx;
     private final Router router;
@@ -32,7 +34,8 @@ public class GrpcServerManager {
 
     @PostConstruct
     void init() {
-        grpcServer = GrpcIoServer.server(vertx);
+        grpcServer = GrpcIoServer.server(vertx,
+                new GrpcServerOptions().setMaxMessageSize(MAX_INBOUND_MESSAGE_SIZE));
         services.stream().forEach(svc -> GrpcIoServiceBridge.bridge(svc).bind(grpcServer));
         router.route().order(Integer.MIN_VALUE).handler(ctx -> {
             String method = ctx.request().method().name();

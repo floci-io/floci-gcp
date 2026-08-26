@@ -11,12 +11,16 @@ import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsBucket;
+import io.floci.gcp.services.gcs.model.GcsComposeSource;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
 import io.floci.gcp.services.gcs.model.ResumableUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
@@ -26,6 +30,8 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import io.grpc.BindableService;
+import io.grpc.ServerInterceptors;
 import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
@@ -67,6 +73,7 @@ public class GcsService {
                     return size() > COMPLETED_RESUMABLE_UPLOAD_HISTORY;
                 }
             });
+    private final ConcurrentHashMap<String, GcsStreamingUpload> streamingUploads = new ConcurrentHashMap<>();
     private final Object[] objectLocks = createObjectLocks();
     private final Object[] uploadLocks = createObjectLocks();
     private final AtomicLong generationSequence;
@@ -75,6 +82,9 @@ public class GcsService {
     private final EmulatorConfig config;
     private final String defaultProjectId;
     private final PubSubService pubSubService;
+    private final GrpcServerManager grpcServerManager;
+    private final GcsAuthorizationService authorizationService;
+    private final GcsGrpcAuthorizationInterceptor grpcAuthorizationInterceptor;
 
     @Inject
     jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
@@ -83,11 +93,16 @@ public class GcsService {
 
     @Inject
     public GcsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, PubSubService pubSubService) {
+            StorageFactory storageFactory, PubSubService pubSubService,
+            GrpcServerManager grpcServerManager, GcsAuthorizationService authorizationService,
+            GcsGrpcAuthorizationInterceptor grpcAuthorizationInterceptor) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.defaultProjectId = config.defaultProjectId();
         this.pubSubService = pubSubService;
+        this.grpcServerManager = grpcServerManager;
+        this.authorizationService = authorizationService;
+        this.grpcAuthorizationInterceptor = grpcAuthorizationInterceptor;
         this.bucketStore = storageFactory.createGlobal("gcs-buckets", "gcs-buckets.json",
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
@@ -124,18 +139,25 @@ public class GcsService {
         this.serviceRegistry = null;
         this.config = null;
         this.pubSubService = null;
+        this.grpcServerManager = null;
+        this.authorizationService = null;
+        this.grpcAuthorizationInterceptor = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("gcs")
                 .enabled(config.services().gcs().enabled())
                 .storageKey("gcs")
-                .protocol(ServiceProtocol.REST)
+                .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(GcsBucketController.class, GcsObjectController.class,
                         GcsUploadController.class, GcsDownloadController.class,
                         GcsXmlDownloadController.class, GcsNotificationController.class,
-                        GcsBatchController.class)
+                        GcsBatchController.class, GcsGrpcController.class)
                 .build());
+        GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
+        BindableService intercepted = () -> ServerInterceptors.intercept(
+                controller, grpcAuthorizationInterceptor);
+        grpcServerManager.bind(intercepted);
     }
 
     @SuppressWarnings("unchecked")
@@ -217,6 +239,8 @@ public class GcsService {
         if (patch.containsKey("defaultEventBasedHold")) {
             bucket.setDefaultEventBasedHold((Boolean) patch.get("defaultEventBasedHold"));
         }
+        long metageneration = Long.parseLong(bucket.getMetageneration());
+        bucket.setMetageneration(Long.toString(metageneration + 1));
         bucket.setUpdated(nowTimestamp());
         bucketStore.put(name, bucket);
         return bucket;
@@ -260,14 +284,23 @@ public class GcsService {
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
             GcsObjectPreconditions preconditions, String baseUrl) {
+        return putObject(bucket, objectName, contentType, data, customerEncryption, userMetadata,
+                null, preconditions, baseUrl);
+    }
+
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
+            GcsObjectMeta metadataTemplate, GcsObjectPreconditions preconditions, String baseUrl) {
         synchronized (objectLock(bucket, objectName)) {
             checkPreconditions(bucket, objectName, preconditions);
-            return putObjectLocked(bucket, objectName, contentType, data, customerEncryption, userMetadata, baseUrl);
+            return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
+                    userMetadata, metadataTemplate, baseUrl);
         }
     }
 
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
-            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata, String baseUrl) {
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
+            GcsObjectMeta metadataTemplate, String baseUrl) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -306,6 +339,7 @@ public class GcsService {
             meta.setMetadata(new LinkedHashMap<>(userMetadata));
         }
         meta.setStorageClass("STANDARD");
+        applyInitialObjectMetadata(meta, metadataTemplate);
         meta.setTimeCreated(now);
         meta.setUpdated(now);
         meta.setSelfLink(baseUrl + "/storage/v1/b/" + bucket + "/o/" + encodedName);
@@ -322,7 +356,8 @@ public class GcsService {
         if (retentionExpiry != null) {
             meta.setRetentionExpirationTime(retentionExpiry);
         }
-        if (Boolean.TRUE.equals(b.getDefaultEventBasedHold())) {
+        if (Boolean.TRUE.equals(b.getDefaultEventBasedHold())
+                && (metadataTemplate == null || metadataTemplate.getEventBasedHold() == null)) {
             meta.setEventBasedHold(true);
         }
 
@@ -337,6 +372,22 @@ public class GcsService {
             }
         }
         return meta;
+    }
+
+    private static void applyInitialObjectMetadata(GcsObjectMeta target, GcsObjectMeta template) {
+        if (template == null) {
+            return;
+        }
+        if (template.getStorageClass() != null && !template.getStorageClass().isBlank()) {
+            target.setStorageClass(template.getStorageClass());
+        }
+        target.setContentDisposition(template.getContentDisposition());
+        target.setContentEncoding(template.getContentEncoding());
+        target.setContentLanguage(template.getContentLanguage());
+        target.setTemporaryHold(template.getTemporaryHold());
+        if (template.getEventBasedHold() != null) {
+            target.setEventBasedHold(template.getEventBasedHold());
+        }
     }
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
@@ -576,15 +627,33 @@ public class GcsService {
 
     public GcsObjectMeta composeObject(String bucket, String destObject,
             List<String> sourceNames, String contentType, GcsObjectPreconditions preconditions, String baseUrl) {
-        LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sourceNames.size());
+        return composeObject(bucket, destObject, sourceNames, contentType, null, preconditions, baseUrl);
+    }
+
+    public GcsObjectMeta composeObject(String bucket, String destObject,
+            List<String> sourceNames, String contentType, GcsObjectMeta metadataTemplate,
+            GcsObjectPreconditions preconditions, String baseUrl) {
+        return composeObjectSources(bucket, destObject,
+                sourceNames.stream().map(name -> new GcsComposeSource(name, null, null)).toList(),
+                contentType, metadataTemplate, preconditions, baseUrl);
+    }
+
+    public GcsObjectMeta composeObjectSources(String bucket, String destObject,
+            List<GcsComposeSource> sources, String contentType, GcsObjectMeta metadataTemplate,
+            GcsObjectPreconditions preconditions, String baseUrl) {
+        LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sources.size());
         if (bucketStore.get(bucket).isEmpty()) {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         byte[] composed = new byte[0];
         GcsObjectMeta firstSourceMeta = null;
         var componentCount = 0;
-        for (String src : sourceNames) {
-            var source = getObjectForDownload(bucket, src, null, GcsCustomerEncryption.none());
+        for (GcsComposeSource src : sources) {
+            var source = getObjectForDownload(bucket, src.name(), src.generation(), GcsCustomerEncryption.none());
+            if (src.ifGenerationMatch() != null
+                    && Long.parseLong(source.meta().getGeneration()) != src.ifGenerationMatch()) {
+                throw GcpException.conditionNotMet("Source generation condition not met: " + src.name());
+            }
             if (firstSourceMeta == null) {
                 firstSourceMeta = source.meta();
             }
@@ -601,7 +670,9 @@ public class GcsService {
             resolvedType = firstSourceMeta.getContentType();
         }
         var meta = putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
-                composed, GcsCustomerEncryption.none(), preconditions, baseUrl);
+                composed, GcsCustomerEncryption.none(),
+                metadataTemplate != null ? metadataTemplate.getMetadata() : null,
+                metadataTemplate, preconditions, baseUrl);
         // Real GCS composite objects report a componentCount and no md5Hash, and
         // composing an already composite source adds its component count.
         meta.setComponentCount(componentCount);
@@ -674,7 +745,7 @@ public class GcsService {
     private GcsObjectMeta copyObjectLocked(GcsObjectDownload src, String dstBucket, String dstObject, String baseUrl) {
         var srcMeta = src.meta();
         var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), null, baseUrl);
+                GcsCustomerEncryption.none(), null, null, baseUrl);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }
@@ -827,6 +898,43 @@ public class GcsService {
         }
         acl.setId(bucket + (objectName != null ? "/" + objectName : "") + "/" + entity);
         return acl;
+    }
+
+    public String startStreamingUpload(GcsObjectMeta object, GcsObjectPreconditions preconditions,
+            Long expectedSize, Integer expectedCrc32c, byte[] expectedMd5) {
+        if (bucketStore.get(object.getBucket()).isEmpty()) {
+            throw GcpException.notFound("Bucket not found: " + object.getBucket());
+        }
+        String uploadId = UUID.randomUUID().toString();
+        streamingUploads.put(uploadId, new GcsStreamingUpload(
+                object, preconditions, expectedSize, expectedCrc32c, expectedMd5));
+        return uploadId;
+    }
+
+    public GcsStreamingUpload getStreamingUpload(String uploadId) {
+        GcsStreamingUpload upload = streamingUploads.get(uploadId);
+        if (upload == null) {
+            throw GcpException.notFound("Streaming upload not found: " + uploadId);
+        }
+        return upload;
+    }
+
+    public GcsObjectMeta finalizeStreamingUpload(String uploadId, String baseUrl) {
+        GcsStreamingUpload upload = getStreamingUpload(uploadId);
+        synchronized (upload) {
+            if (upload.finalizedObject() != null) {
+                return upload.finalizedObject();
+            }
+            byte[] data = upload.data();
+            if (upload.expectedSize() != null && upload.expectedSize() != data.length) {
+                throw GcpException.outOfRange("Uploaded size does not match object_size: " + data.length);
+            }
+            GcsObjectMeta input = upload.object();
+            GcsObjectMeta stored = putObject(input.getBucket(), input.getName(), input.getContentType(), data,
+                    GcsCustomerEncryption.none(), input.getMetadata(), input, upload.preconditions(), baseUrl);
+            upload.finalizeWith(stored);
+            return stored;
+        }
     }
 
     public String startResumableUpload(String bucket, String objectName, String contentType,

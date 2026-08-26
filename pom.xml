@@ -136,6 +136,12 @@
             <artifactId>grpc-google-cloud-kms-v1</artifactId>
         </dependency>
 
+        <!-- Cloud Storage v2 gRPC stubs (StorageGrpc ImplBase) -->
+        <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-cloud-storage-v2</artifactId>
+        </dependency>
+
         <!-- Cloud Tasks gRPC stubs (CloudTasksGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

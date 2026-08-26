@@ -87,6 +87,10 @@ public class GcpException extends RuntimeException {
         return new GcpException(500, "INTERNAL", Status.Code.INTERNAL, message);
     }
 
+    public static GcpException dataLoss(String message) {
+        return new GcpException(500, "DATA_LOSS", Status.Code.DATA_LOSS, message);
+    }
+
     public static GcpException badGateway(String message) {
         return new GcpException(502, "UNAVAILABLE", Status.Code.UNAVAILABLE, message);
     }

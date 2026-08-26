@@ -1,4 +1,7 @@
 quarkus:
+  grpc:
+    server:
+      max-inbound-message-size: 4194304
   log:
     level: WARN
     category:

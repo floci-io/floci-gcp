@@ -17,6 +17,7 @@ quarkus:
   grpc:
     server:
       use-separate-server: false
+      max-inbound-message-size: 4194304
 
   shutdown:
     delay-enabled: true

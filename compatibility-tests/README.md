@@ -109,6 +109,7 @@ PUBSUB_EMULATOR_HOST=localhost:4588
 FIRESTORE_EMULATOR_HOST=localhost:4588
 DATASTORE_EMULATOR_HOST=localhost:4588
 STORAGE_EMULATOR_HOST=http://localhost:4588
+STORAGE_EMULATOR_HOST_GRPC=localhost:4588
 SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 ```
 
@@ -118,17 +119,28 @@ SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 | `FIRESTORE_EMULATOR_HOST` | Firestore | `host:port` |
 | `DATASTORE_EMULATOR_HOST` | Datastore | `host:port` |
 | `STORAGE_EMULATOR_HOST` | Cloud Storage | `http://host:port` |
+| `STORAGE_EMULATOR_HOST_GRPC` | Cloud Storage gRPC v2 | `host:port` |
 | `SECRET_MANAGER_EMULATOR_HOST` | Secret Manager | `host:port` |
 
 IAM, Cloud Logging, Cloud KMS, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging and Cloud KMS may optionally be overridden with `LOGGING_EMULATOR_HOST` and `KMS_EMULATOR_HOST` respectively).
 
 ## Running with Docker
 
-The Java module includes a `Dockerfile` for isolated execution:
+The Java and Go modules include Dockerfiles for isolated execution:
 
 ```bash
 docker build -t floci-gcp-sdk-java sdk-test-java/
 docker run --rm --network host floci-gcp-sdk-java
+```
+
+Build the Go SDK compatibility image, including the Cloud Storage gRPC v2 tests:
+
+```bash
+docker build -t floci-gcp-sdk-test-go:gcs-grpc sdk-test-go/
+mkdir -p test-results
+docker run --rm --network host \
+  -v "$(pwd)/test-results:/results" \
+  floci-gcp-sdk-test-go:gcs-grpc
 ```
 
 On macOS/Windows, use `host.docker.internal`:
@@ -141,6 +153,17 @@ docker run --rm \
   -e DATASTORE_EMULATOR_HOST=host.docker.internal:4588 \
   -e STORAGE_EMULATOR_HOST=http://host.docker.internal:4588 \
   floci-gcp-sdk-java
+```
+
+For the Go image on macOS/Windows, also override the gRPC endpoint:
+
+```bash
+docker run --rm \
+  -e FLOCI_GCP_ENDPOINT=http://host.docker.internal:4588 \
+  -e STORAGE_EMULATOR_HOST=http://host.docker.internal:4588 \
+  -e STORAGE_EMULATOR_HOST_GRPC=host.docker.internal:4588 \
+  -v "$(pwd)/test-results:/results" \
+  floci-gcp-sdk-test-go:gcs-grpc
 ```
 
 ## IaC suites — notes

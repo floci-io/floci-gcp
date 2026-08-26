@@ -2,6 +2,7 @@
 
 floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 
+- **gRPC v2** — bucket and object management plus streaming reads and writes
 - **REST XML** — object operations (upload, download, delete, list objects)
 - **REST JSON** — bucket management (create bucket, list buckets, get bucket metadata)
 
@@ -16,9 +17,12 @@ floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 
 ```bash
 export STORAGE_EMULATOR_HOST=http://localhost:4588
+export STORAGE_EMULATOR_HOST_GRPC=localhost:4588
 ```
 
-GCP Storage SDK clients use this variable to route requests to floci-gcp instead of `storage.googleapis.com`.
+REST clients use `STORAGE_EMULATOR_HOST`. The Go gRPC client uses
+`STORAGE_EMULATOR_HOST_GRPC` without a URL scheme. Java gRPC clients configure
+the endpoint through `StorageOptions.grpc()`.
 
 ## Service Account Authentication
 
@@ -91,6 +95,33 @@ and Bearer tokens are not validated.
 
     // Delete object
     storage.delete("my-bucket", "hello.txt");
+    ```
+
+=== "Java gRPC"
+
+    ```java
+    Storage storage = StorageOptions.grpc()
+        .setHost("http://localhost:4588")
+        .setProjectId("floci-local")
+        .setCredentials(NoCredentials.getInstance())
+        .build()
+        .getService();
+
+    storage.create(BucketInfo.of("my-bucket"));
+    storage.create(
+        BlobInfo.newBuilder("my-bucket", "hello.txt").build(),
+        "hello from floci-gcp".getBytes());
+    ```
+
+=== "Go gRPC"
+
+    ```go
+    os.Setenv("STORAGE_EMULATOR_HOST_GRPC", "localhost:4588")
+    client, err := storage.NewGRPCClient(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
     ```
 
 === "Python"
@@ -225,6 +256,17 @@ http://my-bucket.localhost.floci.io:4588/hello.txt
 The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container IP when running inside Docker, so virtual-hosted URLs work from sidecar containers without extra DNS configuration.
 
 ## Supported Operations
+
+**Cloud Storage gRPC v2:**
+
+- Buckets: `CreateBucket`, `GetBucket`, `ListBuckets`, `UpdateBucket`, `DeleteBucket`
+- Objects: `ComposeObject`, `GetObject`, `ListObjects`, `UpdateObject`, `DeleteObject`
+- Data path: `ReadObject`, `WriteObject`, `BidiWriteObject`
+- Resumable writes: `StartResumableWrite`, `QueryWriteStatus`
+
+The v2 MVP does not implement IAM policy RPCs, retention locking, rewrite,
+move, restore, resumable cancellation, bidi reads, appendable objects, write
+handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 
 **Bucket management (REST JSON):**
 

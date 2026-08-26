@@ -105,7 +105,7 @@ All GCP services — gRPC and REST — share a single port (`4588`) via HTTP/2 A
 <details>
 <summary><strong>Real GCP wire protocols</strong></summary>
 
-floci-gcp speaks the same protocols as real GCP: protobuf-over-gRPC for Pub/Sub, Firestore, and Secret Manager; binary HTTP/protobuf for Datastore; REST XML and JSON for Cloud Storage; and REST JSON for management APIs such as Cloud Run and Cloud Functions. Existing SDK calls work without modification.
+floci-gcp speaks the same protocols as real GCP: protobuf-over-gRPC for Pub/Sub, Firestore, Secret Manager, and Cloud Storage v2; binary HTTP/protobuf for Datastore; REST XML and JSON for Cloud Storage; and REST JSON for management APIs such as Cloud Run and Cloud Functions. Existing SDK calls work without modification.
 
 </details>
 
@@ -165,7 +165,7 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring"]
+            A["Pub/Sub\nFirestore\nCloud Storage v2\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring"]
         end
 
         subgraph REST ["REST services"]
@@ -209,7 +209,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | REST XML + REST JSON | Buckets, objects, multipart upload, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
@@ -335,6 +335,14 @@ Storage storage = StorageOptions.newBuilder()
 storage.create(BucketInfo.of("my-bucket"));
 storage.create(BlobInfo.newBuilder("my-bucket", "hello.txt").build(),
     "hello from floci-gcp".getBytes());
+
+// Use the Cloud Storage v2 gRPC transport instead.
+Storage grpcStorage = StorageOptions.grpc()
+    .setHost("http://localhost:4588")
+    .setProjectId("floci-local")
+    .setCredentials(NoCredentials.getInstance())
+    .build()
+    .getService();
 ```
 
 ```java

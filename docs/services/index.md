@@ -49,7 +49,14 @@ generates a self-signed certificate on first start; fetch it from
 generated certificate covers `localhost`, `floci-gcp`, `host.docker.internal`, and the
 loopback IPs; add more names via `FLOCI_GCP_TLS_EXTRA_SANS`, disable the listener with
 `FLOCI_GCP_TLS_ENABLED=false`, or supply your own PEM pair via `FLOCI_GCP_TLS_CERTIFICATE` /
-`FLOCI_GCP_TLS_CERTIFICATE_KEY` (outside Docker the listener only opens when these are set).
+`FLOCI_GCP_TLS_CERTIFICATE_KEY` (outside Docker the listener only opens when these are
+set — setting only one of the pair is rejected at startup with a clear error).
+
+Like everything floci-gcp serves, the certificate endpoint is a **local-development trust
+bootstrap** — the emulator's other listener is unauthenticated plaintext, so don't put any
+of it on an untrusted network. The entrypoint logs the certificate's SHA-256 fingerprint at
+startup, so a fetched PEM can be verified against the container logs
+(`openssl x509 -in cert.pem -noout -fingerprint -sha256`).
 
 ## Common Setup
 

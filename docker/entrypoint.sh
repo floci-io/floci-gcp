@@ -49,6 +49,10 @@ if [ "${FLOCI_GCP_TLS_ENABLED:-true}" != 'false' ] && [ -z "${FLOCI_GCP_TLS_CERT
         if [ -f "$tls_dir/cert.pem" ] && [ -f "$tls_dir/key.pem" ]; then
             export FLOCI_GCP_TLS_CERTIFICATE="$tls_dir/cert.pem"
             export FLOCI_GCP_TLS_CERTIFICATE_KEY="$tls_dir/key.pem"
+            # Log the fingerprint so a certificate fetched from /_floci-gcp/tls/cert can
+            # be verified out-of-band against the container logs.
+            fingerprint="$(openssl x509 -in "$tls_dir/cert.pem" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"
+            echo "floci-gcp: TLS certificate SHA-256 fingerprint: ${fingerprint:-unavailable}"
         else
             echo 'floci-gcp: TLS listener disabled' >&2
         fi

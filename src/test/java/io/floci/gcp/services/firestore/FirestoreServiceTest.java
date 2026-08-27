@@ -1,6 +1,7 @@
 package io.floci.gcp.services.firestore;
 
 import com.google.firestore.v1.Document;
+import com.google.firestore.v1.MapValue;
 import com.google.firestore.v1.Precondition;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
@@ -97,6 +98,48 @@ class FirestoreServiceTest {
 
         List<StoredDocument> results = service.runQuery(DB + "/documents", query);
         assertEquals(2, results.size());
+    }
+
+    @Test
+    void runQueryMatchesNestedMapFieldPath() {
+        service.applyWrite(nestedBillingDocument("matching", "cus_matching"), Instant.now());
+        service.applyWrite(nestedBillingDocument("different", "cus_different"), Instant.now());
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder()
+                        .setName(DB + "/documents/customers/missing")
+                        .putFields("name", Value.newBuilder().setStringValue("No billing field").build())
+                        .build())
+                .build(), Instant.now());
+
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .setWhere(StructuredQuery.Filter.newBuilder()
+                        .setFieldFilter(StructuredQuery.FieldFilter.newBuilder()
+                                .setField(StructuredQuery.FieldReference.newBuilder()
+                                        .setFieldPath("billing.stripe_customer_id"))
+                                .setOp(StructuredQuery.FieldFilter.Operator.EQUAL)
+                                .setValue(Value.newBuilder().setStringValue("cus_matching"))))
+                .build();
+
+        List<StoredDocument> results = service.runQuery(DB + "/documents", query);
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    private Write nestedBillingDocument(String id, String stripeCustomerId) {
+        Value billing = Value.newBuilder()
+                .setMapValue(MapValue.newBuilder()
+                        .putFields("stripe_customer_id",
+                                Value.newBuilder().setStringValue(stripeCustomerId).build()))
+                .build();
+        return Write.newBuilder()
+                .setUpdate(Document.newBuilder()
+                        .setName(DB + "/documents/customers/" + id)
+                        .putFields("billing", billing)
+                        .build())
+                .build();
     }
 
     @Test

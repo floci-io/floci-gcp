@@ -355,8 +355,8 @@ public class FirestoreService {
         if ("__name__".equals(path)) {
             return a.getName().compareTo(b.getName());
         }
-        StoredValue va = a.getFields() != null ? a.getFields().get(path) : null;
-        StoredValue vb = b.getFields() != null ? b.getFields().get(path) : null;
+        StoredValue va = resolveFieldPath(a, path);
+        StoredValue vb = resolveFieldPath(b, path);
         if (va == null && vb == null) {
             return 0;
         }
@@ -421,7 +421,7 @@ public class FirestoreService {
             String target = value.hasReferenceValue() ? value.getReferenceValue() : value.getStringValue();
             return doc.getName().compareTo(target);
         }
-        StoredValue stored = doc.getFields() != null ? doc.getFields().get(path) : null;
+        StoredValue stored = resolveFieldPath(doc, path);
         if (stored == null) {
             return -1;
         }
@@ -571,7 +571,7 @@ public class FirestoreService {
 
     private boolean matchesFieldFilter(StoredDocument doc, StructuredQuery.FieldFilter ff) {
         String path = ff.getField().getFieldPath();
-        StoredValue stored = doc.getFields() != null ? doc.getFields().get(path) : null;
+        StoredValue stored = resolveFieldPath(doc, path);
         Value filterValue = ff.getValue();
 
         return switch (ff.getOp()) {
@@ -637,7 +637,7 @@ public class FirestoreService {
 
     private boolean matchesUnaryFilter(StoredDocument doc, StructuredQuery.UnaryFilter uf) {
         String path = uf.getField().getFieldPath();
-        StoredValue stored = doc.getFields() != null ? doc.getFields().get(path) : null;
+        StoredValue stored = resolveFieldPath(doc, path);
         return switch (uf.getOp()) {
             case IS_NULL -> stored != null && "null".equals(stored.getType());
             case IS_NOT_NULL -> stored != null && !"null".equals(stored.getType());
@@ -650,6 +650,22 @@ public class FirestoreService {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    private StoredValue resolveFieldPath(StoredDocument doc, String path) {
+        if (doc.getFields() == null) {
+            return null;
+        }
+
+        String[] segments = path.split("\\.", -1);
+        StoredValue value = doc.getFields().get(segments[0]);
+        for (int i = 1; i < segments.length; i++) {
+            if (value == null || !"map".equals(value.getType()) || value.getMapValue() == null) {
+                return null;
+            }
+            value = value.getMapValue().get(segments[i]);
+        }
+        return value;
+    }
 
     private Map<String, StoredValue> convertFields(Map<String, Value> protoFields) {
         Map<String, StoredValue> result = new LinkedHashMap<>();

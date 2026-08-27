@@ -250,4 +250,34 @@ class FirestoreTest {
             docRef.delete().get();
         }
     }
+
+    @Test
+    @Order(11)
+    void queryDocumentsByNestedMapField() throws ExecutionException, InterruptedException {
+        String collection = TestFixtures.uniqueName("nested-query");
+        DocumentReference matching = firestore.collection(collection).document("matching");
+        DocumentReference different = firestore.collection(collection).document("different");
+        DocumentReference missing = firestore.collection(collection).document("missing");
+
+        matching.set(Map.of("billing", Map.of("stripe_customer_id", "cus_matching"))).get();
+        different.set(Map.of("billing", Map.of("stripe_customer_id", "cus_different"))).get();
+        missing.set(Map.of("name", "No billing field")).get();
+
+        try {
+            List<String> documentIds = firestore.collection(collection)
+                    .whereEqualTo("billing.stripe_customer_id", "cus_matching")
+                    .get()
+                    .get()
+                    .getDocuments()
+                    .stream()
+                    .map(DocumentSnapshot::getId)
+                    .toList();
+
+            assertThat(documentIds).containsExactly("matching");
+        } finally {
+            matching.delete().get();
+            different.delete().get();
+            missing.delete().get();
+        }
+    }
 }

@@ -79,6 +79,29 @@ class GcpExceptionMapperTest {
     }
 
     @Test
+    void plainTextErrorsCarryTheBareMessage() {
+        GcpException ex = GcpException.unavailable("upload offset is 4 byte(s)").asPlainText();
+        var response = new GcpExceptionMapper().toResponse(ex);
+
+        assertEquals(503, response.getStatus());
+        // Spelled out the way live GCS sends it, rather than however MediaType would render it.
+        assertEquals("text/plain; charset=utf-8", response.getHeaderString("Content-Type"));
+        assertEquals("upload offset is 4 byte(s)", response.getEntity());
+    }
+
+    @Test
+    void plainTextFlagSurvivesWithReason() {
+        GcpException ex = GcpException.unavailable("gap").asPlainText().withReason("backendError");
+        assertTrue(ex.isPlainText());
+        assertEquals("backendError", ex.getReason());
+    }
+
+    @Test
+    void errorsAreJsonUnlessFlagged() {
+        assertFalse(GcpException.unavailable("gap").isPlainText());
+    }
+
+    @Test
     void reasonIsDerivedFromStatus() {
         assertEquals("alreadyExists",
                 GcpExceptionMapper.ErrorDetail.of(409, "x", "ALREADY_EXISTS").errors().get(0).reason());

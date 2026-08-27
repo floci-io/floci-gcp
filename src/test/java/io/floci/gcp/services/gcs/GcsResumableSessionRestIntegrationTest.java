@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -128,18 +129,28 @@ class GcsResumableSessionRestIntegrationTest {
                 .body(equalTo("testok"));
     }
 
+    // Real GCS serves the offset gap as text/plain, and the Java SDK keys on that content type
+    // plus the words in the body to fail fast instead of retrying (JsonResumableSessionPutTask).
     @Test
-    void chunkPastTheReceivedBytesIsRetryable() {
+    void chunkPastTheReceivedBytesIsPlainText() {
         ensureBucket();
         var uploadId = startUpload("gap-chunk-obj");
 
-        given()
+        var body = given()
                 .contentType("application/octet-stream")
                 .header("Content-Range", "bytes 4-5/6")
                 .body("ok".getBytes(StandardCharsets.UTF_8))
                 .when().post(sessionPath(uploadId))
                 .then().statusCode(503)
-                .body("error.status", equalTo("UNAVAILABLE"));
+                .header("Content-Type", equalTo("text/plain; charset=utf-8"))
+                .header("Content-Length", equalTo("138"))
+                .extract().body().asString();
+
+        // Byte for byte what live GCS returned on 2026-08-27, double space included.
+        assertEquals("Invalid request.  According to the Content-Range header, the upload offset is "
+                + "4 byte(s), which exceeds already uploaded size of 0 byte(s).", body);
+        // The SDK reads "earlier" as the rewind case, which is a different scenario it does retry.
+        assertFalse(body.toLowerCase(Locale.US).contains("earlier"));
     }
 
     @Test
@@ -215,7 +226,8 @@ class GcsResumableSessionRestIntegrationTest {
                 .header("Content-Range", "bytes 4-5/6")
                 .body("ok".getBytes(StandardCharsets.UTF_8))
                 .when().post(sessionPath(uploadId))
-                .then().statusCode(503);
+                .then().statusCode(503)
+                .header("Content-Type", equalTo("text/plain; charset=utf-8"));
     }
 
     @Test

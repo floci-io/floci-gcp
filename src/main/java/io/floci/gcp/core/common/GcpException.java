@@ -12,18 +12,20 @@ public class GcpException extends RuntimeException {
     private final String gcpStatus;
     private final Status.Code grpcCode;
     private final String reason;
+    private final boolean plainText;
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message) {
-        this(httpStatus, gcpStatus, grpcCode, message, null);
+        this(httpStatus, gcpStatus, grpcCode, message, null, false);
     }
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message,
-                         String reason) {
+                         String reason, boolean plainText) {
         super(message);
         this.httpStatus = httpStatus;
         this.gcpStatus = gcpStatus;
         this.grpcCode = grpcCode;
         this.reason = reason;
+        this.plainText = plainText;
     }
 
     public int getHttpStatus() {
@@ -44,7 +46,21 @@ public class GcpException extends RuntimeException {
     }
 
     public GcpException withReason(String reason) {
-        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason);
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText);
+    }
+
+    /** True when the REST body must be the bare message as {@code text/plain}, not the JSON error shape. */
+    public boolean isPlainText() {
+        return plainText;
+    }
+
+    /**
+     * Renders this error as a {@code text/plain} body carrying only the message. Real GCS serves a
+     * handful of errors that way, and SDKs classify them by sniffing the content type, so the JSON
+     * error shape would change how a client reacts.
+     */
+    public GcpException asPlainText() {
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, true);
     }
 
     public static GcpException notFound(String message) {

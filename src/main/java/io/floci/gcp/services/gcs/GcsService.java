@@ -940,8 +940,13 @@ public class GcsService {
     private static byte[] appendChunk(ResumableUpload upload, long start, byte[] data) {
         byte[] existing = upload.data();
         if (start > existing.length) {
-            throw GcpException.unavailable("Invalid request. According to the Content-Range header, the upload offset is "
-                    + start + " byte(s), which exceeds already uploaded size of " + existing.length + " byte(s).");
+            // Real GCS serves this one as text/plain. The Java SDK sniffs that content type to
+            // recognize the offset gap (JsonResumableSessionPutTask) and fails fast, so a JSON
+            // body would make it spend its whole retry budget on an error that never clears.
+            // The double space after "Invalid request." is what the live service sends.
+            throw GcpException.unavailable("Invalid request.  According to the Content-Range header, the upload offset is "
+                    + start + " byte(s), which exceeds already uploaded size of " + existing.length + " byte(s).")
+                    .asPlainText();
         }
         if (start + data.length <= existing.length) {
             return existing;

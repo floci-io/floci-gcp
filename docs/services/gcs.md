@@ -166,9 +166,22 @@ Session behavior matches GCS:
 | Chunk that completes the object | `200` with the object metadata |
 | Status query (`Content-Range: bytes */<total>` or `bytes */*`) | `308` with the received range, or `200` with the object metadata once complete |
 | Chunk already received in full | `308` with the unchanged received range, without appending it again |
-| Chunk starting past the received bytes | `503`, so the client re-syncs with a status query |
+| Chunk starting past the received bytes | `503` with a `text/plain` body, matching GCS |
 | Any request after completion | `200` with the stored object metadata |
 | Unknown or expired `upload_id` | `404` |
+
+The offset gap is the one session error GCS does not serve as JSON. Its body is the bare
+message as `text/plain`, and the Java SDK sniffs that content type to tell a client-side
+data loss apart from a transient `503`, failing fast rather than retrying. floci-gcp
+reproduces the response byte for byte, down to the double space after `Invalid request.`:
+
+```
+HTTP/1.1 503 Service Unavailable
+content-type: text/plain; charset=utf-8
+content-length: 138
+
+Invalid request.  According to the Content-Range header, the upload offset is 4 byte(s), which exceeds already uploaded size of 0 byte(s).
+```
 
 The Go SDK sends `X-GUploader-No-308: yes` because `308` collides with the RFC 7238
 "Permanent Redirect" semantics. floci-gcp answers those requests the way GCS does: `200`

@@ -2,6 +2,7 @@ package io.floci.gcp.core.common;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
@@ -17,12 +18,24 @@ import java.util.List;
  * </pre>
  * The nested {@code errors[]} array (with {@code domain} and {@code reason}) mirrors the
  * legacy Google JSON API error format that some SDK retry/handling logic inspects.
+ *
+ * <p>Errors flagged with {@link GcpException#asPlainText()} skip that shape and carry the bare
+ * message as {@code text/plain}, matching the few responses real GCS serves that way.
  */
 @Provider
 public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
 
+    /** Spelled out rather than built from {@link MediaType}, which drops the space and upper cases the charset. */
+    private static final String PLAIN_TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
     @Override
     public Response toResponse(GcpException ex) {
+        if (ex.isPlainText()) {
+            return Response.status(ex.getHttpStatus())
+                    .header(HttpHeaders.CONTENT_TYPE, PLAIN_TEXT_CONTENT_TYPE)
+                    .entity(ex.getMessage())
+                    .build();
+        }
         String reason = ex.getReason() != null ? ex.getReason() : reasonFor(ex.getGcpStatus());
         return Response.status(ex.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)

@@ -32,14 +32,34 @@ import com.google.cloud.scheduler.v1.CloudSchedulerSettings;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.sqladmin.SQLAdmin;
+import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.api.gax.rpc.TransportChannelProvider;
+import com.google.cloud.http.HttpTransportOptions;
+import io.grpc.Grpc;
+import io.grpc.ManagedChannel;
+import io.grpc.TlsChannelCredentials;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.KeyStore;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.UUID;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 
 public final class TestFixtures {
 
@@ -56,6 +76,160 @@ public final class TestFixtures {
 
     public static String uniqueName(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    // ── TLS ──────────────────────────────────────────────────────────────────────
+    // floci-gcp serves HTTP and HTTPS on the same port, so the TLS endpoint is the
+    // plain endpoint with the scheme swapped. Trust material is bootstrapped at
+    // runtime from GET /_floci-gcp/tls-cert (served over plain HTTP), so nothing has
+    // to be bundled with the suite. Everything below is inert when TLS is disabled:
+    // the endpoint 404s and tlsAvailable() reports false.
+
+    private static final Object TLS_LOCK = new Object();
+    private static boolean tlsProbed;
+    private static String cachedCaCertPem;
+    private static Path cachedCaCertFile;
+
+    /** The emulator's HTTPS endpoint — same host and port as {@link #endpoint()}. */
+    public static String tlsEndpoint() {
+        return endpoint().replaceFirst("^http://", "https://");
+    }
+
+    /**
+     * The emulator's TLS certificate in PEM form, or {@code null} when TLS is disabled.
+     * Fetched once over plain HTTP and cached.
+     */
+    public static String caCertPem() {
+        synchronized (TLS_LOCK) {
+            if (!tlsProbed) {
+                tlsProbed = true;
+                cachedCaCertPem = fetchCaCertPem();
+            }
+            return cachedCaCertPem;
+        }
+    }
+
+    /** Whether the emulator under test is serving TLS. Drives the TLS tests' skip guard. */
+    public static boolean tlsAvailable() {
+        return caCertPem() != null;
+    }
+
+    private static String fetchCaCertPem() {
+        try {
+            HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(endpoint() + "/_floci-gcp/tls-cert"))
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                return null;
+            }
+            return resp.body();
+        } catch (IOException | InterruptedException e) {
+            return null;
+        }
+    }
+
+    private static X509Certificate caCertificate() throws GeneralSecurityException {
+        String pem = caCertPem();
+        if (pem == null) {
+            throw new IllegalStateException(
+                    "TLS is not enabled on " + endpoint() + " — guard with assumeTrue(tlsAvailable())");
+        }
+        return (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(pem.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /** A trust store containing only the emulator's certificate, for HTTP-transport clients. */
+    public static KeyStore caTrustStore() throws GeneralSecurityException, IOException {
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        ks.load(null, null);
+        ks.setCertificateEntry("floci-gcp", caCertificate());
+        return ks;
+    }
+
+    /**
+     * The emulator's certificate as a file, for gRPC's {@code TlsChannelCredentials}.
+     * Written once to a temp file that is removed on JVM exit.
+     */
+    public static File caCertFile() throws IOException {
+        synchronized (TLS_LOCK) {
+            if (cachedCaCertFile == null) {
+                String pem = caCertPem();
+                if (pem == null) {
+                    throw new IllegalStateException(
+                            "TLS is not enabled on " + endpoint() + " — guard with assumeTrue(tlsAvailable())");
+                }
+                Path tmp = Files.createTempFile("floci-gcp-ca-", ".crt");
+                tmp.toFile().deleteOnExit();
+                Files.writeString(tmp, pem);
+                cachedCaCertFile = tmp;
+            }
+            return cachedCaCertFile.toFile();
+        }
+    }
+
+    /** An {@link SSLContext} trusting the emulator, for raw {@link HttpClient} calls. */
+    public static SSLContext tlsSslContext() throws GeneralSecurityException, IOException {
+        TrustManagerFactory tmf =
+                TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(caTrustStore());
+        SSLContext ctx = SSLContext.getInstance("TLS");
+        ctx.init(null, tmf.getTrustManagers(), null);
+        return ctx;
+    }
+
+    /** An {@link HttpClient} that verifies the emulator's certificate rather than skipping checks. */
+    public static HttpClient tlsHttpClient() throws GeneralSecurityException, IOException {
+        return HttpClient.newBuilder().sslContext(tlsSslContext()).build();
+    }
+
+    /**
+     * A GCS client speaking HTTPS to the emulator. Trust is scoped to this client's
+     * transport rather than installed globally via {@code javax.net.ssl.*}.
+     */
+    public static Storage tlsStorageClient() throws GeneralSecurityException, IOException {
+        KeyStore trustStore = caTrustStore();
+        HttpTransportOptions transportOptions = HttpTransportOptions.newBuilder()
+                .setHttpTransportFactory(() -> {
+                    try {
+                        return new NetHttpTransport.Builder().trustCertificates(trustStore).build();
+                    } catch (GeneralSecurityException e) {
+                        throw new IllegalStateException("Failed to build a TLS-trusting HTTP transport", e);
+                    }
+                })
+                .build();
+
+        return StorageOptions.newBuilder()
+                .setHost(tlsEndpoint())
+                .setProjectId(projectId())
+                .setCredentials(NoCredentials.getInstance())
+                .setTransportOptions(transportOptions)
+                .build()
+                .getService();
+    }
+
+    /**
+     * A gRPC channel to the emulator secured with TLS, trusting only its certificate.
+     * Callers own the channel and must shut it down.
+     */
+    public static ManagedChannel tlsGrpcChannel() throws IOException {
+        return Grpc.newChannelBuilder(grpcTarget(),
+                        TlsChannelCredentials.newBuilder().trustManager(caCertFile()).build())
+                .build();
+    }
+
+    /** Wraps a channel so gax-based clients can use it. */
+    public static TransportChannelProvider channelProviderFor(ManagedChannel channel) {
+        return FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+    }
+
+    /** The emulator's {@code host:port} gRPC target, derived from {@link #endpoint()}. */
+    public static String grpcTarget() {
+        URI uri = URI.create(endpoint());
+        int port = uri.getPort() > 0 ? uri.getPort() : 4588;
+        return uri.getHost() + ":" + port;
     }
 
     public static ServiceAccountCredentials serviceAccountCredentials() throws GeneralSecurityException {

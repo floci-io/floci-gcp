@@ -13,6 +13,10 @@ services:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
       FLOCI_GCP_SERVICES_DOCKER_NETWORK: floci_gcp_default
+      # HTTP and HTTPS share port 4588, so plain-HTTP clients are unaffected.
+      # The container runs unprivileged, so the extra 443 binding is disabled.
+      FLOCI_GCP_TLS_ENABLED: "true"
+      FLOCI_GCP_TLS_HTTPS_PORT: "0"
     networks:
       floci_gcp_default:
         aliases:

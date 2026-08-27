@@ -94,6 +94,11 @@ jobs:
       - name: Create Docker network
         run: docker network create compat-net
 
+      # TLS is enabled for every suite. HTTP and HTTPS share port 4588, so the suites
+      # below keep talking plain HTTP unchanged — which makes them a regression guard
+      # for the protocol-sniffing proxy — while sdk-test-java's TlsTest exercises
+      # HTTPS and gRPC-over-TLS. The extra 443 binding is disabled because the
+      # container runs as an unprivileged user.
       - name: Start floci-gcp
         run: |
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
@@ -111,6 +116,8 @@ jobs:
             -e FLOCI_GCP_SERVICES_DOCKER_NETWORK=compat-net \
             -e FLOCI_GCP_SERVICES_KAFKA_MOCK="$KAFKA_MOCK" \
             -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false \
+            -e FLOCI_GCP_TLS_ENABLED=true \
+            -e FLOCI_GCP_TLS_HTTPS_PORT=0 \
             floci-gcp:test-native
 
       - name: Wait for floci-gcp to be ready

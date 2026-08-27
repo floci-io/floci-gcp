@@ -67,6 +67,7 @@ nav:
     - Storage Modes: configuration/storage.md
     - Advanced:
       - application.yml Reference: configuration/advanced/application-yml.md
+      - TLS / HTTPS: configuration/advanced/tls.md
   - Services:
     - Overview: services/index.md
     - Cloud Storage (GCS): services/gcs.md

@@ -17,8 +17,13 @@ build:
 
 # ── Emulator: start / stop ────────────────────────────────────────────────────
 
+# TLS on: HTTP and HTTPS share $(PORT), so plain-HTTP clients are unaffected and the
+# compat suite's TlsTest runs instead of skipping. https-port=0 skips the privileged
+# 443 binding.
 run:
-	$(MVN) quarkus:dev -Dno-color > emulator.log 2>&1 & echo $$! > $(PID_FILE)
+	$(MVN) quarkus:dev -Dno-color \
+		-Dfloci-gcp.tls.enabled=true \
+		-Dfloci-gcp.tls.https-port=0 > emulator.log 2>&1 & echo $$! > $(PID_FILE)
 	@echo "Waiting for emulator to start on port $(PORT)..."
 	@until curl -s http://localhost:$(PORT)/health > /dev/null; do sleep 1; done
 	@echo "Emulator is up!"

@@ -4,6 +4,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.Resettable;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.core.tls.TlsConfigSource;
 import io.floci.gcp.lifecycle.inithook.InitializationHook;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -60,6 +61,32 @@ public class EmulatorInfoController {
                 "version", HealthController.resolveVersion(),
                 "port", config.port(),
                 "defaultProject", config.defaultProjectId())).build();
+    }
+
+    @GET
+    @Path("/tls-cert")
+    public Response tlsCert() {
+        String pem = TlsConfigSource.currentCertPem;
+        if (pem == null || pem.isBlank()) {
+            boolean tlsEnabled = config.tls().enabled();
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("tlsEnabled", tlsEnabled);
+            if (!tlsEnabled) {
+                body.put("error", "TLS is not enabled");
+                body.put("message",
+                        "floci-gcp is serving plain HTTP only. Set FLOCI_GCP_TLS_ENABLED=true and "
+                        + "restart to serve HTTPS on the same port.");
+            } else {
+                body.put("error", "TLS certificate not available yet");
+                body.put("message",
+                        "TLS is enabled but no certificate is available. If floci-gcp has only just "
+                        + "started, the certificate is still being generated — retry shortly. "
+                        + "Otherwise check the startup logs for certificate generation/read errors.");
+            }
+            return Response.status(Response.Status.NOT_FOUND).entity(body).build();
+        }
+        return Response.ok(pem).type("application/x-pem-file").build();
     }
 
     @GET

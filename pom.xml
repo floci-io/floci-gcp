@@ -186,6 +186,18 @@
             <artifactId>jackson-dataformat-cbor</artifactId>
         </dependency>
 
+        <!-- BouncyCastle — X.509 generation for self-signed TLS certificates -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.85</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.85</version>
+        </dependency>
+
         <!-- Testing -->
         <dependency>
             <groupId>io.quarkus</groupId>

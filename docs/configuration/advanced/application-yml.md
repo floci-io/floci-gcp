@@ -38,6 +38,13 @@ floci-gcp:
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-project-id: floci-local
 
+  tls:                                # See "TLS / HTTPS" for details
+    enabled: false                    # Serve HTTP and HTTPS on the same port
+    self-signed: true                 # Auto-generate a cert when no cert-path/key-path is given
+    https-port: 443                   # Extra port bound for HTTPS (0 disables)
+    # cert-path: ""                   # PEM certificate file
+    # key-path: ""                    # PEM private key file
+
   storage:
     mode: memory                      # memory | persistent | hybrid | wal
     persistent-path: ./data

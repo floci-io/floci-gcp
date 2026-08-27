@@ -30,6 +30,12 @@ public interface EmulatorConfig {
                 .orElse(baseUrl());
     }
 
+    /**
+     * TLS settings. When {@code tls().enabled()} is true the TlsProxyServer serves HTTP and
+     * HTTPS on the same public {@link #port()}.
+     */
+    TlsConfig tls();
+
     DnsConfig dns();
 
     StorageConfig storage();
@@ -39,6 +45,39 @@ public interface EmulatorConfig {
     DockerConfig docker();
 
     InitHooksConfig initHooks();
+
+    interface TlsConfig {
+        /** Enable TLS/HTTPS. When true, both HTTP and HTTPS are served on the same public port. */
+        @WithDefault("false")
+        boolean enabled();
+
+        /** Path to PEM certificate file. */
+        Optional<String> certPath();
+
+        /** Path to PEM private key file. */
+        Optional<String> keyPath();
+
+        /** Auto-generate a self-signed certificate when no cert-path/key-path provided. */
+        @WithDefault("true")
+        boolean selfSigned();
+
+        /**
+         * Additional port the TLS proxy binds for HTTPS traffic, alongside the public
+         * floci-gcp {@link EmulatorConfig#port()}.
+         *
+         * <p>GCP SDKs and gcloud default to {@code https://} endpoints on the conventional 443
+         * unless an explicit port is configured. Binding 443 here (with the same HTTP/HTTPS
+         * protocol detection used on the main port) lets clients that assume GCP lives on 443
+         * reach floci-gcp.
+         *
+         * <p>Default {@code 443}. Set to {@code 0} to disable the extra binding (e.g. when
+         * floci-gcp runs unprivileged or another process owns 443). When equal to
+         * {@link EmulatorConfig#port()} only a single listener is started.
+         * Env: FLOCI_GCP_TLS_HTTPS_PORT
+         */
+        @WithDefault("443")
+        int httpsPort();
+    }
 
     interface DnsConfig {
         Optional<List<String>> extraSuffixes();

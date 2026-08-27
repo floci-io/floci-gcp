@@ -18,6 +18,24 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 
 ---
 
+## TLS
+
+Off by default — floci-gcp serves plain HTTP, which is what GCP SDKs expect from an emulator.
+When enabled, HTTP and HTTPS are served on the **same** port (`FLOCI_GCP_PORT`), so existing
+plain-HTTP clients keep working. See [TLS / HTTPS](./advanced/tls.md) for details.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_TLS_ENABLED` | `false` | Serve HTTPS alongside HTTP on the public port |
+| `FLOCI_GCP_TLS_SELF_SIGNED` | `true` | Auto-generate a self-signed certificate when no cert/key is supplied. Stored under `FLOCI_GCP_STORAGE_PERSISTENT_PATH/tls/` and reused across restarts |
+| `FLOCI_GCP_TLS_CERT_PATH` | _(none)_ | PEM certificate file. Must be set together with the key path |
+| `FLOCI_GCP_TLS_KEY_PATH` | _(none)_ | PEM private key file |
+| `FLOCI_GCP_TLS_HTTPS_PORT` | `443` | Extra port bound for HTTPS, since GCP SDKs assume HTTPS on 443 when no port is given. Set `0` to disable |
+
+Fetch the active certificate (over plain HTTP) with `GET /_floci-gcp/tls-cert`.
+
+---
+
 ## Storage
 
 | Variable | Default | Description |

@@ -122,6 +122,27 @@ SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 
 IAM, Cloud Logging, Cloud KMS, and Managed Kafka have no standard GCP emulator env var — tests connect via `FLOCI_GCP_ENDPOINT` directly (Cloud Logging and Cloud KMS may optionally be overridden with `LOGGING_EMULATOR_HOST` and `KMS_EMULATOR_HOST` respectively).
 
+## TLS
+
+`docker-compose.yml`, `make compat-docker`, `make run` and CI all start floci-gcp with
+`FLOCI_GCP_TLS_ENABLED=true`. Because HTTP and HTTPS share port 4588, **every endpoint
+variable above stays on `http://` and no suite changes behaviour** — which makes the whole
+suite a regression guard for the protocol-sniffing proxy.
+
+On top of that, `sdk-test-java`'s `TlsTest` exercises TLS directly: HTTPS through the GCS
+client, gRPC-over-TLS through Pub/Sub and Secret Manager, and a plaintext gRPC call to
+prove the plaintext path still works while TLS is on. It derives `https://` from
+`FLOCI_GCP_ENDPOINT` itself and fetches the emulator's certificate from
+`GET /_floci-gcp/tls-cert` over plain HTTP, so trust is established at runtime — nothing is
+bundled with the suite and no verification is disabled.
+
+`TlsTest` skips itself when that endpoint returns 404, so running against a plaintext
+emulator is fine.
+
+Note that the `*_EMULATOR_HOST` variables cannot be used to test TLS: the GCP SDKs call
+`usePlaintext()` whenever one is set, regardless of scheme. That is why `TlsTest` builds
+its own clients.
+
 ## Running with Docker
 
 The Java module includes a `Dockerfile` for isolated execution:

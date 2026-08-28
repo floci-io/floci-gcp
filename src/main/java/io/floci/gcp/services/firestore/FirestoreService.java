@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -573,14 +574,17 @@ public class FirestoreService {
         String path = ff.getField().getFieldPath();
         StoredValue stored = resolveFieldPath(doc, path);
         Value filterValue = ff.getValue();
+        OptionalInt filterComparison = stored == null
+                ? OptionalInt.empty()
+                : compareFilterValues(stored, filterValue);
 
         return switch (ff.getOp()) {
             case EQUAL -> stored != null && stored.matchesEqual(filterValue);
             case NOT_EQUAL -> stored == null || !stored.matchesEqual(filterValue);
-            case LESS_THAN -> stored != null && compareValues(stored, filterValue) < 0;
-            case LESS_THAN_OR_EQUAL -> stored != null && compareValues(stored, filterValue) <= 0;
-            case GREATER_THAN -> stored != null && compareValues(stored, filterValue) > 0;
-            case GREATER_THAN_OR_EQUAL -> stored != null && compareValues(stored, filterValue) >= 0;
+            case LESS_THAN -> filterComparison.isPresent() && filterComparison.getAsInt() < 0;
+            case LESS_THAN_OR_EQUAL -> filterComparison.isPresent() && filterComparison.getAsInt() <= 0;
+            case GREATER_THAN -> filterComparison.isPresent() && filterComparison.getAsInt() > 0;
+            case GREATER_THAN_OR_EQUAL -> filterComparison.isPresent() && filterComparison.getAsInt() >= 0;
             case ARRAY_CONTAINS -> stored != null && "array".equals(stored.getType())
                     && stored.getArrayValue() != null
                     && stored.getArrayValue().stream().anyMatch(sv -> sv.matchesEqual(filterValue));
@@ -595,6 +599,48 @@ public class FirestoreService {
                     && filterValue.getArrayValue().getValuesList().stream()
                         .anyMatch(fv -> stored.getArrayValue().stream().anyMatch(sv -> sv.matchesEqual(fv)));
             default -> true;
+        };
+    }
+
+    /**
+     * Compares values for inequality filters. Unlike ordering and cursor comparison, an
+     * unsupported type pairing is explicitly incomparable and therefore cannot match an
+     * inclusive inequality merely because the ordering comparator returned zero.
+     */
+    private OptionalInt compareFilterValues(StoredValue stored, Value proto) {
+        return switch (proto.getValueTypeCase()) {
+            case INTEGER_VALUE -> {
+                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
+                    yield OptionalInt.of(Long.compare(stored.getIntegerValue(), proto.getIntegerValue()));
+                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
+                    yield OptionalInt.of(Double.compare(stored.getDoubleValue(), (double) proto.getIntegerValue()));
+                yield OptionalInt.empty();
+            }
+            case DOUBLE_VALUE -> {
+                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
+                    yield OptionalInt.of(Double.compare(stored.getDoubleValue(), proto.getDoubleValue()));
+                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
+                    yield OptionalInt.of(Double.compare((double) stored.getIntegerValue(), proto.getDoubleValue()));
+                yield OptionalInt.empty();
+            }
+            case STRING_VALUE -> {
+                if ("string".equals(stored.getType()) && stored.getStringValue() != null)
+                    yield OptionalInt.of(stored.getStringValue().compareTo(proto.getStringValue()));
+                yield OptionalInt.empty();
+            }
+            case TIMESTAMP_VALUE -> {
+                if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
+                    try {
+                        Instant a = Instant.parse(stored.getStringValue());
+                        Instant b = Instant.ofEpochSecond(
+                                proto.getTimestampValue().getSeconds(),
+                                proto.getTimestampValue().getNanos());
+                        yield OptionalInt.of(a.compareTo(b));
+                    } catch (Exception ignored) {}
+                }
+                yield OptionalInt.empty();
+            }
+            default -> OptionalInt.empty();
         };
     }
 

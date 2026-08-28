@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -126,6 +127,94 @@ class FirestoreServiceTest {
 
         assertEquals(List.of(DB + "/documents/customers/matching"),
                 results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void nestedInclusiveInequalitiesRejectIncompatibleTypes() {
+        service.applyWrite(nestedValueDocument("number", "threshold",
+                Value.newBuilder().setIntegerValue(10).build()), Instant.now());
+        service.applyWrite(nestedValueDocument("string", "threshold",
+                Value.newBuilder().setStringValue("10").build()), Instant.now());
+        service.applyWrite(nestedValueDocument("boolean", "threshold",
+                Value.newBuilder().setBooleanValue(true).build()), Instant.now());
+
+        for (StructuredQuery.FieldFilter.Operator operator : List.of(
+                StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL,
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL)) {
+            List<StoredDocument> results = runNestedFilter(
+                    "billing.threshold", operator, Value.newBuilder().setIntegerValue(10).build());
+
+            assertEquals(List.of(DB + "/documents/customers/number"),
+                    results.stream().map(StoredDocument::getName).toList());
+        }
+    }
+
+    @Test
+    void nestedInclusiveInequalitiesPreserveNumericCrossComparison() {
+        service.applyWrite(nestedValueDocument("integer", "threshold",
+                Value.newBuilder().setIntegerValue(10).build()), Instant.now());
+        service.applyWrite(nestedValueDocument("double", "threshold",
+                Value.newBuilder().setDoubleValue(10.0).build()), Instant.now());
+        service.applyWrite(nestedValueDocument("different", "threshold",
+                Value.newBuilder().setDoubleValue(11.0).build()), Instant.now());
+
+        List<StoredDocument> results = runNestedFilter(
+                "billing.threshold",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL,
+                Value.newBuilder().setDoubleValue(10.0).build());
+
+        assertEquals(Set.of(
+                        DB + "/documents/customers/integer",
+                        DB + "/documents/customers/double",
+                        DB + "/documents/customers/different"),
+                Set.copyOf(results.stream().map(StoredDocument::getName).toList()));
+    }
+
+    @Test
+    void nestedInclusiveInequalitiesPreserveSameTypeStringComparison() {
+        service.applyWrite(nestedValueDocument("alpha", "tier",
+                Value.newBuilder().setStringValue("alpha").build()), Instant.now());
+        service.applyWrite(nestedValueDocument("beta", "tier",
+                Value.newBuilder().setStringValue("beta").build()), Instant.now());
+        service.applyWrite(nestedValueDocument("number", "tier",
+                Value.newBuilder().setIntegerValue(0).build()), Instant.now());
+
+        List<StoredDocument> results = runNestedFilter(
+                "billing.tier",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL,
+                Value.newBuilder().setStringValue("beta").build());
+
+        assertEquals(List.of(
+                        DB + "/documents/customers/alpha",
+                        DB + "/documents/customers/beta"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    private List<StoredDocument> runNestedFilter(String fieldPath,
+            StructuredQuery.FieldFilter.Operator operator, Value value) {
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .setWhere(StructuredQuery.Filter.newBuilder()
+                        .setFieldFilter(StructuredQuery.FieldFilter.newBuilder()
+                                .setField(StructuredQuery.FieldReference.newBuilder()
+                                        .setFieldPath(fieldPath))
+                                .setOp(operator)
+                                .setValue(value)))
+                .build();
+        return service.runQuery(DB + "/documents", query);
+    }
+
+    private Write nestedValueDocument(String id, String field, Value value) {
+        Value billing = Value.newBuilder()
+                .setMapValue(MapValue.newBuilder().putFields(field, value))
+                .build();
+        return Write.newBuilder()
+                .setUpdate(Document.newBuilder()
+                        .setName(DB + "/documents/customers/" + id)
+                        .putFields("billing", billing)
+                        .build())
+                .build();
     }
 
     private Write nestedBillingDocument(String id, String stripeCustomerId) {

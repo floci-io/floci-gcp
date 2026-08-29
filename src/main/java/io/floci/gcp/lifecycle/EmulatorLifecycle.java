@@ -96,7 +96,9 @@ public class EmulatorLifecycle {
         if (event.options().getPort() != primaryHttpPort()) {
             return;
         }
-        awaitPublicPortIfProxied();
+        if (!awaitPublicPortIfProxied()) {
+            return;
+        }
         serviceRegistry.logEnabledServices();
         boolean hasStart = hooksRunner.hasHooks(InitializationHook.START);
         boolean hasReady = hooksRunner.hasHooks(InitializationHook.READY);
@@ -140,14 +142,26 @@ public class EmulatorLifecycle {
      * path already had: by the time the hooks run and readiness is published, the endpoint clients
      * are told to use is actually reachable.
      */
-    private void awaitPublicPortIfProxied() {
+    boolean awaitPublicPortIfProxied() {
         if (!config.tls().enabled() || tlsProxy == null || tlsProxy.isUnsatisfied()) {
-            return;
+            return true;
         }
-        if (!tlsProxy.get().awaitPublicPortReady(PUBLIC_PORT_WAIT_SECONDS, TimeUnit.SECONDS)) {
-            LOG.warnf("TLS proxy did not report the public port ready within %ds; startup hooks may "
-                    + "see connection refused on port %d", PUBLIC_PORT_WAIT_SECONDS, config.port());
+        if (tlsProxy.get().awaitPublicPortReady(PUBLIC_PORT_WAIT_SECONDS, TimeUnit.SECONDS)) {
+            return true;
         }
+        // The bind failed or never completed, so the emulator is unreachable on its public port.
+        // Running the hooks now would point them at a dead endpoint and publishing readiness would
+        // tell clients to connect to something that cannot answer.
+        LOG.errorf("TLS proxy did not report port %d ready within %ds; aborting startup instead of "
+                        + "running hooks against an unreachable endpoint",
+                config.port(), PUBLIC_PORT_WAIT_SECONDS);
+        abortStartup();
+        return false;
+    }
+
+    /** Visible for testing — overridden so tests can observe the abort without exiting the JVM. */
+    void abortStartup() {
+        Quarkus.asyncExit();
     }
 
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {

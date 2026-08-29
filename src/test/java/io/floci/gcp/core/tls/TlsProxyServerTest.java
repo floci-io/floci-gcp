@@ -126,6 +126,53 @@ class TlsProxyServerTest {
         assertEquals("PLAIN", roundTrip(publicPort, H2C_PREFACE));
     }
 
+    /**
+     * When the public port cannot be bound, Quarkus is left listening only on loopback internal
+     * ports and nothing is reachable. Previously that failure was merely logged, leaving a process
+     * that looked healthy but served nothing; it must abort startup instead.
+     */
+    @Test
+    @Timeout(20)
+    void publicPortBindFailure_abortsStartup() throws Exception {
+        int publicPort = freePort();
+        // Occupy the public port so the proxy cannot bind it.
+        try (ServerSocket squatter = new ServerSocket(publicPort)) {
+            CompletableFuture<Integer> aborted = new CompletableFuture<>();
+            proxy = new TlsProxyServer(vertx, configWith(true, publicPort, 0), 4580, 4581) {
+                @Override
+                void failStartup(int port, Throwable cause) {
+                    aborted.complete(port);
+                }
+            };
+            assertEquals(publicPort, aborted.get(10, TimeUnit.SECONDS),
+                    "a failure to bind the public port must abort startup");
+        }
+    }
+
+    /** The extra HTTPS port is best-effort: failing to bind 443 must NOT abort startup. */
+    @Test
+    @Timeout(20)
+    void httpsPortBindFailure_doesNotAbortStartup() throws Exception {
+        int httpBe = freePort();
+        int httpsBe = freePort();
+        int publicPort = freePort();
+        int httpsPort = freePort();
+        httpBackend = startMarkerBackend(httpBe, "PLAIN");
+
+        try (ServerSocket squatter = new ServerSocket(httpsPort)) {
+            CompletableFuture<Integer> aborted = new CompletableFuture<>();
+            proxy = new TlsProxyServer(vertx, configWith(true, publicPort, httpsPort), httpBe, httpsBe) {
+                @Override
+                void failStartup(int port, Throwable cause) {
+                    aborted.complete(port);
+                }
+            };
+            // The public port still serves, and no abort is raised for the squatted extra port.
+            assertEquals("PLAIN", roundTrip(publicPort, (byte) 'G'));
+            assertFalse(aborted.isDone(), "failing to bind the extra HTTPS port must stay non-fatal");
+        }
+    }
+
     @Test
     @Timeout(20)
     void tlsDisabled_bindsNothing() throws Exception {

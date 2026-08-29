@@ -51,8 +51,8 @@ public class TlsConfigSource implements ConfigSource {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     // Internal ports used when TLS proxy is active
-    static final int HTTP_INTERNAL_PORT  = 4580;
-    static final int HTTPS_INTERNAL_PORT = 4581;
+    public static final int HTTP_INTERNAL_PORT  = 4580;
+    public static final int HTTPS_INTERNAL_PORT = 4581;
 
     /** PEM content of the active TLS certificate, or {@code null} when TLS is disabled. */
     public static volatile String currentCertPem = null;

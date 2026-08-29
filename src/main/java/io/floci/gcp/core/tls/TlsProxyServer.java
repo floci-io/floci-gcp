@@ -1,6 +1,7 @@
 package io.floci.gcp.core.tls;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -96,8 +97,11 @@ public class TlsProxyServer {
                     LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
                             String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
                 } else if (port == config.port()) {
-                    LOG.errorv("TLS proxy: failed to start on public port {0}: {1}",
-                            String.valueOf(port), ar.cause().getMessage());
+                    // Fatal: Quarkus is bound to loopback-only internal ports, so without this
+                    // listener nothing is reachable on the public port. Without TLS, Quarkus
+                    // itself fails startup when the port is taken; failing here keeps that
+                    // behaviour instead of leaving a process that looks up but serves nothing.
+                    failStartup(port, ar.cause());
                 } else {
                     // The extra HTTPS port (443 by default) is privileged; binding it fails in
                     // unprivileged environments (e.g. CI/test). Non-fatal — HTTPS on that port is
@@ -172,6 +176,19 @@ public class TlsProxyServer {
             // Resume to receive the first buffer
             frontSocket.resume();
         };
+    }
+
+    /**
+     * Aborts startup when the public port cannot be bound.
+     *
+     * <p>Package-private and overridable so tests can observe the failure without terminating
+     * the test JVM.
+     */
+    void failStartup(int port, Throwable cause) {
+        LOG.errorv("TLS proxy: failed to bind the public port {0} ({1}). floci-gcp is serving "
+                        + "only on loopback internal ports and is unreachable, so startup is aborted.",
+                String.valueOf(port), cause.getMessage());
+        Quarkus.asyncExit();
     }
 
     @PreDestroy

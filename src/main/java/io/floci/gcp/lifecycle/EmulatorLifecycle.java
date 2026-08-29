@@ -5,6 +5,7 @@ import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.PersistentPathValidator;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.core.tls.TlsConfigSource;
 import io.floci.gcp.lifecycle.inithook.InitializationHook;
 import io.floci.gcp.lifecycle.inithook.InitializationHooksRunner;
 import io.quarkus.runtime.Quarkus;
@@ -84,7 +85,7 @@ public class EmulatorLifecycle {
     }
 
     void onHttpStart(@ObservesAsync HttpServerStart event) {
-        if (event.options().getPort() != config.port()) {
+        if (event.options().getPort() != primaryHttpPort()) {
             return;
         }
         serviceRegistry.logEnabledServices();
@@ -110,6 +111,18 @@ public class EmulatorLifecycle {
             LOG.error("Startup hook failed — shutting down", e);
             Quarkus.asyncExit();
         }
+    }
+
+    /**
+     * The port Quarkus actually binds for the plaintext listener.
+     *
+     * <p>With TLS enabled the public {@link EmulatorConfig#port()} belongs to the TLS proxy and
+     * Quarkus moves to internal loopback ports, so matching the public port here would never fire
+     * and the START/READY hooks would silently never run. Matching the internal HTTP port keeps
+     * exactly one listener triggering the hooks, as before.
+     */
+    int primaryHttpPort() {
+        return config.tls().enabled() ? TlsConfigSource.HTTP_INTERNAL_PORT : config.port();
     }
 
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {

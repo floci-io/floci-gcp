@@ -1,7 +1,10 @@
 package io.floci.gcp.services.secretmanager;
 
+import com.google.iam.v1.Binding;
+import com.google.iam.v1.Policy;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,7 +23,8 @@ class SecretManagerServiceTest {
     void setUp() {
         service = new SecretManagerService(
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>());
+                new InMemoryStorage<>(),
+                IamServices.inMemory());
     }
 
     @Test
@@ -129,5 +133,40 @@ class SecretManagerServiceTest {
         List<StoredSecret> secrets = service.listSecrets("p1");
         assertEquals(2, secrets.size());
         assertTrue(secrets.stream().allMatch(s -> s.getName().startsWith("projects/p1")));
+    }
+
+    @Test
+    void iamPolicyRoundTripsRejectsStaleEtagAndIsClearedOnDelete() {
+        String resource = "projects/p1/secrets/iam-target";
+        service.createSecret("p1", "iam-target", "automatic");
+
+        Policy saved = service.setIamPolicy(resource, Policy.newBuilder()
+                .addBindings(Binding.newBuilder()
+                        .setRole("roles/secretmanager.secretAccessor")
+                        .addMembers("user:reader@example.com"))
+                .build());
+
+        assertEquals("roles/secretmanager.secretAccessor", service.getIamPolicy(resource)
+                .getBindings(0).getRole());
+        assertThrows(GcpException.class, () -> service.setIamPolicy(resource, Policy.newBuilder()
+                .setEtag(com.google.protobuf.ByteString.copyFromUtf8("stale"))
+                .build()));
+        assertEquals(saved.getEtag(), service.getIamPolicy(resource).getEtag());
+
+        service.deleteSecret(resource);
+        assertThrows(GcpException.class, () -> service.getIamPolicy(resource));
+
+        service.createSecret("p1", "iam-target", "automatic");
+        assertTrue(service.getIamPolicy(resource).getBindingsList().isEmpty());
+    }
+
+    @Test
+    void testIamPermissionsEchoesRequestedPermissionsForExistingSecret() {
+        String resource = "projects/p1/secrets/permission-target";
+        service.createSecret("p1", "permission-target", "automatic");
+
+        assertEquals(List.of("secretmanager.secrets.get", "secretmanager.secrets.delete"),
+                service.testIamPermissions(resource,
+                        List.of("secretmanager.secrets.get", "secretmanager.secrets.delete")));
     }
 }

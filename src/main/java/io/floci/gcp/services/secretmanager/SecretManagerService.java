@@ -1,6 +1,7 @@
 package io.floci.gcp.services.secretmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.iam.v1.Policy;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -9,6 +10,9 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import io.quarkus.runtime.StartupEvent;
@@ -33,13 +37,15 @@ public class SecretManagerService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final IamService iamService;
 
     @Inject
     public SecretManagerService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
+        this.iamService = iamService;
         this.secretStore = storageFactory.createGlobal("secretmanager-secrets", "secretmanager-secrets.json",
                 new TypeReference<Map<String, StoredSecret>>() {});
         this.versionStore = storageFactory.createGlobal("secretmanager-versions", "secretmanager-versions.json",
@@ -47,12 +53,14 @@ public class SecretManagerService {
     }
 
     SecretManagerService(StorageBackend<String, StoredSecret> secretStore,
-            StorageBackend<String, StoredSecretVersion> versionStore) {
+            StorageBackend<String, StoredSecretVersion> versionStore, IamService iamService) {
         this.secretStore = secretStore;
         this.versionStore = versionStore;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.iamService = iamService;
+        registerPolicyResolver();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -63,6 +71,11 @@ public class SecretManagerService {
                 .resourceClasses(SecretManagerController.class)
                 .build());
         grpcServerManager.bind(new SecretManagerController(this));
+        registerPolicyResolver();
+    }
+
+    private void registerPolicyResolver() {
+        iamService.registerPolicyResourceResolver("projects/*/secrets/*", this::getSecret);
     }
 
     // ── Secrets ────────────────────────────────────────────────────────────────
@@ -101,10 +114,25 @@ public class SecretManagerService {
         if (secretStore.get(name).isEmpty()) {
             throw GcpException.notFound("Secret not found: " + name);
         }
-        String versionPrefix = name + "/versions/";
-        versionStore.scan(k -> k.startsWith(versionPrefix))
-                .forEach(v -> versionStore.delete(v.getName()));
-        secretStore.delete(name);
+        iamService.deleteResourceAndPolicy(name, () -> {
+            String versionPrefix = name + "/versions/";
+            versionStore.scan(k -> k.startsWith(versionPrefix))
+                    .forEach(v -> versionStore.delete(v.getName()));
+            secretStore.delete(name);
+        });
+    }
+
+    public Policy getIamPolicy(String resource) {
+        return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
+    }
+
+    public Policy setIamPolicy(String resource, Policy policy) {
+        StoredPolicy stored = IamPolicyCodec.toStoredPolicy(policy);
+        return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, stored));
+    }
+
+    public List<String> testIamPermissions(String resource, List<String> permissions) {
+        return iamService.testPermissions(resource, permissions);
     }
 
     // ── Versions ───────────────────────────────────────────────────────────────

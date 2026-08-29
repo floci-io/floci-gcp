@@ -30,4 +30,52 @@ class ResourceManagerRestIntegrationTest {
                 .statusCode(200)
                 .body("projectNumber", equalTo(projectNumber));
     }
+
+    @Test
+    void projectIamPolicyUsesPostForEveryMixinMethod() {
+        String base = "/v1/projects/crm-iam-test";
+
+        String etag = given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"policy\":{\"bindings\":[{\"role\":\"roles/pubsub.publisher\",\"members\":[\"user:publisher@example.com\"]}]}}")
+                .when().post(base + ":setIamPolicy")
+                .then().statusCode(200)
+                .body("bindings[0].role", equalTo("roles/pubsub.publisher"))
+                .extract().path("etag");
+
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + ":getIamPolicy")
+                .then().statusCode(200)
+                .body("etag", equalTo(etag))
+                .body("bindings[0].members[0]", equalTo("user:publisher@example.com"));
+
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"permissions\":[\"resourcemanager.projects.get\",\"resourcemanager.projects.delete\"]}")
+                .when().post(base + ":testIamPermissions")
+                .then().statusCode(200)
+                .body("permissions[0]", equalTo("resourcemanager.projects.get"))
+                .body("permissions[1]", equalTo("resourcemanager.projects.delete"));
+
+        given().urlEncodingEnabled(false).when().get(base + ":getIamPolicy").then().statusCode(405);
+        given().urlEncodingEnabled(false).when().get(base + ":setIamPolicy").then().statusCode(405);
+        given().urlEncodingEnabled(false).when().get(base + ":testIamPermissions").then().statusCode(405);
+    }
+
+    @Test
+    void staleProjectIamWriteLeavesCurrentPolicyIntact() {
+        String base = "/v1/projects/crm-iam-etag-test";
+
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"policy\":{\"bindings\":[{\"role\":\"roles/viewer\",\"members\":[\"user:reader@example.com\"]}]}}")
+                .when().post(base + ":setIamPolicy").then().statusCode(200);
+
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"policy\":{\"etag\":\"stale\",\"bindings\":[]}}")
+                .when().post(base + ":setIamPolicy")
+                .then().statusCode(409).body("error.status", equalTo("ABORTED"));
+
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + ":getIamPolicy")
+                .then().statusCode(200)
+                .body("bindings[0].role", equalTo("roles/viewer"));
+    }
 }

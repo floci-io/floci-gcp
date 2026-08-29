@@ -10,7 +10,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Pub/Sub](pubsub.md) | gRPC + REST JSON | `google.pubsub.v1.Publisher`, `google.pubsub.v1.Subscriber`, `/v1/projects/{project}/topics` |
 | [Firestore](firestore.md) | gRPC | `google.firestore.v1.Firestore` |
 | [Datastore](datastore.md) | HTTP/protobuf | `/v1/projects/{project}:{method}` |
-| [Secret Manager](secret-manager.md) | gRPC | `google.cloud.secretmanager.v1.SecretManagerService` |
+| [Secret Manager](secret-manager.md) | gRPC + REST JSON | `google.cloud.secretmanager.v1.SecretManagerService`, `/v1/projects/{project}/secrets` |
 | [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, `/v2/entries:write`, `/v2/entries:list` |
 | [Cloud KMS](kms.md) | gRPC + REST JSON | `google.cloud.kms.v1.KeyManagementService`, `/v1/projects/{project}/locations/{location}/keyRings` |
 | [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts` |
@@ -25,7 +25,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Cloud Scheduler](scheduler.md) | gRPC + REST JSON | `google.cloud.scheduler.v1.CloudScheduler`, `/v1/projects/{project}/locations/{location}/jobs` |
 | [Cloud Monitoring](cloud-monitoring.md) | gRPC + REST JSON | `google.monitoring.v3.MetricService`, `/v3/projects/{project}` |
 | [Service Usage](service-usage.md) | REST JSON | `/v1/projects/{project}/services` |
-| [Resource Manager](service-usage.md#cloud-resource-manager-companion) | REST JSON | `/v1/projects/{projectId}` (minimal `projects.get`) |
+| [Resource Manager](service-usage.md#cloud-resource-manager-companion) | REST JSON | `/v1/projects/{projectId}`, IAM policy mixins |
 | [Eventarc](eventarc.md) | REST JSON | `/v1/projects/{project}/locations/{location}/triggers` |
 | [Firebase Auth](firebase-auth.md) | REST JSON | `/identitytoolkit.googleapis.com/v1/accounts:*`, `/securetoken.googleapis.com/v1/token` |
 | [BigQuery (Phase 1)](bigquery.md) | REST JSON | `/bigquery/v2/projects/{project}` |

@@ -172,6 +172,11 @@ gcloud secrets add-iam-policy-binding my-secret \
     --role="roles/secretmanager.secretAccessor"
 ```
 
+Secret-level IAM policies persist across `GetIamPolicy` / `SetIamPolicy` calls,
+including etag-based read-modify-write flows used by Terraform and OpenTofu.
+Deleting a secret clears its policy. Policies are stored but not enforced: a
+caller that would be denied by IAM in GCP can still access emulator resources.
+
 ## Supported Operations
 
 - `CreateSecret`

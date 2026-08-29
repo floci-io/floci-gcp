@@ -5,6 +5,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.services.iam.IamService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -27,24 +28,28 @@ public class ResourceManagerService {
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final IamService iamService;
 
     @Inject
-    public ResourceManagerService(ServiceRegistry serviceRegistry, EmulatorConfig config) {
+    public ResourceManagerService(ServiceRegistry serviceRegistry, EmulatorConfig config, IamService iamService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.iamService = iamService;
     }
 
-    ResourceManagerService(EmulatorConfig config) {
+    ResourceManagerService(EmulatorConfig config, IamService iamService) {
         this.serviceRegistry = null;
         this.config = config;
+        this.iamService = iamService;
     }
 
     void onStart(@Observes StartupEvent ev) {
         serviceRegistry.register(ServiceDescriptor.builder("resourcemanager")
                 .enabled(config.services().resourcemanager().enabled())
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(ResourceManagerController.class)
+                .resourceClasses(ResourceManagerController.class, ResourceManagerIamController.class)
                 .build());
+        iamService.registerPolicyResourceResolver("projects/*", this::requireProjectForPolicy);
     }
 
     public Map<String, Object> getProject(String projectId) {
@@ -58,6 +63,10 @@ public class ResourceManagerService {
         project.put("name", projectId);
         project.put("createTime", createTime(projectId));
         return project;
+    }
+
+    private void requireProjectForPolicy(String resource) {
+        getProject(resource.substring("projects/".length()));
     }
 
     static String projectNumber(String projectId) {

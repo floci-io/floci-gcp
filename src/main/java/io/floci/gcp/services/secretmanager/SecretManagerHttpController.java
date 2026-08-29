@@ -1,6 +1,8 @@
 package io.floci.gcp.services.secretmanager;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -36,6 +38,9 @@ public class SecretManagerHttpController {
 
     @Inject
     SecretManagerService service;
+
+    @Inject
+    IamService iamService;
 
     // ── Secrets ────────────────────────────────────────────────────────────────
 
@@ -224,14 +229,20 @@ public class SecretManagerHttpController {
         }
     }
 
-    // ── IAM stubs (called by Terraform for IAM-aware resources) ───────────────
+    // ── IAM ───────────────────────────────────────────────────────────────────
 
     @GET
     @Path("/{secretId}:getIamPolicy")
     public Response getIamPolicy(@PathParam("project") String project,
                                  @PathParam("secretId") String secretId) {
         LOG.debugf("REST getIamPolicy project=%s secretId=%s", project, secretId);
-        return Response.ok(Map.of("version", 1, "bindings", List.of(), "etag", "")).build();
+        return Response.ok(iamService.getPolicy(secretName(project, secretId))).build();
+    }
+
+    @POST
+    @Path("/{secretId}:getIamPolicy")
+    public Response getIamPolicyWithPost() {
+        return Response.status(Response.Status.METHOD_NOT_ALLOWED).build();
     }
 
     @POST
@@ -241,9 +252,14 @@ public class SecretManagerHttpController {
                                  @PathParam("secretId") String secretId,
                                  Map<String, Object> body) {
         LOG.debugf("REST setIamPolicy project=%s secretId=%s", project, secretId);
-        Map<String, Object> policy = (body != null && body.containsKey("policy"))
-                ? (Map<String, Object>) body.get("policy") : Map.of();
-        return Response.ok(policy).build();
+        Map<String, Object> policy = body != null ? (Map<String, Object>) body.get("policy") : null;
+        return Response.ok(iamService.setPolicy(secretName(project, secretId), IamPolicyCodec.fromJsonMap(policy))).build();
+    }
+
+    @GET
+    @Path("/{secretId}:setIamPolicy")
+    public Response setIamPolicyWithGet() {
+        return Response.status(Response.Status.METHOD_NOT_ALLOWED).build();
     }
 
     @POST
@@ -253,11 +269,22 @@ public class SecretManagerHttpController {
                                        @PathParam("secretId") String secretId,
                                        Map<String, Object> body) {
         LOG.debugf("REST testIamPermissions project=%s secretId=%s", project, secretId);
-        List<?> permissions = (body != null) ? (List<?>) body.get("permissions") : List.of();
-        return Response.ok(Map.of("permissions", permissions != null ? permissions : List.of())).build();
+        List<String> permissions = body != null ? (List<String>) body.get("permissions") : List.of();
+        return Response.ok(Map.of("permissions", iamService.testPermissions(
+                secretName(project, secretId), permissions != null ? permissions : List.of()))).build();
+    }
+
+    @GET
+    @Path("/{secretId}:testIamPermissions")
+    public Response testIamPermissionsWithGet() {
+        return Response.status(Response.Status.METHOD_NOT_ALLOWED).build();
     }
 
     // ── JSON builders ──────────────────────────────────────────────────────────
+
+    private static String secretName(String project, String secretId) {
+        return "projects/" + project + "/secrets/" + secretId;
+    }
 
     private static Map<String, Object> toSecretJson(StoredSecret stored) {
         Map<String, Object> response = new LinkedHashMap<>();

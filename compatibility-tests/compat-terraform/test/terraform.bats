@@ -333,9 +333,21 @@ setup() {
     [[ "$result" != *'roles/pubsub.subscriber'* ]]
 }
 
+@test "Terraform: Secret Manager IAM policy holds accessor grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret:getIamPolicy")
+    [[ "$result" == *'roles/secretmanager.secretAccessor'* ]]
+    [[ "$result" == *'floci-compat-sa@'* ]]
+}
+
+@test "Terraform: project IAM policy holds publisher grant" {
+    result=$(gcp_curl -X POST -H 'Content-Type: application/json' -d '{}' "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.publisher'* ]]
+    [[ "$result" == *'floci-compat-sa@'* ]]
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
 @test "Terraform: all managed resources tracked in state" {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 18 ]
+    [ "$count" -ge 20 ]
 }

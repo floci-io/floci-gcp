@@ -40,7 +40,7 @@ public class IamController {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM POST %s project=%s id=%s method=%s", rest, p.project(), p.identifier(), p.customMethod());
 
-        if (p.customMethod() != null) {
+        if (p.customMethod() != null && "serviceAccounts".equals(p.resourceType()) && p.identifier() != null) {
             return handleCustomMethod(p, body);
         }
 

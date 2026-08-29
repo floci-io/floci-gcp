@@ -25,6 +25,10 @@ public class ResourceManagerController {
 
     @GET
     public Response getProject(@PathParam("project") String project) {
+        if (project.endsWith(":getIamPolicy") || project.endsWith(":setIamPolicy")
+                || project.endsWith(":testIamPermissions")) {
+            return Response.status(Response.Status.METHOD_NOT_ALLOWED).build();
+        }
         Map<String, Object> body = service.getProject(project);
         return Response.ok(body).build();
     }

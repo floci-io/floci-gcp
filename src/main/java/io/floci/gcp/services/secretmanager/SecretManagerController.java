@@ -220,25 +220,40 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     @Override
     public void setIamPolicy(SetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("setIamPolicy resource=%s", request.getResource());
-        responseObserver.onNext(request.getPolicy());
-        responseObserver.onCompleted();
+        try {
+            responseObserver.onNext(service.setIamPolicy(request.getResource(), request.getPolicy()));
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("setIamPolicy failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     @Override
     public void getIamPolicy(GetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("getIamPolicy resource=%s", request.getResource());
-        responseObserver.onNext(Policy.getDefaultInstance());
-        responseObserver.onCompleted();
+        try {
+            responseObserver.onNext(service.getIamPolicy(request.getResource()));
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("getIamPolicy failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     @Override
     public void testIamPermissions(TestIamPermissionsRequest request,
             StreamObserver<TestIamPermissionsResponse> responseObserver) {
         LOG.debugf("testIamPermissions resource=%s", request.getResource());
-        responseObserver.onNext(TestIamPermissionsResponse.newBuilder()
-                .addAllPermissions(request.getPermissionsList())
-                .build());
-        responseObserver.onCompleted();
+        try {
+            responseObserver.onNext(TestIamPermissionsResponse.newBuilder()
+                    .addAllPermissions(service.testIamPermissions(request.getResource(), request.getPermissionsList()))
+                    .build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("testIamPermissions failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

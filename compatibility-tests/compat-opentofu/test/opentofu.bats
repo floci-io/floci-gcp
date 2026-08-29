@@ -333,7 +333,19 @@ setup() {
     [[ "$result" != *'roles/pubsub.subscriber'* ]]
 }
 
+@test "OpenTofu: Secret Manager IAM policy holds accessor grant" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}/secrets/floci-compat-secret-tofu:getIamPolicy")
+    [[ "$result" == *'roles/secretmanager.secretAccessor'* ]]
+    [[ "$result" == *'floci-compat-sa-tofu@'* ]]
+}
+
+@test "OpenTofu: project IAM policy holds publisher grant" {
+    result=$(gcp_curl -X POST -H 'Content-Type: application/json' -d '{}' "${FLOCI_ENDPOINT}/v1/projects/${FLOCI_PROJECT}:getIamPolicy")
+    [[ "$result" == *'roles/pubsub.publisher'* ]]
+    [[ "$result" == *'floci-compat-sa-tofu@'* ]]
+}
+
 @test "OpenTofu: all managed resources tracked in state" {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -ge 18 ]
+    [ "$count" -ge 20 ]
 }

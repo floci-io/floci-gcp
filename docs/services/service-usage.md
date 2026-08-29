@@ -43,10 +43,17 @@ floci-gcp therefore serves a minimal Cloud Resource Manager v1 surface:
 | Method | Path |
 |---|---|
 | `GET` | `/v1/projects/{projectId}` |
+| `POST` | `/v1/projects/{projectId}:getIamPolicy` |
+| `POST` | `/v1/projects/{projectId}:setIamPolicy` |
+| `POST` | `/v1/projects/{projectId}:testIamPermissions` |
 
 Every project ID resolves to an `ACTIVE` project with a stable synthetic
 `projectNumber` (the emulator's multi-tenancy is keyed by project ID; projects are never
 created or deleted).
+
+Project-level IAM policies are stored with stable empty-policy and rotating write
+etags for Terraform/OpenTofu read-modify-write flows. IAM bindings are not
+enforced by the emulator; they do not restrict access to emulated resources.
 
 ## Quick Start
 

@@ -18,7 +18,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Pub/Sub** | gRPC + REST | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, subscription filters |
 | **Firestore** | gRPC | Documents, collections, queries, field transforms, aggregation, transactions, real-time listeners |
 | **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation, transactions |
-| **Secret Manager** | gRPC | Secrets, versions, access, disable/enable/destroy, IAM bindings |
+| **Secret Manager** | gRPC + REST | Secrets, versions, access, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with filter subset, `ListLogs`, `DeleteLog` |
 | **Cloud KMS** | gRPC + REST | Key rings, crypto keys, versions, symmetric encrypt/decrypt, asymmetric sign/decrypt, `GenerateRandomBytes` |
 | **IAM** | REST | Service accounts, RSA-2048 keys, policy bindings, SignBlob (V4 signed URLs) |
@@ -36,7 +36,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Firebase Auth (Identity Platform)** | REST | Identity Toolkit v1 sign-up/sign-in, emulator JWTs, admin user CRUD |
 | **Eventarc** | REST | Trigger CRUD; delivers CloudEvents from Pub/Sub and GCS events to Cloud Run and HTTP endpoints |
 | **IAM Credentials** | REST | `generateAccessToken` for service-account impersonation (shape-only stub tokens) |
-| **Resource Manager** | REST | Minimal `projects.get` for provider project lookups |
+| **Resource Manager** | REST | `projects.get` and project IAM policy mixins for provider project lookups |
 
 ## Why floci-gcp?
 

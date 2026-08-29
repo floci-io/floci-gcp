@@ -6,6 +6,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.PersistentPathValidator;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.core.tls.TlsConfigSource;
+import io.floci.gcp.core.tls.TlsProxyServer;
 import io.floci.gcp.lifecycle.inithook.InitializationHook;
 import io.floci.gcp.lifecycle.inithook.InitializationHooksRunner;
 import io.quarkus.runtime.Quarkus;
@@ -23,6 +24,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class EmulatorLifecycle {
@@ -39,13 +41,19 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final PersistentPathValidator persistentPathValidator;
     private final Instance<ContainerTeardown> containerTeardowns;
+    private final Instance<TlsProxyServer> tlsProxy;
+
+    /** How long startup waits for the TLS proxy's public port before proceeding with a warning. */
+    private static final long PUBLIC_PORT_WAIT_SECONDS = 30;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config, InitializationHooksRunner hooksRunner,
                              InitLifecycleState initLifecycleState,
                              PersistentPathValidator persistentPathValidator,
-                             Instance<ContainerTeardown> containerTeardowns) {
+                             Instance<ContainerTeardown> containerTeardowns,
+                             Instance<TlsProxyServer> tlsProxy) {
+        this.tlsProxy = tlsProxy;
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -88,6 +96,7 @@ public class EmulatorLifecycle {
         if (event.options().getPort() != primaryHttpPort()) {
             return;
         }
+        awaitPublicPortIfProxied();
         serviceRegistry.logEnabledServices();
         boolean hasStart = hooksRunner.hasHooks(InitializationHook.START);
         boolean hasReady = hooksRunner.hasHooks(InitializationHook.READY);
@@ -123,6 +132,22 @@ public class EmulatorLifecycle {
      */
     int primaryHttpPort() {
         return config.tls().enabled() ? TlsConfigSource.HTTP_INTERNAL_PORT : config.port();
+    }
+
+    /**
+     * With TLS on, the public port belongs to the TLS proxy and is bound asynchronously, so this
+     * observer can fire before it is accepting. Waiting here keeps the guarantee the plaintext
+     * path already had: by the time the hooks run and readiness is published, the endpoint clients
+     * are told to use is actually reachable.
+     */
+    private void awaitPublicPortIfProxied() {
+        if (!config.tls().enabled() || tlsProxy == null || tlsProxy.isUnsatisfied()) {
+            return;
+        }
+        if (!tlsProxy.get().awaitPublicPortReady(PUBLIC_PORT_WAIT_SECONDS, TimeUnit.SECONDS)) {
+            LOG.warnf("TLS proxy did not report the public port ready within %ds; startup hooks may "
+                    + "see connection refused on port %d", PUBLIC_PORT_WAIT_SECONDS, config.port());
+        }
     }
 
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {

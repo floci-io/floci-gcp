@@ -18,6 +18,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * A TCP proxy server that enables HTTP and HTTPS on the same port.
@@ -61,6 +65,7 @@ public class TlsProxyServer {
     private final int httpBackendPort;
     private final int httpsBackendPort;
     private final List<NetServer> proxyServers = new ArrayList<>();
+    private final CompletableFuture<Void> publicPortReady = new CompletableFuture<>();
     private NetClient client;
 
     @Inject
@@ -96,7 +101,11 @@ public class TlsProxyServer {
                 if (ar.succeeded()) {
                     LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
                             String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
+                    if (port == config.port()) {
+                        publicPortReady.complete(null);
+                    }
                 } else if (port == config.port()) {
+                    publicPortReady.completeExceptionally(ar.cause());
                     // Fatal: Quarkus is bound to loopback-only internal ports, so without this
                     // listener nothing is reachable on the public port. Without TLS, Quarkus
                     // itself fails startup when the port is taken; failing here keeps that
@@ -176,6 +185,28 @@ public class TlsProxyServer {
             // Resume to receive the first buffer
             frontSocket.resume();
         };
+    }
+
+    /**
+     * Blocks until the public listener is accepting connections.
+     *
+     * <p>{@code listen()} is asynchronous and carries no happens-before relationship with
+     * Quarkus's {@code HttpServerStart} event, so the startup hooks and the ready flag can
+     * otherwise run while the public port is not yet bound: a hook that calls the configured
+     * endpoint gets connection refused, and readiness is published before clients can connect.
+     *
+     * @return {@code true} once the port is accepting, {@code false} on timeout or bind failure
+     */
+    public boolean awaitPublicPortReady(long timeout, TimeUnit unit) {
+        try {
+            publicPortReady.get(timeout, unit);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException e) {
+            return false;
+        }
     }
 
     /**

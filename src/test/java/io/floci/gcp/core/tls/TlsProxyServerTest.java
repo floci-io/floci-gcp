@@ -173,6 +173,43 @@ class TlsProxyServerTest {
         }
     }
 
+    /**
+     * The startup hooks and the ready flag must not run ahead of the public bind, or a hook that
+     * calls the configured endpoint races it and sees connection refused.
+     */
+    @Test
+    @Timeout(20)
+    void awaitPublicPortReady_blocksUntilTheBindCompletes() throws Exception {
+        int httpBe = freePort();
+        int httpsBe = freePort();
+        int publicPort = freePort();
+        httpBackend = startMarkerBackend(httpBe, "PLAIN");
+
+        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, 0), httpBe, httpsBe);
+
+        assertTrue(proxy.awaitPublicPortReady(10, TimeUnit.SECONDS),
+                "await must succeed once the public listener is bound");
+        // Once it reports ready the port must actually be accepting, with no further waiting.
+        assertEquals("PLAIN", roundTrip(publicPort, (byte) 'G'));
+    }
+
+    /** A failed public bind must release the waiter rather than stalling startup for the timeout. */
+    @Test
+    @Timeout(20)
+    void awaitPublicPortReady_returnsFalseWhenTheBindFails() throws Exception {
+        int publicPort = freePort();
+        try (ServerSocket squatter = new ServerSocket(publicPort)) {
+            proxy = new TlsProxyServer(vertx, configWith(true, publicPort, 0), 4580, 4581) {
+                @Override
+                void failStartup(int port, Throwable cause) {
+                    // swallow so the test JVM survives; the await behaviour is what is under test
+                }
+            };
+            assertFalse(proxy.awaitPublicPortReady(10, TimeUnit.SECONDS),
+                    "a failed bind must release the waiter, not stall until the timeout");
+        }
+    }
+
     @Test
     @Timeout(20)
     void tlsDisabled_bindsNothing() throws Exception {

@@ -25,7 +25,7 @@ class EmulatorLifecyclePortTest {
         when(config.port()).thenReturn(publicPort);
         when(config.tls()).thenReturn(tls);
         when(tls.enabled()).thenReturn(tlsEnabled);
-        return new EmulatorLifecycle(null, null, config, null, null, null, null);
+        return new EmulatorLifecycle(null, null, config, null, null, null, null, null);
     }
 
     @Test

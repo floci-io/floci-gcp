@@ -6,6 +6,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
+import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -232,6 +234,25 @@ class SecretManagerServiceTest {
     }
 
     @Test
+    void flushesDeletedStateBeforeClearingDeletionIntent() {
+        String resource = "projects/p1/secrets/flush-order";
+        List<String> flushes = new CopyOnWriteArrayList<>();
+        RecordingStorage<StoredSecret> secrets = new RecordingStorage<>("secrets", flushes);
+        RecordingStorage<StoredSecretVersion> versions = new RecordingStorage<>("versions", flushes);
+        RecordingStorage<String> deletions = new RecordingStorage<>("deletions", flushes);
+        RecordingStorage<StoredPolicy> policies = new RecordingStorage<>("policies", flushes);
+        SecretManagerService flushService = new SecretManagerService(secrets, versions, deletions,
+                IamServices.withStores(new InMemoryStorage<>(), new InMemoryStorage<>(), policies));
+        flushService.createSecret("p1", "flush-order", "automatic");
+        flushService.addSecretVersion(resource, new byte[]{1}, null);
+        flushService.setIamPolicy(resource, Policy.getDefaultInstance());
+
+        flushService.deleteSecret(resource);
+
+        assertEquals(List.of("deletions", "policies", "versions", "secrets", "deletions"), flushes);
+    }
+
+    @Test
     void testIamPermissionsEchoesRequestedPermissionsForExistingSecret() {
         String resource = "projects/p1/secrets/permission-target";
         service.createSecret("p1", "permission-target", "automatic");
@@ -269,6 +290,21 @@ class SecretManagerServiceTest {
 
         void releaseFlush() {
             allowFirstFlush.countDown();
+        }
+    }
+
+    private static final class RecordingStorage<T> extends InMemoryStorage<String, T> {
+        private final String name;
+        private final List<String> flushes;
+
+        private RecordingStorage(String name, List<String> flushes) {
+            this.name = name;
+            this.flushes = flushes;
+        }
+
+        @Override
+        public void flush() {
+            flushes.add(name);
         }
     }
 }

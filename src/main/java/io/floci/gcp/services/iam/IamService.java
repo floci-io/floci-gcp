@@ -216,6 +216,7 @@ public class IamService {
         synchronized (policyLock(key)) {
             deleteResource.run();
             policyStore.delete(key);
+            policyStore.flush();
         }
     }
 

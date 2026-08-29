@@ -105,8 +105,10 @@ public class SecretManagerService {
 
     public StoredSecret getSecret(String name) {
         LOG.debugf("getSecret name=%s", name);
-        requireSecretExists(name);
-        return secretStore.get(name).orElseThrow();
+        synchronized (secretLock(name)) {
+            requireSecretExists(name);
+            return secretStore.get(name).orElseThrow();
+        }
     }
 
     private void requireSecretExists(String name) {
@@ -126,8 +128,10 @@ public class SecretManagerService {
 
     public StoredSecret updateSecret(String name) {
         LOG.debugf("updateSecret name=%s", name);
-        requireSecretExists(name);
-        return secretStore.get(name).orElseThrow();
+        synchronized (secretLock(name)) {
+            requireSecretExists(name);
+            return secretStore.get(name).orElseThrow();
+        }
     }
 
     public void deleteSecret(String name) {
@@ -176,6 +180,8 @@ public class SecretManagerService {
                     .forEach(v -> versionStore.delete(v.getName()));
             secretStore.delete(name);
         });
+        versionStore.flush();
+        secretStore.flush();
     }
 
     public Policy getIamPolicy(String resource) {
@@ -209,31 +215,37 @@ public class SecretManagerService {
     public StoredSecretVersion getSecretVersion(String versionedName) {
         LOG.debugf("getSecretVersion name=%s", versionedName);
         String secretName = secretNameForVersion(versionedName);
-        requireSecretExists(secretName);
-        return resolveVersion(versionedName);
+        synchronized (secretLock(secretName)) {
+            requireSecretExists(secretName);
+            return resolveVersion(versionedName);
+        }
     }
 
     public List<StoredSecretVersion> listSecretVersions(String secretName) {
         LOG.debugf("listSecretVersions secret=%s", secretName);
-        if (pendingDeletionStore.get(secretName).isPresent()) {
-            return List.of();
+        synchronized (secretLock(secretName)) {
+            if (pendingDeletionStore.get(secretName).isPresent()) {
+                return List.of();
+            }
+            String prefix = secretName + "/versions/";
+            return versionStore.scan(k -> k.startsWith(prefix));
         }
-        String prefix = secretName + "/versions/";
-        return versionStore.scan(k -> k.startsWith(prefix));
     }
 
     public StoredSecretVersion accessSecretVersion(String versionedName) {
         LOG.debugf("accessSecretVersion name=%s", versionedName);
         String secretName = secretNameForVersion(versionedName);
-        requireSecretExists(secretName);
-        StoredSecretVersion version = resolveVersion(versionedName);
-        if ("DESTROYED".equals(version.getState())) {
-            throw GcpException.notFound("Secret version is destroyed: " + version.getName());
+        synchronized (secretLock(secretName)) {
+            requireSecretExists(secretName);
+            StoredSecretVersion version = resolveVersion(versionedName);
+            if ("DESTROYED".equals(version.getState())) {
+                throw GcpException.notFound("Secret version is destroyed: " + version.getName());
+            }
+            if ("DISABLED".equals(version.getState())) {
+                throw GcpException.invalidArgument("Secret version is disabled: " + version.getName());
+            }
+            return version;
         }
-        if ("DISABLED".equals(version.getState())) {
-            throw GcpException.invalidArgument("Secret version is disabled: " + version.getName());
-        }
-        return version;
     }
 
     public StoredSecretVersion disableSecretVersion(String versionedName) {

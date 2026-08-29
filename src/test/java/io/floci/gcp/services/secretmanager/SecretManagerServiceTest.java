@@ -4,6 +4,7 @@ import com.google.iam.v1.Binding;
 import com.google.iam.v1.Policy;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
@@ -18,13 +19,18 @@ import static org.junit.jupiter.api.Assertions.*;
 class SecretManagerServiceTest {
 
     private SecretManagerService service;
+    private InMemoryStorage<String, StoredSecret> secretStore;
+    private InMemoryStorage<String, StoredSecretVersion> versionStore;
+    private InMemoryStorage<String, String> pendingDeletionStore;
+    private IamService iamService;
 
     @BeforeEach
     void setUp() {
-        service = new SecretManagerService(
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                IamServices.inMemory());
+        secretStore = new InMemoryStorage<>();
+        versionStore = new InMemoryStorage<>();
+        pendingDeletionStore = new InMemoryStorage<>();
+        iamService = IamServices.inMemory();
+        service = new SecretManagerService(secretStore, versionStore, pendingDeletionStore, iamService);
     }
 
     @Test
@@ -158,6 +164,30 @@ class SecretManagerServiceTest {
 
         service.createSecret("p1", "iam-target", "automatic");
         assertTrue(service.getIamPolicy(resource).getBindingsList().isEmpty());
+    }
+
+    @Test
+    void resumesInterruptedDeletionBeforeRecreatingSecret() {
+        String resource = "projects/p1/secrets/interrupted-delete";
+        service.createSecret("p1", "interrupted-delete", "automatic");
+        service.addSecretVersion(resource, new byte[]{1}, null);
+        service.setIamPolicy(resource, Policy.newBuilder()
+                .addBindings(Binding.newBuilder()
+                        .setRole("roles/secretmanager.secretAccessor")
+                        .addMembers("user:reader@example.com"))
+                .build());
+
+        // Simulate a process stopping after durable deletion intent is recorded.
+        pendingDeletionStore.put(resource, resource);
+        SecretManagerService restarted = new SecretManagerService(
+                secretStore, versionStore, pendingDeletionStore, iamService);
+
+        restarted.resumePendingDeletions();
+        assertThrows(GcpException.class, () -> restarted.getSecret(resource));
+        assertTrue(restarted.listSecretVersions(resource).isEmpty());
+
+        restarted.createSecret("p1", "interrupted-delete", "automatic");
+        assertTrue(restarted.getIamPolicy(resource).getBindingsList().isEmpty());
     }
 
     @Test

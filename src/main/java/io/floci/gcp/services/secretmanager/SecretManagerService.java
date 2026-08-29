@@ -33,6 +33,7 @@ public class SecretManagerService {
 
     private final StorageBackend<String, StoredSecret> secretStore;
     private final StorageBackend<String, StoredSecretVersion> versionStore;
+    private final StorageBackend<String, String> pendingDeletionStore;
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
@@ -50,12 +51,16 @@ public class SecretManagerService {
                 new TypeReference<Map<String, StoredSecret>>() {});
         this.versionStore = storageFactory.createGlobal("secretmanager-versions", "secretmanager-versions.json",
                 new TypeReference<Map<String, StoredSecretVersion>>() {});
+        this.pendingDeletionStore = storageFactory.createGlobal("secretmanager-deletions", "secretmanager-deletions.json",
+                new TypeReference<Map<String, String>>() {});
     }
 
     SecretManagerService(StorageBackend<String, StoredSecret> secretStore,
-            StorageBackend<String, StoredSecretVersion> versionStore, IamService iamService) {
+            StorageBackend<String, StoredSecretVersion> versionStore,
+            StorageBackend<String, String> pendingDeletionStore, IamService iamService) {
         this.secretStore = secretStore;
         this.versionStore = versionStore;
+        this.pendingDeletionStore = pendingDeletionStore;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
@@ -64,6 +69,7 @@ public class SecretManagerService {
     }
 
     void onStart(@Observes StartupEvent ev) {
+        resumePendingDeletions();
         serviceRegistry.register(ServiceDescriptor.builder("secretmanager")
                 .enabled(config.services().secretmanager().enabled())
                 .storageKey("secretmanager")
@@ -83,6 +89,7 @@ public class SecretManagerService {
     public StoredSecret createSecret(String project, String secretId, String replicationType) {
         String name = "projects/" + project + "/secrets/" + secretId;
         LOG.infof("createSecret name=%s", name);
+        resumePendingDeletion(name);
         if (secretStore.get(name).isPresent()) {
             throw GcpException.alreadyExists("Secret already exists: " + name);
         }
@@ -93,6 +100,9 @@ public class SecretManagerService {
 
     public StoredSecret getSecret(String name) {
         LOG.debugf("getSecret name=%s", name);
+        if (pendingDeletionStore.get(name).isPresent()) {
+            throw GcpException.notFound("Secret not found: " + name);
+        }
         return secretStore.get(name)
                 .orElseThrow(() -> GcpException.notFound("Secret not found: " + name));
     }
@@ -114,6 +124,37 @@ public class SecretManagerService {
         if (secretStore.get(name).isEmpty()) {
             throw GcpException.notFound("Secret not found: " + name);
         }
+        pendingDeletionStore.put(name, name);
+        pendingDeletionStore.flush();
+        completeDeletion(name);
+        clearPendingDeletion(name);
+    }
+
+    /**
+     * Completes deletions that were durably marked before an interrupted delete.
+     * A deletion marker is written before any of the independently persisted
+     * secret, version, and IAM policy records change, so replaying this work is
+     * safe and prevents a recreated secret from inheriting stale state.
+     */
+    void resumePendingDeletions() {
+        pendingDeletionStore.scan(key -> true).forEach(this::resumePendingDeletion);
+    }
+
+    private void resumePendingDeletion(String name) {
+        if (pendingDeletionStore.get(name).isEmpty()) {
+            return;
+        }
+        LOG.warnf("Resuming interrupted deletion for secret %s", name);
+        completeDeletion(name);
+        clearPendingDeletion(name);
+    }
+
+    private void clearPendingDeletion(String name) {
+        pendingDeletionStore.delete(name);
+        pendingDeletionStore.flush();
+    }
+
+    private void completeDeletion(String name) {
         iamService.deleteResourceAndPolicy(name, () -> {
             String versionPrefix = name + "/versions/";
             versionStore.scan(k -> k.startsWith(versionPrefix))

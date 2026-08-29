@@ -174,8 +174,11 @@ gcloud secrets add-iam-policy-binding my-secret \
 
 Secret-level IAM policies persist across `GetIamPolicy` / `SetIamPolicy` calls,
 including etag-based read-modify-write flows used by Terraform and OpenTofu.
-Deleting a secret clears its policy. Policies are stored but not enforced: a
-caller that would be denied by IAM in GCP can still access emulator resources.
+Deleting a secret clears its versions and policy. Cleanup intent is persisted
+before deletion, so interrupted cleanup is resumed before the emulator serves
+requests after restart or recreates the same secret name. Policies are stored
+but not enforced: a caller that would be denied by IAM in GCP can still access
+emulator resources.
 
 ## Supported Operations
 

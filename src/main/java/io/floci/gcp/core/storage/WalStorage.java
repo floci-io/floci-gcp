@@ -121,6 +121,11 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
+    public void checkpoint() {
+        compactChecked();
+    }
+
+    @Override
     public void load() {
         if (Files.exists(snapshotPath)) {
             try {
@@ -174,6 +179,14 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     private void compact() {
+        try {
+            compactChecked();
+        } catch (StorageException e) {
+            LOG.errorv(e, "Failed to compact WAL storage");
+        }
+    }
+
+    private void compactChecked() {
         compactionLock.writeLock().lock();
         try {
             Files.createDirectories(snapshotPath.getParent());
@@ -188,7 +201,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
 
             LOG.debugv("Compacted {0} entries to snapshot, WAL truncated", store.size());
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to compact WAL storage");
+            throw new StorageException("Failed to compact WAL storage", e);
         } finally {
             compactionLock.writeLock().unlock();
         }

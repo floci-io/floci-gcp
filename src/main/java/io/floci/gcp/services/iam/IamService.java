@@ -220,6 +220,15 @@ public class IamService {
         }
     }
 
+    public void deleteResourceAndPolicyDurably(String resource, Runnable deleteResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            deleteResource.run();
+            policyStore.delete(key);
+            policyStore.checkpoint();
+        }
+    }
+
     /**
      * Echoes the requested permissions for an existing resource. For a resource
      * a registered resolver reports missing, fails open with an empty set — the

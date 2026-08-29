@@ -68,6 +68,9 @@ public class ProjectAwareStorageBackend<V> implements StorageBackend<String, V> 
     public void flush() { delegate.flush(); }
 
     @Override
+    public void checkpoint() { delegate.checkpoint(); }
+
+    @Override
     public void load() { delegate.load(); }
 
     @Override

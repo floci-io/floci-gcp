@@ -31,6 +31,20 @@ public interface StorageBackend<K, V> {
     /** Persist data to disk if applicable. */
     void flush();
 
+    /**
+     * Writes prior mutations to the filesystem or throws when it cannot do so.
+     * Existing {@link #flush()} remains best-effort for lifecycle and background use.
+     *
+     * <p>Implementations rename a fully written temp file, so a reader never observes a
+     * partial state and the boundary survives process death. There is no fsync, so the
+     * boundary does not survive host power loss. Assumes a single writing process per
+     * data directory; a concurrent process writes whole-map snapshots that silently
+     * discard this one's mutations.
+     */
+    default void checkpoint() {
+        flush();
+    }
+
     /** Load data from disk on startup. */
     void load();
 

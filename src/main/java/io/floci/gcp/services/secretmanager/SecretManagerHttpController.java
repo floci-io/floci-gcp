@@ -2,7 +2,6 @@ package io.floci.gcp.services.secretmanager;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamPolicyCodec;
-import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,9 +37,6 @@ public class SecretManagerHttpController {
 
     @Inject
     SecretManagerService service;
-
-    @Inject
-    IamService iamService;
 
     // ── Secrets ────────────────────────────────────────────────────────────────
 
@@ -236,7 +232,8 @@ public class SecretManagerHttpController {
     public Response getIamPolicy(@PathParam("project") String project,
                                  @PathParam("secretId") String secretId) {
         LOG.debugf("REST getIamPolicy project=%s secretId=%s", project, secretId);
-        return Response.ok(iamService.getPolicy(secretName(project, secretId))).build();
+        return Response.ok(IamPolicyCodec.toStoredPolicy(
+                service.getIamPolicy(secretName(project, secretId)))).build();
     }
 
     @POST
@@ -253,7 +250,9 @@ public class SecretManagerHttpController {
                                  Map<String, Object> body) {
         LOG.debugf("REST setIamPolicy project=%s secretId=%s", project, secretId);
         Map<String, Object> policy = body != null ? (Map<String, Object>) body.get("policy") : null;
-        return Response.ok(iamService.setPolicy(secretName(project, secretId), IamPolicyCodec.fromJsonMap(policy))).build();
+        return Response.ok(IamPolicyCodec.toStoredPolicy(service.setIamPolicy(
+                secretName(project, secretId),
+                IamPolicyCodec.toProtoPolicy(IamPolicyCodec.fromJsonMap(policy))))).build();
     }
 
     @GET
@@ -270,7 +269,7 @@ public class SecretManagerHttpController {
                                        Map<String, Object> body) {
         LOG.debugf("REST testIamPermissions project=%s secretId=%s", project, secretId);
         List<String> permissions = body != null ? (List<String>) body.get("permissions") : List.of();
-        return Response.ok(Map.of("permissions", iamService.testPermissions(
+        return Response.ok(Map.of("permissions", service.testIamPermissions(
                 secretName(project, secretId), permissions != null ? permissions : List.of()))).build();
     }
 

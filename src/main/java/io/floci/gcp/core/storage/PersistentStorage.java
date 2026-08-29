@@ -80,6 +80,11 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
+    public void checkpoint() {
+        persistToDiskChecked();
+    }
+
+    @Override
     public void load() {
         if (!Files.exists(filePath)) {
             LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
@@ -121,12 +126,20 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     private synchronized void persistToDisk() {
         try {
+            persistToDiskChecked();
+        } catch (StorageException e) {
+            LOG.errorv(e, "Failed to persist data to {0}", filePath);
+        }
+    }
+
+    private synchronized void persistToDiskChecked() {
+        try {
             Files.createDirectories(filePath.getParent());
             Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
             objectMapper.writeValue(tempFile.toFile(), store);
             Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to persist data to {0}", filePath);
+            throw new StorageException("Failed to persist data to " + filePath, e);
         }
     }
 }

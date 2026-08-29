@@ -16,8 +16,8 @@ public final class IamServices {
     }
 
     public static IamService withStores(StorageBackend<String, StoredServiceAccount> serviceAccounts,
-            StorageBackend<String, StoredServiceAccountKey> serviceAccountKeys,
+            StorageBackend<String, StoredServiceAccountKey> keys,
             StorageBackend<String, StoredPolicy> policies) {
-        return new IamService(serviceAccounts, serviceAccountKeys, policies);
+        return new IamService(serviceAccounts, keys, policies);
     }
 }

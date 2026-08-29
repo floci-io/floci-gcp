@@ -13,6 +13,12 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -191,6 +197,41 @@ class SecretManagerServiceTest {
     }
 
     @Test
+    void serializesDeleteWithConcurrentRecreateAndVersionMutation() throws Exception {
+        String resource = "projects/p1/secrets/racing-delete";
+        BlockingFlushStorage deletionStore = new BlockingFlushStorage();
+        SecretManagerService racingService = new SecretManagerService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), deletionStore, IamServices.inMemory());
+        racingService.createSecret("p1", "racing-delete", "automatic");
+
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        try {
+            Future<?> delete = executor.submit(() -> racingService.deleteSecret(resource));
+            assertTrue(deletionStore.awaitFirstFlush());
+
+            Future<StoredSecret> recreate = executor.submit(
+                    () -> racingService.createSecret("p1", "racing-delete", "automatic"));
+            Future<StoredSecretVersion> addVersion = executor.submit(
+                    () -> racingService.addSecretVersion(resource, new byte[]{1}, null));
+            assertFalse(recreate.isDone());
+            assertFalse(addVersion.isDone());
+
+            deletionStore.releaseFlush();
+            delete.get(5, TimeUnit.SECONDS);
+            assertEquals(resource, recreate.get(5, TimeUnit.SECONDS).getName());
+            try {
+                StoredSecretVersion added = addVersion.get(5, TimeUnit.SECONDS);
+                assertEquals(resource + "/versions/1", added.getName());
+            } catch (ExecutionException e) {
+                assertInstanceOf(GcpException.class, e.getCause());
+            }
+            assertEquals(resource, racingService.getSecret(resource).getName());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void testIamPermissionsEchoesRequestedPermissionsForExistingSecret() {
         String resource = "projects/p1/secrets/permission-target";
         service.createSecret("p1", "permission-target", "automatic");
@@ -198,5 +239,36 @@ class SecretManagerServiceTest {
         assertEquals(List.of("secretmanager.secrets.get", "secretmanager.secrets.delete"),
                 service.testIamPermissions(resource,
                         List.of("secretmanager.secrets.get", "secretmanager.secrets.delete")));
+    }
+
+    private static final class BlockingFlushStorage extends InMemoryStorage<String, String> {
+        private final CountDownLatch firstFlushStarted = new CountDownLatch(1);
+        private final CountDownLatch allowFirstFlush = new CountDownLatch(1);
+        private boolean firstFlush = true;
+
+        @Override
+        public synchronized void flush() {
+            if (!firstFlush) {
+                return;
+            }
+            firstFlush = false;
+            firstFlushStarted.countDown();
+            try {
+                if (!allowFirstFlush.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting to release deletion flush");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting to release deletion flush", e);
+            }
+        }
+
+        boolean awaitFirstFlush() throws InterruptedException {
+            return firstFlushStarted.await(5, TimeUnit.SECONDS);
+        }
+
+        void releaseFlush() {
+            allowFirstFlush.countDown();
+        }
     }
 }

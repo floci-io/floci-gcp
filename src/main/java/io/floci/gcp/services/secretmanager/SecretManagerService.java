@@ -25,15 +25,18 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class SecretManagerService {
 
     private static final Logger LOG = Logger.getLogger(SecretManagerService.class);
+    private static final int SECRET_LOCK_COUNT = 256;
 
     private final StorageBackend<String, StoredSecret> secretStore;
     private final StorageBackend<String, StoredSecretVersion> versionStore;
     private final StorageBackend<String, String> pendingDeletionStore;
+    private final Object[] secretLocks = createSecretLocks();
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
@@ -81,7 +84,7 @@ public class SecretManagerService {
     }
 
     private void registerPolicyResolver() {
-        iamService.registerPolicyResourceResolver("projects/*/secrets/*", this::getSecret);
+        iamService.registerPolicyResourceResolver("projects/*/secrets/*", this::requireSecretExists);
     }
 
     // ── Secrets ────────────────────────────────────────────────────────────────
@@ -89,22 +92,30 @@ public class SecretManagerService {
     public StoredSecret createSecret(String project, String secretId, String replicationType) {
         String name = "projects/" + project + "/secrets/" + secretId;
         LOG.infof("createSecret name=%s", name);
-        resumePendingDeletion(name);
-        if (secretStore.get(name).isPresent()) {
-            throw GcpException.alreadyExists("Secret already exists: " + name);
+        synchronized (secretLock(name)) {
+            resumePendingDeletion(name);
+            if (secretStore.get(name).isPresent()) {
+                throw GcpException.alreadyExists("Secret already exists: " + name);
+            }
+            StoredSecret secret = new StoredSecret(name, Instant.now().toString(), replicationType);
+            secretStore.put(name, secret);
+            return secret;
         }
-        StoredSecret secret = new StoredSecret(name, Instant.now().toString(), replicationType);
-        secretStore.put(name, secret);
-        return secret;
     }
 
     public StoredSecret getSecret(String name) {
         LOG.debugf("getSecret name=%s", name);
+        requireSecretExists(name);
+        return secretStore.get(name).orElseThrow();
+    }
+
+    private void requireSecretExists(String name) {
         if (pendingDeletionStore.get(name).isPresent()) {
             throw GcpException.notFound("Secret not found: " + name);
         }
-        return secretStore.get(name)
-                .orElseThrow(() -> GcpException.notFound("Secret not found: " + name));
+        if (secretStore.get(name).isEmpty()) {
+            throw GcpException.notFound("Secret not found: " + name);
+        }
     }
 
     public List<StoredSecret> listSecrets(String project) {
@@ -115,19 +126,21 @@ public class SecretManagerService {
 
     public StoredSecret updateSecret(String name) {
         LOG.debugf("updateSecret name=%s", name);
-        return secretStore.get(name)
-                .orElseThrow(() -> GcpException.notFound("Secret not found: " + name));
+        requireSecretExists(name);
+        return secretStore.get(name).orElseThrow();
     }
 
     public void deleteSecret(String name) {
         LOG.infof("deleteSecret name=%s", name);
-        if (secretStore.get(name).isEmpty()) {
-            throw GcpException.notFound("Secret not found: " + name);
+        synchronized (secretLock(name)) {
+            if (secretStore.get(name).isEmpty()) {
+                throw GcpException.notFound("Secret not found: " + name);
+            }
+            pendingDeletionStore.put(name, name);
+            pendingDeletionStore.flush();
+            completeDeletion(name);
+            clearPendingDeletion(name);
         }
-        pendingDeletionStore.put(name, name);
-        pendingDeletionStore.flush();
-        completeDeletion(name);
-        clearPendingDeletion(name);
     }
 
     /**
@@ -141,12 +154,14 @@ public class SecretManagerService {
     }
 
     private void resumePendingDeletion(String name) {
-        if (pendingDeletionStore.get(name).isEmpty()) {
-            return;
+        synchronized (secretLock(name)) {
+            if (pendingDeletionStore.get(name).isEmpty()) {
+                return;
+            }
+            LOG.warnf("Resuming interrupted deletion for secret %s", name);
+            completeDeletion(name);
+            clearPendingDeletion(name);
         }
-        LOG.warnf("Resuming interrupted deletion for secret %s", name);
-        completeDeletion(name);
-        clearPendingDeletion(name);
     }
 
     private void clearPendingDeletion(String name) {
@@ -180,30 +195,37 @@ public class SecretManagerService {
 
     public StoredSecretVersion addSecretVersion(String secretName, byte[] payload, Long dataCrc32c) {
         LOG.infof("addSecretVersion secret=%s", secretName);
-        if (secretStore.get(secretName).isEmpty()) {
-            throw GcpException.notFound("Secret not found: " + secretName);
+        synchronized (secretLock(secretName)) {
+            requireSecretExists(secretName);
+            int versionNumber = nextVersionNumber(secretName);
+            String versionName = secretName + "/versions/" + versionNumber;
+            StoredSecretVersion version = new StoredSecretVersion(versionName, versionNumber,
+                    Instant.now().toString(), payload, dataCrc32c);
+            versionStore.put(versionName, version);
+            return version;
         }
-        int versionNumber = nextVersionNumber(secretName);
-        String versionName = secretName + "/versions/" + versionNumber;
-        StoredSecretVersion version = new StoredSecretVersion(versionName, versionNumber,
-                Instant.now().toString(), payload, dataCrc32c);
-        versionStore.put(versionName, version);
-        return version;
     }
 
     public StoredSecretVersion getSecretVersion(String versionedName) {
         LOG.debugf("getSecretVersion name=%s", versionedName);
+        String secretName = secretNameForVersion(versionedName);
+        requireSecretExists(secretName);
         return resolveVersion(versionedName);
     }
 
     public List<StoredSecretVersion> listSecretVersions(String secretName) {
         LOG.debugf("listSecretVersions secret=%s", secretName);
+        if (pendingDeletionStore.get(secretName).isPresent()) {
+            return List.of();
+        }
         String prefix = secretName + "/versions/";
         return versionStore.scan(k -> k.startsWith(prefix));
     }
 
     public StoredSecretVersion accessSecretVersion(String versionedName) {
         LOG.debugf("accessSecretVersion name=%s", versionedName);
+        String secretName = secretNameForVersion(versionedName);
+        requireSecretExists(secretName);
         StoredSecretVersion version = resolveVersion(versionedName);
         if ("DESTROYED".equals(version.getState())) {
             throw GcpException.notFound("Secret version is destroyed: " + version.getName());
@@ -216,28 +238,21 @@ public class SecretManagerService {
 
     public StoredSecretVersion disableSecretVersion(String versionedName) {
         LOG.infof("disableSecretVersion name=%s", versionedName);
-        StoredSecretVersion version = resolveVersion(versionedName);
-        version.setState("DISABLED");
-        versionStore.put(version.getName(), version);
-        return version;
+        return updateSecretVersion(versionedName, version -> version.setState("DISABLED"));
     }
 
     public StoredSecretVersion enableSecretVersion(String versionedName) {
         LOG.infof("enableSecretVersion name=%s", versionedName);
-        StoredSecretVersion version = resolveVersion(versionedName);
-        version.setState("ENABLED");
-        versionStore.put(version.getName(), version);
-        return version;
+        return updateSecretVersion(versionedName, version -> version.setState("ENABLED"));
     }
 
     public StoredSecretVersion destroySecretVersion(String versionedName) {
         LOG.infof("destroySecretVersion name=%s", versionedName);
-        StoredSecretVersion version = resolveVersion(versionedName);
-        version.setState("DESTROYED");
-        version.setPayload(null);
-        version.setDestroyTime(Instant.now().toString());
-        versionStore.put(version.getName(), version);
-        return version;
+        return updateSecretVersion(versionedName, version -> {
+            version.setState("DESTROYED");
+            version.setPayload(null);
+            version.setDestroyTime(Instant.now().toString());
+        });
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -258,5 +273,36 @@ public class SecretManagerService {
         }
         return versionStore.get(versionedName)
                 .orElseThrow(() -> GcpException.notFound("Version not found: " + versionedName));
+    }
+
+    private StoredSecretVersion updateSecretVersion(String versionedName, Consumer<StoredSecretVersion> update) {
+        String secretName = secretNameForVersion(versionedName);
+        synchronized (secretLock(secretName)) {
+            requireSecretExists(secretName);
+            StoredSecretVersion version = resolveVersion(versionedName);
+            update.accept(version);
+            versionStore.put(version.getName(), version);
+            return version;
+        }
+    }
+
+    private static Object[] createSecretLocks() {
+        Object[] locks = new Object[SECRET_LOCK_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private Object secretLock(String secretName) {
+        return secretLocks[Math.floorMod(secretName.hashCode(), secretLocks.length)];
+    }
+
+    private String secretNameForVersion(String versionedName) {
+        int versionIndex = versionedName.indexOf("/versions/");
+        if (versionIndex < 0) {
+            throw GcpException.notFound("Version not found: " + versionedName);
+        }
+        return versionedName.substring(0, versionIndex);
     }
 }

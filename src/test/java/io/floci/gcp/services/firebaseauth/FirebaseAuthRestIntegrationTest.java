@@ -481,7 +481,8 @@ class FirebaseAuthRestIntegrationTest {
 
         // Number(v) is NaN or 0, so `|| MAX` applies. Double.parseDouble would accept the
         // d/f type suffixes and JavaScript does not; JavaScript rejects a signed 0x literal.
-        for (Object duration : new Object[]{"3600d", "3600f", "-0x10", false, ""}) {
+        // "\u200b" is Cf, not whitespace, so Number() leaves it in place and yields NaN.
+        for (Object duration : new Object[]{"3600d", "3600f", "-0x10", false, "", "\u200b3600"}) {
             String cookie = given()
                     .urlEncodingEnabled(false)
                     .contentType("application/json")
@@ -499,7 +500,12 @@ class FirebaseAuthRestIntegrationTest {
         for (Map.Entry<Object, Long> expected : List.of(
                 Map.entry((Object) "0x1000", 4096L),
                 Map.entry((Object) "3.6e3", 3600L),
-                Map.entry((Object) " 3600 ", 3600L))) {
+                Map.entry((Object) " 3600 ", 3600L),
+                // ECMAScript StrWhiteSpace goes beyond String.trim()'s <= U+0020, and beyond
+                // String.strip(): Character.isWhitespace excludes the non-breaking spaces.
+                Map.entry((Object) "\u00a03600\u00a0", 3600L),
+                Map.entry((Object) "\u30003600", 3600L),
+                Map.entry((Object) "\u20283600\ufeff", 3600L))) {
             String cookie = given()
                     .urlEncodingEnabled(false)
                     .contentType("application/json")

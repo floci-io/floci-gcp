@@ -17,6 +17,10 @@ public class FirebaseAuthCorsRouteFilter {
             "/securetoken.googleapis.com/*",
     };
 
+    // Matches expressjs/cors' defaults, which is what firebase-tools' Auth Emulator uses.
+    private static final String DEFAULT_CORS_METHODS = "GET,HEAD,PUT,PATCH,POST,DELETE";
+
+
     private final Router router;
 
     @Inject
@@ -30,9 +34,6 @@ public class FirebaseAuthCorsRouteFilter {
             router.route(pathPrefix).order(Integer.MIN_VALUE + 1).handler(this::handle);
         }
     }
-
-    // Matches expressjs/cors' defaults, which is what firebase-tools' Auth Emulator uses.
-    private static final String DEFAULT_CORS_METHODS = "GET,HEAD,PUT,PATCH,POST,DELETE";
 
     private void handle(RoutingContext ctx) {
         String origin = ctx.request().getHeader("Origin");

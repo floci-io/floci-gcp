@@ -40,10 +40,14 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
 - Session cookies: `createSessionCookie` re-issues a verified ID token's payload with a fresh
   `iat`/`exp` window and `iss=https://session.firebase.google.com/{project}`. `validDuration`
   is in **seconds** and must fall in `[300, 1209600]` (5 minutes – 14 days), else
-  `INVALID_DURATION`. Like the official emulator, a value that is not a non-zero number —
-  absent, `0`, or a string such as `"3600s"` — silently falls back to the 14-day maximum
-  rather than being rejected. There is no verification endpoint: the Admin SDKs verify
-  session cookies locally, and `checkRevoked` goes through `accounts:lookup`.
+  `INVALID_DURATION`. Like the official emulator, the value is first put through JavaScript
+  `Number()` coercion and then `|| MAX`, so anything coercing to `NaN` or `0` - absent,
+  `0`, `false`, `""`, or a string such as `"3600s"` silently falls back to the 14-day
+  maximum, while anything coercing to another number (`0.5`, `true`, `"0x10"`) reaches the
+  range check and is rejected there. Radix prefixes (`"0x1000"`) and exponent notation
+  (`"3.6e3"`) are read the way `Number()` reads them. There is no verification endpoint:
+  the Admin SDKs verify session cookies locally, and `checkRevoked` goes through
+  `accounts:lookup`.
 
 ## Quick Start
 

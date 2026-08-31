@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -458,6 +459,59 @@ class FirebaseAuthRestIntegrationTest {
                 .extract().path("sessionCookie");
         Map<String, Object> payload = decodeSegment(cookie, 1);
         assertEquals(14L * 24 * 60 * 60, num(payload.get("exp")) - num(payload.get("iat")));
+    }
+
+    @Test
+    void createSessionCookieCoercesDurationLikeJavaScriptNumber() throws Exception {
+        String idToken = (String) signUpClient("cookie-coercion@example.com").get("idToken");
+
+        // Number(v) is non-zero but outside [300, 1209600], so the range check rejects it
+        // rather than the coercion silently falling back to the 14-day maximum.
+        for (Object duration : new Object[]{0.5, true, "0x10", "0b1010", "1e-3"}) {
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .header("Authorization", "Bearer owner")
+                    .body(Map.of("idToken", idToken, "validDuration", duration))
+                    .when().post(PROJECT + ":createSessionCookie")
+                    .then()
+                    .statusCode(400)
+                    .body("error.message", equalTo("INVALID_DURATION"));
+        }
+
+        // Number(v) is NaN or 0, so `|| MAX` applies. Double.parseDouble would accept the
+        // d/f type suffixes and JavaScript does not; JavaScript rejects a signed 0x literal.
+        for (Object duration : new Object[]{"3600d", "3600f", "-0x10", false, ""}) {
+            String cookie = given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .header("Authorization", "Bearer owner")
+                    .body(Map.of("idToken", idToken, "validDuration", duration))
+                    .when().post(PROJECT + ":createSessionCookie")
+                    .then().statusCode(200)
+                    .extract().path("sessionCookie");
+            Map<String, Object> payload = decodeSegment(cookie, 1);
+            assertEquals(14L * 24 * 60 * 60, num(payload.get("exp")) - num(payload.get("iat")));
+        }
+
+        // Number(v) lands in range and is used as-is, including the radix prefixes and
+        // exponent notation JavaScript accepts.
+        for (Map.Entry<Object, Long> expected : List.of(
+                Map.entry((Object) "0x1000", 4096L),
+                Map.entry((Object) "3.6e3", 3600L),
+                Map.entry((Object) " 3600 ", 3600L))) {
+            String cookie = given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .header("Authorization", "Bearer owner")
+                    .body(Map.of("idToken", idToken, "validDuration", expected.getKey()))
+                    .when().post(PROJECT + ":createSessionCookie")
+                    .then().statusCode(200)
+                    .extract().path("sessionCookie");
+            Map<String, Object> payload = decodeSegment(cookie, 1);
+            assertEquals(expected.getValue().longValue(),
+                    num(payload.get("exp")) - num(payload.get("iat")));
+        }
     }
 
     @Test

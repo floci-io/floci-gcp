@@ -16,6 +16,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import static io.floci.gcp.services.firebaseauth.FirebaseAuthException.badRequest;
 import static io.floci.gcp.services.firebaseauth.FirebaseAuthException.check;
@@ -48,6 +50,10 @@ public class FirebaseAuthService {
     private static final long TOKEN_EXPIRES_IN_SECONDS = 3600;
     private static final long SESSION_COOKIE_MIN_VALID_DURATION = 5 * 60;
     private static final long SESSION_COOKIE_MAX_VALID_DURATION = 14 * 24 * 60 * 60;
+    private static final Pattern JS_DECIMAL_LITERAL =
+            Pattern.compile("[+-]?(Infinity|(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?)");
+    private static final Pattern JS_RADIX_LITERAL =
+            Pattern.compile("0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+");
     private static final String PROJECT_NUMBER = "12345";
     static final String CUSTOM_TOKEN_AUDIENCE =
             "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit";
@@ -494,35 +500,62 @@ public class FirebaseAuthService {
         String idToken = str(body.get("idToken"));
         check(idToken != null && !idToken.isEmpty(), "MISSING_ID_TOKEN");
 
-        long validDuration = sessionCookieDuration(body.get("validDuration"));
+        double validDuration = sessionCookieDuration(body.get("validDuration"));
         check(validDuration >= SESSION_COOKIE_MIN_VALID_DURATION
                 && validDuration <= SESSION_COOKIE_MAX_VALID_DURATION, "INVALID_DURATION");
 
         Map<String, Object> payload = new LinkedHashMap<>(verifyIdToken(project, idToken).payload());
         long iat = Instant.now().getEpochSecond();
         payload.put("iat", iat);
-        payload.put("exp", iat + validDuration);
+        payload.put("exp", iat + (long) validDuration);
         payload.put("iss", "https://session.firebase.google.com/" + str(payload.get("aud")));
 
-        LOG.debugf("firebaseauth createSessionCookie project=%s localId=%s validDuration=%d",
+        LOG.debugf("firebaseauth createSessionCookie project=%s localId=%s validDuration=%s",
                 project, payload.get("user_id"), validDuration);
         return Map.of("sessionCookie", FirebaseJwt.sign(payload));
     }
 
-    private static long sessionCookieDuration(Object validDuration) {
-        if (validDuration instanceof Number number) {
-            return number.longValue() == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : number.longValue();
+    /**
+     * The emulator computes {@code Number(validDuration) || SESSION_COOKIE_MAX_VALID_DURATION},
+     * so anything coercing to {@code NaN} or {@code 0} — absent, {@code null}, {@code false},
+     * {@code ""}, {@code "3600s"} — falls back to the maximum, while any other value is passed
+     * through to the range check and rejected there if out of bounds.
+     */
+    private static double sessionCookieDuration(Object validDuration) {
+        double coerced = jsNumber(validDuration);
+        return Double.isNaN(coerced) || coerced == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : coerced;
+    }
+
+    /**
+     * ECMAScript {@code Number(value)} coercion, returning {@code NaN} where JavaScript does.
+     * {@link Double#parseDouble} is not a substitute: it accepts Java's {@code d}/{@code f} type
+     * suffixes ({@code "3600d"}) that JavaScript rejects, and rejects the {@code 0x}/{@code 0b}/
+     * {@code 0o} radix prefixes that JavaScript accepts.
+     */
+    private static double jsNumber(Object value) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
         }
-        String text = str(validDuration);
-        if (text == null || text.isBlank()) {
-            return SESSION_COOKIE_MAX_VALID_DURATION;
+        if (value instanceof Boolean bool) {
+            return bool ? 1 : 0;
         }
-        try {
-            long parsed = (long) Double.parseDouble(text.trim());
-            return parsed == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : parsed;
-        } catch (NumberFormatException e) {
-            return SESSION_COOKIE_MAX_VALID_DURATION;
+        String text = str(value);
+        if (text == null) {
+            return Double.NaN;
         }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return 0;
+        }
+        if (JS_RADIX_LITERAL.matcher(trimmed).matches()) {
+            int radix = switch (Character.toLowerCase(trimmed.charAt(1))) {
+                case 'x' -> 16;
+                case 'b' -> 2;
+                default -> 8;
+            };
+            return new BigInteger(trimmed.substring(2), radix).doubleValue();
+        }
+        return JS_DECIMAL_LITERAL.matcher(trimmed).matches() ? Double.parseDouble(trimmed) : Double.NaN;
     }
 
     // ── securetoken grantToken ────────────────────────────────────────────────

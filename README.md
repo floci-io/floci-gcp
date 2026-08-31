@@ -4,7 +4,8 @@
 </p>
 
 <p align="center">
-  <strong>Light, fluffy, and always free — GCP Local Emulator</strong><br />
+  <strong>Any Cloud. Locally.</strong><br />
+  Light, fluffy, and always free: the GCP local emulator<br />
   No account. No auth token. No feature gates. Just <code>docker compose up</code>.
 </p>
 
@@ -35,7 +36,14 @@ floci-gcp is a free, open-source local GCP emulator for development, testing, an
 
 It gives you GCP-shaped services on your machine without requiring a cloud account, auth token, or paid feature gates. Point your GCP SDK, gcloud CLI, Terraform, or test suite at `http://localhost:4588` and keep your existing workflows.
 
-floci-gcp is named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
+floci-gcp is the GCP member of the [Floci](https://github.com/floci-io) emulator family, named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
+
+| Emulator | Cloud | Port |
+|---|---|:---:|
+| [floci](https://github.com/floci-io/floci) | AWS | 4566 |
+| [floci-az](https://github.com/floci-io/floci-az) | Azure | 4577 |
+| **[floci-gcp](https://github.com/floci-io/floci-gcp)** | **GCP** | **4588** |
+| [floci-oci](https://github.com/floci-io/floci-oci) | OCI | 4599 |
 
 ## Quick Start
 
@@ -98,7 +106,7 @@ Run GCP-compatible services locally without a GCP account, service account key, 
 <details>
 <summary><strong>Single port for everything</strong></summary>
 
-All GCP services — gRPC and REST — share a single port (`4588`) via HTTP/2 ALPN negotiation. No per-service daemon setup, no port management.
+All GCP services (gRPC and REST) share a single port (`4588`) via HTTP/2 ALPN negotiation. No per-service daemon setup, no port management.
 
 </details>
 
@@ -125,7 +133,7 @@ Choose from in-memory, persistent, hybrid, and write-ahead log storage depending
 
 ## Why floci-gcp?
 
-GCP's official emulators are fragmented — each service ships its own binary, runs on a different port, and requires separate setup. floci-gcp unifies them under a single port.
+GCP's official emulators are fragmented: each service ships its own binary, runs on a different port, and requires separate setup. floci-gcp unifies them under a single port.
 
 | Capability | floci-gcp | GCP official emulators |
 |---|:---:|:---:|
@@ -235,12 +243,12 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 ## Real Docker Integration
 
-floci-gcp uses real Docker containers when in-process emulation would reduce fidelity — stateful databases, connection-heavy protocols, and image-based runtimes. These services spawn sidecar containers via the host Docker daemon. Each is gated by a per-service `mock` flag: set it to `true` to keep the service metadata-only without Docker.
+floci-gcp uses real Docker containers when in-process emulation would reduce fidelity: stateful databases, connection-heavy protocols, and image-based runtimes. These services spawn sidecar containers via the host Docker daemon. Each is gated by a per-service `mock` flag: set it to `true` to keep the service metadata-only without Docker.
 
 | Service | Default image | What is real | Mock flag |
 |---|---|---|---|
 | Managed Kafka | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
-| Cloud SQL for PostgreSQL | `postgres:15.18-alpine` (15–18) | PostgreSQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
+| Cloud SQL for PostgreSQL | `postgres:15.18-alpine` (15-18) | PostgreSQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
 | GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
 
@@ -279,7 +287,7 @@ Use `memory` for fast CI runs. Use `hybrid` when you want state preserved across
 
 ## Multi-Project Isolation
 
-GCP resource names follow `projects/{project}/...`. floci-gcp uses the project ID as the multi-tenancy boundary — resources in `project-a` are invisible to `project-b`.
+GCP resource names follow `projects/{project}/...`. floci-gcp uses the project ID as the multi-tenancy boundary: resources in `project-a` are invisible to `project-b`.
 
 The project ID is resolved in this order:
 1. URL path segment `projects/{project}/...`
@@ -604,7 +612,7 @@ cd compatibility-tests && just test-terraform
 
 ## Migrating from gcloud emulators
 
-Google ships a separate emulator per service (`gcloud beta emulators pubsub | firestore | datastore | bigtable | spanner`), each its own process on its own port. floci-gcp replaces all of them with one binary on a single port (`4588`), reusing the same `*_EMULATOR_HOST` environment variables the GCP SDKs already honor — just point them at floci-gcp.
+Google ships a separate emulator per service (`gcloud beta emulators pubsub | firestore | datastore | bigtable | spanner`), each its own process on its own port. floci-gcp replaces all of them with one binary on a single port (`4588`), reusing the same `*_EMULATOR_HOST` environment variables the GCP SDKs already honor. Just point them at floci-gcp.
 
 | gcloud emulator | floci-gcp |
 |---|---|
@@ -615,7 +623,7 @@ Google ships a separate emulator per service (`gcloud beta emulators pubsub | fi
 | _(no official emulator)_ | `SECRET_MANAGER_EMULATOR_HOST=localhost:4588` |
 | Firebase Auth emulator → `FIREBASE_AUTH_EMULATOR_HOST=localhost:9099` | `FIREBASE_AUTH_EMULATOR_HOST=localhost:4588` |
 
-The GCP SDKs skip credential checks automatically when these variables are set, so no code changes are needed — one container replaces the fragmented per-service emulator processes.
+The GCP SDKs skip credential checks automatically when these variables are set, so no code changes are needed. One container replaces the fragmented per-service emulator processes.
 
 ## Image Tags
 
@@ -640,6 +648,12 @@ image: floci/floci-gcp:0.5.0
 # Track main
 image: floci/floci-gcp:nightly
 ```
+
+### Release train
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci-gcp:nightly` tracks `main`. Every merged fix is available the next day, with immutable `nightly-mmddyyyy` tags for reproducible builds.
+
+Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 
 ## Configuration
 
@@ -760,4 +774,4 @@ tiers, is listed in [THANKS.md](https://github.com/floci-io/.github/blob/main/TH
 
 ## License
 
-MIT — use it however you want.
+MIT: use it however you want.

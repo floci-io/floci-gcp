@@ -351,6 +351,10 @@ in `src/test/resources/application.yml` so the suite never starts containers.
 
 ---
 
+## Documentation Style
+
+- No em-dashes anywhere, in any content. Use colons, commas, or periods.
+
 ## Logging
 
 - Use JBoss Logging

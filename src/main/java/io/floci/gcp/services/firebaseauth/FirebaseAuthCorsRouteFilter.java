@@ -20,7 +20,6 @@ public class FirebaseAuthCorsRouteFilter {
     // Matches expressjs/cors' defaults, which is what firebase-tools' Auth Emulator uses.
     private static final String DEFAULT_CORS_METHODS = "GET,HEAD,PUT,PATCH,POST,DELETE";
 
-
     private final Router router;
 
     @Inject

@@ -3,6 +3,16 @@ package io.floci.gcp.services.firebaseauth;
 import java.math.BigInteger;
 import java.util.regex.Pattern;
 
+/**
+ * ECMAScript {@code Number(value)} coercion, returning {@code NaN} wherever JavaScript does.
+ *
+ * <p>The Firebase Auth emulator is written in TypeScript and leans on JavaScript's implicit
+ * conversions for request fields, so reproducing its behaviour means reproducing {@code Number()}
+ * rather than reaching for the nearest Java equivalent. {@link Double#parseDouble} is not that
+ * equivalent: it accepts Java's {@code d}/{@code f} type suffixes ({@code "3600d"}) that
+ * JavaScript rejects, and rejects the {@code 0x}/{@code 0b}/{@code 0o} radix prefixes that
+ * JavaScript accepts.
+ */
 final class JsNumber {
 
     /** {@code StrDecimalLiteral}, without the type suffixes {@link Double#parseDouble} allows. */
@@ -19,6 +29,12 @@ final class JsNumber {
      * Coerces a JSON-decoded value the way {@code Number(value)} would. Absent values arrive as
      * {@code null}: {@code Number(undefined)} is {@code NaN} and {@code Number(null)} is
      * {@code 0}, both falsy, so callers applying a {@code ||} fallback cannot tell them apart.
+     *
+     * <p>Arrays and objects are not put through {@code ToPrimitive} and always yield {@code NaN}.
+     * Bare {@code Number()} would read {@code [3600]} as {@code 3600}, but the emulator never
+     * evaluates it: the fields this coercion backs are typed {@code string} in its OpenAPI schema,
+     * and its request validator coerces only numbers to strings, so a structured value is
+     * rejected as {@code INVALID_ARGUMENT} before the operation runs.
      */
     static double of(Object value) {
         if (value instanceof Number number) {

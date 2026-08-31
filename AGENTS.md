@@ -63,7 +63,7 @@ floci-gcp follows a layered design:
 - `ServiceRegistry`
 - `StorageBackend` + `StorageFactory`
 - `GcpException` + `GcpExceptionMapper`
-- `GcpGrpcController` — base class for gRPC service implementations
+- `GcpGrpcController` — shared gRPC error-mapping helper (static `grpcError`); not a base class
 - `ProjectContextFilter` — extracts GCP project ID from request path or headers
 - `RequestContext` — `@RequestScoped` holder for the current project ID
 - `GcpResourceNames` — utilities for parsing and building GCP resource name strings
@@ -101,7 +101,7 @@ floci-gcp must implement real GCP wire protocols.
 
 | Protocol | Services | Transport | Implementation |
 |----------|----------|-----------|----------------|
-| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager | HTTP/2 + proto3 | `GcpGrpcController` subclass |
+| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass + `GcpGrpcController.grpcError` |
 | REST JSON | GCS (management), IAM, Secret Manager (REST) | HTTP/1.1 or HTTP/2 | JAX-RS |
 | REST XML | GCS (object operations) | HTTP/1.1 or HTTP/2 | JAX-RS + `XmlBuilder` |
 
@@ -292,7 +292,7 @@ If a change affects request parsing, response shape, error handling, persistence
 
 - Services should throw `GcpException`
 - REST flows use `GcpExceptionMapper` → `{"error": {"code": N, "message": "...", "status": "..."}}`
-- gRPC flows use `GcpGrpcController.error(observer, t)` → `StatusRuntimeException`
+- gRPC flows use `GcpGrpcController.grpcError(observer, t)` → `StatusRuntimeException`
 - Controller return types must remain reflection-safe
 
 ---
@@ -315,7 +315,7 @@ When adding functionality:
 
 1. Create a package under `services/`
 2. Add:
-   - Controller (extends `GcpGrpcController` for gRPC, or JAX-RS resource for REST)
+   - Controller (extends the generated `*Grpc.*ImplBase` for gRPC, or JAX-RS resource for REST)
    - Service
    - `model/`
 3. Register the service in `ServiceRegistry`

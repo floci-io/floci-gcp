@@ -45,9 +45,9 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
   `false`, `""`, or a string such as `"3600s"`) silently falls back to the 14-day maximum,
   while anything coercing to another number (`0.5`, `true`, `"0x10"`) reaches the range
   check and is rejected there. Radix prefixes (`"0x1000"`), exponent notation (`"3.6e3"`)
-  and ECMAScript whitespace (which includes NBSP) are read the way `Number()` reads them. There is no verification endpoint as
-  the Admin SDKs verify session cookies locally, and `checkRevoked` goes through
-  `accounts:lookup`.
+  and ECMAScript whitespace (which includes NBSP) are read the way `Number()` reads them.
+  There is no verification endpoint as the Admin SDKs verify session cookies locally, and
+  `checkRevoked` goes through `accounts:lookup`.
 
 ## Quick Start
 

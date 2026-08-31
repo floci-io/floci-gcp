@@ -41,6 +41,12 @@ public class GcsCorsFilter implements ContainerRequestFilter, ContainerResponseF
             return;
         }
         String bucket = extractBucket(req.getUriInfo().getRequestUri().getRawPath());
+        if (bucket == null) {
+            // Not a GCS-shaped path at all. Leave OPTIONS handling (and any other
+            // service's own CORS filter, e.g. FirebaseAuthCorsFilter) alone instead of
+            // absorbing the preflight here with a bare, header-less 200.
+            return;
+        }
         String requestedMethod = req.getHeaderString(ACCESS_CONTROL_REQUEST_METHOD);
         Map<String, Object> rule = matchCorsRule(bucket, origin, requestedMethod);
         Response.ResponseBuilder rb = Response.ok();

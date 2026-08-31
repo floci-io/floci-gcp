@@ -31,6 +31,9 @@ public class FirebaseAuthCorsRouteFilter {
         }
     }
 
+    // Matches expressjs/cors' defaults, which is what firebase-tools' Auth Emulator uses.
+    private static final String DEFAULT_CORS_METHODS = "GET,HEAD,PUT,PATCH,POST,DELETE";
+
     private void handle(RoutingContext ctx) {
         String origin = ctx.request().getHeader("Origin");
         if (origin == null) {
@@ -38,20 +41,18 @@ public class FirebaseAuthCorsRouteFilter {
             return;
         }
         ctx.response().putHeader("Access-Control-Allow-Origin", origin);
-        ctx.response().putHeader("Vary", "Origin");
 
         if (!"OPTIONS".equalsIgnoreCase(ctx.request().method().name())) {
+            ctx.response().putHeader("Vary", "Origin");
             ctx.next();
             return;
         }
-        String requestedMethod = ctx.request().getHeader("Access-Control-Request-Method");
-        ctx.response().putHeader("Access-Control-Allow-Methods",
-                requestedMethod != null ? requestedMethod : "GET, POST");
+        ctx.response().putHeader("Access-Control-Allow-Methods", DEFAULT_CORS_METHODS);
         String requestedHeaders = ctx.request().getHeader("Access-Control-Request-Headers");
-        if (requestedHeaders != null) {
+        if (requestedHeaders != null && !requestedHeaders.isEmpty()) {
             ctx.response().putHeader("Access-Control-Allow-Headers", requestedHeaders);
         }
-        ctx.response().putHeader("Access-Control-Max-Age", "3600");
-        ctx.response().setStatusCode(200).end();
+        ctx.response().putHeader("Vary", "Origin, Access-Control-Request-Headers");
+        ctx.response().setStatusCode(204).end();
     }
 }

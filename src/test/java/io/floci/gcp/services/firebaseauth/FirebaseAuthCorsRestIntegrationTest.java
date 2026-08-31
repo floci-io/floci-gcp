@@ -21,11 +21,11 @@ class FirebaseAuthCorsRestIntegrationTest {
                 .header("Access-Control-Request-Headers", "Content-Type")
                 .when().options(CLIENT + ":signInWithPassword")
                 .then()
-                .statusCode(200)
+                .statusCode(204)
                 .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
-                .header("Access-Control-Allow-Methods", equalTo("POST"))
+                .header("Access-Control-Allow-Methods", equalTo("GET,HEAD,PUT,PATCH,POST,DELETE"))
                 .header("Access-Control-Allow-Headers", equalTo("Content-Type"))
-                .header("Vary", equalTo("Origin"));
+                .header("Vary", equalTo("Origin, Access-Control-Request-Headers"));
     }
 
     @Test
@@ -53,11 +53,11 @@ class FirebaseAuthCorsRestIntegrationTest {
                 .header("Access-Control-Request-Headers", "Content-Type")
                 .when().options("/securetoken.googleapis.com/v1/token")
                 .then()
-                .statusCode(200)
+                .statusCode(204)
                 .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
-                .header("Access-Control-Allow-Methods", equalTo("POST"))
+                .header("Access-Control-Allow-Methods", equalTo("GET,HEAD,PUT,PATCH,POST,DELETE"))
                 .header("Access-Control-Allow-Headers", equalTo("Content-Type"))
-                .header("Vary", equalTo("Origin"));
+                .header("Vary", equalTo("Origin, Access-Control-Request-Headers"));
     }
 
     @Test

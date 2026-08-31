@@ -101,7 +101,7 @@ floci-gcp must implement real GCP wire protocols.
 
 | Protocol | Services | Transport | Implementation |
 |----------|----------|-----------|----------------|
-| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass + `GcpGrpcController.grpcError` |
+| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass (Datastore implements `BindableService` directly) + `GcpGrpcController.grpcError` |
 | REST JSON | GCS (management), IAM, Secret Manager (REST) | HTTP/1.1 or HTTP/2 | JAX-RS |
 | REST XML | GCS (object operations) | HTTP/1.1 or HTTP/2 | JAX-RS + `XmlBuilder` |
 
@@ -315,7 +315,7 @@ When adding functionality:
 
 1. Create a package under `services/`
 2. Add:
-   - Controller (extends the generated `*Grpc.*ImplBase` for gRPC, or JAX-RS resource for REST)
+   - Controller (extends the generated `*Grpc.*ImplBase`, or implements `BindableService`, for gRPC; JAX-RS resource for REST)
    - Service
    - `model/`
 3. Register the service in `ServiceRegistry`

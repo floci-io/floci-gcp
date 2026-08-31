@@ -46,6 +46,21 @@ class FirebaseAuthCorsRestIntegrationTest {
     }
 
     @Test
+    void preflightForSecureTokenRefreshAdvertisesTheRequestedOrigin() {
+        given()
+                .header("Origin", ORIGIN)
+                .header("Access-Control-Request-Method", "POST")
+                .header("Access-Control-Request-Headers", "Content-Type")
+                .when().options("/securetoken.googleapis.com/v1/token")
+                .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
+                .header("Access-Control-Allow-Methods", equalTo("POST"))
+                .header("Access-Control-Allow-Headers", equalTo("Content-Type"))
+                .header("Vary", equalTo("Origin"));
+    }
+
+    @Test
     void requestWithNoOriginGetsNoCorsHeaders() {
         given()
                 .urlEncodingEnabled(false)

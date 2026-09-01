@@ -651,7 +651,7 @@ image: floci/floci-gcp:nightly
 
 ### Release train
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci-gcp:nightly` tracks `main`. Every merged fix is available the next day, with immutable `nightly-mmddyyyy` tags for reproducible builds.
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci-gcp:nightly` tracks `main`. Every merged fix is available the next day, and dated `nightly-mmddyyyy` tags let you pin a specific night's build.
 
 Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 

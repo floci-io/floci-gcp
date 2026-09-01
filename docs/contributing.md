@@ -4,9 +4,9 @@ floci-gcp is MIT licensed and welcomes contributions of all kinds.
 
 ## Ways to Help
 
-- **Bug reports** — open a [GitHub issue](https://github.com/floci-io/floci-gcp/issues/new?template=bug_report.md) with a minimal reproduction
-- **Missing API operations** — open a [feature request](https://github.com/floci-io/floci-gcp/issues/new?template=feature_request.md)
-- **Pull requests** — new service operations, bug fixes, documentation improvements
+- **Bug reports**: open a [GitHub issue](https://github.com/floci-io/floci-gcp/issues/new?template=bug_report.md) with a minimal reproduction
+- **Missing API operations**: open a [feature request](https://github.com/floci-io/floci-gcp/issues/new?template=feature_request.md)
+- **Pull requests**: new service operations, bug fixes, documentation improvements
 
 ## Development Setup
 
@@ -102,6 +102,12 @@ just test-all-iac      # Terraform / OpenTofu
 ```
 
 If the compatibility test suite is unavailable in your environment, state that explicitly in the PR description.
+
+## Releases
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does not cut a release: the change rides the next train, and is in that night's `nightly` image either way.
+
+Maintainers cut releases from `main` with the Release Cut workflow, which runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is never edited by hand.
 
 ## Reporting Security Issues
 

@@ -4,10 +4,10 @@ Thank you for your interest in contributing! Floci is a community-driven project
 
 ## Ways to Contribute
 
-- **Bug reports** — open an issue with a minimal reproduction
-- **Feature requests** — open an issue describing the GCP behavior you need
-- **Pull requests** — bug fixes, new service implementations, or improvements
-- **Compatibility tests** — add cases to `./compatibility-tests/`
+- **Bug reports**: open an issue with a minimal reproduction
+- **Feature requests**: open an issue describing the GCP behavior you need
+- **Pull requests**: bug fixes, new service implementations, or improvements
+- **Compatibility tests**: add cases to `./compatibility-tests/`
 
 ## Getting Started
 
@@ -47,16 +47,16 @@ If you prefer to use your own Maven installation (3.9+), you can use `mvn` inste
 
 ## Branching Model
 
-Floci uses a **tag-driven release model**. Docker images are never published on PR merge — only when a maintainer pushes a version tag.
+Floci uses a **tag-driven release model**. Docker images are never published on PR merge, only when a maintainer pushes a version tag.
 
 | Branch | Purpose | Docker published? |
 |---|---|---|
-| `main` | Integration branch — all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
+| `main` | Integration branch: all PRs merge here. Treated as unstable/nightly. | No (CI tests only) |
 | `X.Y.Z` tag | Signals a production release. Triggers the full Docker publish pipeline. | Yes (`x.y.z`, `latest`, `x.y.z-jvm`, `latest-jvm`) |
 
 ## Commit Message Format
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) — semantic-release reads these to generate the changelog and version bumps automatically.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/): semantic-release reads these to generate the changelog and version bumps automatically.
 
 > **The PR title is validated automatically by CI** and must follow this format, since it becomes the squash-merge commit message that semantic-release reads.
 
@@ -66,9 +66,9 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) �
 <type>[optional scope]: <description>
 ```
 
-- **type** — one of the values in the table below (lowercase)
-- **scope** — optional, in parentheses, identifies the service or area (e.g. `gcs`, `pubsub`, `core`)
-- **description** — short summary in the imperative mood, no trailing period
+- **type**: one of the values in the table below (lowercase)
+- **scope**: optional, in parentheses, identifies the service or area (e.g. `gcs`, `pubsub`, `core`)
+- **description**: short summary in the imperative mood, no trailing period
 - Append `!` before the colon to signal a breaking change: `feat(api)!:`
 
 | Type | When to use | Version bump |
@@ -78,13 +78,13 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) �
 | `perf` | Performance improvement | patch |
 | `revert` | Reverts a previous commit | patch |
 | `docs` | Documentation only | none |
-| `style` | Formatting, whitespace — no logic change | none |
+| `style` | Formatting, whitespace, no logic change | none |
 | `chore` | Build, CI, dependencies, housekeeping | none |
 | `refactor` | Code restructure without behavior change | none |
 | `test` | Adding or updating tests | none |
 | `build` | Build system or tooling changes | none |
 | `ci` | CI workflow changes | none |
-| `BREAKING CHANGE` | Footer or `!` suffix — incompatible change | major |
+| `BREAKING CHANGE` | Footer or `!` suffix, incompatible change | major |
 
 ### Valid examples ✅
 
@@ -133,7 +133,7 @@ ln -s AGENTS.md COPILOT.md
 ## Adding a New GCP Service
 
 1. Create a package under `src/main/java/.../services/<service>/`
-2. Add a Controller (follow the correct protocol — gRPC, REST JSON, REST XML, or HTTP/protobuf)
+2. Add a Controller (follow the correct protocol: gRPC, REST JSON, REST XML, or HTTP/protobuf)
 3. Add a Service (`@ApplicationScoped`) and model POJOs
 4. Add config entries in `EmulatorConfig.java` and `application.yml`
 5. Register a `ServiceDescriptor` in `ServiceRegistry`
@@ -142,19 +142,23 @@ ln -s AGENTS.md COPILOT.md
 
 `ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` should resolve service metadata through existing service descriptors and storage patterns. Adding a service should not require new service-keyed switch statements in those consumers.
 
-Always implement the **real GCP wire protocol** — never invent custom endpoints. The GCP SDK must work against floci-gcp without modification.
+Always implement the **real GCP wire protocol**. Never invent custom endpoints. The GCP SDK must work against floci-gcp without modification.
 
 ## Pull Request Guidelines
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
 2. Open a PR targeting `main`.
-3. CI runs tests automatically — all checks must pass before merge.
-4. Keep PRs focused — one feature or fix per PR.
+3. CI runs tests automatically. All checks must pass before merge.
+4. Keep PRs focused: one feature or fix per PR.
 5. Reference any related issues in the PR description.
 
 Docker images are never built on contributor PRs, so merging to `main` is always cheap.
 
 ## Release Process (maintainers)
+
+Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does
+not cut a release: the change rides the next train, and is in that night's `nightly` image
+either way.
 
 Releases are cut from `main` with the **Release Cut** workflow
 (Actions → Release Cut → Run workflow). semantic-release analyzes the
@@ -163,7 +167,7 @@ Conventional Commits since the last tag, bumps `pom.xml`, regenerates
 push triggers the Docker publish pipeline. Use the `dry-run` input to
 preview the next version and notes without releasing.
 
-`CHANGELOG.md` is generated — **do not edit it by hand**. Your Conventional
+`CHANGELOG.md` is generated. **Do not edit it by hand.** Your Conventional
 Commit message is the changelog entry. Genuine corrections to the file
 require the `changelog-edit` label on the PR.
 

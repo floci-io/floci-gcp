@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -78,8 +79,7 @@ public class GcsXmlDownloadController {
         authorizationService.requireObjectWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
-        String host = headers.getHeaderString("Host");
-        String baseUrl = host != null ? "http://" + host : config.baseUrl();
+        String baseUrl = RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port());
         GcsObjectMeta meta = service.putObject(bucket, objectPath, contentType, body != null ? body : new byte[0],
                 GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), baseUrl);
         return Response.ok(meta).build();

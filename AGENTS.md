@@ -59,16 +59,16 @@ floci-gcp follows a layered design:
 
 ### Core Infrastructure
 
-- `EmulatorConfig` — `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface
+- `EmulatorConfig`: `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface
 - `ServiceRegistry`
 - `StorageBackend` + `StorageFactory`
 - `GcpException` + `GcpExceptionMapper`
-- `GcpGrpcController` — shared gRPC error-mapping helper (static `grpcError`); not a base class
-- `ProjectContextFilter` — extracts GCP project ID from request path or headers
-- `RequestContext` — `@RequestScoped` holder for the current project ID
-- `GcpResourceNames` — utilities for parsing and building GCP resource name strings
+- `GcpGrpcController`: shared gRPC error-mapping helper (static `grpcError`); not a base class
+- `ProjectContextFilter`: extracts GCP project ID from request path or headers
+- `RequestContext`: `@RequestScoped` holder for the current project ID
+- `GcpResourceNames`: utilities for parsing and building GCP resource name strings
 - `EmulatorLifecycle`
-- `XmlBuilder` + `XmlParser` — used by GCS (REST XML)
+- `XmlBuilder` + `XmlParser`: used by GCS (REST XML)
 
 ---
 
@@ -127,7 +127,7 @@ Resolution order in `ProjectContextFilter`:
 ### Important exceptions
 
 - GCS uses REST XML for object operations and REST JSON for bucket management; keep them aligned
-- gRPC services use pre-compiled stubs from `grpc-google-cloud-*-java` artifacts — do not introduce raw `.proto` codegen
+- gRPC services use pre-compiled stubs from `grpc-google-cloud-*-java` artifacts. Do not introduce raw `.proto` codegen
 - Management APIs should be validated with GCP SDK clients, not only handcrafted HTTP requests
 
 ---
@@ -176,7 +176,7 @@ When adding storage-related behavior:
 
 Configuration lives under `floci-gcp.*`.
 
-`EmulatorConfig` is a `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface. Nested config groups are inner interfaces. Defaults use `@WithDefault`. Do **not** use `@ApplicationScoped` + `@ConfigProperty` for config — use `@ConfigMapping` instead.
+`EmulatorConfig` is a `@ConfigMapping(prefix = "floci-gcp")` SmallRye Config interface. Nested config groups are inner interfaces. Defaults use `@WithDefault`. Do **not** use `@ApplicationScoped` + `@ConfigProperty` for config. Use `@ConfigMapping` instead.
 
 When adding config:
 
@@ -214,19 +214,19 @@ Critical areas:
 
 ## Compatibility Project
 
-Compatibility tests live in `./compatibility-tests/` and validate floci-gcp against real GCP tooling — SDK clients and Infrastructure-as-Code providers — not just handcrafted HTTP.
+Compatibility tests live in `./compatibility-tests/` and validate floci-gcp against real GCP tooling (SDK clients and Infrastructure-as-Code providers), not just handcrafted HTTP.
 
 ### Layout
 
 Each subdirectory is a self-contained suite with its own `Dockerfile`:
 
-- `sdk-test-java` — GCP SDK for Java. **Default / reference suite**; preferred for management-plane validation.
-- `sdk-test-node` — GCP SDK for Node.js
-- `sdk-test-python` — GCP SDK for Python
-- `sdk-test-go` — GCP SDK for Go
-- `sdk-test-gcloud` — gcloud CLI (bats-based)
-- `compat-terraform` — Terraform `hashicorp/google` provider (bats-based)
-- `compat-opentofu` — OpenTofu `hashicorp/google` provider (bats-based)
+- `sdk-test-java`: GCP SDK for Java. **Default / reference suite**; preferred for management-plane validation.
+- `sdk-test-node`: GCP SDK for Node.js
+- `sdk-test-python`: GCP SDK for Python
+- `sdk-test-go`: GCP SDK for Go
+- `sdk-test-gcloud`: gcloud CLI (bats-based)
+- `compat-terraform`: Terraform `hashicorp/google` provider (bats-based)
+- `compat-opentofu`: OpenTofu `hashicorp/google` provider (bats-based)
 
 `justfile` provides per-suite recipes (`just test-java`, `just test-terraform`, …) for running a suite locally against a running floci-gcp instance.
 
@@ -245,11 +245,11 @@ The endpoint is passed via env: `FLOCI_GCP_ENDPOINT` for the SDK suites; `FLOCI_
 
 1. Give the suite directory a `Dockerfile` whose entrypoint runs the tests and writes JUnit XML to `/results`.
 2. Add the directory name to the `matrix.test` list in `compatibility.yml`.
-3. Keep test output visible — do not silence the runner (e.g. avoid `mvn test -q`); a hanging test must be diagnosable from the streamed log.
+3. Keep test output visible: do not silence the runner (e.g. avoid `mvn test -q`); a hanging test must be diagnosable from the streamed log.
 
 ### IaC suites (Terraform / OpenTofu)
 
-- Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version** — e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
+- Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version**, e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
 - Auth is bypassed with a fake `GOOGLE_OAUTH_ACCESS_TOKEN`; the emulator ignores it.
 - Only REST-exposed services are reachable via Terraform custom endpoints (GCS, IAM, Secret Manager). gRPC-only services (Pub/Sub, Firestore, Datastore) are not, without REST transcoding.
 
@@ -329,11 +329,11 @@ When adding functionality:
 
 If the service launches real Docker containers (sidecars / data planes), it
 **must** expose a single root-level `mock` flag on its `*ServiceConfig`
-(`boolean mock();`) that keeps the service metadata-only without Docker —
+(`boolean mock();`) that keeps the service metadata-only without Docker.
 mirroring `kafka.mock`, `cloudsql.mock`, and `cloudrun.mock` (env var
 `FLOCI_GCP_SERVICES_<SVC>_MOCK`). Gate every container interaction in the
 service layer on `!mock()` (keep the Docker driver/manager class free of the
-flag). Do not add a separate `enabled`-style opt-in for the container path — the
+flag). Do not add a separate `enabled`-style opt-in for the container path: the
 `mock` flag is the only toggle, defaulting to `false` (`kafka.mock`,
 `cloudsql.mock`, `cloudrun.mock` all default `false`). Always set `mock: true`
 in `src/test/resources/application.yml` so the suite never starts containers.
@@ -424,7 +424,7 @@ Treat release workflows as critical infrastructure.
 - Forgetting YAML updates
 - Producing inconsistent resource names (must match `projects/{project}/...` pattern)
 - Testing only with raw HTTP (use SDK clients)
-- Using `@ApplicationScoped` + `@ConfigProperty` for config — use `@ConfigMapping` interfaces instead
+- Using `@ApplicationScoped` + `@ConfigProperty` for config. Use `@ConfigMapping` interfaces instead
 - Introducing unnecessary new patterns
 
 ---
@@ -443,7 +443,7 @@ If a task would require broad architectural changes, stop and surface the tradeo
 
 ## GCP SDK Source as Reference
 
-Don't try to look into jars from `~/.m2/repository` — they are not source code. Refer to the actual GCP SDK source code for accurate behavior and protocol details.
+Don't try to look into jars from `~/.m2/repository`: they are not source code. Refer to the actual GCP SDK source code for accurate behavior and protocol details.
 
 The proto definitions for each gRPC service are the authoritative source for request/response shapes and field semantics.
 

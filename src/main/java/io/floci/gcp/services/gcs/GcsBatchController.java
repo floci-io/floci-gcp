@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
+import java.net.ConnectException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -173,6 +174,14 @@ public class GcsBatchController {
         return new SubRequest(method, pathAndQuery, headers, requestBody, contentId);
     }
 
+    // Loopback port for re-dispatching sub-requests. Neither candidate is reliable
+    // on its own: the request URI carries the port the CLIENT used, which under
+    // `docker run -p 9000:4588` is 9000 and nothing listens on it inside the
+    // container; while config.port() is not what a @QuarkusTest binds (it gets
+    // quarkus.http.test-port). So try the request port, and remember the one that
+    // actually connects.
+    private volatile Integer resolvedPort;
+
     private int requestPort(UriInfo uriInfo) {
         if (uriInfo != null && uriInfo.getBaseUri() != null && uriInfo.getBaseUri().getPort() > 0) {
             return uriInfo.getBaseUri().getPort();
@@ -180,7 +189,8 @@ public class GcsBatchController {
         return config.port();
     }
 
-    private SubResponse dispatch(SubRequest req, String outerAuthorization, int port) {
+    private SubResponse dispatch(SubRequest req, String outerAuthorization, int requestedPort) {
+        int port = resolvedPort != null ? resolvedPort : requestedPort;
         try {
             URI uri = rewriteToLocalhost(URI.create(req.path()), port);
 
@@ -211,8 +221,22 @@ public class GcsBatchController {
                 builder.header("Content-Type", "application/json");
             }
 
-            HttpResponse<String> resp = httpClient.send(builder.build(),
-                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp;
+            try {
+                resp = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+                resolvedPort = port;
+            } catch (ConnectException connectFailed) {
+                // The client-visible port is not one we listen on -- a published port
+                // that differs from the internal one. Fall back to the configured port.
+                int fallback = config.port();
+                if (fallback == port) {
+                    throw connectFailed;
+                }
+                LOG.debugf("batch loopback port %d refused, retrying on %d", port, fallback);
+                builder.uri(rewriteToLocalhost(URI.create(req.path()), fallback));
+                resp = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+                resolvedPort = fallback;
+            }
 
             LOG.debugf("batch dispatch %s %s → %d", req.method(), req.path(), resp.statusCode());
             return new SubResponse(resp.statusCode(), resp.body());

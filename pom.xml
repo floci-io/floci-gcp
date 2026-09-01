@@ -15,7 +15,7 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.37.4</quarkus.platform.version>
+        <quarkus.platform.version>3.38.3</quarkus.platform.version>
     </properties>
 
     <dependencyManagement>
@@ -30,7 +30,7 @@
             <dependency>
                 <groupId>com.google.cloud</groupId>
                 <artifactId>libraries-bom</artifactId>
-                <version>26.85.1</version>
+                <version>26.87.0</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -66,7 +66,7 @@
         <dependency>
             <groupId>com.google.api.grpc</groupId>
             <artifactId>proto-google-common-protos</artifactId>
-            <version>2.73.0</version>
+            <version>2.75.0</version>
         </dependency>
 
         <!-- Protobuf JSON support for REST services backed by Google proto contracts -->
@@ -103,7 +103,7 @@
         <dependency>
             <groupId>com.google.api.grpc</groupId>
             <artifactId>grpc-google-cloud-pubsub-v1</artifactId>
-            <version>1.152.0</version>
+            <version>1.154.0</version>
         </dependency>
 
         <!-- google.iam.v1.IAMPolicy gRPC stub (IAMPolicyGrpc ImplBase) -->
@@ -196,7 +196,7 @@
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.85</version>
+            <version>1.85.2</version>
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>

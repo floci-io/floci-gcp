@@ -643,7 +643,7 @@ Use `latest` for stable releases, a pinned version for reproducible builds, and 
 image: floci/floci-gcp:latest
 
 # Pinned release
-image: floci/floci-gcp:0.5.0
+image: floci/floci-gcp:x.y.z
 
 # Track main
 image: floci/floci-gcp:nightly

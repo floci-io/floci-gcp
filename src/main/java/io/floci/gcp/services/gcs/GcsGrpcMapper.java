@@ -148,7 +148,11 @@ final class GcsGrpcMapper {
         meta.setName(value.getName());
         meta.setBucket(bucketId(value.getBucket()));
         meta.setContentType(value.getContentType().isBlank() ? "application/octet-stream" : value.getContentType());
-        meta.setStorageClass(value.getStorageClass().isBlank() ? "STANDARD" : value.getStorageClass());
+        // Left unset when the client omits it, so the object inherits the bucket default the
+        // same way a REST write does; putObject falls back to STANDARD when the bucket has none.
+        if (!value.getStorageClass().isBlank()) {
+            meta.setStorageClass(value.getStorageClass());
+        }
         meta.setContentDisposition(blankToNull(value.getContentDisposition()));
         meta.setContentEncoding(blankToNull(value.getContentEncoding()));
         meta.setContentLanguage(blankToNull(value.getContentLanguage()));

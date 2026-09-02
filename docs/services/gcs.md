@@ -306,7 +306,10 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `CopyObject`
 - `MoveObject`
 - `HeadObject`
-- `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, custom metadata)
+- `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `customTime`, custom metadata)
+- System metadata at upload time (`contentEncoding`, `contentDisposition`, `contentLanguage`,
+  `customTime`, `storageClass`) as query parameters or in the JSON metadata part of a
+  multipart/resumable upload
 - `ComposeObject` (concatenate up to 32 source objects)
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`)

@@ -283,7 +283,8 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 
 **Bucket management (REST JSON):**
 
-- `CreateBucket` (with `location`, `storageClass`, `versioning`, `lifecycle`, `cors`, `retentionPolicy`)
+- `CreateBucket` (names validated against the GCS naming rules; a duplicate reports
+  `reason: conflict`) (with `location`, `storageClass`, `versioning`, `lifecycle`, `cors`, `retentionPolicy`)
 - `GetBucket`
 - `ListBuckets` (with `pageToken` pagination)
 - `UpdateBucket` / `PatchBucket`
@@ -318,7 +319,7 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - System metadata at upload time (`contentEncoding`, `contentDisposition`, `contentLanguage`,
   `customTime`, `storageClass`) as query parameters or in the JSON metadata part of a
   multipart/resumable upload
-- `ComposeObject` (concatenate up to 32 source objects)
+- `ComposeObject` (concatenate 1 to 32 source objects; 0 or more than 32 is a 400)
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`), including when the container's published port
   differs from its internal one (`docker run -p 9000:4588`)

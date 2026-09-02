@@ -45,7 +45,9 @@ jobs:
   release:
     name: Cut release from main
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # semantic-release comments on and labels every issue and PR in the release,
+    # which is roughly two API writes each. A 278-PR release took ~22 minutes.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

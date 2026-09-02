@@ -494,35 +494,30 @@ public class FirebaseAuthService {
         String idToken = str(body.get("idToken"));
         check(idToken != null && !idToken.isEmpty(), "MISSING_ID_TOKEN");
 
-        long validDuration = sessionCookieDuration(body.get("validDuration"));
+        double validDuration = sessionCookieDuration(body.get("validDuration"));
         check(validDuration >= SESSION_COOKIE_MIN_VALID_DURATION
                 && validDuration <= SESSION_COOKIE_MAX_VALID_DURATION, "INVALID_DURATION");
 
         Map<String, Object> payload = new LinkedHashMap<>(verifyIdToken(project, idToken).payload());
         long iat = Instant.now().getEpochSecond();
         payload.put("iat", iat);
-        payload.put("exp", iat + validDuration);
+        payload.put("exp", iat + (long) validDuration);
         payload.put("iss", "https://session.firebase.google.com/" + str(payload.get("aud")));
 
-        LOG.debugf("firebaseauth createSessionCookie project=%s localId=%s validDuration=%d",
+        LOG.debugf("firebaseauth createSessionCookie project=%s localId=%s validDuration=%s",
                 project, payload.get("user_id"), validDuration);
         return Map.of("sessionCookie", FirebaseJwt.sign(payload));
     }
 
-    private static long sessionCookieDuration(Object validDuration) {
-        if (validDuration instanceof Number number) {
-            return number.longValue() == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : number.longValue();
-        }
-        String text = str(validDuration);
-        if (text == null || text.isBlank()) {
-            return SESSION_COOKIE_MAX_VALID_DURATION;
-        }
-        try {
-            long parsed = (long) Double.parseDouble(text.trim());
-            return parsed == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : parsed;
-        } catch (NumberFormatException e) {
-            return SESSION_COOKIE_MAX_VALID_DURATION;
-        }
+    /**
+     * The emulator computes {@code Number(validDuration) || SESSION_COOKIE_MAX_VALID_DURATION},
+     * so anything coercing to {@code NaN} or {@code 0} — absent, {@code null}, {@code false},
+     * {@code ""}, {@code "3600s"} — falls back to the maximum, while any other value is passed
+     * through to the range check and rejected there if out of bounds.
+     */
+    private static double sessionCookieDuration(Object validDuration) {
+        double coerced = JsNumber.of(validDuration);
+        return Double.isNaN(coerced) || coerced == 0 ? SESSION_COOKIE_MAX_VALID_DURATION : coerced;
     }
 
     // ── securetoken grantToken ────────────────────────────────────────────────

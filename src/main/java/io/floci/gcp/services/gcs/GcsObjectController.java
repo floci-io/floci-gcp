@@ -53,13 +53,19 @@ public class GcsObjectController {
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
 			@QueryParam("startOffset") String startOffset,
+			@QueryParam("softDeleted") @DefaultValue("false") boolean softDeleted,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
 		authorizationService.requireObjectList(authorization, bucket, prefix);
-        List<GcsObjectMeta> all = includeVersions
-                ? service.listObjectVersions(bucket, prefix)
-                : service.listObjects(bucket);
-        if (!includeVersions && prefix != null && !prefix.isBlank()) {
+        if (softDeleted && includeVersions) {
+            throw GcpException.invalidArgument("softDeleted and versions cannot both be set");
+        }
+        List<GcsObjectMeta> all = softDeleted
+                ? service.listSoftDeletedObjects(bucket, prefix)
+                : includeVersions
+                        ? service.listObjectVersions(bucket, prefix)
+                        : service.listObjects(bucket);
+        if (!includeVersions && !softDeleted && prefix != null && !prefix.isBlank()) {
             all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
         }
         all = all.stream()
@@ -252,6 +258,22 @@ public class GcsObjectController {
         return Response.noContent().build();
     }
 
+    /**
+     * {@code objects.restore}: brings a soft-deleted generation back to live.
+     *
+     * <p>Requires an explicit generation, as GCS does, a name alone is ambiguous once several
+     * generations of the same object have been soft-deleted.
+     */
+    @POST
+    @Path("/{object: .+}/restore")
+    public Response restoreObject(@PathParam("bucket") String bucket,
+            @PathParam("object") String objectPath,
+            @QueryParam("generation") String generation,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+        authorizationService.requireObjectWrite(authorization, bucket, objectPath);
+        return Response.ok(service.restoreObject(bucket, objectPath, generation)).build();
+    }
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("/{destObject: .+}/compose")
@@ -339,20 +361,28 @@ public class GcsObjectController {
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
+            @QueryParam("maxBytesRewrittenPerCall") Long maxBytesRewrittenPerCall,
+            @QueryParam("rewriteToken") String rewriteToken,
             @Context HttpHeaders headers) {
         authorizationService.requireSourceReadAndDestinationWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 srcBucket, srcObjectPath, dstBucket, dstObjectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        GcsObjectMeta meta = service.copyObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
-                preconditions, requestBaseUrl(headers));
+        var result = service.rewriteObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
+                maxBytesRewrittenPerCall, rewriteToken, preconditions, requestBaseUrl(headers));
+
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#rewriteResponse");
-        response.put("totalBytesRewritten", meta.getSize());
-        response.put("objectSize", meta.getSize());
-        response.put("done", true);
-        response.put("resource", meta);
+        response.put("totalBytesRewritten", String.valueOf(result.totalBytesRewritten()));
+        response.put("objectSize", String.valueOf(result.objectSize()));
+        response.put("done", result.done());
+        if (result.done()) {
+            response.put("resource", result.meta());
+        } else {
+            // The client loops on this token until the response comes back done.
+            response.put("rewriteToken", result.rewriteToken());
+        }
         return Response.ok(response).build();
     }
 

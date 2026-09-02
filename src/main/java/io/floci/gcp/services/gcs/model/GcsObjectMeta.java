@@ -103,6 +103,8 @@ public class GcsObjectMeta {
     private Boolean temporaryHold;
     private Boolean eventBasedHold;
     private String retentionExpirationTime;
+    private String softDeleteTime;
+    private String hardDeleteTime;
 
     public String getTimeDeleted() { return timeDeleted; }
     public void setTimeDeleted(String timeDeleted) { this.timeDeleted = timeDeleted; }
@@ -118,4 +120,11 @@ public class GcsObjectMeta {
 
     public String getRetentionExpirationTime() { return retentionExpirationTime; }
     public void setRetentionExpirationTime(String retentionExpirationTime) { this.retentionExpirationTime = retentionExpirationTime; }
+
+
+    public String getSoftDeleteTime() { return softDeleteTime; }
+    public void setSoftDeleteTime(String softDeleteTime) { this.softDeleteTime = softDeleteTime; }
+
+    public String getHardDeleteTime() { return hardDeleteTime; }
+    public void setHardDeleteTime(String hardDeleteTime) { this.hardDeleteTime = hardDeleteTime; }
 }

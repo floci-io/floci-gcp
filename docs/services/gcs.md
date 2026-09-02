@@ -2,9 +2,9 @@
 
 floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 
-- **gRPC v2** — bucket and object management plus streaming reads and writes
-- **REST XML** — object operations (upload, download, delete, list objects)
-- **REST JSON** — bucket management (create bucket, list buckets, get bucket metadata)
+- **gRPC v2**, bucket and object management plus streaming reads and writes
+- **REST XML**, object operations (upload, download, delete, list objects)
+- **REST JSON**, bucket management (create bucket, list buckets, get bucket metadata)
 
 ## Configuration
 
@@ -180,13 +180,13 @@ and Bearer tokens are not validated.
 
 ## Multipart Upload
 
-floci-gcp supports multipart (resumable) upload — the standard GCS mechanism for large objects. The GCP SDK uses this automatically for objects above a threshold.
+floci-gcp supports multipart (resumable) upload, the standard GCS mechanism for large objects. The GCP SDK uses this automatically for objects above a threshold.
 
 ## Resumable Upload Sessions
 
 `POST /upload/storage/v1/b/{bucket}/o?uploadType=resumable` opens a session and returns
 the session URL in the `Location` header. Chunks go to that URL with a `Content-Range`
-header, using either `PUT` or `POST` — the Java, Node and Python SDKs send `PUT`, the Go
+header, using either `PUT` or `POST`, the Java, Node and Python SDKs send `PUT`, the Go
 SDK sends `POST`, and both are handled the same way.
 
 Session behavior matches GCS:
@@ -288,7 +288,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `ListBuckets` (with `pageToken` pagination)
 - `UpdateBucket` / `PatchBucket`
 - `DeleteBucket`
-- `GetBucketIamPolicy` / `SetBucketIamPolicy` / `TestBucketIamPermissions`
+- `GetBucketIamPolicy` / `SetBucketIamPolicy`
+- `TestBucketIamPermissions`, `GET /b/{bucket}/iam/testPermissions?permissions=...` (the GCS
+  spelling); the Cloud IAM style `POST /b/{bucket}/iam:testPermissions` is also accepted
 
 **Bucket ACLs (REST JSON):**
 
@@ -296,6 +298,11 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `GetBucketAcl` / `UpdateBucketAcl` / `DeleteBucketAcl`
 - `ListDefaultObjectAcl` / `CreateDefaultObjectAcl`
 - `GetDefaultObjectAcl` / `UpdateDefaultObjectAcl` / `DeleteDefaultObjectAcl`
+
+**Project resources (REST JSON):**
+
+- `GetServiceAccount` (`/storage/v1/projects/{project}/serviceAccount`), the principal
+  Cloud Storage publishes as; grant it publish rights before wiring notifications
 
 **Object operations (REST XML + REST JSON):**
 
@@ -312,11 +319,11 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - Batch requests (`/batch/storage/v1`)
 - Customer-supplied encryption keys (CSEK)
 
-Object names containing `/`, spaces, `+`, or percent-encoded sequences round-trip correctly — the emulator preserves URI-encoded names exactly as real GCS does.
+Object names containing `/`, spaces, `+`, or percent-encoded sequences round-trip correctly, the emulator preserves URI-encoded names exactly as real GCS does.
 
 **Pub/Sub notifications (REST JSON):**
 
-- `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`) — object changes publish to the configured Pub/Sub topic in the local backend
+- `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`), object changes publish to the configured Pub/Sub topic in the local backend
 
 **Object ACLs (REST JSON):**
 
@@ -330,4 +337,4 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 - `ifSourceGenerationMatch` / `ifSourceGenerationNotMatch` for object moves
 - `ifSourceMetagenerationMatch` / `ifSourceMetagenerationNotMatch` for object moves
 - Returns HTTP 412 on precondition failure
-- Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence — concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)
+- Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence, concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)

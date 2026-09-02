@@ -61,6 +61,8 @@ floci-gcp:
   services:
     gcs:
       enabled: true
+      upload-session-idle-timeout-seconds: 604800
+      upload-session-sweep-interval-seconds: 3600
     pubsub:
       enabled: true
     firestore:

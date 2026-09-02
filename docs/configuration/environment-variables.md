@@ -73,6 +73,8 @@ Each service can be toggled independently. All are enabled by default.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_GCS_ENABLED` | `true` | Cloud Storage (GCS) |
+| `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable or streaming upload session is dropped (defaults to the real GCS seven-day session window) |
+| `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | How often abandoned upload sessions are swept; `0` disables the sweeper |
 | `FLOCI_GCP_SERVICES_PUBSUB_ENABLED` | `true` | Pub/Sub |
 | `FLOCI_GCP_SERVICES_FIRESTORE_ENABLED` | `true` | Firestore |
 | `FLOCI_GCP_SERVICES_DATASTORE_ENABLED` | `true` | Datastore |

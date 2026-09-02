@@ -11,6 +11,8 @@ floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_GCS_ENABLED` | `true` | Enable/disable Cloud Storage |
+| `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable or streaming upload session is dropped, matching the real GCS seven-day session window. Lower it on long-lived instances to reclaim buffered bytes sooner |
+| `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | How often abandoned upload sessions are swept; `0` disables the sweeper |
 | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL embedded in object URLs and pre-signed URLs |
 
 ## Emulator Variable

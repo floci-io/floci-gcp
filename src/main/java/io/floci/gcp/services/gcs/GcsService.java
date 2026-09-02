@@ -152,7 +152,8 @@ public class GcsService {
                 .resourceClasses(GcsBucketController.class, GcsObjectController.class,
                         GcsUploadController.class, GcsDownloadController.class,
                         GcsXmlDownloadController.class, GcsNotificationController.class,
-                        GcsBatchController.class, GcsGrpcController.class)
+                        GcsBatchController.class, GcsGrpcController.class,
+                        GcsProjectController.class)
                 .build());
         if (config.services().gcs().enabled()) {
             GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);

@@ -196,18 +196,35 @@ public class GcsBucketController {
         return Response.ok(bucketIamResponse(bucket, policy)).build();
     }
 
+    // GCS spells this GET /b/{bucket}/iam/testPermissions?permissions=..., note
+    // the slash and the repeated query parameter. The colon form below is the
+    // Cloud IAM convention and is kept only so existing callers do not break.
+    @GET
+    @Path("/{bucket}/iam/testPermissions")
+    public Response testBucketIamPermissions(@PathParam("bucket") String bucket,
+			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
+            @QueryParam("permissions") List<String> permissions) {
+        return testPermissionsResponse(bucket, authorization, permissions);
+    }
+
     @POST
     @Path("/{bucket}/iam:testPermissions")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response testBucketIamPermissions(@PathParam("bucket") String bucket,
+    public Response testBucketIamPermissionsPost(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             Map<String, Object> body) {
-		authorizationService.rejectDownscopedToken(authorization);
-        service.getBucket(bucket);
         @SuppressWarnings("unchecked")
         List<String> requested = body != null ? (List<String>) body.get("permissions") : List.of();
+        return testPermissionsResponse(bucket, authorization, requested);
+    }
+
+    private Response testPermissionsResponse(String bucket, String authorization, List<String> requested) {
+		authorizationService.rejectDownscopedToken(authorization);
+        service.getBucket(bucket);
         List<String> granted = iamService.testPermissions("buckets/" + bucket, requested != null ? requested : List.of());
-        return Response.ok(Map.of("permissions", granted)).build();
+        return Response.ok(Map.of(
+                "kind", "storage#testIamPermissionsResponse",
+                "permissions", granted)).build();
     }
 
     // ── Bucket ACLs ───────────────────────────────────────────────────────────

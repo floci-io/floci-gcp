@@ -3,6 +3,7 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
@@ -14,6 +15,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,6 +29,11 @@ import java.util.TreeSet;
 @Path("/storage/v1/b/{bucket}/o")
 @Produces(MediaType.APPLICATION_JSON)
 public class GcsObjectController {
+
+    // Injected per request rather than threaded through every method signature: the
+    // request URI is where the authority lives on HTTP/2, which carries no Host header.
+    @Context
+    UriInfo uriInfo;
 
     private final GcsService service;
     private final EmulatorConfig config;
@@ -357,7 +364,6 @@ public class GcsObjectController {
     }
 
     private String requestBaseUrl(HttpHeaders headers) {
-        String host = headers.getHeaderString("Host");
-        return host != null ? "http://" + host : config.baseUrl();
+        return RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port());
     }
 }

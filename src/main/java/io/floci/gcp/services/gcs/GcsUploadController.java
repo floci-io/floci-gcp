@@ -3,6 +3,7 @@ package io.floci.gcp.services.gcs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
@@ -276,24 +277,7 @@ public class GcsUploadController {
     }
 
     private String requestBaseUrl(HttpHeaders headers, UriInfo uriInfo) {
-        String host = headers.getHeaderString("Host");
-        if (host == null) {
-            return config.baseUrl();
-        }
-        if (hasPort(host)) {
-            return "http://" + host;
-        }
-        URI baseUrl = URI.create(config.baseUrl());
-        int port = baseUrl.getPort() >= 0 ? baseUrl.getPort() : config.port();
-        String scheme = baseUrl.getScheme() != null ? baseUrl.getScheme() : uriInfo.getBaseUri().getScheme();
-        return scheme + "://" + host + ":" + port;
-    }
-
-    private static boolean hasPort(String host) {
-        if (host.startsWith("[")) {
-            return host.indexOf("]:") > 0;
-        }
-        return host.indexOf(':') >= 0;
+        return RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port());
     }
 
     private static Map<String, String> extractUserMetadata(Map<?, ?> requestMetadata) {

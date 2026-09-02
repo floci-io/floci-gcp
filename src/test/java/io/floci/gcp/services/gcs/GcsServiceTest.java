@@ -80,8 +80,9 @@ class GcsServiceTest {
 
     @Test
     void listBucketsFiltersByProject() {
-        service.createBucket("b1", "p1", BASE_URL, Map.of());
-        service.createBucket("b2", "p1", BASE_URL, Map.of());
+        // "b1"/"b2" are shorter than the 3-character minimum GCS enforces.
+        service.createBucket("bucket-one", "p1", BASE_URL, Map.of());
+        service.createBucket("bucket-two", "p1", BASE_URL, Map.of());
 
         List<GcsBucket> buckets = service.listBuckets("p1");
         assertEquals(2, buckets.size());

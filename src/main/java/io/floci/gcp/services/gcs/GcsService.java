@@ -166,9 +166,15 @@ public class GcsService {
     public GcsBucket createBucket(String name, String projectId, String baseUrl,
             Map<String, Object> body) {
         LOG.debugf("createBucket name=%s project=%s", name, projectId);
+        // Validate before the existence check: a malformed name is a 400 regardless of
+        // whether something with that name happens to exist.
+        GcsBucketNames.validate(name);
         if (bucketStore.get(name).isPresent()) {
             LOG.warnf("createBucket failed: bucket already exists name=%s", name);
-            throw GcpException.alreadyExists("Bucket already exists: " + name);
+            // GCS documents `conflict` as the only 409 reason, and client code branches
+            // on it; the generic ALREADY_EXISTS mapping would emit `alreadyExists`.
+            throw GcpException.alreadyExists(
+                    "You already own this bucket. Please select another name.").withReason("conflict");
         }
         String now = nowTimestamp();
         GcsBucket bucket = new GcsBucket();
@@ -200,7 +206,8 @@ public class GcsService {
                 bucket.setCors((List<Map<String, Object>>) body.get("cors"));
             }
             if (body.containsKey("retentionPolicy")) {
-                bucket.setRetentionPolicy((Map<String, Object>) body.get("retentionPolicy"));
+                bucket.setRetentionPolicy(
+                        withEffectiveTime((Map<String, Object>) body.get("retentionPolicy")));
             }
             if (body.containsKey("defaultEventBasedHold")) {
                 bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
@@ -233,7 +240,8 @@ public class GcsService {
             bucket.setCors((List<Map<String, Object>>) patch.get("cors"));
         }
         if (patch.containsKey("retentionPolicy")) {
-            bucket.setRetentionPolicy((Map<String, Object>) patch.get("retentionPolicy"));
+            bucket.setRetentionPolicy(
+                    withEffectiveTime((Map<String, Object>) patch.get("retentionPolicy")));
         }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
@@ -542,6 +550,8 @@ public class GcsService {
         return true;
     }
 
+    private static final int MAX_COMPOSE_SOURCES = 32;
+
     public void deleteObjectVersion(String bucket, String objectName, String generation) {
         deleteObjectVersion(bucket, objectName, generation, GcsObjectPreconditions.NONE);
     }
@@ -644,6 +654,15 @@ public class GcsService {
             List<GcsComposeSource> sources, String contentType, GcsObjectMeta metadataTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sources.size());
+        // GCS caps a single compose at 32 sources and requires at least one. Accepting
+        // more here would let a client build a composite locally that production rejects.
+        if (sources.isEmpty()) {
+            throw GcpException.invalidArgument("compose requires at least one source object");
+        }
+        if (sources.size() > MAX_COMPOSE_SOURCES) {
+            throw GcpException.invalidArgument(
+                    "compose accepts at most " + MAX_COMPOSE_SOURCES + " source objects, got " + sources.size());
+        }
         if (bucketStore.get(bucket).isEmpty()) {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
@@ -1048,6 +1067,19 @@ public class GcsService {
         return meta;
     }
 
+    // GCS stamps effectiveTime when a retention policy is applied, not only when it is
+    // locked. Clients display it, and a lock compares against it.
+    private Map<String, Object> withEffectiveTime(Map<String, Object> retentionPolicy) {
+        if (retentionPolicy == null) {
+            return null;
+        }
+        Map<String, Object> copy = new java.util.LinkedHashMap<>(retentionPolicy);
+        // Server-determined per the storage/v1 discovery document, so a client-supplied
+        // value is replaced rather than preserved.
+        copy.put("effectiveTime", nowTimestamp());
+        return copy;
+    }
+
     private static void validateResumableTotalSize(ResumableUpload upload, Long totalSize) {
         if (upload.totalSize() != null && totalSize != null && !upload.totalSize().equals(totalSize)) {
             throw GcpException.invalidArgument(
@@ -1176,7 +1208,7 @@ public class GcsService {
     }
 
     public GcsBucket lockRetentionPolicy(String bucket, Long ifMetagenerationMatch) {
-        LOG.infof("lockRetentionPolicy bucket=%s", bucket);
+        LOG.debugf("lockRetentionPolicy bucket=%s", bucket);
         GcsBucket b = getBucket(bucket);
         long current = b.getMetageneration() != null ? Long.parseLong(b.getMetageneration()) : 1;
         if (ifMetagenerationMatch != null && current != ifMetagenerationMatch) {

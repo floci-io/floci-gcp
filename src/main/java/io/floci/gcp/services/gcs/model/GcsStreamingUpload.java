@@ -12,6 +12,7 @@ public final class GcsStreamingUpload {
     private byte[] data = new byte[0];
     private GcsObjectMeta finalizedObject;
     private long lastTouchedMillis = System.currentTimeMillis();
+    private boolean evicted;
 
     public GcsStreamingUpload(GcsObjectMeta object, GcsObjectPreconditions preconditions,
             Long expectedSize, Integer expectedCrc32c, byte[] expectedMd5) {
@@ -50,6 +51,22 @@ public final class GcsStreamingUpload {
         return lastTouchedMillis;
     }
 
+    /**
+     * Marks this session dropped by the idle sweep.
+     *
+     * <p>A writer looks the session up before it takes this monitor, so the sweep can remove the
+     * map entry in between. The writer still has to acquire this monitor to append, so recording
+     * the eviction on the session itself is what stops it writing into an orphaned object and
+     * acknowledging a persisted size for bytes no later chunk could ever find.
+     */
+    public synchronized void markEvicted() {
+        evicted = true;
+    }
+
+    public synchronized boolean isEvicted() {
+        return evicted;
+    }
+
     public synchronized void touch() {
         lastTouchedMillis = System.currentTimeMillis();
     }
@@ -63,6 +80,10 @@ public final class GcsStreamingUpload {
     }
 
     public synchronized void append(long offset, byte[] chunk) {
+        if (evicted) {
+            throw io.floci.gcp.core.common.GcpException.notFound(
+                    "Upload session has expired and is no longer available");
+        }
         lastTouchedMillis = System.currentTimeMillis();
         if (finalizedObject != null) {
             return;

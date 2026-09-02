@@ -9,6 +9,7 @@ import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -399,6 +400,28 @@ class GcsServiceTest {
         assertNull(service.findResumableUpload(resumableId));
         assertEquals(0, service.streamingUploadCount());
         assertThrows(GcpException.class, () -> service.getStreamingUpload(streamingId));
+    }
+
+    @Test
+    void aWriterHoldingAnEvictedStreamingSessionCannotAcknowledgeLostBytes() {
+        service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta meta = new GcsObjectMeta();
+        meta.setBucket("race-bucket");
+        meta.setName("racy.txt");
+        String uploadId = service.startStreamingUpload(meta, GcsObjectPreconditions.NONE, null, null, null);
+
+        // GcsGrpcController looks the session up and only then synchronizes on it, so a sweep can
+        // remove the map entry in between. Hold the reference the way the controller would.
+        GcsStreamingUpload stale = service.getStreamingUpload(uploadId);
+
+        assertEquals(1, service.evictExpiredUploadSessions(
+                System.currentTimeMillis() + 3_600_000L, 1_000L));
+
+        // Writing through the stale reference must fail. Silently accepting the bytes would hand
+        // the client a persisted size for data the next chunk could never find a session for.
+        assertThrows(GcpException.class,
+                () -> stale.append(0, "lost".getBytes(StandardCharsets.UTF_8)));
+        assertThrows(GcpException.class, () -> service.finalizeStreamingUpload(uploadId, BASE_URL));
     }
 
     @Test

@@ -29,6 +29,8 @@ quarkus:
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
       - --initialize-at-run-time=io.floci.gcp.services.cloudkms.KmsCrypto
+      # Holds a static SecureRandom; native image refuses one in the image heap.
+      - --initialize-at-run-time=io.floci.gcp.services.gcs.GcsHmacKeyController
       - --initialize-at-run-time=io.floci.gcp.services.firebaseauth.FirebaseAuthService
       - --initialize-at-run-time=io.floci.gcp.services.cloudsql.CloudSqlPostgresDataPlane
       - --initialize-at-run-time=io.floci.gcp.services.scheduler.SchedulerExpressionParser
@@ -45,9 +47,9 @@ floci-gcp:
   max-request-size: 512
   base-url: "http://localhost:4588"
   tls:
-    enabled: false     # FLOCI_GCP_TLS_ENABLED — serve HTTP+HTTPS on the same port via protocol-sniffing proxy
-    self-signed: true  # FLOCI_GCP_TLS_SELF_SIGNED — auto-generate a cert when no cert-path/key-path given
-    https-port: 443    # FLOCI_GCP_TLS_HTTPS_PORT — also bind 443 so GCP SDK default-HTTPS clients reach floci-gcp (0 disables)
+    enabled: false     # FLOCI_GCP_TLS_ENABLED, serve HTTP+HTTPS on the same port via protocol-sniffing proxy
+    self-signed: true  # FLOCI_GCP_TLS_SELF_SIGNED, auto-generate a cert when no cert-path/key-path given
+    https-port: 443    # FLOCI_GCP_TLS_HTTPS_PORT, also bind 443 so GCP SDK default-HTTPS clients reach floci-gcp (0 disables)
     # cert-path: ""    # FLOCI_GCP_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""     # FLOCI_GCP_TLS_KEY_PATH (PEM private key file)
   default-project-id: floci-local

@@ -19,6 +19,8 @@ import io.floci.gcp.services.gcs.model.GcsComposeSource;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsRewriteResult;
+import io.floci.gcp.services.gcs.model.GcsRewriteSession;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
@@ -48,6 +50,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Comparator;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -66,6 +69,7 @@ public class GcsService {
     private final StorageBackend<String, StoredAcl> aclStore;
     private final StorageBackend<String, StoredNotification> notificationStore;
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, GcsRewriteSession> rewriteSessions = new ConcurrentHashMap<>();
     private final Map<String, CompletedResumableUpload> completedResumableUploads = Collections.synchronizedMap(
             new LinkedHashMap<>(16, 0.75f, true) {
                 @Override
@@ -152,7 +156,8 @@ public class GcsService {
                 .resourceClasses(GcsBucketController.class, GcsObjectController.class,
                         GcsUploadController.class, GcsDownloadController.class,
                         GcsXmlDownloadController.class, GcsNotificationController.class,
-                        GcsBatchController.class, GcsGrpcController.class)
+                        GcsBatchController.class, GcsGrpcController.class,
+                        GcsHmacKeyController.class)
                 .build());
         if (config.services().gcs().enabled()) {
             GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
@@ -202,6 +207,9 @@ public class GcsService {
             if (body.containsKey("retentionPolicy")) {
                 bucket.setRetentionPolicy((Map<String, Object>) body.get("retentionPolicy"));
             }
+            if (body.containsKey("softDeletePolicy")) {
+                bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
+            }
             if (body.containsKey("defaultEventBasedHold")) {
                 bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
             }
@@ -234,6 +242,9 @@ public class GcsService {
         }
         if (patch.containsKey("retentionPolicy")) {
             bucket.setRetentionPolicy((Map<String, Object>) patch.get("retentionPolicy"));
+        }
+        if (patch.containsKey("softDeletePolicy")) {
+            bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
         }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
@@ -527,6 +538,7 @@ public class GcsService {
             objectMetaStore.put(key + "\0" + markerGen, marker);
         }
         GcsObjectMeta deletedMeta = live;
+        softDelete(bucket, objectName, live);
         objectMetaStore.delete(key);
         objectDataStore.delete(key);
         if (deletedMeta != null) {
@@ -540,6 +552,133 @@ public class GcsService {
             }
         }
         return true;
+    }
+
+    // ── Soft delete ──────────────────────────────────────────────────────────
+    //
+    // With a softDeletePolicy on the bucket, a deleted object is retained under a separate key
+    // namespace instead of vanishing: it disappears from live listings, shows up under
+    // ?softDeleted=true, and can be restored by generation. Real GCS has had this on by default
+    // since 2024, so code written against production may rely on being able to undo a delete.
+
+    private static final String SOFT_DELETE_MARKER = "\0softDeleted\0";
+
+    private String softDeleteKey(String bucket, String objectName, String generation) {
+        return objectKey(bucket, objectName) + SOFT_DELETE_MARKER + generation;
+    }
+
+    public boolean isSoftDeleteEnabled(String bucket) {
+        return softDeleteRetentionSeconds(bucket) > 0;
+    }
+
+    private long softDeleteRetentionSeconds(String bucket) {
+        Map<String, Object> policy = bucketStore.get(bucket)
+                .map(GcsBucket::getSoftDeletePolicy)
+                .orElse(null);
+        if (policy == null) {
+            return 0L;
+        }
+        Object duration = policy.get("retentionDurationSeconds");
+        try {
+            return duration == null ? 0L : Long.parseLong(String.valueOf(duration));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private void softDelete(String bucket, String objectName, GcsObjectMeta live) {
+        softDelete(bucket, objectName, live, objectKey(bucket, objectName));
+    }
+
+    /**
+     * Retains one version under the soft-delete namespace, reading its bytes from
+     * {@code sourceKey}, the live key for a live object, the archive key for a noncurrent one.
+     *
+     * <p>A generation-scoped delete is retained too, not only a delete by name: "when you delete
+     * a noncurrent object, it becomes soft-deleted"
+     * (https://cloud.google.com/storage/docs/soft-delete). That distinction is not academic , 
+     * google-cloud-storage for Python sends the loaded generation on every {@code blob.delete()},
+     * so treating a generation-scoped delete as permanent would bypass soft delete entirely for
+     * the SDK most likely to be relying on it.
+     */
+    private void softDelete(String bucket, String objectName, GcsObjectMeta version, String sourceKey) {
+        long retention = softDeleteRetentionSeconds(bucket);
+        if (retention <= 0 || version.getGeneration() == null) {
+            return;
+        }
+        GcsObjectMeta archived = cloneMeta(version);
+        archived.setIsLatest(false);
+        String now = nowTimestamp();
+        archived.setSoftDeleteTime(now);
+        archived.setHardDeleteTime(
+                java.time.Instant.now().plusSeconds(retention).truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+                        .toString());
+
+        String archiveKey = softDeleteKey(bucket, objectName, version.getGeneration());
+        objectDataStore.get(sourceKey).ifPresent(data -> objectDataStore.put(archiveKey, data));
+        objectMetaStore.put(archiveKey, archived);
+        LOG.debugf("softDelete bucket=%s name=%s generation=%s", bucket, objectName, version.getGeneration());
+    }
+
+    /** Soft-deleted objects in a bucket, newest generation first, optionally filtered by prefix. */
+    public List<GcsObjectMeta> listSoftDeletedObjects(String bucket, String prefix) {
+        String bucketPrefix = objectKey(bucket, "");
+        List<GcsObjectMeta> out = new ArrayList<>();
+        for (String storeKey : objectMetaStore.keys()) {
+            if (!storeKey.startsWith(bucketPrefix) || !storeKey.contains(SOFT_DELETE_MARKER)) {
+                continue;
+            }
+            objectMetaStore.get(storeKey).ifPresent(meta -> {
+                if (prefix == null || prefix.isEmpty() || meta.getName().startsWith(prefix)) {
+                    out.add(meta);
+                }
+            });
+        }
+        out.sort(Comparator.comparing(GcsObjectMeta::getName)
+                .thenComparing(m -> m.getGeneration() == null ? "" : m.getGeneration()));
+        return out;
+    }
+
+    /** Restores a soft-deleted generation back to live, as {@code objects.restore} does. */
+    public GcsObjectMeta restoreObject(String bucket, String objectName, String generation) {
+        synchronized (objectLock(bucket, objectName)) {
+            if (generation == null || generation.isBlank()) {
+                throw GcpException.invalidArgument("generation is required to restore an object");
+            }
+            String archiveKey = softDeleteKey(bucket, objectName, generation);
+            GcsObjectMeta archived = objectMetaStore.get(archiveKey)
+                    .orElseThrow(() -> GcpException.notFound(
+                            "Soft-deleted object not found: " + objectName + " generation " + generation));
+
+            String key = objectKey(bucket, objectName);
+            // Restoring onto a name that is live again displaces that object, so route it
+            // through the ordinary delete path first: that enforces holds and retention, archives
+            // it when versioning is on, and retains it under the soft delete policy. Writing
+            // straight over it would destroy a live generation, which is the opposite of what
+            // this feature exists to do.
+            if (getLiveObjectMeta(bucket, objectName).isPresent()) {
+                deleteObjectLocked(bucket, objectName);
+            }
+            GcsObjectMeta restored = cloneMeta(archived);
+            restored.setSoftDeleteTime(null);
+            restored.setHardDeleteTime(null);
+            restored.setIsLatest(true);
+            restored.setTimeDeleted(null);
+            restored.setUpdated(nowTimestamp());
+
+            objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
+            objectMetaStore.put(key, restored);
+            objectMetaStore.delete(archiveKey);
+            objectDataStore.delete(archiveKey);
+            // With versioning on, the original delete also left this generation in the noncurrent
+            // namespace. It is live again now, so drop that copy: leaving both would list the same
+            // generation twice, once current and once noncurrent.
+            String versionKey = key + "\0" + generation;
+            objectMetaStore.delete(versionKey);
+            objectDataStore.delete(versionKey);
+            LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
+            return restored;
+        }
     }
 
     public void deleteObjectVersion(String bucket, String objectName, String generation) {
@@ -560,6 +699,7 @@ public class GcsService {
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
             checkPreconditions(Optional.of(live), preconditions);
+            softDelete(bucket, objectName, live, liveKey);
             objectMetaStore.delete(liveKey);
             objectDataStore.delete(liveKey);
             return;
@@ -570,6 +710,7 @@ public class GcsService {
             throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
         }
         checkPreconditions(archived, preconditions);
+        softDelete(bucket, objectName, archived.get(), archiveKey);
         objectMetaStore.delete(archiveKey);
         objectDataStore.delete(archiveKey);
     }
@@ -728,16 +869,83 @@ public class GcsService {
         }
     }
 
+    /**
+     * One call of {@code objects.rewrite}.
+     *
+     * <p>Without {@code maxBytesRewrittenPerCall}, or when the object fits inside it, the rewrite
+     * completes immediately. Otherwise it returns {@code done: false} plus a {@code rewriteToken}
+     * the client passes back until the copy finishes, exactly as GCS does for large or
+     * class-changing copies. The destination is written only on the completing call, so a partially
+     * rewritten object is never visible.
+     */
+    public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
+            Long maxBytesPerCall, String rewriteToken, GcsObjectPreconditions preconditions, String baseUrl) {
+        GcsObjectMeta source = getObjectMeta(srcBucket, srcObject);
+        long objectSize = source.getSize() != null ? Long.parseLong(source.getSize()) : 0L;
+
+        GcsRewriteSession session;
+        if (rewriteToken != null && !rewriteToken.isBlank()) {
+            session = rewriteSessions.get(rewriteToken);
+            if (session == null) {
+                throw GcpException.invalidArgument("Invalid rewriteToken: " + rewriteToken);
+            }
+            if (!session.matches(srcBucket, srcObject, dstBucket, dstObject)) {
+                // GCS ties the token to the exact source/destination pair.
+                throw GcpException.invalidArgument(
+                        "rewriteToken does not match the requested source and destination");
+            }
+            if (!session.sourceGenerationUnchanged(source.getGeneration())) {
+                throw GcpException.invalidArgument(
+                        "rewriteToken refers to a source generation that has since been replaced");
+            }
+        } else {
+            session = new GcsRewriteSession(srcBucket, srcObject, source.getGeneration(),
+                    dstBucket, dstObject, objectSize, 0L, preconditions);
+        }
+
+        long step = maxBytesPerCall != null && maxBytesPerCall > 0 ? maxBytesPerCall : objectSize;
+        session = session.advancedBy(Math.max(step, 1L));
+
+        if (!session.complete()) {
+            String token = rewriteToken != null && !rewriteToken.isBlank()
+                    ? rewriteToken
+                    : UUID.randomUUID().toString().replace("-", "");
+            rewriteSessions.put(token, session);
+            return new GcsRewriteResult(false, token, session.bytesRewritten(), objectSize, null);
+        }
+
+        // Pinned to the generation the token was bound to, not whatever is live now.
+        GcsObjectMeta meta = copyObject(srcBucket, srcObject, session.srcGeneration(),
+                dstBucket, dstObject, session.preconditions(), baseUrl);
+        // Only once the copy has actually succeeded: retiring the token first would turn a failed
+        // destination precondition into an unretryable rewrite, since the client's token would
+        // already be gone.
+        if (rewriteToken != null && !rewriteToken.isBlank()) {
+            rewriteSessions.remove(rewriteToken);
+        }
+        return new GcsRewriteResult(true, null, objectSize, objectSize, meta);
+    }
+
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject, String baseUrl) {
         return copyObject(srcBucket, srcObject, dstBucket, dstObject, GcsObjectPreconditions.NONE, baseUrl);
     }
 
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
             GcsObjectPreconditions preconditions, String baseUrl) {
+        return copyObject(srcBucket, srcObject, null, dstBucket, dstObject, preconditions, baseUrl);
+    }
+
+    /**
+     * Copies a specific source generation when one is given. A completing chunked rewrite passes
+     * the generation its token was bound to, so an overwrite between the token check and the copy
+     * cannot substitute newer bytes for the ones the rewrite measured its progress against.
+     */
+    public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
+            String dstBucket, String dstObject, GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         // Read the source before taking the destination lock. Nesting two
         // stripe locks could deadlock with a copy running in the other direction.
-        var src = getObjectForDownload(srcBucket, srcObject, null, GcsCustomerEncryption.none());
+        var src = getObjectForDownload(srcBucket, srcObject, srcGeneration, GcsCustomerEncryption.none());
         synchronized (objectLock(dstBucket, dstObject)) {
             checkPreconditions(dstBucket, dstObject, preconditions);
             return copyObjectLocked(src, dstBucket, dstObject, baseUrl);

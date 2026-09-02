@@ -2,9 +2,9 @@
 
 floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 
-- **gRPC v2** — bucket and object management plus streaming reads and writes
-- **REST XML** — object operations (upload, download, delete, list objects)
-- **REST JSON** — bucket management (create bucket, list buckets, get bucket metadata)
+- **gRPC v2**, bucket and object management plus streaming reads and writes
+- **REST XML**, object operations (upload, download, delete, list objects)
+- **REST JSON**, bucket management (create bucket, list buckets, get bucket metadata)
 
 ## Configuration
 
@@ -180,13 +180,13 @@ and Bearer tokens are not validated.
 
 ## Multipart Upload
 
-floci-gcp supports multipart (resumable) upload — the standard GCS mechanism for large objects. The GCP SDK uses this automatically for objects above a threshold.
+floci-gcp supports multipart (resumable) upload, the standard GCS mechanism for large objects. The GCP SDK uses this automatically for objects above a threshold.
 
 ## Resumable Upload Sessions
 
 `POST /upload/storage/v1/b/{bucket}/o?uploadType=resumable` opens a session and returns
 the session URL in the `Location` header. Chunks go to that URL with a `Content-Range`
-header, using either `PUT` or `POST` — the Java, Node and Python SDKs send `PUT`, the Go
+header, using either `PUT` or `POST`, the Java, Node and Python SDKs send `PUT`, the Go
 SDK sends `POST`, and both are handled the same way.
 
 Session behavior matches GCS:
@@ -297,6 +297,12 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `ListDefaultObjectAcl` / `CreateDefaultObjectAcl`
 - `GetDefaultObjectAcl` / `UpdateDefaultObjectAcl` / `DeleteDefaultObjectAcl`
 
+**Project resources (REST JSON):**
+
+- `hmacKeys` create/list/get/update/delete (`/storage/v1/projects/{project}/hmacKeys`), the
+  credentials S3-compatible clients present to GCS; the secret is returned once on create,
+  and a key must be INACTIVE before it can be deleted
+
 **Object operations (REST XML + REST JSON):**
 
 - `PutObject` (simple and multipart/resumable upload)
@@ -308,15 +314,18 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `HeadObject`
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, custom metadata)
 - `ComposeObject` (concatenate up to 32 source objects)
+- `RewriteObject` (multi-call: `maxBytesRewrittenPerCall` below the object size returns
+  `done: false` with a `rewriteToken` and the client loops until it completes)
+- Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`)
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`)
 - Customer-supplied encryption keys (CSEK)
 
-Object names containing `/`, spaces, `+`, or percent-encoded sequences round-trip correctly — the emulator preserves URI-encoded names exactly as real GCS does.
+Object names containing `/`, spaces, `+`, or percent-encoded sequences round-trip correctly, the emulator preserves URI-encoded names exactly as real GCS does.
 
 **Pub/Sub notifications (REST JSON):**
 
-- `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`) — object changes publish to the configured Pub/Sub topic in the local backend
+- `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`), object changes publish to the configured Pub/Sub topic in the local backend
 
 **Object ACLs (REST JSON):**
 
@@ -330,4 +339,4 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 - `ifSourceGenerationMatch` / `ifSourceGenerationNotMatch` for object moves
 - `ifSourceMetagenerationMatch` / `ifSourceMetagenerationNotMatch` for object moves
 - Returns HTTP 412 on precondition failure
-- Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence — concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)
+- Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence, concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)

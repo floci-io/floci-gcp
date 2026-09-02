@@ -159,6 +159,10 @@ public class GcsObjectController {
             @PathParam("object") String objectPath,
             @QueryParam("alt") String alt,
             @QueryParam("generation") String generation,
+            @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
+            @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
+            @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
+            @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader) {
@@ -166,12 +170,76 @@ public class GcsObjectController {
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if ("media".equals(alt)) {
             var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+            if (readPreconditionsFail(download.meta(), ifGenerationMatch, ifGenerationNotMatch,
+                    ifMetagenerationMatch, ifMetagenerationNotMatch)) {
+                return notModified(download.meta());
+            }
             return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
         }
-        if (generation != null) {
-            return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();
+        GcsObjectMeta meta = generation != null
+                ? service.getObjectMeta(bucket, objectPath, generation)
+                : service.getObjectMeta(bucket, objectPath);
+        if (readPreconditionsFail(meta, ifGenerationMatch, ifGenerationNotMatch,
+                ifMetagenerationMatch, ifMetagenerationNotMatch)) {
+            return notModified(meta);
         }
-        return Response.ok(service.getObjectMeta(bucket, objectPath)).build();
+        return Response.ok(meta).build();
+    }
+
+    /**
+     * A 304 carries the selected object's validators. RFC 7232 requires a 304 to generate the
+     * header fields that a 200 for the same request would have sent, ETag among them, and the
+     * media path does send ETag and the x-goog generation headers. A bare 304 would leave a
+     * cache-aware client without the validators it needs to revalidate what it already holds.
+     */
+    private static Response notModified(GcsObjectMeta meta) {
+        Response.ResponseBuilder builder = Response.notModified();
+        if (meta.getEtag() != null) {
+            builder.header("ETag", meta.getEtag());
+        }
+        if (meta.getGeneration() != null) {
+            builder.header("x-goog-generation", meta.getGeneration());
+        }
+        if (meta.getMetageneration() != null) {
+            builder.header("x-goog-metageneration", meta.getMetageneration());
+        }
+        return builder.build();
+    }
+
+    /**
+     * Evaluates conditional-read preconditions.
+     *
+     * <p>The two families fail differently, per the documented precondition table: a
+     * {@code *Match} that does not hold is {@code 412 Precondition Failed}, while a
+     * {@code *NotMatch} that does not hold is {@code 304 Not Modified}, the request would have
+     * succeeded, so the point is to skip transferring a body the caller already has. Returns true
+     * when the caller should answer 304; throws for the 412 cases.
+     */
+    private static boolean readPreconditionsFail(GcsObjectMeta meta, Long ifGenerationMatch,
+            Long ifGenerationNotMatch, Long ifMetagenerationMatch, Long ifMetagenerationNotMatch) {
+        long generation = parseOrZero(meta.getGeneration());
+        long metageneration = parseOrZero(meta.getMetageneration());
+
+        if (ifGenerationMatch != null && generation != ifGenerationMatch) {
+            throw GcpException.conditionNotMet(
+                    "ifGenerationMatch: " + generation + " != " + ifGenerationMatch);
+        }
+        if (ifMetagenerationMatch != null && metageneration != ifMetagenerationMatch) {
+            throw GcpException.conditionNotMet(
+                    "ifMetagenerationMatch: " + metageneration + " != " + ifMetagenerationMatch);
+        }
+        if (ifGenerationNotMatch != null && generation == ifGenerationNotMatch) {
+            return true;
+        }
+        return ifMetagenerationNotMatch != null && metageneration == ifMetagenerationNotMatch;
+    }
+
+    private static long parseOrZero(String value) {
+        try {
+            return value == null ? 0L : Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     @PATCH

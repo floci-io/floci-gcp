@@ -32,10 +32,11 @@ public class GcsDownloadController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
             @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
-            @HeaderParam("Range") String rangeHeader) {
+            @HeaderParam("Range") String rangeHeader,
+            @HeaderParam("Accept-Encoding") String acceptEncoding) {
         authorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
-        return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
+        return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
     }
 }

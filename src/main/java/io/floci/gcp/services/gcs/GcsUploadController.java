@@ -64,12 +64,13 @@ public class GcsUploadController {
         }
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
+        GcsObjectMeta systemMetadata = systemMetadataFromQuery(uriInfo);
         if ("multipart".equals(uploadType)) {
-            return handleMultipart(bucket, nameParam, headers, uriInfo, body, preconditions);
+            return handleMultipart(bucket, nameParam, headers, uriInfo, body, preconditions, systemMetadata);
         } else if ("resumable".equals(uploadType)) {
-            return handleStartResumable(bucket, nameParam, headers, uriInfo, body, preconditions);
+            return handleStartResumable(bucket, nameParam, headers, uriInfo, body, preconditions, systemMetadata);
         } else if ("media".equals(uploadType)) {
-            return handleMedia(bucket, nameParam, headers, uriInfo, body, preconditions);
+            return handleMedia(bucket, nameParam, headers, uriInfo, body, preconditions, systemMetadata);
         }
         throw GcpException.invalidArgument("unsupported uploadType: " + uploadType);
     }
@@ -133,6 +134,59 @@ public class GcsUploadController {
         return Response.status(308);
     }
 
+    // System metadata a client can set at upload time. GCS accepts these both as
+    // query parameters on the upload URL and, for multipart/resumable, as fields
+    // of the JSON metadata part. They are carried as a template rather than
+    // patched afterwards so the object lands with them already set, without the
+    // spurious metageneration bump a follow-up patch would cause.
+    private static final String[] SYSTEM_METADATA_FIELDS = {
+            "contentEncoding", "contentDisposition", "contentLanguage", "cacheControl",
+            "customTime", "storageClass"
+    };
+
+    private static GcsObjectMeta systemMetadataFromQuery(UriInfo uriInfo) {
+        var params = uriInfo.getQueryParameters();
+        GcsObjectMeta meta = null;
+        for (String field : SYSTEM_METADATA_FIELDS) {
+            String value = params.getFirst(field);
+            if (value == null || value.isBlank()) {
+                continue;
+            }
+            if (meta == null) {
+                meta = new GcsObjectMeta();
+            }
+            assignSystemMetadata(meta, field, value);
+        }
+        return meta;
+    }
+
+    // Fields in the JSON metadata part take precedence over the query string.
+    private static GcsObjectMeta mergeSystemMetadata(GcsObjectMeta base, Map<?, ?> metadata) {
+        GcsObjectMeta merged = base;
+        for (String field : SYSTEM_METADATA_FIELDS) {
+            if (!(metadata.get(field) instanceof String value) || value.isBlank()) {
+                continue;
+            }
+            if (merged == null) {
+                merged = new GcsObjectMeta();
+            }
+            assignSystemMetadata(merged, field, value);
+        }
+        return merged;
+    }
+
+    private static void assignSystemMetadata(GcsObjectMeta meta, String field, String value) {
+        switch (field) {
+            case "contentEncoding" -> meta.setContentEncoding(value);
+            case "contentDisposition" -> meta.setContentDisposition(value);
+            case "contentLanguage" -> meta.setContentLanguage(value);
+            case "cacheControl" -> meta.setCacheControl(value);
+            case "customTime" -> meta.setCustomTime(value);
+            case "storageClass" -> meta.setStorageClass(value);
+            default -> { /* unreachable: every SYSTEM_METADATA_FIELDS entry is handled above */ }
+        }
+    }
+
     private static GcsContentRange parseContentRange(String header, int bodyLength) {
         if (!header.startsWith("bytes ")) {
             throw GcpException.invalidArgument("invalid Content-Range header: " + header);
@@ -158,7 +212,12 @@ public class GcsUploadController {
         Long totalSize = "*".equals(totalValue) ? null : parseLong(totalValue, header);
         long end;
         if ("*".equals(endValue)) {
-            if (totalSize != null || bodyLength == 0) {
+            // "bytes <start>-*/*" is what a client streaming an unknown length sends: the
+            // chunk it carries is the final one, so the total is what we hold once it is
+            // appended. A zero-length body is the legitimate empty-object case -- the Node
+            // SDK emits exactly this header with content-length 0 for file.save("") -- and
+            // it leaves end one before start.
+            if (totalSize != null) {
                 throw GcpException.invalidArgument("invalid Content-Range header: " + header);
             }
             end = start + bodyLength - 1L;
@@ -166,7 +225,8 @@ public class GcsUploadController {
         } else {
             end = parseLong(endValue, header);
         }
-        if (start < 0 || end < start || bodyLength != end - start + 1) {
+        boolean emptyFinalChunk = bodyLength == 0 && end == start - 1L;
+        if (start < 0 || (end < start && !emptyFinalChunk) || bodyLength != end - start + 1) {
             throw GcpException.invalidArgument("invalid Content-Range header: " + header);
         }
         if (totalSize != null && end >= totalSize) {
@@ -184,7 +244,7 @@ public class GcsUploadController {
     }
 
     private Response handleMultipart(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
-            GcsObjectPreconditions preconditions) {
+            GcsObjectPreconditions preconditions, GcsObjectMeta systemMetadata) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String[] rawParts = parseMultipartRaw(contentType, new String(body, ISO));
 
@@ -206,14 +266,17 @@ public class GcsUploadController {
         authorizationService.requireObjectWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
         var userMetadata = extractUserMetadata(metadata);
+        // The metadata part wins over the query string when both carry a field.
+        GcsObjectMeta system = mergeSystemMetadata(systemMetadata, metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions, requestBaseUrl(headers, uriInfo));
+                GcsCustomerEncryption.fromHeaders(headers), userMetadata, system, preconditions,
+                requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
     }
 
     private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
-            GcsObjectPreconditions preconditions) {
+            GcsObjectPreconditions preconditions, GcsObjectMeta systemMetadata) {
         String requestContentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         if (body != null && body.length > 0 && !isJsonContentType(requestContentType)) {
             throw GcpException.invalidArgument("Unsupported content with type: " + mediaType(requestContentType));
@@ -236,6 +299,7 @@ public class GcsUploadController {
                     contentType = bodyContentType;
                 }
                 userMetadata = extractUserMetadata(meta);
+                systemMetadata = mergeSystemMetadata(systemMetadata, meta);
             }
         }
 
@@ -249,7 +313,7 @@ public class GcsUploadController {
         authorizationService.requireObjectWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         String uploadId = service.startResumableUpload(bucket, name, contentType,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, preconditions);
+                GcsCustomerEncryption.fromHeaders(headers), userMetadata, systemMetadata, preconditions);
         String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
                 + "/o?uploadType=resumable&upload_id=" + uploadId;
 
@@ -257,12 +321,13 @@ public class GcsUploadController {
     }
 
     private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
-            GcsObjectPreconditions preconditions) {
+            GcsObjectPreconditions preconditions, GcsObjectMeta systemMetadata) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         authorizationService.requireObjectWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
-                GcsCustomerEncryption.fromHeaders(headers), preconditions, requestBaseUrl(headers, uriInfo));
+                GcsCustomerEncryption.fromHeaders(headers), null, systemMetadata, preconditions,
+                requestBaseUrl(headers, uriInfo));
         return Response.ok(meta).build();
     }
 

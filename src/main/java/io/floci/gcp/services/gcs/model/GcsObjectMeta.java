@@ -29,6 +29,7 @@ public class GcsObjectMeta {
     private String contentDisposition;
     private String contentEncoding;
     private String contentLanguage;
+    private String cacheControl;
     private Map<String, String> metadata;
     private Map<String, String> customerEncryption;
 
@@ -89,6 +90,9 @@ public class GcsObjectMeta {
     public String getContentEncoding() { return contentEncoding; }
     public void setContentEncoding(String contentEncoding) { this.contentEncoding = contentEncoding; }
 
+    public String getCacheControl() { return cacheControl; }
+    public void setCacheControl(String cacheControl) { this.cacheControl = cacheControl; }
+
     public String getContentLanguage() { return contentLanguage; }
     public void setContentLanguage(String contentLanguage) { this.contentLanguage = contentLanguage; }
 
@@ -103,6 +107,10 @@ public class GcsObjectMeta {
     private Boolean temporaryHold;
     private Boolean eventBasedHold;
     private String retentionExpirationTime;
+    // User-settable timestamp. Lifecycle rules key off it so an application can
+    // express "delete 30 days after the record was superseded" rather than
+    // relying on the object's create time.
+    private String customTime;
 
     public String getTimeDeleted() { return timeDeleted; }
     public void setTimeDeleted(String timeDeleted) { this.timeDeleted = timeDeleted; }
@@ -118,4 +126,7 @@ public class GcsObjectMeta {
 
     public String getRetentionExpirationTime() { return retentionExpirationTime; }
     public void setRetentionExpirationTime(String retentionExpirationTime) { this.retentionExpirationTime = retentionExpirationTime; }
+
+    public String getCustomTime() { return customTime; }
+    public void setCustomTime(String customTime) { this.customTime = customTime; }
 }

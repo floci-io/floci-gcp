@@ -340,7 +340,12 @@ public class GcsService {
         if (userMetadata != null && !userMetadata.isEmpty()) {
             meta.setMetadata(new LinkedHashMap<>(userMetadata));
         }
-        meta.setStorageClass("STANDARD");
+        // Objects inherit the bucket's default storage class; an explicit class on the
+        // upload overrides it via the metadata template applied below.
+        meta.setStorageClass(bucketStore.get(bucket)
+                .map(GcsBucket::getStorageClass)
+                .filter(sc -> sc != null && !sc.isBlank())
+                .orElse("STANDARD"));
         applyInitialObjectMetadata(meta, metadataTemplate);
         meta.setTimeCreated(now);
         meta.setUpdated(now);
@@ -386,9 +391,13 @@ public class GcsService {
         target.setContentDisposition(template.getContentDisposition());
         target.setContentEncoding(template.getContentEncoding());
         target.setContentLanguage(template.getContentLanguage());
+        target.setCacheControl(template.getCacheControl());
         target.setTemporaryHold(template.getTemporaryHold());
         if (template.getEventBasedHold() != null) {
             target.setEventBasedHold(template.getEventBasedHold());
+        }
+        if (template.getCustomTime() != null) {
+            target.setCustomTime(template.getCustomTime());
         }
     }
 
@@ -614,6 +623,12 @@ public class GcsService {
         }
         if (patch.containsKey("eventBasedHold")) {
             meta.setEventBasedHold((Boolean) patch.get("eventBasedHold"));
+        }
+        if (patch.containsKey("cacheControl")) {
+            meta.setCacheControl((String) patch.get("cacheControl"));
+        }
+        if (patch.containsKey("customTime")) {
+            meta.setCustomTime((String) patch.get("customTime"));
         }
         meta.setUpdated(nowTimestamp());
         long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");
@@ -961,15 +976,22 @@ public class GcsService {
     public String startResumableUpload(String bucket, String objectName, String contentType,
             GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
             GcsObjectPreconditions preconditions) {
+        return startResumableUpload(bucket, objectName, contentType, customerEncryption, metadata, null,
+                preconditions);
+    }
+
+    public String startResumableUpload(String bucket, String objectName, String contentType,
+            GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
+            GcsObjectMeta systemMetadata, GcsObjectPreconditions preconditions) {
         synchronized (objectLock(bucket, objectName)) {
             return startResumableUploadLocked(bucket, objectName, contentType, customerEncryption, metadata,
-                    preconditions);
+                    systemMetadata, preconditions);
         }
     }
 
     private String startResumableUploadLocked(String bucket, String objectName, String contentType,
             GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
-            GcsObjectPreconditions preconditions) {
+            GcsObjectMeta systemMetadata, GcsObjectPreconditions preconditions) {
         LOG.debugf("startResumableUpload bucket=%s name=%s contentType=%s", bucket, objectName, contentType);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("startResumableUpload failed: bucket not found bucket=%s", bucket);
@@ -977,7 +999,7 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata(), metadata, preconditions, new byte[0], null));
+                customerEncryption.metadata(), metadata, systemMetadata, preconditions, new byte[0], null));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -1019,7 +1041,7 @@ public class GcsService {
             if (range.totalSize() == null || range.end() + 1 < range.totalSize()) {
                 resumableUploads.put(uploadId, new ResumableUpload(
                         upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(),
-                        upload.metadata(), upload.preconditions(), combined,
+                        upload.metadata(), upload.systemMetadata(), upload.preconditions(), combined,
                         upload.totalSize() != null ? upload.totalSize() : range.totalSize()));
                 return ResumableChunkOutcome.incomplete(combined.length);
             }
@@ -1040,7 +1062,7 @@ public class GcsService {
     private GcsObjectMeta finishResumableUpload(String uploadId, ResumableUpload upload, byte[] data, String baseUrl) {
         GcsObjectMeta meta = putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
-                upload.preconditions(), baseUrl);
+                upload.systemMetadata(), upload.preconditions(), baseUrl);
         completedResumableUploads.put(uploadId,
                 new CompletedResumableUpload(upload.bucket(), upload.objectName(), meta));
         resumableUploads.remove(uploadId);

@@ -53,6 +53,9 @@ public class GcsObjectController {
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
 			@QueryParam("startOffset") String startOffset,
+			@QueryParam("endOffset") String endOffset,
+			@QueryParam("matchGlob") String matchGlob,
+			@QueryParam("includeTrailingDelimiter") @DefaultValue("false") boolean includeTrailingDelimiter,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @QueryParam("versions") @DefaultValue("false") boolean includeVersions) {
 		authorizationService.requireObjectList(authorization, bucket, prefix);
@@ -62,9 +65,13 @@ public class GcsObjectController {
         if (!includeVersions && prefix != null && !prefix.isBlank()) {
             all = all.stream().filter(o -> o.getName().startsWith(prefix)).toList();
         }
+        // startOffset is inclusive, endOffset exclusive.
+        GcsObjectGlob.GlobMatcher globMatcher = GcsObjectGlob.matcher(GcsObjectGlob.compile(matchGlob));
         all = all.stream()
                 .sorted(Comparator.comparing(GcsObjectMeta::getName))
                 .filter(o -> startOffset == null || o.getName().compareTo(startOffset) >= 0)
+                .filter(o -> endOffset == null || o.getName().compareTo(endOffset) < 0)
+                .filter(o -> globMatcher.matches(o.getName()))
                 .toList();
         Set<String> prefixes = new TreeSet<>();
         if (delimiter != null && !delimiter.isEmpty()) {
@@ -75,6 +82,12 @@ public class GcsObjectController {
                 int idx = rest.indexOf(delimiter);
                 if (idx >= 0) {
                     prefixes.add(basePrefix + rest.substring(0, idx + delimiter.length()));
+                    // includeTrailingDelimiter: an object whose own name ends in exactly one
+                    // delimiter is a "directory placeholder". It still rolls up into
+                    // prefixes[], but its metadata is additionally returned in items[].
+                    if (includeTrailingDelimiter && idx + delimiter.length() == rest.length()) {
+                        rolledUp.add(meta);
+                    }
                 } else {
                     rolledUp.add(meta);
                 }

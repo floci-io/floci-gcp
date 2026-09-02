@@ -311,6 +311,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `DeleteObject`
 - `ListObjects` (with `pageToken`, `prefix`, `delimiter` pagination, plus `startOffset`,
   `endOffset`, `matchGlob` and `includeTrailingDelimiter` filtering)
+- Decompressive transcoding (an object stored with `contentEncoding: gzip` is served
+  decompressed to a client that did not send `Accept-Encoding: gzip`, and as stored to one
+  that did; `Range` is ignored on a transcoded read)
 - `CopyObject`
 - `MoveObject`
 - `HeadObject`

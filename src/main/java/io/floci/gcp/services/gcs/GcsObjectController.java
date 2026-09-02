@@ -185,7 +185,8 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
-            @HeaderParam("Range") String rangeHeader) {
+            @HeaderParam("Range") String rangeHeader,
+            @HeaderParam("Accept-Encoding") String acceptEncoding) {
         authorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if ("media".equals(alt)) {
@@ -194,7 +195,7 @@ public class GcsObjectController {
                     ifMetagenerationMatch, ifMetagenerationNotMatch)) {
                 return notModified(download.meta());
             }
-            return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
+            return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
         }
         GcsObjectMeta meta = generation != null
                 ? service.getObjectMeta(bucket, objectPath, generation)

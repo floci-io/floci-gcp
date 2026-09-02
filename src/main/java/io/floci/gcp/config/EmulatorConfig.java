@@ -232,6 +232,18 @@ public interface EmulatorConfig {
     interface GcsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Idle time after which an unfinished resumable or streaming upload session is dropped
+         * along with its buffered bytes. Defaults to the real GCS resumable session window of
+         * seven days; lower it on long-lived instances to reclaim abandoned uploads sooner.
+         */
+        @WithDefault("604800")
+        long uploadSessionIdleTimeoutSeconds();
+
+        /** Interval between sweeps for expired upload sessions. Zero or less disables the sweeper. */
+        @WithDefault("3600")
+        long uploadSessionSweepIntervalSeconds();
     }
 
     interface PubSubServiceConfig {

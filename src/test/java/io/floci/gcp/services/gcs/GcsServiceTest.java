@@ -6,8 +6,10 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.services.gcs.model.GcsBucket;
+import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -374,4 +376,96 @@ class GcsServiceTest {
         storage.load();
         return storage;
     }
+
+    @Test
+    void abandonedUploadSessionsAreEvictedOnceIdlePastTheTimeout() {
+        service.createBucket("reap-bucket", "p1", BASE_URL, Map.of());
+
+        String resumableId = service.startResumableUpload("reap-bucket", "abandoned.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+        GcsObjectMeta streamed = new GcsObjectMeta();
+        streamed.setBucket("reap-bucket");
+        streamed.setName("abandoned-stream.txt");
+        String streamingId = service.startStreamingUpload(streamed, GcsObjectPreconditions.NONE,
+                null, null, null);
+
+        assertNotNull(service.findResumableUpload(resumableId));
+        assertEquals(1, service.streamingUploadCount());
+
+        long oneHour = 3_600_000L;
+        // A "now" an hour past the session's last write, rather than sleeping.
+        int evicted = service.evictExpiredUploadSessions(System.currentTimeMillis() + oneHour, oneHour / 2);
+
+        assertEquals(2, evicted, "both the REST and the gRPC session should be swept together");
+        assertNull(service.findResumableUpload(resumableId));
+        assertEquals(0, service.streamingUploadCount());
+        assertThrows(GcpException.class, () -> service.getStreamingUpload(streamingId));
+    }
+
+    @Test
+    void aWriterHoldingAnEvictedStreamingSessionCannotAcknowledgeLostBytes() {
+        service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta meta = new GcsObjectMeta();
+        meta.setBucket("race-bucket");
+        meta.setName("racy.txt");
+        String uploadId = service.startStreamingUpload(meta, GcsObjectPreconditions.NONE, null, null, null);
+
+        // GcsGrpcController looks the session up and only then synchronizes on it, so a sweep can
+        // remove the map entry in between. Hold the reference the way the controller would.
+        GcsStreamingUpload stale = service.getStreamingUpload(uploadId);
+
+        assertEquals(1, service.evictExpiredUploadSessions(
+                System.currentTimeMillis() + 3_600_000L, 1_000L));
+
+        // Writing through the stale reference must fail. Silently accepting the bytes would hand
+        // the client a persisted size for data the next chunk could never find a session for.
+        assertThrows(GcpException.class,
+                () -> stale.append(0, "lost".getBytes(StandardCharsets.UTF_8)));
+        assertThrows(GcpException.class, () -> service.finalizeStreamingUpload(uploadId, BASE_URL));
+    }
+
+    @Test
+    void activeUploadSessionsSurviveTheSweep() {
+        service.createBucket("keep-bucket", "p1", BASE_URL, Map.of());
+
+        String resumableId = service.startResumableUpload("keep-bucket", "active.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+        GcsObjectMeta streamed = new GcsObjectMeta();
+        streamed.setBucket("keep-bucket");
+        streamed.setName("active-stream.txt");
+        service.startStreamingUpload(streamed, GcsObjectPreconditions.NONE, null, null, null);
+
+        // Swept immediately: nothing has been idle for an hour yet.
+        assertEquals(0, service.evictExpiredUploadSessions(System.currentTimeMillis(), 3_600_000L));
+        assertNotNull(service.findResumableUpload(resumableId));
+        assertEquals(1, service.streamingUploadCount());
+    }
+
+    @Test
+    void advancingAResumableChunkRefreshesTheIdleDeadline() {
+        service.createBucket("touch-bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload("touch-bucket", "chunked.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+
+        long startedAt = service.findResumableUpload(uploadId).lastTouchedMillis();
+        service.applyResumableChunk(uploadId, new GcsContentRange(0, 3, 8L, false),
+                "abcd".getBytes(StandardCharsets.UTF_8), BASE_URL);
+
+        assertTrue(service.findResumableUpload(uploadId).lastTouchedMillis() >= startedAt,
+                "a chunk that advances the session must refresh its last-touched stamp");
+        // Still present a moment later, because the chunk reset the idle clock.
+        assertEquals(0, service.evictExpiredUploadSessions(System.currentTimeMillis(), 3_600_000L));
+        assertNotNull(service.findResumableUpload(uploadId));
+    }
+
+    @Test
+    void aNonPositiveIdleTimeoutDisablesEviction() {
+        service.createBucket("disabled-bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload("disabled-bucket", "kept.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+
+        assertEquals(0, service.evictExpiredUploadSessions(System.currentTimeMillis() + 999_999_999L, 0));
+        assertNotNull(service.findResumableUpload(uploadId));
+    }
+
 }

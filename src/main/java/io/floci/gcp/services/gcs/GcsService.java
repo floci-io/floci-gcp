@@ -929,9 +929,61 @@ public class GcsService {
         return streamingUploads.size();
     }
 
+    // Both upload maps are keyed by upload id and, before this, were only ever cleared by an
+    // explicit terminal event: a finalize, an abort, or (for non-resumable gRPC streams) a
+    // stream close. A client that starts an upload and disappears left its buffered bytes
+    // resident for the lifetime of the process, on either transport. Sweeping the two together
+    // keeps REST and gRPC from diverging again.
+    //
+    // `nowMillis` is a parameter rather than a clock read so the sweep is directly testable.
+    //
+    // Both loops take the same monitor the matching write path holds, but that alone is not
+    // enough for the streaming case: GcsGrpcController looks a session up and only then
+    // synchronizes on it, so the sweep can remove the map entry in between and leave the writer
+    // holding a live reference to an orphaned session. Marking the session evicted under its own
+    // monitor closes that window, because the writer has to take the same monitor to append. The
+    // resumable path needs no equivalent, since applyResumableChunk reads the map inside the
+    // lock and so simply sees the session gone. Returns the number of sessions dropped.
+    int evictExpiredUploadSessions(long nowMillis, long idleTimeoutMillis) {
+        if (idleTimeoutMillis <= 0) {
+            return 0;
+        }
+        long cutoff = nowMillis - idleTimeoutMillis;
+        int evicted = 0;
+
+        for (String uploadId : List.copyOf(resumableUploads.keySet())) {
+            synchronized (uploadLock(uploadId)) {
+                ResumableUpload upload = resumableUploads.get(uploadId);
+                if (upload != null && upload.lastTouchedMillis() < cutoff) {
+                    resumableUploads.remove(uploadId);
+                    evicted++;
+                }
+            }
+        }
+
+        for (Map.Entry<String, GcsStreamingUpload> entry : streamingUploads.entrySet()) {
+            GcsStreamingUpload upload = entry.getValue();
+            synchronized (upload) {
+                if (upload.lastTouchedMillis() < cutoff) {
+                    upload.markEvicted();
+                    streamingUploads.remove(entry.getKey(), upload);
+                    evicted++;
+                }
+            }
+        }
+
+        if (evicted > 0) {
+            LOG.debugf("Evicted %d idle upload session(s) idle longer than %dms", evicted, idleTimeoutMillis);
+        }
+        return evicted;
+    }
+
     public GcsObjectMeta finalizeStreamingUpload(String uploadId, String baseUrl) {
         GcsStreamingUpload upload = getStreamingUpload(uploadId);
         synchronized (upload) {
+            if (upload.isEvicted()) {
+                throw GcpException.notFound("Streaming upload not found: " + uploadId);
+            }
             if (upload.finalizedObject() != null) {
                 return upload.finalizedObject();
             }
@@ -977,7 +1029,8 @@ public class GcsService {
         }
         String uploadId = UUID.randomUUID().toString();
         resumableUploads.put(uploadId, new ResumableUpload(bucket, objectName, contentType,
-                customerEncryption.metadata(), metadata, preconditions, new byte[0], null));
+                customerEncryption.metadata(), metadata, preconditions, new byte[0], null,
+                System.currentTimeMillis()));
         LOG.debugf("startResumableUpload uploadId=%s", uploadId);
         return uploadId;
     }
@@ -1020,7 +1073,8 @@ public class GcsService {
                 resumableUploads.put(uploadId, new ResumableUpload(
                         upload.bucket(), upload.objectName(), upload.contentType(), upload.customerEncryption(),
                         upload.metadata(), upload.preconditions(), combined,
-                        upload.totalSize() != null ? upload.totalSize() : range.totalSize()));
+                        upload.totalSize() != null ? upload.totalSize() : range.totalSize(),
+                        System.currentTimeMillis()));
                 return ResumableChunkOutcome.incomplete(combined.length);
             }
             if (combined.length != range.totalSize()) {

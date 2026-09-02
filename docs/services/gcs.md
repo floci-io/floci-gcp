@@ -306,6 +306,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 
 - `GetServiceAccount` (`/storage/v1/projects/{project}/serviceAccount`), the principal
   Cloud Storage publishes as; grant it publish rights before wiring notifications
+- `hmacKeys` create/list/get/update/delete (`/storage/v1/projects/{project}/hmacKeys`), the
+  credentials S3-compatible clients present to GCS; the secret is returned once on create,
+  and a key must be INACTIVE before it can be deleted
 
 **Object operations (REST XML + REST JSON):**
 
@@ -325,6 +328,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   `customTime`, `storageClass`) as query parameters or in the JSON metadata part of a
   multipart/resumable upload
 - `ComposeObject` (concatenate 1 to 32 source objects; 0 or more than 32 is a 400)
+- `RewriteObject` (multi-call: `maxBytesRewrittenPerCall` below the object size returns
+  `done: false` with a `rewriteToken` and the client loops until it completes)
+- Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`)
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`), including when the container's published port
   differs from its internal one (`docker run -p 9000:4588`)

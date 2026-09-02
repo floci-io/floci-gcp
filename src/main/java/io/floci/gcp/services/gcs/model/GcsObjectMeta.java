@@ -111,6 +111,8 @@ public class GcsObjectMeta {
     // express "delete 30 days after the record was superseded" rather than
     // relying on the object's create time.
     private String customTime;
+    private String softDeleteTime;
+    private String hardDeleteTime;
 
     public String getTimeDeleted() { return timeDeleted; }
     public void setTimeDeleted(String timeDeleted) { this.timeDeleted = timeDeleted; }
@@ -129,4 +131,10 @@ public class GcsObjectMeta {
 
     public String getCustomTime() { return customTime; }
     public void setCustomTime(String customTime) { this.customTime = customTime; }
+
+    public String getSoftDeleteTime() { return softDeleteTime; }
+    public void setSoftDeleteTime(String softDeleteTime) { this.softDeleteTime = softDeleteTime; }
+
+    public String getHardDeleteTime() { return hardDeleteTime; }
+    public void setHardDeleteTime(String hardDeleteTime) { this.hardDeleteTime = hardDeleteTime; }
 }

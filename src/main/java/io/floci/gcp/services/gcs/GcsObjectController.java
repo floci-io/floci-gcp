@@ -161,12 +161,13 @@ public class GcsObjectController {
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
-            @HeaderParam("Range") String rangeHeader) {
+            @HeaderParam("Range") String rangeHeader,
+            @HeaderParam("Accept-Encoding") String acceptEncoding) {
         authorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if ("media".equals(alt)) {
             var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
-            return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader);
+            return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
         }
         if (generation != null) {
             return Response.ok(service.getObjectMeta(bucket, objectPath, generation)).build();

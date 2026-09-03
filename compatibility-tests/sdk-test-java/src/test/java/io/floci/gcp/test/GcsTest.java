@@ -6,6 +6,7 @@ import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Bucket;
 import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class GcsTest {
@@ -138,5 +140,34 @@ class GcsTest {
         assertThat(bucket).isNotNull();
         assertThat(bucket.delete()).isTrue();
         assertThat(storage.get(BUCKET_NAME)).isNull();
+    }
+
+    @Test
+    @Order(10)
+    void rejectsDeletionOfNonEmptyBucket() {
+        String bucketName = TestFixtures.uniqueName("non-empty-bucket");
+        BlobId blobId = BlobId.of(bucketName, "object.txt");
+        byte[] contents = "preserved contents".getBytes(StandardCharsets.UTF_8);
+        try {
+            storage.create(BucketInfo.of(bucketName));
+            storage.create(BlobInfo.newBuilder(blobId).build(), contents);
+
+            assertThatThrownBy(() -> storage.delete(bucketName))
+                    .isInstanceOfSatisfying(StorageException.class,
+                            ex -> assertThat(ex.getCode()).isEqualTo(409));
+
+            assertThat(storage.get(blobId).getContent()).isEqualTo(contents);
+            assertThat(storage.delete(blobId)).isTrue();
+            assertThat(storage.delete(bucketName)).isTrue();
+        } finally {
+            try {
+                storage.delete(blobId);
+            } catch (Exception ignored) {
+            }
+            try {
+                storage.delete(bucketName);
+            } catch (Exception ignored) {
+            }
+        }
     }
 }

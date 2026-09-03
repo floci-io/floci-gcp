@@ -18,6 +18,12 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -326,6 +332,55 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteNonEmptyBucketThrowsBucketNotEmpty() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.deleteBucket("bucket"));
+
+        assertEquals(409, ex.getHttpStatus());
+        assertEquals("BucketNotEmpty", ex.getReason());
+        assertNotNull(service.getBucket("bucket"));
+        assertArrayEquals(new byte[]{1},
+                service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void deleteBucketWaitsForAnUploadToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        service = new GcsService(new InMemoryStorage<>(),
+                new BlockingFirstPutStorage<>(metadataWriteStarted, allowMetadataWrite),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var upload = executor.submit(() -> service.putObject("bucket", "obj.txt", "text/plain",
+                    new byte[]{1}, GcsCustomerEncryption.none(), BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            upload.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("BucketNotEmpty", deletionException.getReason());
+            assertNotNull(service.getBucket("bucket"));
+            assertArrayEquals(new byte[]{1},
+                    service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentOverwriteNeverMixesGenerations() throws Exception {
         service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
         var payloads = Map.of(
@@ -356,6 +411,33 @@ class GcsServiceTest {
         } finally {
             stop.set(true);
             writer.join();
+        }
+    }
+
+    private static final class BlockingFirstPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockFirstPut = new AtomicBoolean(true);
+
+        private BlockingFirstPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockFirstPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
         }
     }
 

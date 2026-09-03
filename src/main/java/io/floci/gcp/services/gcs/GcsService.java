@@ -74,6 +74,7 @@ public class GcsService {
                 }
             });
     private final ConcurrentHashMap<String, GcsStreamingUpload> streamingUploads = new ConcurrentHashMap<>();
+    private final Object[] bucketLocks = createObjectLocks();
     private final Object[] objectLocks = createObjectLocks();
     private final Object[] uploadLocks = createObjectLocks();
     private final AtomicLong generationSequence;
@@ -250,11 +251,18 @@ public class GcsService {
 
     public void deleteBucket(String name) {
         LOG.debugf("deleteBucket name=%s", name);
-        if (bucketStore.get(name).isEmpty()) {
-            LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
-            throw GcpException.notFound("Bucket not found: " + name);
+        synchronized (bucketLock(name)) {
+            if (bucketStore.get(name).isEmpty()) {
+                LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
+                throw GcpException.notFound("Bucket not found: " + name);
+            }
+            if (objectMetaStore.keys().stream().anyMatch(key -> key.startsWith(name + "\0"))) {
+                LOG.warnf("deleteBucket failed: bucket not empty name=%s", name);
+                throw GcpException.alreadyExists("The bucket you tried to delete was not empty.")
+                        .withReason("BucketNotEmpty");
+            }
+            bucketStore.delete(name);
         }
-        bucketStore.delete(name);
     }
 
     public List<GcsBucket> listBuckets(String projectId) {
@@ -293,10 +301,12 @@ public class GcsService {
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
             GcsObjectMeta metadataTemplate, GcsObjectPreconditions preconditions, String baseUrl) {
-        synchronized (objectLock(bucket, objectName)) {
-            checkPreconditions(bucket, objectName, preconditions);
-            return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                    userMetadata, metadataTemplate, baseUrl);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                checkPreconditions(bucket, objectName, preconditions);
+                return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
+                        userMetadata, metadataTemplate, baseUrl);
+            }
         }
     }
 
@@ -1315,6 +1325,10 @@ public class GcsService {
 
     private Object objectLock(String bucket, String objectName) {
         return objectLocks[objectLockIndex(bucket, objectName)];
+    }
+
+    private Object bucketLock(String bucket) {
+        return bucketLocks[Math.floorMod(bucket.hashCode(), bucketLocks.length)];
     }
 
     private int objectLockIndex(String bucket, String objectName) {

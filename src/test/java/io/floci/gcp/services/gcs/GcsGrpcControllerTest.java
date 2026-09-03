@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.storage.v2.BidiWriteObjectRequest;
 import com.google.storage.v2.BidiWriteObjectResponse;
@@ -8,6 +9,7 @@ import com.google.storage.v2.Bucket;
 import com.google.storage.v2.ChecksummedData;
 import com.google.storage.v2.ComposeObjectRequest;
 import com.google.storage.v2.CreateBucketRequest;
+import com.google.storage.v2.DeleteBucketRequest;
 import com.google.storage.v2.GetBucketRequest;
 import com.google.storage.v2.ListBucketsRequest;
 import com.google.storage.v2.ListBucketsResponse;
@@ -39,6 +41,7 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -329,6 +332,20 @@ class GcsGrpcControllerTest {
 
         assertNull(response.error);
         assertEquals("true", response.single().getMetadataOrThrow("updated"));
+    }
+
+    @Test
+    void deleteNonEmptyBucketReturnsFailedPrecondition() {
+        createBucket("non-empty-delete-bucket");
+        service.putObject("non-empty-delete-bucket", "object", "text/plain", new byte[] {1}, BASE_URL);
+
+        RecordingObserver<Empty> response = new RecordingObserver<>();
+        controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                .setName("projects/_/buckets/non-empty-delete-bucket")
+                .build(), response);
+
+        assertEquals(Status.Code.FAILED_PRECONDITION, Status.fromThrowable(response.error).getCode());
+        assertNotNull(service.getBucket("non-empty-delete-bucket"));
     }
 
     private void createBucket(String name) {

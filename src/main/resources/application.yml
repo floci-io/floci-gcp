@@ -30,7 +30,7 @@ quarkus:
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
       - --initialize-at-run-time=io.floci.gcp.services.cloudkms.KmsCrypto
       # Holds a static SecureRandom; native image refuses one in the image heap.
-      - --initialize-at-run-time=io.floci.gcp.services.gcs.GcsHmacKeyController
+      - --initialize-at-run-time=io.floci.gcp.services.gcs.GcsHmacKeyService
       - --initialize-at-run-time=io.floci.gcp.services.firebaseauth.FirebaseAuthService
       - --initialize-at-run-time=io.floci.gcp.services.cloudsql.CloudSqlPostgresDataPlane
       - --initialize-at-run-time=io.floci.gcp.services.scheduler.SchedulerExpressionParser

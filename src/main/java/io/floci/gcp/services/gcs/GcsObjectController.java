@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
@@ -37,13 +38,15 @@ public class GcsObjectController {
 
     private final GcsService service;
     private final EmulatorConfig config;
+    private final ObjectMapper objectMapper;
 	private final GcsAuthorizationService authorizationService;
 
     @Inject
-	public GcsObjectController(GcsService service, EmulatorConfig config,
+	public GcsObjectController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper,
 			GcsAuthorizationService authorizationService) {
         this.service = service;
         this.config = config;
+        this.objectMapper = objectMapper;
 		this.authorizationService = authorizationService;
     }
 
@@ -452,14 +455,16 @@ public class GcsObjectController {
             @QueryParam("ifMetagenerationNotMatch") Long ifMetagenerationNotMatch,
             @QueryParam("maxBytesRewrittenPerCall") Long maxBytesRewrittenPerCall,
             @QueryParam("rewriteToken") String rewriteToken,
-            @Context HttpHeaders headers) {
+            @Context HttpHeaders headers,
+            String body) {
         authorizationService.requireSourceReadAndDestinationWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 srcBucket, srcObjectPath, dstBucket, dstObjectPath);
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
         var result = service.rewriteObject(srcBucket, srcObjectPath, dstBucket, dstObjectPath,
-                maxBytesRewrittenPerCall, rewriteToken, preconditions, requestBaseUrl(headers));
+                maxBytesRewrittenPerCall, rewriteToken, destinationStorageClass(body), preconditions,
+                requestBaseUrl(headers));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#rewriteResponse");
@@ -473,6 +478,23 @@ public class GcsObjectController {
             response.put("rewriteToken", result.rewriteToken());
         }
         return Response.ok(response).build();
+    }
+
+    // The rewrite body is the destination object's metadata. Read as a string rather than a
+    // bound Map so a client that sends no body and no Content-Type (the raw compat cases, and
+    // the SDKs' continuation calls) is not refused with 415. Only storageClass is honoured today;
+    // it decides whether the copy spans storage classes and what the destination lands with.
+    private String destinationStorageClass(String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            Map<?, ?> metadata = objectMapper.readValue(body, Map.class);
+            return metadata.get("storageClass") instanceof String storageClass && !storageClass.isBlank()
+                    ? storageClass : null;
+        } catch (java.io.IOException e) {
+            throw GcpException.invalidArgument("invalid rewrite request body");
+        }
     }
 
     private String requestBaseUrl(HttpHeaders headers) {

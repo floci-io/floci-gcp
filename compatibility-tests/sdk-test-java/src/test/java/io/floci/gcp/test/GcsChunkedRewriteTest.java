@@ -6,6 +6,7 @@ import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.CopyWriter;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageClass;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -15,9 +16,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@code objects.rewrite} is multi-call in real GCS: when {@code maxBytesRewrittenPerCall} is
  * below the object size the response comes back {@code done:false} with a {@code rewriteToken},
- * and the client loops until it completes. That is the path GCS takes for large or
- * class-changing copies, and a single-shot response never exercises it, so the SDK's chunking
- * loop goes untested against the emulator.
+ * and the client loops until it completes. Per the storage/v1 discovery document the limit "only
+ * applies to requests where the source and destination span locations and/or storage classes",
+ * so the chunked case here changes the storage class, and a same-class copy is asserted to
+ * finish in one call whatever chunk size the client asked for.
  */
 class GcsChunkedRewriteTest {
 
@@ -50,7 +52,9 @@ class GcsChunkedRewriteTest {
     void rewriteCompletesOverSeveralCallsAndPublishesOnlyWhenDone() {
         CopyWriter writer = storage.copy(Storage.CopyRequest.newBuilder()
                 .setSource(BlobId.of(BUCKET, SOURCE))
-                .setTarget(BlobId.of(BUCKET, TARGET))
+                .setTarget(BlobInfo.newBuilder(BlobId.of(BUCKET, TARGET))
+                        .setStorageClass(StorageClass.NEARLINE)
+                        .build())
                 .setMegabytesCopiedPerChunk(1L)
                 .build());
 
@@ -74,7 +78,23 @@ class GcsChunkedRewriteTest {
         Blob target = writer.getResult();
         assertThat(target.getName()).isEqualTo(TARGET);
         assertThat(target.getSize()).isEqualTo(PAYLOAD.length);
+        assertThat(target.getStorageClass()).isEqualTo(StorageClass.NEARLINE);
         assertThat(storage.readAllBytes(BlobId.of(BUCKET, TARGET))).isEqualTo(PAYLOAD);
+    }
+
+    @Test
+    void chunkSizeIsIgnoredForASameClassCopyInOneLocation() {
+        // "this only applies to requests where the source and destination span locations and/or
+        // storage classes": real GCS finishes this copy in the first call, and so does the emulator.
+        CopyWriter writer = storage.copy(Storage.CopyRequest.newBuilder()
+                .setSource(BlobId.of(BUCKET, SOURCE))
+                .setTarget(BlobId.of(BUCKET, "same-class-target.bin"))
+                .setMegabytesCopiedPerChunk(1L)
+                .build());
+
+        assertThat(writer.isDone()).isTrue();
+        assertThat(writer.getTotalBytesCopied()).isEqualTo(PAYLOAD.length);
+        assertThat(writer.getResult().getSize()).isEqualTo(PAYLOAD.length);
     }
 
     @Test

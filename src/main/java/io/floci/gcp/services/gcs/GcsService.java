@@ -914,7 +914,12 @@ public class GcsService {
      * rewritten object is never visible.
      */
     public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
-            Long maxBytesPerCall, String rewriteToken, GcsObjectPreconditions preconditions, String baseUrl) {
+            Long maxBytesPerCall, String rewriteToken, String destinationStorageClass,
+            GcsObjectPreconditions preconditions, String baseUrl) {
+        if (maxBytesPerCall != null && (maxBytesPerCall <= 0 || maxBytesPerCall % ONE_MIB != 0)) {
+            throw GcpException.invalidArgument(
+                    "maxBytesRewrittenPerCall must be an integral multiple of 1 MiB (1048576), got: " + maxBytesPerCall);
+        }
         GcsObjectMeta source = getObjectMeta(srcBucket, srcObject);
         long objectSize = source.getSize() != null ? Long.parseLong(source.getSize()) : 0L;
 
@@ -933,13 +938,28 @@ public class GcsService {
                 throw GcpException.invalidArgument(
                         "rewriteToken refers to a source generation that has since been replaced");
             }
+            if (maxBytesPerCall != null && !maxBytesPerCall.equals(session.maxBytesPerCall())) {
+                // "this value must not change across rewrite calls else you'll get an error that
+                // the rewriteToken is invalid" (storage/v1 discovery, objects.rewrite).
+                throw GcpException.invalidArgument(
+                        "Invalid rewriteToken: maxBytesRewrittenPerCall must not change across rewrite calls");
+            }
+            // Later calls may omit the request fields; the first call's values stand.
+            destinationStorageClass = session.destinationStorageClass();
         } else {
             session = new GcsRewriteSession(srcBucket, srcObject, source.getGeneration(),
-                    dstBucket, dstObject, objectSize, 0L, preconditions);
+                    dstBucket, dstObject, destinationStorageClass, objectSize, 0L, maxBytesPerCall,
+                    preconditions);
         }
 
-        long step = maxBytesPerCall != null && maxBytesPerCall > 0 ? maxBytesPerCall : objectSize;
-        session = session.advancedBy(Math.max(step, 1L));
+        // The per-call limit "only applies to requests where the source and destination span
+        // locations and/or storage classes" (storage/v1 discovery, objects.rewrite). A copy within
+        // one location and class finishes in a single call whatever limit the client sent.
+        long limit = session.maxBytesPerCall() != null
+                && spansLocationOrStorageClass(srcBucket, source, dstBucket, destinationStorageClass)
+                ? session.maxBytesPerCall()
+                : objectSize;
+        session = session.advancedBy(Math.max(limit, 1L));
 
         if (!session.complete()) {
             String token = rewriteToken != null && !rewriteToken.isBlank()
@@ -949,9 +969,14 @@ public class GcsService {
             return new GcsRewriteResult(false, token, session.bytesRewritten(), objectSize, null);
         }
 
+        GcsObjectMeta destinationTemplate = null;
+        if (destinationStorageClass != null && !destinationStorageClass.isBlank()) {
+            destinationTemplate = new GcsObjectMeta();
+            destinationTemplate.setStorageClass(destinationStorageClass);
+        }
         // Pinned to the generation the token was bound to, not whatever is live now.
         GcsObjectMeta meta = copyObject(srcBucket, srcObject, session.srcGeneration(),
-                dstBucket, dstObject, session.preconditions(), baseUrl);
+                dstBucket, dstObject, destinationTemplate, session.preconditions(), baseUrl);
         // Only once the copy has actually succeeded: retiring the token first would turn a failed
         // destination precondition into an unretryable rewrite, since the client's token would
         // already be gone.
@@ -977,20 +1002,64 @@ public class GcsService {
      */
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
             String dstBucket, String dstObject, GcsObjectPreconditions preconditions, String baseUrl) {
+        return copyObject(srcBucket, srcObject, srcGeneration, dstBucket, dstObject, null, preconditions, baseUrl);
+    }
+
+    /**
+     * Copies with a destination template, currently the {@code storageClass} a rewrite request
+     * names for the destination. Fields the template leaves unset fall back to the source object
+     * and the destination bucket exactly as a plain copy does.
+     */
+    public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
+            String dstBucket, String dstObject, GcsObjectMeta destinationTemplate,
+            GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         // Read the source before taking the destination lock. Nesting two
         // stripe locks could deadlock with a copy running in the other direction.
         var src = getObjectForDownload(srcBucket, srcObject, srcGeneration, GcsCustomerEncryption.none());
         synchronized (objectLock(dstBucket, dstObject)) {
             checkPreconditions(dstBucket, dstObject, preconditions);
-            return copyObjectLocked(src, dstBucket, dstObject, baseUrl);
+            return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
         }
     }
 
+    private static final long ONE_MIB = 1024L * 1024L;
+
+    // "Span locations and/or storage classes": the bucket location on each side, and the source
+    // object's class against the class the destination will land with (the class the request
+    // names, else the destination bucket's default, else STANDARD, which is what putObjectLocked
+    // applies).
+    private boolean spansLocationOrStorageClass(String srcBucket, GcsObjectMeta source, String dstBucket,
+            String requestedStorageClass) {
+        GcsBucket src = bucketStore.get(srcBucket).orElse(null);
+        GcsBucket dst = bucketStore.get(dstBucket).orElse(null);
+        String srcLocation = src != null && src.getLocation() != null ? src.getLocation() : "US";
+        String dstLocation = dst != null && dst.getLocation() != null ? dst.getLocation() : "US";
+        if (!srcLocation.equalsIgnoreCase(dstLocation)) {
+            return true;
+        }
+        String srcClass = source.getStorageClass() != null && !source.getStorageClass().isBlank()
+                ? source.getStorageClass() : "STANDARD";
+        String dstClass;
+        if (requestedStorageClass != null && !requestedStorageClass.isBlank()) {
+            dstClass = requestedStorageClass;
+        } else if (dst != null && dst.getStorageClass() != null && !dst.getStorageClass().isBlank()) {
+            dstClass = dst.getStorageClass();
+        } else {
+            dstClass = "STANDARD";
+        }
+        return !srcClass.equalsIgnoreCase(dstClass);
+    }
+
     private GcsObjectMeta copyObjectLocked(GcsObjectDownload src, String dstBucket, String dstObject, String baseUrl) {
+        return copyObjectLocked(src, dstBucket, dstObject, null, baseUrl);
+    }
+
+    private GcsObjectMeta copyObjectLocked(GcsObjectDownload src, String dstBucket, String dstObject,
+            GcsObjectMeta destinationTemplate, String baseUrl) {
         var srcMeta = src.meta();
         var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), null, null, baseUrl);
+                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }

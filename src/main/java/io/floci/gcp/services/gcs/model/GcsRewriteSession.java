@@ -11,14 +11,19 @@ package io.floci.gcp.services.gcs.model;
  * the rewrite, so this only tracks how far the protocol has advanced. That is enough for a client
  * to take the same code path it would against real GCS, which is what the emulator exists to
  * exercise.
+ *
+ * <p>{@code maxBytesPerCall} and {@code destinationStorageClass} are pinned from the first call:
+ * the discovery document says the limit "must not change across rewrite calls else you'll get an
+ * error that the rewriteToken is invalid", and later calls "can omit all other request fields".
  */
 public record GcsRewriteSession(String srcBucket, String srcObject, String srcGeneration,
-        String dstBucket, String dstObject, long objectSize, long bytesRewritten,
-        GcsObjectPreconditions preconditions) {
+        String dstBucket, String dstObject, String destinationStorageClass, long objectSize,
+        long bytesRewritten, Long maxBytesPerCall, GcsObjectPreconditions preconditions) {
 
     public GcsRewriteSession advancedBy(long bytes) {
         return new GcsRewriteSession(srcBucket, srcObject, srcGeneration, dstBucket, dstObject,
-                objectSize, Math.min(objectSize, bytesRewritten + bytes), preconditions);
+                destinationStorageClass, objectSize, Math.min(objectSize, bytesRewritten + bytes),
+                maxBytesPerCall, preconditions);
     }
 
     public boolean complete() {

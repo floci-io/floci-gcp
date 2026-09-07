@@ -27,6 +27,17 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Quarkus 3.38 manages httpclient5 at 5.6.x, whose new commons-compress content
+                 decoder reaches the XZ, LZMA, Brotli and Zstd codecs. Under the native build's
+                 link-at-build-time those need org.tukaani:xz, org.brotli:dec and zstd-jni on the
+                 classpath, none of which this project ships, so the image build fails with
+                 "unresolved method XZCompressorInputStream.builder()". docker-java is the only
+                 consumer here and works with 5.5.x, which has no such decoder. -->
+            <dependency>
+                <groupId>org.apache.httpcomponents.client5</groupId>
+                <artifactId>httpclient5</artifactId>
+                <version>5.5.2</version>
+            </dependency>
             <dependency>
                 <groupId>com.google.cloud</groupId>
                 <artifactId>libraries-bom</artifactId>

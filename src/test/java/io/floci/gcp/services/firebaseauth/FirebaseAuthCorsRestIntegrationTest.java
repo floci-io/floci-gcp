@@ -11,6 +11,7 @@ import static org.hamcrest.Matchers.nullValue;
 class FirebaseAuthCorsRestIntegrationTest {
 
     private static final String CLIENT = "/identitytoolkit.googleapis.com/v1/accounts";
+    private static final String EMULATOR = "/emulator/v1";
     private static final String ORIGIN = "http://127.0.0.1:59301";
 
     @Test
@@ -58,6 +59,32 @@ class FirebaseAuthCorsRestIntegrationTest {
                 .header("Access-Control-Allow-Methods", equalTo("GET,HEAD,PUT,PATCH,POST,DELETE"))
                 .header("Access-Control-Allow-Headers", equalTo("Content-Type"))
                 .header("Vary", equalTo("Origin, Access-Control-Request-Headers"));
+    }
+
+    @Test
+    void preflightForEmulatorDeleteAllAccountsAdvertisesTheRequestedOrigin() {
+        given()
+                .header("Origin", ORIGIN)
+                .header("Access-Control-Request-Method", "DELETE")
+                .header("Access-Control-Request-Headers", "Content-Type")
+                .when().options(EMULATOR + "/projects/cors-emulator-probe/accounts")
+                .then()
+                .statusCode(204)
+                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
+                .header("Access-Control-Allow-Methods", equalTo("GET,HEAD,PUT,PATCH,POST,DELETE"))
+                .header("Access-Control-Allow-Headers", equalTo("Content-Type"))
+                .header("Vary", equalTo("Origin, Access-Control-Request-Headers"));
+    }
+
+    @Test
+    void actualEmulatorDeleteAllAccountsResponseAdvertisesTheRequestedOrigin() {
+        given()
+                .header("Origin", ORIGIN)
+                .when().delete(EMULATOR + "/projects/cors-emulator-probe/accounts")
+                .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
+                .header("Vary", equalTo("Origin"));
     }
 
     @Test

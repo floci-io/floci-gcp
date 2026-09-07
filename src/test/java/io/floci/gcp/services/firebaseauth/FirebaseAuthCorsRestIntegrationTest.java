@@ -88,7 +88,7 @@ class FirebaseAuthCorsRestIntegrationTest {
     }
 
     @Test
-    void requestWithNoOriginGetsNoCorsHeaders() {
+    void requestWithNoOriginStillVariesOnOrigin() {
         given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
@@ -99,6 +99,7 @@ class FirebaseAuthCorsRestIntegrationTest {
                 .when().post(CLIENT + ":signUp")
                 .then()
                 .statusCode(200)
-                .header("Access-Control-Allow-Origin", nullValue());
+                .header("Access-Control-Allow-Origin", nullValue())
+                .header("Vary", equalTo("Origin"));
     }
 }

@@ -37,9 +37,6 @@ public class FirebaseAuthCorsRouteFilter {
     }
 
     private void handle(RoutingContext ctx) {
-        // `Vary` is unconditional, even without an `Origin` to reflect: a shared cache that
-        // stored an origin-less response would otherwise hand it, stripped of
-        // `Access-Control-Allow-Origin`, to a browser request that does carry one.
         ctx.response().putHeader("Vary", "Origin");
 
         String origin = ctx.request().getHeader("Origin");

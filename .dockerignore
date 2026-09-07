@@ -1,6 +1,7 @@
 *
 !bin/gcplocal
 !docker/entrypoint.sh
+!docker/healthcheck.sh
 !docker/localstack-parity.sh
 !pom.xml
 !src/**

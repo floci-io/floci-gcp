@@ -59,4 +59,51 @@ class GcsGrpcIntegrationTest {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
+
+    /**
+     * cacheControl only reaches the emulator over REST. A gRPC-only client never sees the
+     * REST representation, so the object it reads back has to carry the field too.
+     */
+    @Test
+    void grpcGetObjectReportsCacheControlSetByARestUpload() throws Exception {
+        String bucket = "grpc-cache-control-bucket";
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext()
+                .build();
+        try {
+            StorageGrpc.StorageBlockingStub storage = StorageGrpc.newBlockingStub(channel);
+            storage.createBucket(CreateBucketRequest.newBuilder()
+                    .setParent("projects/_")
+                    .setBucketId(bucket)
+                    .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
+                    .build());
+
+            String body = """
+                    --sysmeta
+                    Content-Type: application/json
+
+                    {"name":"cached.txt","cacheControl":"public, max-age=3600"}
+                    --sysmeta
+                    Content-Type: text/plain
+
+                    cached
+                    --sysmeta--
+                    """.replace("\n", "\r\n");
+            given()
+                    .queryParam("uploadType", "multipart")
+                    .header("Content-Type", "multipart/related; boundary=sysmeta")
+                    .body(body.getBytes(StandardCharsets.UTF_8))
+                    .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                    .then().statusCode(200);
+
+            com.google.storage.v2.Object object = storage.getObject(GetObjectRequest.newBuilder()
+                    .setBucket("projects/_/buckets/" + bucket)
+                    .setObject("cached.txt")
+                    .build());
+            assertEquals("public, max-age=3600", object.getCacheControl());
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
 }

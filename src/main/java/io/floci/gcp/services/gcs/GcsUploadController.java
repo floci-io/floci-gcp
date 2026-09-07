@@ -135,29 +135,24 @@ public class GcsUploadController {
         return Response.status(308);
     }
 
-    // System metadata a client can set at upload time. GCS accepts these both as
-    // query parameters on the upload URL and, for multipart/resumable, as fields
-    // of the JSON metadata part. They are carried as a template rather than
-    // patched afterwards so the object lands with them already set, without the
-    // spurious metageneration bump a follow-up patch would cause.
+    // System metadata a client can set in the JSON metadata part of a multipart or
+    // resumable upload. They are carried as a template rather than patched afterwards
+    // so the object lands with them already set, without the spurious metageneration
+    // bump a follow-up patch would cause.
     private static final String[] SYSTEM_METADATA_FIELDS = {
             "contentEncoding", "contentDisposition", "contentLanguage", "cacheControl",
             "customTime", "storageClass"
     };
 
+    // System metadata objects.insert accepts on the upload URL. Today that is only
+    // contentEncoding; GCS ignores the other fields there.
     private static GcsObjectMeta systemMetadataFromQuery(UriInfo uriInfo) {
-        var params = uriInfo.getQueryParameters();
-        GcsObjectMeta meta = null;
-        for (String field : SYSTEM_METADATA_FIELDS) {
-            String value = params.getFirst(field);
-            if (value == null || value.isBlank()) {
-                continue;
-            }
-            if (meta == null) {
-                meta = new GcsObjectMeta();
-            }
-            assignSystemMetadata(meta, field, value);
+        var contentEncoding = uriInfo.getQueryParameters().getFirst("contentEncoding");
+        if (contentEncoding == null || contentEncoding.isBlank()) {
+            return null;
         }
+        var meta = new GcsObjectMeta();
+        meta.setContentEncoding(contentEncoding);
         return meta;
     }
 
@@ -165,7 +160,11 @@ public class GcsUploadController {
     private static GcsObjectMeta mergeSystemMetadata(GcsObjectMeta base, Map<?, ?> metadata) {
         GcsObjectMeta merged = base;
         for (String field : SYSTEM_METADATA_FIELDS) {
-            if (!(metadata.get(field) instanceof String value) || value.isBlank()) {
+            if (!(metadata.get(field) instanceof String value)) {
+                continue;
+            }
+            // GCS rejects an empty customTime instead of ignoring it like the other fields.
+            if (value.isBlank() && !field.equals("customTime")) {
                 continue;
             }
             if (merged == null) {
@@ -182,7 +181,7 @@ public class GcsUploadController {
             case "contentDisposition" -> meta.setContentDisposition(value);
             case "contentLanguage" -> meta.setContentLanguage(value);
             case "cacheControl" -> meta.setCacheControl(value);
-            case "customTime" -> meta.setCustomTime(value);
+            case "customTime" -> meta.setCustomTime(GcsCustomTime.normalize(value));
             case "storageClass" -> meta.setStorageClass(value);
             default -> { /* unreachable: every SYSTEM_METADATA_FIELDS entry is handled above */ }
         }

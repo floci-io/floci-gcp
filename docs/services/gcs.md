@@ -275,7 +275,9 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 **Cloud Storage gRPC v2:**
 
 - Buckets: `CreateBucket`, `GetBucket`, `ListBuckets`, `UpdateBucket`, `DeleteBucket`
-- Objects: `ComposeObject`, `GetObject`, `ListObjects`, `UpdateObject`, `DeleteObject`
+- Objects: `ComposeObject`, `GetObject`, `ListObjects`, `UpdateObject`, `DeleteObject`;
+  object system metadata (`cacheControl`, `contentDisposition`, `contentEncoding`,
+  `contentLanguage`, `customTime`, `storageClass`) round-trips with the REST path
 - Data path: `ReadObject`, `WriteObject`, `BidiWriteObject`
 - Resumable writes: `StartResumableWrite`, `QueryWriteStatus`
 
@@ -323,10 +325,13 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `CopyObject`
 - `MoveObject`
 - `HeadObject`
-- `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `customTime`, custom metadata)
+- `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `cacheControl`, `customTime`, custom metadata)
 - System metadata at upload time (`contentEncoding`, `contentDisposition`, `contentLanguage`,
-  `customTime`, `storageClass`) as query parameters or in the JSON metadata part of a
-  multipart/resumable upload
+  `cacheControl`, `customTime`, `storageClass`) in the JSON metadata part of a
+  multipart/resumable upload; on the upload URL only `contentEncoding` is honoured, as on GCS
+- `customTime` follows the GCS rules: rendered in UTC, never removed once set (a `null`
+  patch or an unset gRPC `custom_time` under the mask is a no-op), and a decrease is
+  rejected with `400` / `INVALID_ARGUMENT`
 - `ComposeObject` (concatenate 1 to 32 source objects; 0 or more than 32 is a 400)
 - `RewriteObject` (multi-call when the source and destination span storage classes or bucket
   locations: a `maxBytesRewrittenPerCall`, which must be a multiple of 1 MiB, below the object

@@ -127,12 +127,14 @@ final class GcsGrpcMapper {
                 .setContentDisposition(orEmpty(stored.getContentDisposition()))
                 .setContentEncoding(orEmpty(stored.getContentEncoding()))
                 .setContentLanguage(orEmpty(stored.getContentLanguage()))
+                .setCacheControl(orEmpty(stored.getCacheControl()))
                 .setTemporaryHold(Boolean.TRUE.equals(stored.getTemporaryHold()))
                 .setEventBasedHold(Boolean.TRUE.equals(stored.getEventBasedHold()));
         timestamp(stored.getTimeCreated()).ifPresent(value::setCreateTime);
         timestamp(stored.getUpdated()).ifPresent(value::setUpdateTime);
         timestamp(stored.getTimeDeleted()).ifPresent(value::setDeleteTime);
         timestamp(stored.getRetentionExpirationTime()).ifPresent(value::setRetentionExpireTime);
+        timestamp(stored.getCustomTime()).ifPresent(value::setCustomTime);
         if (stored.getMetadata() != null) {
             value.putAllMetadata(stored.getMetadata());
         }
@@ -156,6 +158,8 @@ final class GcsGrpcMapper {
         meta.setContentDisposition(blankToNull(value.getContentDisposition()));
         meta.setContentEncoding(blankToNull(value.getContentEncoding()));
         meta.setContentLanguage(blankToNull(value.getContentLanguage()));
+        meta.setCacheControl(blankToNull(value.getCacheControl()));
+        meta.setCustomTime(value.hasCustomTime() ? GcsCustomTime.fromWrite(value.getCustomTime()) : null);
         meta.setTemporaryHold(value.getTemporaryHold());
         meta.setEventBasedHold(value.hasEventBasedHold() ? value.getEventBasedHold() : null);
         if (value.getMetadataCount() > 0) {
@@ -169,7 +173,8 @@ final class GcsGrpcMapper {
         Map<String, java.lang.Object> patch = new LinkedHashMap<>();
         java.util.Set<String> selected = paths.contains("*")
                 ? java.util.Set.of("content_type", "content_disposition", "content_encoding",
-                        "content_language", "metadata", "temporary_hold", "event_based_hold")
+                        "content_language", "cache_control", "custom_time", "metadata",
+                        "temporary_hold", "event_based_hold")
                 : new java.util.LinkedHashSet<>(paths);
         for (String path : selected) {
             switch (path) {
@@ -177,6 +182,13 @@ final class GcsGrpcMapper {
                 case "content_disposition" -> patch.put("contentDisposition", value.getContentDisposition());
                 case "content_encoding" -> patch.put("contentEncoding", value.getContentEncoding());
                 case "content_language" -> patch.put("contentLanguage", value.getContentLanguage());
+                case "cache_control" -> patch.put("cacheControl", blankToNull(value.getCacheControl()));
+                // GCS never removes a custom time. An unset custom_time under the mask is a no-op.
+                case "custom_time" -> {
+                    if (value.hasCustomTime()) {
+                        patch.put("customTime", GcsCustomTime.fromUpdate(value.getCustomTime()));
+                    }
+                }
                 case "metadata" -> patch.put("metadata", new LinkedHashMap<>(value.getMetadataMap()));
                 case "temporary_hold" -> patch.put("temporaryHold", value.getTemporaryHold());
                 case "event_based_hold" -> patch.put("eventBasedHold", value.getEventBasedHold());

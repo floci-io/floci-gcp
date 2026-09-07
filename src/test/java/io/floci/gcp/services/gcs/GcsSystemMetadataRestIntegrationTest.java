@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * System metadata a client sets at upload time (contentEncoding, customTime, ...) and
@@ -32,20 +33,27 @@ class GcsSystemMetadataRestIntegrationTest {
                 .body("contentEncoding", equalTo("gzip"));
     }
 
+    /**
+     * objects.insert takes contentEncoding on the URL but no other system metadata. GCS
+     * silently ignores the rest, so an object uploaded this way lands without them.
+     */
     @Test
-    void mediaUploadHonorsCacheControlQueryParameter() {
-        // cacheControl is in the accepted system-metadata set, so it has to persist rather
-        // than being silently dropped on the way through.
+    void mediaUploadIgnoresOtherSystemMetadataQueryParameters() {
         ensureBucket();
         given().contentType("text/plain").body("x")
                 .when().post("/upload/storage/v1/b/" + BUCKET
-                        + "/o?uploadType=media&name=cc-media&cacheControl=max-age=3600")
+                        + "/o?uploadType=media&name=cc-media&cacheControl=max-age=3600"
+                        + "&customTime=2026-01-15T10:30:00Z&contentLanguage=ja&storageClass=NEARLINE")
                 .then().statusCode(200)
-                .body("cacheControl", equalTo("max-age=3600"));
+                .body("cacheControl", nullValue())
+                .body("customTime", nullValue())
+                .body("contentLanguage", nullValue())
+                .body("storageClass", equalTo("STANDARD"));
 
         given().when().get("/storage/v1/b/" + BUCKET + "/o/cc-media")
                 .then().statusCode(200)
-                .body("cacheControl", equalTo("max-age=3600"));
+                .body("cacheControl", nullValue())
+                .body("customTime", nullValue());
     }
 
     @Test
@@ -60,34 +68,106 @@ class GcsSystemMetadataRestIntegrationTest {
                 .body("cacheControl", equalTo("no-store"));
     }
 
+    /** GCS renders customTime in UTC with 0, 3, 6 or 9 fraction digits, whatever was sent. */
     @Test
-    void mediaUploadHonorsCustomTimeQueryParameter() {
+    void customTimeIsRenderedTheWayGcsRendersIt() {
         ensureBucket();
-        given().contentType("text/plain").body("x")
-                .when().post("/upload/storage/v1/b/" + BUCKET
-                        + "/o?uploadType=media&name=ct-media&customTime=2026-01-15T10:30:00.000Z")
+        given().header("Content-Type", "multipart/related; boundary=ct")
+                .body(multipart("ct", "{\"name\":\"ct-render\",\"customTime\":\"2026-01-15T19:30:00.120+09:00\"}"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart")
                 .then().statusCode(200)
-                .body("customTime", equalTo("2026-01-15T10:30:00.000Z"));
+                .body("customTime", equalTo("2026-01-15T10:30:00.120Z"));
+
+        given().contentType("application/json").body(Map.of("customTime", "2026-01-15T10:30:01.123456Z"))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-render")
+                .then().statusCode(200)
+                .body("customTime", equalTo("2026-01-15T10:30:01.123456Z"));
+    }
+
+    @Test
+    void patchWithANullCustomTimeKeepsTheValue() {
+        ensureBucket();
+        given().header("Content-Type", "multipart/related; boundary=ct")
+                .body(multipart("ct", "{\"name\":\"ct-keep\",\"customTime\":\"2026-02-01T00:00:00Z\"}"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart")
+                .then().statusCode(200);
+
+        given().contentType("application/json").body("{\"customTime\":null}")
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-keep")
+                .then().statusCode(200)
+                .body("customTime", equalTo("2026-02-01T00:00:00Z"));
+    }
+
+    @Test
+    void patchRejectsADecreasedCustomTime() {
+        ensureBucket();
+        given().header("Content-Type", "multipart/related; boundary=ct")
+                .body(multipart("ct", "{\"name\":\"ct-decrease\",\"customTime\":\"2026-02-01T00:00:00.5Z\"}"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart")
+                .then().statusCode(200);
+
+        String message = """
+                Custom time cannot be decreased. Previously: 2026-02-01T00:00:00.5+00:00. \
+                Attempting to set: 2026-02-01T00:00:00.25+00:00.""";
+        given().contentType("application/json").body(Map.of("customTime", "2026-02-01T00:00:00.25Z"))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-decrease")
+                .then().statusCode(400)
+                .body("error.message", equalTo(message))
+                .body("error.errors[0].reason", equalTo("invalid"));
+
+        given().contentType("application/json").body(Map.of("customTime", "2026-02-01T00:00:00.500Z"))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-decrease")
+                .then().statusCode(200)
+                .body("customTime", equalTo("2026-02-01T00:00:00.500Z"));
+    }
+
+    @Test
+    void unparsableCustomTimeIsRejectedWithTheGcsMessage() {
+        ensureBucket();
+        String message = """
+                Parse Error: Invalid value for type.googleapis.com/google.protobuf.Timestamp field: \
+                'Field 'customTime', Illegal timestamp format; timestamps must end with 'Z' or have \
+                a valid timezone offset.'.""";
+        given().header("Content-Type", "multipart/related; boundary=ct")
+                .body(multipart("ct", "{\"name\":\"ct-invalid\",\"customTime\":\"\"}"))
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart")
+                .then().statusCode(400)
+                .body("error.message", equalTo(message));
+
+        given().contentType("text/plain").body("x")
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=media&name=ct-invalid")
+                .then().statusCode(200);
+        given().contentType("application/json").body(Map.of("customTime", "2027-02-01T00:00:00"))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-invalid")
+                .then().statusCode(400)
+                .body("error.message", equalTo(message))
+                .body("error.errors[0].reason", equalTo("invalid"));
+    }
+
+    private static byte[] multipart(String boundary, String metadataJson) {
+        return """
+                --%1$s
+                Content-Type: application/json
+
+                %2$s
+                --%1$s
+                Content-Type: text/plain
+
+                x
+                --%1$s--
+                """.formatted(boundary, metadataJson).replace("\n", "\r\n").getBytes(StandardCharsets.UTF_8);
     }
 
     @Test
     void multipartUploadHonorsContentEncodingInTheMetadataPart() {
         ensureBucket();
-        var boundary = "sysmeta";
-        var body = "--" + boundary + "\r\n"
-                + "Content-Type: application/json\r\n\r\n"
-                + "{\"name\":\"ce-multipart\",\"contentEncoding\":\"gzip\",\"customTime\":\"2026-01-15T10:30:00.000Z\"}\r\n"
-                + "--" + boundary + "\r\n"
-                + "Content-Type: text/plain\r\n\r\n"
-                + "compressed-bytes\r\n"
-                + "--" + boundary + "--\r\n";
-
-        given().header("Content-Type", "multipart/related; boundary=" + boundary)
-                .body(body.getBytes(StandardCharsets.UTF_8))
+        given().header("Content-Type", "multipart/related; boundary=sysmeta")
+                .body(multipart("sysmeta", """
+                        {"name":"ce-multipart","contentEncoding":"gzip","customTime":"2026-01-15T10:30:00.000Z"}"""))
                 .when().post("/upload/storage/v1/b/" + BUCKET + "/o?uploadType=multipart")
                 .then().statusCode(200)
                 .body("contentEncoding", equalTo("gzip"))
-                .body("customTime", equalTo("2026-01-15T10:30:00.000Z"));
+                .body("customTime", equalTo("2026-01-15T10:30:00Z"));
     }
 
     @Test
@@ -99,7 +179,7 @@ class GcsSystemMetadataRestIntegrationTest {
         given().contentType("application/json").body(Map.of("customTime", "2026-06-20T08:00:00.000Z"))
                 .when().patch("/storage/v1/b/" + BUCKET + "/o/ct-patch")
                 .then().statusCode(200)
-                .body("customTime", equalTo("2026-06-20T08:00:00.000Z"));
+                .body("customTime", equalTo("2026-06-20T08:00:00Z"));
     }
 
     @Test

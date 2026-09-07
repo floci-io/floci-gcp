@@ -753,6 +753,12 @@ public class GcsService {
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
 
+        // GCS never removes a custom time, so a null here leaves the field alone.
+        String customTime = null;
+        if (patch.get("customTime") instanceof String requested) {
+            customTime = GcsCustomTime.normalize(requested);
+            GcsCustomTime.requireNotDecreased(meta.getCustomTime(), customTime);
+        }
         if (patch.containsKey("contentType")) {
             meta.setContentType((String) patch.get("contentType"));
         }
@@ -779,8 +785,8 @@ public class GcsService {
         if (patch.containsKey("cacheControl")) {
             meta.setCacheControl((String) patch.get("cacheControl"));
         }
-        if (patch.containsKey("customTime")) {
-            meta.setCustomTime((String) patch.get("customTime"));
+        if (customTime != null) {
+            meta.setCustomTime(customTime);
         }
         meta.setUpdated(nowTimestamp());
         long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");

@@ -558,9 +558,11 @@ public class GcsService {
     }
 
     public boolean deleteObject(String bucket, String objectName, GcsObjectPreconditions preconditions) {
-        synchronized (objectLock(bucket, objectName)) {
-            checkPreconditions(bucket, objectName, preconditions);
-            return deleteObjectLocked(bucket, objectName);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                checkPreconditions(bucket, objectName, preconditions);
+                return deleteObjectLocked(bucket, objectName);
+            }
         }
     }
 
@@ -858,8 +860,10 @@ public class GcsService {
 
     public void deleteObjectVersion(String bucket, String objectName, String generation,
             GcsObjectPreconditions preconditions) {
-        synchronized (objectLock(bucket, objectName)) {
-            deleteObjectVersionLocked(bucket, objectName, generation, preconditions);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                deleteObjectVersionLocked(bucket, objectName, generation, preconditions);
+            }
         }
     }
 

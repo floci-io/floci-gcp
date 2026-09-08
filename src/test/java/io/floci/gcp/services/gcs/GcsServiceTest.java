@@ -514,6 +514,11 @@ class GcsServiceTest {
         WAL
     }
 
+    private enum SoftDeleteOperation {
+        BY_NAME,
+        BY_GENERATION
+    }
+
     private static final class OrderedStorage<V> implements StorageBackend<String, V> {
         private final Map<String, V> values = new LinkedHashMap<>();
 
@@ -697,6 +702,52 @@ class GcsServiceTest {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
 
         assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @ParameterizedTest
+    @EnumSource(SoftDeleteOperation.class)
+    void deleteBucketWaitsForSoftDeletePublication(SoftDeleteOperation operation) throws Exception {
+        CountDownLatch softDeleteWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowSoftDeleteWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                softDeleteWriteStarted, allowSoftDeleteWrite);
+        var dataStore = new InMemoryStorage<String, byte[]>();
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                dataStore, new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta object = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var objectDeletion = executor.submit(() -> {
+                if (operation == SoftDeleteOperation.BY_NAME) {
+                    service.deleteObject("bucket", "obj.txt");
+                } else {
+                    service.deleteObjectVersion("bucket", "obj.txt", object.getGeneration());
+                }
+            });
+            assertTrue(softDeleteWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var bucketDeletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class,
+                    () -> bucketDeletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowSoftDeleteWrite.countDown();
+            objectDeletion.get(5, TimeUnit.SECONDS);
+            bucketDeletion.get(5, TimeUnit.SECONDS);
+
+            assertTrue(metadataStore.keys().isEmpty());
+            assertTrue(dataStore.keys().isEmpty());
+            service.createBucket("bucket", "p1", BASE_URL, Map.of());
+            assertTrue(service.listObjects("bucket").isEmpty());
+            assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        } finally {
+            allowSoftDeleteWrite.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test

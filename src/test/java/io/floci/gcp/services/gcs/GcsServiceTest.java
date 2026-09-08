@@ -367,6 +367,33 @@ class GcsServiceTest {
     }
 
     @Test
+    void softDeleteKeyDoesNotAliasLiveObjectName() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta deleted = service.putObject("bucket", "object", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        String liveObjectName = "object\0softDeleted\0" + deleted.getGeneration();
+        service.putObject("bucket", liveObjectName, "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.deleteObject("bucket", "object");
+
+        assertArrayEquals(new byte[]{2},
+                service.getObjectData("bucket", liveObjectName, GcsCustomerEncryption.none()));
+        assertEquals(List.of(liveObjectName), service.listObjects("bucket").stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        assertEquals(List.of(liveObjectName), service.listObjectVersions("bucket", null).stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        assertEquals(List.of("object"), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        GcpException ex = assertThrows(GcpException.class, () -> service.deleteBucket("bucket"));
+        assertEquals("conflict", ex.getReason());
+    }
+
+    @Test
     void deleteBucketWithOnlySoftDeletedObjectsPurgesTheirArchivedState() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));

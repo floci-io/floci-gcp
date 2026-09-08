@@ -271,18 +271,25 @@ public class GcsService {
 
     public void deleteBucket(String name) {
         LOG.debugf("deleteBucket name=%s", name);
+        if (!deleteBucketIfEmpty(name)) {
+            LOG.warnf("deleteBucket failed: bucket not empty name=%s", name);
+            throw GcpException.alreadyExists("The bucket you tried to delete is not empty.")
+                    .withReason("conflict");
+        }
+    }
+
+    public boolean deleteBucketIfEmpty(String name) {
         synchronized (bucketLock(name)) {
             if (bucketStore.get(name).isEmpty()) {
                 LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
                 throw GcpException.notFound("Bucket not found: " + name);
             }
             if (hasLiveOrVersionedObjects(name)) {
-                LOG.warnf("deleteBucket failed: bucket not empty name=%s", name);
-                throw GcpException.alreadyExists("The bucket you tried to delete is not empty.")
-                        .withReason("conflict");
+                return false;
             }
             purgeSoftDeletedObjects(name);
             bucketStore.delete(name);
+            return true;
         }
     }
 
@@ -617,9 +624,22 @@ public class GcsService {
 
     private boolean isSoftDeletedObject(String storeKey) {
         return objectMetaStore.get(storeKey)
-                .filter(meta -> meta.getGeneration() != null && meta.getSoftDeleteTime() != null)
-                .map(meta -> storeKey.endsWith(SOFT_DELETE_MARKER + meta.getGeneration()))
+                .filter(meta -> meta.getBucket() != null && meta.getName() != null
+                        && meta.getGeneration() != null && meta.getSoftDeleteTime() != null)
+                .map(meta -> storeKey.equals(softDeleteKey(
+                        meta.getBucket(), meta.getName(), meta.getGeneration())))
                 .orElse(false);
+    }
+
+    private static boolean isLiveObjectKey(String storeKey, GcsObjectMeta meta) {
+        return meta.getBucket() != null && meta.getName() != null
+                && storeKey.equals(objectKey(meta.getBucket(), meta.getName()));
+    }
+
+    private static boolean isVersionedObjectKey(String storeKey, GcsObjectMeta meta) {
+        return meta.getBucket() != null && meta.getName() != null && meta.getGeneration() != null
+                && storeKey.equals(
+                        objectKey(meta.getBucket(), meta.getName()) + "\0" + meta.getGeneration());
     }
 
     public boolean isSoftDeleteEnabled(String bucket) {
@@ -1143,13 +1163,13 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String prefix = bucket + "\0";
-        int prefixLen = prefix.length();
         List<GcsObjectMeta> objects = new ArrayList<>();
         for (String key : objectMetaStore.keys()) {
-            if (!key.startsWith(prefix) || key.indexOf('\0', prefixLen) != -1) {
+            if (!key.startsWith(prefix)) {
                 continue;
             }
             objectMetaStore.get(key)
+                    .filter(meta -> isLiveObjectKey(key, meta))
                     .filter(meta -> isReadableLiveObject(key, meta))
                     .ifPresent(objects::add);
         }
@@ -1163,8 +1183,10 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String bucketPrefix = bucket + "\0";
-        List<GcsObjectMeta> all = objectMetaStore.scan(k -> k.startsWith(bucketPrefix));
-        List<GcsObjectMeta> result = all.stream()
+        List<GcsObjectMeta> result = objectMetaStore.keys().stream()
+                .filter(key -> key.startsWith(bucketPrefix))
+                .flatMap(key -> objectMetaStore.get(key).stream()
+                        .filter(meta -> isLiveObjectKey(key, meta) || isVersionedObjectKey(key, meta)))
                 .filter(m -> prefix == null || prefix.isBlank() || m.getName() != null && m.getName().startsWith(prefix))
                 .toList();
         LOG.debugf("listObjectVersions bucket=%s count=%d", bucket, result.size());
@@ -1766,6 +1788,11 @@ public class GcsService {
     }
 
     private static String objectKey(String bucket, String objectName) {
+        if (objectName.indexOf('\0') >= 0) {
+            String encodedName = Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(objectName.getBytes(StandardCharsets.UTF_8));
+            return bucket + "\0\0" + encodedName;
+        }
         return bucket + "\0" + objectName;
     }
 

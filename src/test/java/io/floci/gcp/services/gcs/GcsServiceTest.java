@@ -351,6 +351,22 @@ class GcsServiceTest {
     }
 
     @Test
+    void softDeleteMarkerInLiveObjectNameDoesNotBypassNonEmptyCheck() {
+        String objectName = "live\0softDeleted\0object.txt";
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", objectName, "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.deleteBucket("bucket"));
+
+        assertEquals("conflict", ex.getReason());
+        assertArrayEquals(new byte[]{1},
+                service.getObjectData("bucket", objectName, GcsCustomerEncryption.none()));
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @Test
     void deleteBucketWithOnlySoftDeletedObjectsPurgesTheirArchivedState() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));

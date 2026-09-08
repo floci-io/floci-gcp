@@ -290,13 +290,13 @@ public class GcsService {
     public boolean hasLiveOrVersionedObjects(String bucket) {
         String bucketPrefix = bucket + "\0";
         return objectMetaStore.keys().stream()
-                .anyMatch(key -> key.startsWith(bucketPrefix) && !key.contains(SOFT_DELETE_MARKER));
+                .anyMatch(key -> key.startsWith(bucketPrefix) && !isSoftDeletedObject(key));
     }
 
     private void purgeSoftDeletedObjects(String bucket) {
         String bucketPrefix = bucket + "\0";
         objectMetaStore.keys().stream()
-                .filter(key -> key.startsWith(bucketPrefix) && key.contains(SOFT_DELETE_MARKER))
+                .filter(key -> key.startsWith(bucketPrefix) && isSoftDeletedObject(key))
                 .forEach(key -> {
                     objectMetaStore.delete(key);
                     objectDataStore.delete(key);
@@ -615,6 +615,13 @@ public class GcsService {
         return objectKey(bucket, objectName) + SOFT_DELETE_MARKER + generation;
     }
 
+    private boolean isSoftDeletedObject(String storeKey) {
+        return objectMetaStore.get(storeKey)
+                .filter(meta -> meta.getGeneration() != null && meta.getSoftDeleteTime() != null)
+                .map(meta -> storeKey.endsWith(SOFT_DELETE_MARKER + meta.getGeneration()))
+                .orElse(false);
+    }
+
     public boolean isSoftDeleteEnabled(String bucket) {
         return softDeleteRetentionSeconds(bucket) > 0;
     }
@@ -673,7 +680,7 @@ public class GcsService {
         String bucketPrefix = objectKey(bucket, "");
         List<GcsObjectMeta> out = new ArrayList<>();
         for (String storeKey : objectMetaStore.keys()) {
-            if (!storeKey.startsWith(bucketPrefix) || !storeKey.contains(SOFT_DELETE_MARKER)) {
+            if (!storeKey.startsWith(bucketPrefix) || !isSoftDeletedObject(storeKey)) {
                 continue;
             }
             objectMetaStore.get(storeKey).ifPresent(meta -> {

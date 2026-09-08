@@ -560,9 +560,11 @@ class GkeServiceTest {
     }
 
     @Test
-    void desiredNodeVersionUpdatesTheNodePoolsAsWellAsTheCluster() {
-        // Review finding: a cluster-wide node version update touched only the cluster aggregate,
-        // leaving every pool reporting its previous version to reconciliation clients.
+    void desiredNodeVersionUpdatesTheSolePoolWhenNoPoolIdIsGiven() {
+        // desiredNodePoolId is only mandatory once a cluster has more than one pool, so a
+        // single-pool cluster must still upgrade without it. The pool carries its own version and
+        // GetNodePool reads it from the pool store, so moving only the cluster aggregate would
+        // leave the pool reporting the old version to reconciliation clients.
         service.createCluster(PROJECT, LOCATION, Map.of("name", "version-cluster"));
 
         service.updateCluster(PROJECT, LOCATION, "version-cluster",
@@ -574,6 +576,78 @@ class GkeServiceTest {
             assertEquals("1.31.5-gke.1", pool.getVersion(),
                     "node pool " + pool.getName() + " must report the requested version");
         }
+    }
+
+    @Test
+    void desiredNodeVersionUpgradesOnlyThePoolNamedByDesiredNodePoolId() {
+        // Review finding: desired_node_version targets the pool named by desired_node_pool_id.
+        // Terraform's google_container_cluster sends desiredNodePoolId: "default-pool", so
+        // upgrading every pool moved the versions of the standalone google_container_node_pool
+        // resources nobody asked to touch, which reads as drift on the next plan.
+        service.createCluster(PROJECT, LOCATION, Map.of(
+                "name", "targeted-cluster",
+                "nodePools", List.of(
+                        Map.of("name", "default-pool", "version", "1.30.0-gke.1"),
+                        Map.of("name", "workers", "version", "1.30.0-gke.1"))));
+
+        service.updateCluster(PROJECT, LOCATION, "targeted-cluster", Map.of(
+                "desiredNodePoolId", "default-pool",
+                "desiredNodeVersion", "1.31.5-gke.1"));
+
+        assertEquals("1.31.5-gke.1",
+                service.getNodePool(PROJECT, LOCATION, "targeted-cluster", "default-pool").getVersion());
+        assertEquals("1.30.0-gke.1",
+                service.getNodePool(PROJECT, LOCATION, "targeted-cluster", "workers").getVersion(),
+                "a pool the request did not name must keep its version");
+    }
+
+    @Test
+    void desiredNodeVersionNeedsAPoolIdOnceThereIsMoreThanOnePool() {
+        service.createCluster(PROJECT, LOCATION, Map.of(
+                "name", "ambiguous-cluster",
+                "nodePools", List.of(
+                        Map.of("name", "default-pool", "version", "1.30.0-gke.1"),
+                        Map.of("name", "workers", "version", "1.30.0-gke.1"))));
+
+        GcpException thrown = assertThrows(GcpException.class,
+                () -> service.updateCluster(PROJECT, LOCATION, "ambiguous-cluster",
+                        Map.of("desiredNodeVersion", "1.31.5-gke.1")));
+        assertEquals(400, thrown.getHttpStatus(),
+                "an ambiguous target is a bad request, not a silent upgrade of every pool");
+
+        // The rejection must not have half-applied. The target is resolved before anything is
+        // assigned, so neither the cluster aggregate nor any pool moved.
+        assertNotEquals("1.31.5-gke.1",
+                service.getCluster(PROJECT, LOCATION, "ambiguous-cluster").getCurrentNodeVersion());
+        for (StoredNodePool pool : service.listNodePools(PROJECT, LOCATION, "ambiguous-cluster")) {
+            assertEquals("1.30.0-gke.1", pool.getVersion(),
+                    "node pool " + pool.getName() + " must be untouched by a rejected update");
+        }
+    }
+
+    @Test
+    void desiredNodePoolIdMustNameAnExistingPool() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "unknown-target"));
+
+        GcpException thrown = assertThrows(GcpException.class,
+                () -> service.updateCluster(PROJECT, LOCATION, "unknown-target", Map.of(
+                        "desiredNodePoolId", "no-such-pool",
+                        "desiredNodeVersion", "1.31.5-gke.1")));
+        assertEquals(404, thrown.getHttpStatus());
+    }
+
+    @Test
+    void desiredNodePoolIdDoesNotLeakIntoClusterState() {
+        // desiredNodePoolId routes the request; it is not Cluster state. Left in the generic
+        // desired* merge it would land in extraConfig and be serialized as a `nodePoolId` field
+        // the Cluster resource does not have — and Terraform sends it on every cluster update.
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "no-leak"));
+
+        service.updateCluster(PROJECT, LOCATION, "no-leak", Map.of(
+                "desiredNodePoolId", "default-pool",
+                "desiredNodeVersion", "1.31.5-gke.1"));
+
+        assertNull(service.getCluster(PROJECT, LOCATION, "no-leak").getExtraConfig().get("nodePoolId"));
     }
 
     @Test

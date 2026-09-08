@@ -170,6 +170,12 @@ analysis, since floci-gcp has no real infrastructure behind them to inspect:
 - `FetchClusterUpgradeInfo`/`FetchNodePoolUpgradeInfo` report the current
   version as both current and target with nothing pending — floci-gcp has a
   single fixed master/node version, so there is never a real upgrade path.
+- `UpdateCluster` with `desiredNodeVersion` upgrades the single node pool named
+  by `desiredNodePoolId`, matching the real API, where that field is mandatory
+  once a cluster has more than one pool. With exactly one pool the id may be
+  omitted; with several it is required, and a request without it is rejected
+  as `400 INVALID_ARGUMENT` rather than silently upgrading pools the caller
+  did not name.
 
 **Autopilot mode** (`autopilot.enabled`) and **Fleet/Anthos registration**
 (`fleet`) are not semantically modeled — floci-gcp does not run a real
@@ -179,16 +185,17 @@ block the emulator doesn't act on, so tooling that merely checks
 `cluster.autopilot.enabled` or `cluster.fleet.project` works correctly.
 
 All mutations return a synchronous, `DONE` Operation (no real long-running operation lifecycle) —
-consistent across every RPC above, not just cluster create/delete as before.
+consistent across every RPC above, not just cluster create/delete as before. The one exception is
+`CompleteNodePoolUpgrade`, which returns `google.protobuf.Empty` (`{}`) as the real API does.
 
 `StartIPRotation`/`CompleteIPRotation` acknowledge the request (bumping the cluster's
 fingerprint/etag) rather than performing a real dual-certificate rotation window — there is no
 live client traffic to migrate off an old certificate in this emulator.
-`CompleteNodePoolUpgrade`/`RollbackNodePoolUpgrade` validate the node pool exists and return the
-operation; there is no real node-version upgrade in flight to complete or roll back, since node
-pools don't run real node VMs. `GetServerConfig` reports this emulator's single supported
-master/node version across all three release channels (`RAPID`/`REGULAR`/`STABLE`) — there is no
-real multi-version fleet behind it.
+`CompleteNodePoolUpgrade`/`RollbackNodePoolUpgrade` validate the node pool exists, then return
+`{}` and an Operation respectively; there is no real node-version upgrade in flight to complete or
+roll back, since node pools don't run real node VMs. `GetServerConfig` reports this emulator's
+single supported master/node version across all three release channels
+(`RAPID`/`REGULAR`/`STABLE`) — there is no real multi-version fleet behind it.
 
 ## Limitations
 

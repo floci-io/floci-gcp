@@ -323,12 +323,16 @@ public class GkeService {
         if (updateMap != null) {
             String desiredNodeVersion = (String) updateMap.get("desiredNodeVersion");
             if (desiredNodeVersion != null) {
+                // Resolve the target before mutating anything. Both rejection paths in
+                // nodeVersionUpdateTargets throw, and `cluster` is the live stored object, so
+                // assigning first would leave a rejected request's version behind on it.
+                List<StoredNodePool> targets =
+                        nodeVersionUpdateTargets(project, location, clusterId, updateMap);
                 cluster.setCurrentNodeVersion(desiredNodeVersion);
-                // A cluster-wide node version update has to reach the pools as well. Each pool
-                // carries its own `version`, and GetNodePool/ListNodePools read it from the pool
-                // store, so updating only the cluster aggregate would report the new version on
-                // the cluster while every pool still reported the old one.
-                for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+                // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
+                // the pool store, so moving only the cluster aggregate would report the new
+                // version on the cluster while the pool still reported the old one.
+                for (StoredNodePool pool : targets) {
                     pool.setVersion(desiredNodeVersion);
                     pool.setEtag(newFingerprint());
                     nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
@@ -354,6 +358,7 @@ public class GkeService {
             // Already applied above to their typed field — drop so they aren't also duplicated,
             // inertly but pointlessly, into extraConfig under the same key.
             stripped.remove("nodeVersion");
+            stripped.remove("nodePoolId");
             stripped.remove("masterVersion");
             stripped.remove("locations");
             stripped.remove("loggingService");
@@ -778,6 +783,34 @@ public class GkeService {
     private StoredNodePool requireNodePool(String project, String location, String clusterId, String nodePoolId) {
         return nodePoolStore.get(nodePoolKey(project, location, clusterId, nodePoolId))
                 .orElseThrow(() -> GcpException.notFound("Not found: nodePool " + nodePoolId));
+    }
+
+    /** The node pools an {@code UpdateCluster} carrying {@code desiredNodeVersion} upgrades.
+     *
+     * <p>{@code desired_node_version} upgrades the single pool named by {@code
+     * desired_node_pool_id}, which the proto makes "mandatory if 'desired_node_version' ... is
+     * specified and there is more than one node pool on the cluster". Terraform's
+     * {@code google_container_cluster} sends {@code desiredNodePoolId: "default-pool"}, so
+     * upgrading every pool would move the versions of the standalone {@code
+     * google_container_node_pool} resources nobody asked to touch, and show up as drift on the
+     * next plan.
+     *
+     * <p>The fallback to the sole pool is what lets the field stay optional in the single-pool
+     * case the proto carves out; with several pools and no id there is no defensible target, so
+     * the request is rejected rather than guessed at. */
+    private List<StoredNodePool> nodeVersionUpdateTargets(String project, String location, String clusterId,
+            Map<String, Object> updateMap) {
+        String desiredNodePoolId = (String) updateMap.get("desiredNodePoolId");
+        if (desiredNodePoolId != null && !desiredNodePoolId.isBlank()) {
+            return List.of(requireNodePool(project, location, clusterId, desiredNodePoolId));
+        }
+        List<StoredNodePool> pools = listNodePools(project, location, clusterId);
+        if (pools.size() > 1) {
+            throw GcpException.invalidArgument(
+                    "desiredNodePoolId is required when desiredNodeVersion is specified and the "
+                            + "cluster has more than one node pool");
+        }
+        return pools;
     }
 
     private void touch(StoredCluster cluster) {

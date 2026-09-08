@@ -689,43 +689,45 @@ public class GcsService {
 
     /** Restores a soft-deleted generation back to live, as {@code objects.restore} does. */
     public GcsObjectMeta restoreObject(String bucket, String objectName, String generation) {
-        synchronized (objectLock(bucket, objectName)) {
-            if (generation == null || generation.isBlank()) {
-                throw GcpException.invalidArgument("generation is required to restore an object");
-            }
-            String archiveKey = softDeleteKey(bucket, objectName, generation);
-            GcsObjectMeta archived = objectMetaStore.get(archiveKey)
-                    .orElseThrow(() -> GcpException.notFound(
-                            "Soft-deleted object not found: " + objectName + " generation " + generation));
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                if (generation == null || generation.isBlank()) {
+                    throw GcpException.invalidArgument("generation is required to restore an object");
+                }
+                String archiveKey = softDeleteKey(bucket, objectName, generation);
+                GcsObjectMeta archived = objectMetaStore.get(archiveKey)
+                        .orElseThrow(() -> GcpException.notFound(
+                                "Soft-deleted object not found: " + objectName + " generation " + generation));
 
-            String key = objectKey(bucket, objectName);
-            // Restoring onto a name that is live again displaces that object, so route it
-            // through the ordinary delete path first: that enforces holds and retention, archives
-            // it when versioning is on, and retains it under the soft delete policy. Writing
-            // straight over it would destroy a live generation, which is the opposite of what
-            // this feature exists to do.
-            if (getLiveObjectMeta(bucket, objectName).isPresent()) {
-                deleteObjectLocked(bucket, objectName);
-            }
-            GcsObjectMeta restored = cloneMeta(archived);
-            restored.setSoftDeleteTime(null);
-            restored.setHardDeleteTime(null);
-            restored.setIsLatest(true);
-            restored.setTimeDeleted(null);
-            restored.setUpdated(nowTimestamp());
+                String key = objectKey(bucket, objectName);
+                // Restoring onto a name that is live again displaces that object, so route it
+                // through the ordinary delete path first: that enforces holds and retention, archives
+                // it when versioning is on, and retains it under the soft delete policy. Writing
+                // straight over it would destroy a live generation, which is the opposite of what
+                // this feature exists to do.
+                if (getLiveObjectMeta(bucket, objectName).isPresent()) {
+                    deleteObjectLocked(bucket, objectName);
+                }
+                GcsObjectMeta restored = cloneMeta(archived);
+                restored.setSoftDeleteTime(null);
+                restored.setHardDeleteTime(null);
+                restored.setIsLatest(true);
+                restored.setTimeDeleted(null);
+                restored.setUpdated(nowTimestamp());
 
-            objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
-            objectMetaStore.put(key, restored);
-            objectMetaStore.delete(archiveKey);
-            objectDataStore.delete(archiveKey);
-            // With versioning on, the original delete also left this generation in the noncurrent
-            // namespace. It is live again now, so drop that copy: leaving both would list the same
-            // generation twice, once current and once noncurrent.
-            String versionKey = key + "\0" + generation;
-            objectMetaStore.delete(versionKey);
-            objectDataStore.delete(versionKey);
-            LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
-            return restored;
+                objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
+                objectMetaStore.put(key, restored);
+                objectMetaStore.delete(archiveKey);
+                objectDataStore.delete(archiveKey);
+                // With versioning on, the original delete also left this generation in the noncurrent
+                // namespace. It is live again now, so drop that copy: leaving both would list the same
+                // generation twice, once current and once noncurrent.
+                String versionKey = key + "\0" + generation;
+                objectMetaStore.delete(versionKey);
+                objectDataStore.delete(versionKey);
+                LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
+                return restored;
+            }
         }
     }
 

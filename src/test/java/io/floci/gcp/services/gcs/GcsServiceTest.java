@@ -474,6 +474,44 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteBucketWaitsForARestoreToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta object = service.putObject("bucket", "object.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "object.txt");
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var restore = executor.submit(() -> service.restoreObject(
+                    "bucket", "object.txt", object.getGeneration()));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            restore.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "object.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentOverwriteNeverMixesGenerations() throws Exception {
         service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
         var payloads = Map.of(

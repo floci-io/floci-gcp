@@ -351,6 +351,22 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteBucketWithOnlySoftDeletedObjectsPurgesTheirArchivedState() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+
+        assertEquals(1, service.listSoftDeletedObjects("bucket", null).size());
+
+        service.deleteBucket("bucket");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @Test
     void deleteBucketWaitsForAnUploadToPublishMetadata() throws Exception {
         CountDownLatch metadataWriteStarted = new CountDownLatch(1);
         CountDownLatch allowMetadataWrite = new CountDownLatch(1);

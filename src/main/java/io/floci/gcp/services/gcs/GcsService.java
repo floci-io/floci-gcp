@@ -276,13 +276,31 @@ public class GcsService {
                 LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
                 throw GcpException.notFound("Bucket not found: " + name);
             }
-            if (objectMetaStore.keys().stream().anyMatch(key -> key.startsWith(name + "\0"))) {
+            if (hasLiveOrVersionedObjects(name)) {
                 LOG.warnf("deleteBucket failed: bucket not empty name=%s", name);
                 throw GcpException.alreadyExists("The bucket you tried to delete is not empty.")
                         .withReason("conflict");
             }
+            purgeSoftDeletedObjects(name);
             bucketStore.delete(name);
         }
+    }
+
+    /** Soft-deleted objects do not keep a bucket from being deleted. */
+    public boolean hasLiveOrVersionedObjects(String bucket) {
+        String bucketPrefix = bucket + "\0";
+        return objectMetaStore.keys().stream()
+                .anyMatch(key -> key.startsWith(bucketPrefix) && !key.contains(SOFT_DELETE_MARKER));
+    }
+
+    private void purgeSoftDeletedObjects(String bucket) {
+        String bucketPrefix = bucket + "\0";
+        objectMetaStore.keys().stream()
+                .filter(key -> key.startsWith(bucketPrefix) && key.contains(SOFT_DELETE_MARKER))
+                .forEach(key -> {
+                    objectMetaStore.delete(key);
+                    objectDataStore.delete(key);
+                });
     }
 
     public List<GcsBucket> listBuckets(String projectId) {

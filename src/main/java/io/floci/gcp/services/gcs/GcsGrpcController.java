@@ -143,7 +143,7 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
             checkMetageneration(current.getMetageneration(),
                     request.hasIfMetagenerationMatch() ? request.getIfMetagenerationMatch() : null,
                     request.hasIfMetagenerationNotMatch() ? request.getIfMetagenerationNotMatch() : null);
-            if (!service.listObjectVersions(bucketId, null).isEmpty()) {
+            if (service.hasLiveOrVersionedObjects(bucketId)) {
                 throw GcpException.failedPrecondition("Bucket is not empty: " + bucketId);
             }
             service.deleteBucket(bucketId);

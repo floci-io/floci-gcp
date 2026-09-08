@@ -348,6 +348,22 @@ class GcsGrpcControllerTest {
         assertNotNull(service.getBucket("non-empty-delete-bucket"));
     }
 
+    @Test
+    void deleteBucketWithOnlySoftDeletedObjectsSucceeds() {
+        service.createBucket("soft-deleted-delete-bucket", "test-project", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("soft-deleted-delete-bucket", "object", "text/plain", new byte[] {1}, BASE_URL);
+        service.deleteObject("soft-deleted-delete-bucket", "object");
+
+        RecordingObserver<Empty> response = new RecordingObserver<>();
+        controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                .setName("projects/_/buckets/soft-deleted-delete-bucket")
+                .build(), response);
+
+        assertNull(response.error);
+        assertEquals(1, response.values.size());
+    }
+
     private void createBucket(String name) {
         service.createBucket(name, "test-project", BASE_URL, Map.of());
     }

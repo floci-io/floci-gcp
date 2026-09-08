@@ -45,6 +45,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -621,30 +622,59 @@ public class GcsService {
     private static final String SOFT_DELETE_MARKER = "\0softDeleted\0";
 
     private void migrateLegacyObjectKeys() {
-        int migrated = 0;
-        for (String legacyKey : new ArrayList<>(objectMetaStore.keys())) {
-            GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
-            String targetKey = legacyMigrationTarget(legacyKey, meta);
-            if (targetKey == null) {
-                continue;
+        List<String> pending = new ArrayList<>();
+        for (String storeKey : objectMetaStore.keys()) {
+            GcsObjectMeta meta = objectMetaStore.get(storeKey).orElse(null);
+            if (legacyMigrationTarget(storeKey, meta) != null) {
+                pending.add(storeKey);
             }
-            GcsObjectMeta targetMeta = objectMetaStore.get(targetKey).orElse(null);
-            if (targetMeta != null && !sameObjectGeneration(meta, targetMeta)) {
+        }
+
+        int migrated = 0;
+        boolean progressed;
+        do {
+            progressed = false;
+            for (var iterator = pending.iterator(); iterator.hasNext();) {
+                String legacyKey = iterator.next();
+                GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
+                String targetKey = legacyMigrationTarget(legacyKey, meta);
+                if (targetKey == null) {
+                    iterator.remove();
+                    continue;
+                }
+                GcsObjectMeta targetMeta = objectMetaStore.get(targetKey).orElse(null);
+                boolean matchingTarget = targetMeta != null && sameObjectGeneration(meta, targetMeta);
+                if (targetMeta != null && !matchingTarget) {
+                    continue;
+                }
+                Optional<byte[]> legacyData = objectDataStore.get(legacyKey);
+                Optional<byte[]> targetData = objectDataStore.get(targetKey);
+                if (targetData.isPresent()
+                        && (legacyData.isPresent() && !Arrays.equals(legacyData.get(), targetData.get())
+                                || legacyData.isEmpty() && !matchingTarget)) {
+                    continue;
+                }
+                if (targetData.isEmpty()) {
+                    legacyData.ifPresent(data -> objectDataStore.put(targetKey, data));
+                }
+                if (targetMeta == null) {
+                    objectMetaStore.put(targetKey, meta);
+                }
+                objectDataStore.delete(legacyKey);
+                objectMetaStore.delete(legacyKey);
+                iterator.remove();
+                migrated++;
+                progressed = true;
+            }
+        } while (progressed && !pending.isEmpty());
+
+        for (String legacyKey : pending) {
+            GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
+            if (meta != null) {
                 LOG.warnf("Cannot migrate legacy GCS object key because target is occupied"
                                 + " bucket=%s name=%s generation=%s",
                         meta.getBucket(), meta.getName(), meta.getGeneration());
-                continue;
             }
-            if (objectDataStore.get(targetKey).isEmpty()) {
-                objectDataStore.get(legacyKey)
-                        .ifPresent(data -> objectDataStore.put(targetKey, data));
-            }
-            if (targetMeta == null) {
-                objectMetaStore.put(targetKey, meta);
-            }
-            objectDataStore.delete(legacyKey);
-            objectMetaStore.delete(legacyKey);
-            migrated++;
         }
         if (migrated > 0) {
             objectDataStore.checkpoint();

@@ -22,8 +22,12 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -32,6 +36,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -395,6 +401,51 @@ class GcsServiceTest {
     }
 
     @Test
+    void legacyNulObjectKeyMigrationResolvesLegacyKeyCollisionInOneRestart() {
+        StorageBackend<String, GcsObjectMeta> metadata = new OrderedStorage<>();
+        StorageBackend<String, byte[]> data = new OrderedStorage<>();
+        String firstName = "legacy\0object";
+        String firstLegacyKey = "bucket\0" + firstName;
+        String firstTargetKey = encodedObjectKey("bucket", firstName);
+        String collidingName = "\0" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(firstName.getBytes(StandardCharsets.UTF_8));
+        String collidingLegacyKey = "bucket\0" + collidingName;
+        assertEquals(firstTargetKey, collidingLegacyKey);
+        putLegacyObject(metadata, data, firstLegacyKey,
+                storedObject("bucket", firstName, "1", true), new byte[]{1});
+        putLegacyObject(metadata, data, collidingLegacyKey,
+                storedObject("bucket", collidingName, "2", true), new byte[]{2});
+
+        GcsService restarted = new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", firstName));
+        assertArrayEquals(new byte[]{2}, restarted.getObjectData("bucket", collidingName));
+        assertTrue(metadata.get(firstLegacyKey).isEmpty());
+        assertEquals(firstName, metadata.get(firstTargetKey).orElseThrow().getName());
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationDoesNotAcceptMismatchedOrphanTargetData() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = encodedObjectKey("bucket", objectName);
+        GcsObjectMeta legacyMeta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, legacyMeta, new byte[]{1});
+        data.put(migratedKey, new byte[]{2});
+
+        new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertSame(legacyMeta, metadata.get(legacyKey).orElseThrow());
+        assertArrayEquals(new byte[]{1}, data.get(legacyKey).orElseThrow());
+        assertTrue(metadata.get(migratedKey).isEmpty());
+        assertArrayEquals(new byte[]{2}, data.get(migratedKey).orElseThrow());
+    }
+
+    @Test
     void legacyNulObjectKeyMigrationDoesNotOverwriteConflictingTarget() {
         StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
         StorageBackend<String, byte[]> data = new InMemoryStorage<>();
@@ -433,6 +484,11 @@ class GcsServiceTest {
         metadata.put(key, meta);
     }
 
+    private static String encodedObjectKey(String bucket, String objectName) {
+        return bucket + "\0\0" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(objectName.getBytes(StandardCharsets.UTF_8));
+    }
+
     private static <V> StorageBackend<String, V> openMigrationStorage(
             LegacyMigrationStorageMode mode, Path root, String name,
             TypeReference<Map<String, V>> type) {
@@ -456,6 +512,51 @@ class GcsServiceTest {
         PERSISTENT,
         HYBRID,
         WAL
+    }
+
+    private static final class OrderedStorage<V> implements StorageBackend<String, V> {
+        private final Map<String, V> values = new LinkedHashMap<>();
+
+        @Override
+        public void put(String key, V value) {
+            values.put(key, value);
+        }
+
+        @Override
+        public Optional<V> get(String key) {
+            return Optional.ofNullable(values.get(key));
+        }
+
+        @Override
+        public void delete(String key) {
+            values.remove(key);
+        }
+
+        @Override
+        public List<V> scan(Predicate<String> keyFilter) {
+            return values.entrySet().stream()
+                    .filter(entry -> keyFilter.test(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .collect(Collectors.toCollection(java.util.ArrayList::new));
+        }
+
+        @Override
+        public Set<String> keys() {
+            return new LinkedHashSet<>(values.keySet());
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void load() {
+        }
+
+        @Override
+        public void clear() {
+            values.clear();
+        }
     }
 
     @Test

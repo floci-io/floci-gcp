@@ -528,6 +528,82 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteBucketWaitsForResumableUploadFinalization() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload("bucket", "resumable.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var finalization = executor.submit(() -> service.applyResumableChunk(
+                    uploadId, null, new byte[]{1}, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            finalization.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "resumable.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForStreamingUploadFinalization() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta input = new GcsObjectMeta();
+        input.setBucket("bucket");
+        input.setName("streaming.txt");
+        input.setContentType("text/plain");
+        String uploadId = service.startStreamingUpload(
+                input, GcsObjectPreconditions.NONE, null, null, null);
+        service.getStreamingUpload(uploadId).append(0, new byte[]{1});
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var finalization = executor.submit(() -> service.finalizeStreamingUpload(uploadId, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            finalization.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "streaming.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentOverwriteNeverMixesGenerations() throws Exception {
         service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
         var payloads = Map.of(

@@ -1042,12 +1042,14 @@ public class GcsService {
             String dstBucket, String dstObject, GcsObjectMeta destinationTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
-        // Read the source before taking the destination lock. Nesting two
+        // Read the source before taking the destination locks. Nesting two
         // stripe locks could deadlock with a copy running in the other direction.
         var src = getObjectForDownload(srcBucket, srcObject, srcGeneration, GcsCustomerEncryption.none());
-        synchronized (objectLock(dstBucket, dstObject)) {
-            checkPreconditions(dstBucket, dstObject, preconditions);
-            return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
+        synchronized (bucketLock(dstBucket)) {
+            synchronized (objectLock(dstBucket, dstObject)) {
+                checkPreconditions(dstBucket, dstObject, preconditions);
+                return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
+            }
         }
     }
 
@@ -1106,19 +1108,21 @@ public class GcsService {
             throw GcpException.invalidArgument("Source and destination object names must be different.");
         }
 
-        int sourceLockIndex = objectLockIndex(bucket, srcObject);
-        int destinationLockIndex = objectLockIndex(bucket, dstObject);
-        // Lock stripes in a stable order so opposite-direction moves cannot deadlock.
-        synchronized (objectLocks[Math.min(sourceLockIndex, destinationLockIndex)]) {
-            synchronized (objectLocks[Math.max(sourceLockIndex, destinationLockIndex)]) {
-                var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
-                checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
-                checkObjectMutable(source.meta());
-                checkPreconditions(bucket, dstObject, destinationPreconditions);
+        synchronized (bucketLock(bucket)) {
+            int sourceLockIndex = objectLockIndex(bucket, srcObject);
+            int destinationLockIndex = objectLockIndex(bucket, dstObject);
+            // Lock stripes in a stable order so opposite-direction moves cannot deadlock.
+            synchronized (objectLocks[Math.min(sourceLockIndex, destinationLockIndex)]) {
+                synchronized (objectLocks[Math.max(sourceLockIndex, destinationLockIndex)]) {
+                    var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
+                    checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
+                    checkObjectMutable(source.meta());
+                    checkPreconditions(bucket, dstObject, destinationPreconditions);
 
-                GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
-                deleteObjectLocked(bucket, srcObject);
-                return moved;
+                    GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
+                    deleteObjectLocked(bucket, srcObject);
+                    return moved;
+                }
             }
         }
     }

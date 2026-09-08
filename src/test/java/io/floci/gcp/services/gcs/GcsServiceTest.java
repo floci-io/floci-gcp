@@ -400,6 +400,80 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteBucketWaitsForACopyToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("source-bucket", "p1", BASE_URL, Map.of());
+        service.createBucket("destination-bucket", "p1", BASE_URL, Map.of());
+        service.putObject("source-bucket", "source.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var copy = executor.submit(() -> service.copyObject(
+                    "source-bucket", "source.txt", "destination-bucket", "copy.txt", BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("destination-bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            copy.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "destination-bucket", "copy.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForAMoveToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "source.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var move = executor.submit(() -> service.moveObject(
+                    "bucket", "source.txt", "moved.txt",
+                    GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            move.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "moved.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentOverwriteNeverMixesGenerations() throws Exception {
         service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
         var payloads = Map.of(
@@ -446,6 +520,37 @@ class GcsServiceTest {
         @Override
         public void put(K key, V value) {
             if (blockFirstPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
+        }
+    }
+
+    private static final class ArmableBlockingPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockNextPut = new AtomicBoolean();
+
+        private ArmableBlockingPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        private void blockNextPut() {
+            blockNextPut.set(true);
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockNextPut.compareAndSet(true, false)) {
                 putStarted.countDown();
                 try {
                     if (!allowPut.await(5, TimeUnit.SECONDS)) {

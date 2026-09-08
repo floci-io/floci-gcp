@@ -112,9 +112,10 @@ public class GcsService {
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
-        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = storageFactory.createGlobal("gcs-object-data", "gcs-object-data.json",
                 new TypeReference<Map<String, byte[]>>() {});
+        migrateLegacyObjectKeys();
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
         this.notificationStore = storageFactory.createGlobal("gcs-notifications", "gcs-notifications.json",
@@ -136,8 +137,9 @@ public class GcsService {
             String defaultProjectId) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
-        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = objectDataStore;
+        migrateLegacyObjectKeys();
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
         this.notificationStore = new io.floci.gcp.core.storage.InMemoryStorage<>();
@@ -617,6 +619,68 @@ public class GcsService {
     // since 2024, so code written against production may rely on being able to undo a delete.
 
     private static final String SOFT_DELETE_MARKER = "\0softDeleted\0";
+
+    private void migrateLegacyObjectKeys() {
+        int migrated = 0;
+        for (String legacyKey : new ArrayList<>(objectMetaStore.keys())) {
+            GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
+            String targetKey = legacyMigrationTarget(legacyKey, meta);
+            if (targetKey == null) {
+                continue;
+            }
+            GcsObjectMeta targetMeta = objectMetaStore.get(targetKey).orElse(null);
+            if (targetMeta != null && !sameObjectGeneration(meta, targetMeta)) {
+                LOG.warnf("Cannot migrate legacy GCS object key because target is occupied"
+                                + " bucket=%s name=%s generation=%s",
+                        meta.getBucket(), meta.getName(), meta.getGeneration());
+                continue;
+            }
+            if (objectDataStore.get(targetKey).isEmpty()) {
+                objectDataStore.get(legacyKey)
+                        .ifPresent(data -> objectDataStore.put(targetKey, data));
+            }
+            if (targetMeta == null) {
+                objectMetaStore.put(targetKey, meta);
+            }
+            objectDataStore.delete(legacyKey);
+            objectMetaStore.delete(legacyKey);
+            migrated++;
+        }
+        if (migrated > 0) {
+            objectDataStore.checkpoint();
+            objectMetaStore.checkpoint();
+            LOG.infof("Migrated %d legacy GCS object storage keys", migrated);
+        }
+    }
+
+    private static String legacyMigrationTarget(String storeKey, GcsObjectMeta meta) {
+        if (meta == null || meta.getBucket() == null || meta.getName() == null
+                || meta.getName().indexOf('\0') < 0) {
+            return null;
+        }
+        String legacyLiveKey = legacyObjectKey(meta.getBucket(), meta.getName());
+        if (storeKey.equals(legacyLiveKey)) {
+            return objectKey(meta.getBucket(), meta.getName());
+        }
+        if (meta.getGeneration() == null) {
+            return null;
+        }
+        if (meta.getSoftDeleteTime() != null
+                && storeKey.equals(legacyLiveKey + SOFT_DELETE_MARKER + meta.getGeneration())) {
+            return objectKey(meta.getBucket(), meta.getName())
+                    + SOFT_DELETE_MARKER + meta.getGeneration();
+        }
+        if (storeKey.equals(legacyLiveKey + "\0" + meta.getGeneration())) {
+            return objectKey(meta.getBucket(), meta.getName()) + "\0" + meta.getGeneration();
+        }
+        return null;
+    }
+
+    private static boolean sameObjectGeneration(GcsObjectMeta left, GcsObjectMeta right) {
+        return java.util.Objects.equals(left.getBucket(), right.getBucket())
+                && java.util.Objects.equals(left.getName(), right.getName())
+                && java.util.Objects.equals(left.getGeneration(), right.getGeneration());
+    }
 
     private String softDeleteKey(String bucket, String objectName, String generation) {
         return objectKey(bucket, objectName) + SOFT_DELETE_MARKER + generation;
@@ -1793,6 +1857,10 @@ public class GcsService {
                     .encodeToString(objectName.getBytes(StandardCharsets.UTF_8));
             return bucket + "\0\0" + encodedName;
         }
+        return bucket + "\0" + objectName;
+    }
+
+    private static String legacyObjectKey(String bucket, String objectName) {
         return bucket + "\0" + objectName;
     }
 

@@ -2,9 +2,11 @@ package io.floci.gcp.services.gcs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.core.storage.WalStorage;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
@@ -14,12 +16,15 @@ import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -267,6 +272,190 @@ class GcsServiceTest {
         assertEquals("mounted/smoke.txt",
                 restarted.getObjectMeta("bucket", "mounted/smoke.txt").getName());
         assertArrayEquals(data, restarted.getObjectData("bucket", "mounted/smoke.txt"));
+    }
+
+    @Test
+    void legacyNulObjectKeysAreMigratedAcrossPersistentReloads() {
+        Path root = tempDir.resolve("legacy-nul-keys");
+        StorageBackend<String, GcsBucket> buckets = persistent(
+                root.resolve("gcs-buckets.json"), new TypeReference<Map<String, GcsBucket>>() {});
+        StorageBackend<String, GcsObjectMeta> metadata = persistent(
+                root.resolve("gcs-objects.json"), new TypeReference<Map<String, GcsObjectMeta>>() {});
+        StorageBackend<String, byte[]> data = persistent(
+                root.resolve("gcs-object-data.json"), new TypeReference<Map<String, byte[]>>() {});
+        GcsService seedingService = new GcsService(
+                buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        seedingService.createBucket("bucket", "p1", BASE_URL, Map.of());
+        seedingService.createBucket("soft-only", "p1", BASE_URL, Map.of());
+
+        String objectName = "legacy\0object";
+        String legacyLiveKey = "bucket\0" + objectName;
+        putLegacyObject(metadata, data, legacyLiveKey,
+                storedObject("bucket", objectName, "3", true), new byte[]{3});
+        putLegacyObject(metadata, data, legacyLiveKey + "\0" + "2",
+                storedObject("bucket", objectName, "2", false), new byte[]{2});
+        GcsObjectMeta softDeleted = storedObject("bucket", objectName, "1", false);
+        softDeleted.setSoftDeleteTime(Instant.now().minusSeconds(60).toString());
+        softDeleted.setHardDeleteTime(Instant.now().plusSeconds(86_400).toString());
+        putLegacyObject(metadata, data, legacyLiveKey + "\0softDeleted\0" + "1",
+                softDeleted, new byte[]{1});
+
+        String softOnlyName = "legacy\0soft-only";
+        GcsObjectMeta softOnly = storedObject("soft-only", softOnlyName, "4", false);
+        softOnly.setSoftDeleteTime(Instant.now().minusSeconds(60).toString());
+        softOnly.setHardDeleteTime(Instant.now().plusSeconds(86_400).toString());
+        putLegacyObject(metadata, data,
+                "soft-only\0" + softOnlyName + "\0softDeleted\0" + "4",
+                softOnly, new byte[]{4});
+
+        GcsService restarted = persistentService(root);
+
+        assertArrayEquals(new byte[]{3}, restarted.getObjectData("bucket", objectName));
+        assertArrayEquals(new byte[]{2}, restarted.getObjectData(
+                "bucket", objectName, "2", GcsCustomerEncryption.none()));
+        assertEquals(Set.of("2", "3"), restarted.listObjectVersions("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .collect(java.util.stream.Collectors.toSet()));
+        assertEquals(List.of("1"), restarted.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .toList());
+        assertEquals("1", restarted.restoreObject("bucket", objectName, "1").getGeneration());
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+
+        assertEquals(List.of("4"), restarted.listSoftDeletedObjects("soft-only", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .toList());
+        restarted.deleteBucket("soft-only");
+
+        GcsService afterPurge = persistentService(root);
+        assertTrue(afterPurge.listSoftDeletedObjects("soft-only", null).isEmpty());
+        GcpException missing = assertThrows(GcpException.class,
+                () -> afterPurge.getBucket("soft-only"));
+        assertEquals("NOT_FOUND", missing.getGcpStatus());
+    }
+
+    @ParameterizedTest
+    @EnumSource(LegacyMigrationStorageMode.class)
+    void legacyNulObjectKeyMigrationIsCheckpointed(LegacyMigrationStorageMode mode) {
+        Path root = tempDir.resolve("legacy-nul-checkpoint-" + mode);
+        TypeReference<Map<String, GcsObjectMeta>> metadataType = new TypeReference<>() {};
+        TypeReference<Map<String, byte[]>> dataType = new TypeReference<>() {};
+        StorageBackend<String, GcsObjectMeta> metadata = openMigrationStorage(
+                mode, root, "metadata", metadataType);
+        StorageBackend<String, byte[]> data = openMigrationStorage(
+                mode, root, "data", dataType);
+        metadata.load();
+        data.load();
+        StorageBackend<String, GcsBucket> buckets = new InMemoryStorage<>();
+        GcsService seedingService = new GcsService(
+                buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        seedingService.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String objectName = "legacy\0object";
+        putLegacyObject(metadata, data, "bucket\0" + objectName,
+                storedObject("bucket", objectName, "1", true), new byte[]{1});
+
+        new GcsService(buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        closeMigrationStorage(metadata);
+        closeMigrationStorage(data);
+
+        StorageBackend<String, GcsObjectMeta> reloadedMetadata = openMigrationStorage(
+                mode, root, "metadata", metadataType);
+        StorageBackend<String, byte[]> reloadedData = openMigrationStorage(
+                mode, root, "data", dataType);
+        reloadedMetadata.load();
+        reloadedData.load();
+        try {
+            GcsService restarted = new GcsService(
+                    buckets, reloadedMetadata, reloadedData, new InMemoryStorage<>(), "test-project");
+            assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+        } finally {
+            closeMigrationStorage(reloadedMetadata);
+            closeMigrationStorage(reloadedData);
+        }
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationCompletesAfterPartialMigration() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = "bucket\0\0bGVnYWN5AG9iamVjdA";
+        GcsObjectMeta meta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, meta, new byte[]{1});
+        metadata.put(migratedKey, meta);
+        data.put(migratedKey, new byte[]{1});
+
+        GcsService restarted = new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+        assertTrue(metadata.get(legacyKey).isEmpty());
+        assertTrue(data.get(legacyKey).isEmpty());
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationDoesNotOverwriteConflictingTarget() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = "bucket\0\0bGVnYWN5AG9iamVjdA";
+        GcsObjectMeta legacyMeta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, legacyMeta, new byte[]{1});
+        metadata.put(migratedKey, storedObject("bucket", objectName, "2", true));
+        data.put(migratedKey, new byte[]{2});
+
+        new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertSame(legacyMeta, metadata.get(legacyKey).orElseThrow());
+        assertArrayEquals(new byte[]{1}, data.get(legacyKey).orElseThrow());
+        assertEquals("2", metadata.get(migratedKey).orElseThrow().getGeneration());
+        assertArrayEquals(new byte[]{2}, data.get(migratedKey).orElseThrow());
+    }
+
+    private static GcsObjectMeta storedObject(
+            String bucket, String name, String generation, boolean latest) {
+        GcsObjectMeta meta = new GcsObjectMeta();
+        meta.setBucket(bucket);
+        meta.setName(name);
+        meta.setGeneration(generation);
+        meta.setIsLatest(latest);
+        return meta;
+    }
+
+    private static void putLegacyObject(
+            StorageBackend<String, GcsObjectMeta> metadata,
+            StorageBackend<String, byte[]> data,
+            String key, GcsObjectMeta meta, byte[] bytes) {
+        data.put(key, bytes);
+        metadata.put(key, meta);
+    }
+
+    private static <V> StorageBackend<String, V> openMigrationStorage(
+            LegacyMigrationStorageMode mode, Path root, String name,
+            TypeReference<Map<String, V>> type) {
+        return switch (mode) {
+            case PERSISTENT -> new PersistentStorage<>(root.resolve(name + ".json"), type);
+            case HYBRID -> new HybridStorage<>(root.resolve(name + ".json"), type, 60_000);
+            case WAL -> new WalStorage<>(
+                    root.resolve(name + ".json"), root.resolve(name + ".wal"), type, 60_000);
+        };
+    }
+
+    private static void closeMigrationStorage(StorageBackend<?, ?> storage) {
+        if (storage instanceof HybridStorage<?, ?> hybrid) {
+            hybrid.shutdown();
+        } else if (storage instanceof WalStorage<?, ?> wal) {
+            wal.shutdown();
+        }
+    }
+
+    private enum LegacyMigrationStorageMode {
+        PERSISTENT,
+        HYBRID,
+        WAL
     }
 
     @Test

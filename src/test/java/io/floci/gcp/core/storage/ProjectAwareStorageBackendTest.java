@@ -18,6 +18,15 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class ProjectAwareStorageBackendTest {
+    @Test void explicitViewClearCannotEraseAnotherProject() {
+        backend.putForProject("first", "same", "one");
+        backend.putForProject("second", "same", "two");
+        var first = backend.forProject("first");
+        assertEquals(List.of("one"), first.scan(k -> true));
+        first.clear();
+        assertTrue(first.keys().isEmpty());
+        assertEquals(Optional.of("two"), backend.getForProject("second", "same"));
+    }
 
     @Mock
     Instance<RequestContext> contextInstance;

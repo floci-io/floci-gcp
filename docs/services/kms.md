@@ -3,7 +3,7 @@
 floci-gcp emulates Google Cloud KMS over gRPC and REST using the real
 `google.cloud.kms.v1.KeyManagementService` protocol. Crypto operations are backed by real local
 cryptography (AES-256-GCM for symmetric keys; RSA/EC for asymmetric keys), so encrypt/decrypt and
-sign/verify round-trips behave like GCP — including binding ciphertext to the key version, so a
+sign/verify round-trips behave like GCP, including binding ciphertext to the key version, so a
 cross-key decrypt fails as it would in production.
 
 ## Configuration

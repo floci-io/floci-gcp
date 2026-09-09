@@ -97,7 +97,8 @@ The `./compatibility-tests/` directory contains SDK-based integration tests. Run
 cd compatibility-tests
 cp env.example .env
 just setup
-just test-all          # SDK suites (Java, Node, Python, Go, gcloud)
+just test-all          # SDK suites (Java, Python, Node, Go, Rust)
+just test-gcloud       # gcloud CLI suite
 just test-all-iac      # Terraform / OpenTofu
 ```
 
@@ -105,7 +106,7 @@ If the compatibility test suite is unavailable in your environment, state that e
 
 ## Releases
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does not cut a release: the change rides the next train, and reaches the `nightly` image on the next nightly build.
+Stable releases are cut manually from `main`. Merging does not cut a release; scheduled nightly builds normally publish the current tip as the `nightly` image.
 
 Maintainers cut releases from `main` with the Release Cut workflow, which runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
 

@@ -1,6 +1,6 @@
 # Multi-Project Isolation
 
-GCP resource names follow `projects/{project}/...`. floci-gcp uses the GCP project ID as the multi-tenancy boundary — resources created in one project are invisible to another.
+GCP resource names follow `projects/{project}/...`. floci-gcp uses the GCP project ID as the multi-tenancy boundary: resources created in one project are invisible to another.
 
 ## How It Works
 
@@ -19,8 +19,8 @@ floci-gcp extracts the project ID from each request and uses it to namespace all
 
 floci-gcp resolves the project ID in this order:
 
-1. URL path segment — `projects/{project}/...`
-2. `x-goog-request-params` header — `project=...`
+1. URL path segment: `projects/{project}/...`
+2. `x-goog-request-params` header: `project=...`
 3. `FLOCI_GCP_DEFAULT_PROJECT_ID` fallback (default: `floci-local`)
 
 ## Working with Multiple Projects
@@ -28,7 +28,7 @@ floci-gcp resolves the project ID in this order:
 ```bash
 export PUBSUB_EMULATOR_HOST=localhost:4588
 
-# Create the same topic name in two different projects — fully isolated
+# Create the same topic name in two different projects: fully isolated
 gcloud pubsub topics create my-topic --project=project-a
 gcloud pubsub topics create my-topic --project=project-b
 
@@ -57,13 +57,13 @@ environment:
 === "Java"
 
     ```java
-    // Pub/Sub — specify project explicitly
+    // Pub/Sub: specify project explicitly
     TopicName topicA = TopicName.of("project-a", "my-topic");
     TopicName topicB = TopicName.of("project-b", "my-topic");
 
     topicAdminClient.createTopic(topicA);
     topicAdminClient.createTopic(topicB);
-    // These are fully independent — listing topics for project-a won't show project-b
+    // These are fully independent: listing topics for project-a won't show project-b
     ```
 
 === "Python"

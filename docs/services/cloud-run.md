@@ -5,7 +5,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | Config | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Enable/disable Cloud Run |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Mock mode — control plane only, no Docker-backed image-based service execution |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Mock mode: control plane only, no Docker-backed image-based service execution |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_DEFAULT_PORT` | `8080` | Container port used when the service template omits a port |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT` | `240s` | Time to wait for the container TCP port to become reachable |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_REQUEST_TIMEOUT` | `300s` | Default invocation proxy timeout |
@@ -34,7 +34,7 @@ When execution is disabled, create, update, and delete return completed `google.
 
 In mock mode (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true`) Cloud Run services are metadata only. Creating a service synthesizes the service URL, timestamps, etag, ready condition, traffic status, latest revision fields, and one read-only revision. No container image is pulled and no request-serving runtime is started.
 
-Image-based service execution runs by default (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false`); set `mock=true` to keep services metadata-only — no Docker containers and no execution-mode template validation. In execution mode, image-based service creation starts one Docker container for the created revision, injects `PORT`, `K_SERVICE`, `K_REVISION`, and `K_CONFIGURATION`, waits for the ingress TCP port, and returns a deterministic app-root invocation URL on the floci-gcp front door:
+Image-based service execution runs by default (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false`); set `mock=true` to keep services metadata-only: no Docker containers and no execution-mode template validation. In execution mode, image-based service creation starts one Docker container for the created revision, injects `PORT`, `K_SERVICE`, `K_REVISION`, and `K_CONFIGURATION`, waits for the ingress TCP port, and returns a deterministic app-root invocation URL on the floci-gcp front door:
 
 ```text
 http://{service}-{project-token}.{location}.run.localhost.floci.io:4588

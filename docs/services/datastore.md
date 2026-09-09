@@ -1,6 +1,6 @@
 # Datastore
 
-floci-gcp emulates Google Cloud Datastore over gRPC using the real `google.datastore.v1` protocol.
+floci-gcp emulates Google Cloud Datastore over gRPC and binary HTTP/protobuf using the real `google.datastore.v1` protocol. Current Google Cloud Datastore SDK clients use the HTTP/protobuf path.
 
 ## Configuration
 
@@ -138,7 +138,7 @@ datastore.runInTransaction(callable);
 
 ## Indexes
 
-Datastore requires indexes for composite queries (queries with multiple inequality filters or `ORDER BY` on a field that's not the sort field). In the emulator, basic indexes are created automatically; complex composite indexes can be defined in `datastore.indexes.yaml`.
+floci-gcp does not load `datastore.indexes.yaml` or enforce Datastore index requirements. Structured and GQL queries scan the emulator's stored entities, so a query that requires a composite index in GCP may still run locally.
 
 ## GQL Queries
 

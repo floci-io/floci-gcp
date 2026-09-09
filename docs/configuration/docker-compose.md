@@ -1,6 +1,6 @@
 # Running with Docker
 
-floci-gcp is distributed as a Docker image. All configuration is done through environment variables — no config files or volume-mounted YAML is required.
+floci-gcp is distributed as a Docker image. All configuration is done through environment variables: no config files or volume-mounted YAML is required.
 
 ## Quick Start
 
@@ -10,7 +10,7 @@ docker run --rm -p 4588:4588 \
   floci/floci-gcp:latest
 ```
 
-All GCP services are immediately available at `http://localhost:4588`.
+All emulated GCP APIs are immediately available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints.
 
 The Docker socket mount lets floci-gcp spawn sidecar containers for the Docker-backed services (Cloud Run execution, Cloud SQL, Managed Kafka, GKE). Omit it if you only need the in-process services, or set the per-service `*_MOCK` flags to `true`.
 
@@ -51,7 +51,7 @@ volumes:
 
 ## Multi-container Networking
 
-By default floci-gcp embeds `localhost` in response URLs — for example, GCS object URLs look like `http://localhost:4588/my-bucket/my-object`. This works when your application runs on the same machine, but breaks inside Docker Compose because other containers cannot reach `localhost` of the floci-gcp container.
+By default floci-gcp embeds `localhost` in response URLs: for example, GCS object URLs look like `http://localhost:4588/my-bucket/my-object`. This works when your application runs on the same machine, but breaks inside Docker Compose because other containers cannot reach `localhost` of the floci-gcp container.
 
 Set `FLOCI_GCP_HOSTNAME` to the Compose service name and `FLOCI_GCP_BASE_URL` to the full URL so floci-gcp uses that name in every URL it generates:
 

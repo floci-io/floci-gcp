@@ -19,7 +19,7 @@ docker pull floci/floci-gcp:latest
 
 | Tag | Description |
 |---|---|
-| `latest` | Current stable release (native image — fast startup, low memory) |
+| `latest` | Current stable release (native image: fast startup, low memory) |
 | `x.y.z` | Pinned release |
 | `nightly` | Latest nightly build (floating) |
 | `nightly-mmddyyyy` | Pinned nightly |
@@ -29,7 +29,7 @@ docker pull floci/floci-gcp:latest
 ## Choosing a tag
 
 ```yaml title="docker-compose.yml"
-# Standard release — recommended for most use cases
+# Standard release: recommended for most use cases
 services:
   floci-gcp:
     image: floci/floci-gcp:latest
@@ -64,7 +64,7 @@ java -jar target/quarkus-app/quarkus-run.jar
 
 ```bash
 ./mvnw clean package -Pnative -DskipTests
-./target/floci-gcp-*-runner   # e.g. ./target/floci-gcp-0.5.0-runner
+./target/floci-gcp-*-runner
 ```
 
 !!! note

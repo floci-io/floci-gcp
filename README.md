@@ -34,7 +34,7 @@
 
 floci-gcp is a free, open-source local GCP emulator for development, testing, and CI.
 
-It gives you GCP-shaped services on your machine without requiring a cloud account, auth token, or paid feature gates. Point your GCP SDK, gcloud CLI, Terraform, or test suite at `http://localhost:4588` and keep your existing workflows.
+It gives you GCP-shaped services on your machine without requiring a cloud account, auth token, or paid feature gates. Configure supported GCP SDKs, gcloud CLI commands, Terraform resources, or test suites to use `http://localhost:4588` and keep your existing workflows.
 
 floci-gcp is the GCP member of the [Floci](https://github.com/floci-io) emulator family, named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccus), the cloud formation that looks like popcorn.
 
@@ -81,7 +81,7 @@ export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are available at `http://localhost:4588`. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+All emulated GCP APIs are available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
 
 <details>
 <summary>Using Docker directly?</summary>
@@ -89,6 +89,7 @@ All GCP services are available at `http://localhost:4588`. Credentials are not c
 ```bash
 docker run -d --name floci-gcp \
   -p 4588:4588 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   floci/floci-gcp:latest
 ```
 
@@ -106,14 +107,14 @@ Run GCP-compatible services locally without a GCP account, service account key, 
 <details>
 <summary><strong>Single port for everything</strong></summary>
 
-All GCP services (gRPC and REST) share a single port (`4588`) via HTTP/2 ALPN negotiation. No per-service daemon setup, no port management.
+All emulated GCP API endpoints (gRPC and REST) share a single port (`4588`) via HTTP/2 ALPN negotiation. Docker-backed data planes expose separate generated endpoints when required by their native protocols.
 
 </details>
 
 <details>
 <summary><strong>Real GCP wire protocols</strong></summary>
 
-floci-gcp speaks the same protocols as real GCP: protobuf-over-gRPC for Pub/Sub, Firestore, Secret Manager, and Cloud Storage v2; binary HTTP/protobuf for Datastore; REST XML and JSON for Cloud Storage; and REST JSON for management APIs such as Cloud Run and Cloud Functions. Existing SDK calls work without modification.
+floci-gcp speaks real GCP wire protocols: protobuf-over-gRPC for Pub/Sub, Firestore, Datastore, Secret Manager, and Cloud Storage v2; binary HTTP/protobuf for Datastore SDK clients; REST XML and JSON for Cloud Storage; and REST JSON for management APIs such as Cloud Run and Cloud Functions. Supported operations work with standard SDK clients after endpoint configuration.
 
 </details>
 
@@ -133,11 +134,11 @@ Choose from in-memory, persistent, hybrid, and write-ahead log storage depending
 
 ## Why floci-gcp?
 
-GCP's official emulators are fragmented: each service ships its own binary, runs on a different port, and requires separate setup. floci-gcp unifies them under a single port.
+GCP's official emulators are fragmented: each service ships its own binary, runs on a different port, and requires separate setup. floci-gcp exposes its supported GCP API surfaces through one shared port.
 
 | Capability | floci-gcp | GCP official emulators |
 |---|:---:|:---:|
-| Single port for all services | ✅ | ❌ |
+| Shared port for emulated APIs | ✅ | ❌ |
 | gRPC + REST on the same port | ✅ | ❌ |
 | No GCP account required | ✅ | ✅ |
 | Pub/Sub | ✅ | ✅ |
@@ -161,38 +162,43 @@ GCP's official emulators are fragmented: each service ships its own binary, runs
 | BigQuery (Phase 1) | ✅ | ❌ |
 | Eventarc | ✅ | ❌ |
 | IAM Service Account Credentials | ✅ | ❌ |
+| Security Token Service (STS) | ✅ | ❌ |
 | Native binary | ✅ | ❌ |
 
 ## Architecture Overview
 
 ```mermaid
 flowchart LR
-    Client["GCP SDK / gcloud CLI"]
+    Client["GCP SDK / gcloud / application client"]
 
     subgraph FlociGCP ["floci-gcp, port 4588"]
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nCloud Storage v2\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring"]
+            A["Pub/Sub\nFirestore\nDatastore\nCloud Storage v2\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring\nIAM policy mixins"]
         end
 
-        subgraph REST ["REST services"]
-            B["Cloud Storage\nIAM\nIAM Credentials\nDatastore\nCloud Run\nCloud Functions\nCloud SQL\nGKE\nBigQuery\nEventarc\nService Usage\nFirebase Auth"]
+        subgraph REST ["HTTP API services"]
+            B["Cloud Storage\nPub/Sub\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Scheduler\nCloud Monitoring\nIAM and IAM Credentials\nSTS\nDatastore\nManaged Kafka\nCloud Run and Functions\nCloud SQL\nGKE\nBigQuery\nEventarc\nService Usage and Resource Manager\nFirebase Auth"]
         end
 
-        subgraph Docker ["Docker-backed"]
-            C["Managed Kafka (Redpanda)\nCloud SQL (Postgres)\nCloud Run\nGKE (k3s)"]
+        subgraph DockerControl ["Docker-backed control planes"]
+            C["Managed Kafka\nCloud SQL\nCloud Run\nGKE"]
         end
 
         Router --> GRPC
         Router --> REST
-        Router --> Docker
-        GRPC & REST --> Store[("StorageBackend\nmemory · hybrid · persistent · wal")]
+        REST --> DockerControl
+        GRPC & REST & DockerControl --> Store[("StorageBackend\nmemory · hybrid · persistent · wal")]
     end
 
     DockerEngine["Docker Engine"]
+    Sidecars["Redpanda\nPostgreSQL\nCloud Run containers\nk3s"]
     Client -->|"HTTP/2 :4588\nGCP wire protocols"| Router
-    Docker -->|"Docker API"| DockerEngine
+    DockerControl -->|"Docker API"| DockerEngine
+    DockerEngine --> Sidecars
+    Client -->|"Kafka, PostgreSQL,\nand Kubernetes endpoints"| Sidecars
+    Router -->|"Cloud Run invocation proxy"| Sidecars
 ```
 
 ## Supported Services
@@ -203,7 +209,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 |---|---|
 | Object and document storage | Cloud Storage (GCS), Firestore, Datastore |
 | Messaging and events | Pub/Sub, Managed Kafka, Eventarc |
-| Security and identity | Secret Manager, Cloud KMS, IAM, IAM Service Account Credentials, Firebase Auth (Identity Platform) |
+| Security and identity | Secret Manager, Cloud KMS, IAM, IAM Service Account Credentials, Security Token Service (STS), Firebase Auth (Identity Platform) |
 | Container orchestration | GKE (Kubernetes Engine) |
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
@@ -217,21 +223,22 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
+| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, compose, rewrite, move, soft delete and restore, ACLs, bucket IAM, HMAC keys, conditional requests, versioning, lifecycle, CORS, decompressive transcoding, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
-| **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
-| **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
+| **Firestore** | gRPC | Documents, collections, structured queries with filters, ordering, and cursors, field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
+| **Datastore** | gRPC + HTTP/protobuf | Entities, structured queries, GQL queries, aggregation (COUNT), transactions, GQL named/positional bindings |
 | **Secret Manager** | gRPC + REST JSON | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads |
 | **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **IAM Service Account Credentials** | REST JSON | `generateAccessToken` (`iamcredentials.googleapis.com` v1) for service-account impersonation with scopes and lifetime; tokens are opaque emulator stubs |
+| **Security Token Service (STS)** | REST JSON | OAuth 2.0 token exchange at `/v1/token`, including downscoped tokens with GCS Credential Access Boundaries |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **GKE (Kubernetes Engine)** | REST JSON | Clusters and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. Reached by SDKs/gcloud through host-based routing (`container.*`) or the `/container/v1` path prefix |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; Docker-backed invocation on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
 | **Eventarc** | REST JSON | Trigger CRUD (`eventarc.googleapis.com` v1); delivers CloudEvents from Pub/Sub publishes and GCS object events to Cloud Run and HTTP endpoint destinations |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
-| **Cloud SQL for PostgreSQL** | REST JSON | Instances (Postgres), control-plane lifecycle, long-running operations |
+| **Cloud SQL for PostgreSQL** | REST JSON | Instance, database, and user lifecycle; long-running operations; Docker-backed PostgreSQL data plane by default, with mock mode for control-plane-only use |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
 | **Cloud Scheduler** | gRPC + REST JSON | Cron jobs with Pub/Sub, HTTP, and App Engine targets; `Pause`/`Resume`/`RunJob`; unix-cron + time zones; background tick fires due jobs (Pub/Sub publishes into the local backend) |
 | **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries` with GCP validation rules) and read (`ListTimeSeries` with alignment/reduction subset and pagination) |
@@ -612,7 +619,7 @@ cd compatibility-tests && just test-terraform
 
 ## Migrating from gcloud emulators
 
-Google ships a separate emulator per service (`gcloud beta emulators pubsub | firestore | datastore | bigtable | spanner`), each its own process on its own port. floci-gcp replaces all of them with one binary on a single port (`4588`), reusing the same `*_EMULATOR_HOST` environment variables the GCP SDKs already honor. Just point them at floci-gcp.
+Google's official emulators run as separate service-specific processes. For the services it supports, floci-gcp exposes the emulated APIs from one binary on a shared port (`4588`) and reuses standard `*_EMULATOR_HOST` variables where GCP clients provide them. Docker-backed native data planes use their generated endpoints.
 
 | gcloud emulator | floci-gcp |
 |---|---|
@@ -651,7 +658,7 @@ image: floci/floci-gcp:nightly
 
 ### Release train
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci-gcp:nightly` tracks `main`. Every merged fix is available the next day, and dated `nightly-mmddyyyy` tags let you pin a specific night's build.
+Maintainers cut stable releases from `main` with the manual Release Cut workflow. Between releases, `floci/floci-gcp:nightly` tracks `main`; scheduled nightly builds normally publish the current tip, and dated `nightly-mmddyyyy` tags let you pin a specific build.
 
 Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 
@@ -661,7 +668,7 @@ All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_PORT` | `4588` | Port for all services (gRPC + REST) |
+| `FLOCI_GCP_PORT` | `4588` | Shared API port for gRPC and HTTP endpoints |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID |
 | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL returned in service responses |
 | `FLOCI_GCP_HOSTNAME` | *(unset)* | Hostname to use in returned URLs when running inside Docker Compose |

@@ -235,7 +235,7 @@ The Java SDK suite is the preferred reference for management-plane validation wh
 
 ### IaC suites (Terraform / OpenTofu)
 
-- Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version**, e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
+- Configure each google provider `*_custom_endpoint` with the base path required by that endpoint's provider contract. Do not apply one path rule to every service. For example, Storage uses `${var.endpoint}/storage/v1/`, Secret Manager uses `${var.endpoint}/v1/`, and IAM intentionally uses the versionless `${var.endpoint}/`. Follow the checked-in Terraform and OpenTofu provider configurations when adding coverage.
 - Auth is bypassed with a fake `GOOGLE_OAUTH_ACCESS_TOKEN`; the emulator ignores it.
 - A provider resource is testable only when the provider can target an implemented compatible HTTP API. Do not infer IaC compatibility merely because a service exposes some HTTP or gRPC transport.
 

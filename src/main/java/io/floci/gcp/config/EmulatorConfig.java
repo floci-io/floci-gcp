@@ -132,10 +132,21 @@ public interface EmulatorConfig {
         long compactionIntervalMs();
     }
 
+    interface ComputeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+        @WithDefault("50")
+        long operationDelayMs();
+        @WithDefault("us-central1,europe-west1")
+        java.util.List<String> regions();
+    }
+
     interface ServicesConfig {
 
         /** Shared Docker network for sidecar containers. */
         Optional<String> dockerNetwork();
+
+        ComputeServiceConfig compute();
 
         GcsServiceConfig gcs();
 

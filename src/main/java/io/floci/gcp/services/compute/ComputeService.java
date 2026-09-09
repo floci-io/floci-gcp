@@ -343,7 +343,7 @@ public class ComputeService {
     public final class Context {
         private final String project, scope, collection, name, action;
         public final ComputeProject state;
-        private final Map<String, String> finalStates = new LinkedHashMap<>();
+        private Map<String, String> finalStates = new LinkedHashMap<>();
         Context(String project, String scope, String collection, String name, String action, ComputeProject state) {
             this.project = project; this.scope = scope; this.collection = collection; this.name = name; this.action = action; this.state = state;
         }
@@ -355,6 +355,11 @@ public class ComputeService {
         public ObjectNode object() { return ComputeService.object(); }
         public String link(String path) { return "https://www.googleapis.com/compute/v1/projects/" + project + "/" + path; }
         public String path(String ref) { return localPath(project, ref); }
+        public Context child(String path) {
+            Context child = context(project, path, state);
+            child.finalStates = finalStates;
+            return child;
+        }
         public ObjectNode require(String ref) {
             String key = path(ref);
             Context target = context(project, key, state);

@@ -18,7 +18,7 @@ module Fixtures
   def unique(prefix) = "#{prefix}-#{SecureRandom.hex(6)}"
   def storage
     Google::Cloud::Storage.new(project_id: PROJECT, credentials: :this_channel_is_insecure,
-      endpoint: ENDPOINT)
+      endpoint: ENDPOINT + "/")
   end
   def http(method, path, body = nil, headers = {})
     uri = URI(ENDPOINT + path)

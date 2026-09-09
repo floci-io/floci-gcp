@@ -40,3 +40,19 @@ snapshot across concurrent writes.
 Public interfaces follow the [Compute REST reference](https://docs.cloud.google.com/compute/docs/reference/rest/v1).
 Credential acceptance retains the emulator's existing auth bypass; resource
 isolation is not IAM enforcement.
+
+## Instances and disks
+
+Zonal instances support insert/get/list/aggregatedList/start/stop/reset/delete,
+setMachineType, setMetadata, setTags, setLabels, addAccessConfig/deleteAccessConfig,
+attachDisk/detachDisk and setDiskAutoDelete. A stopped VM has status TERMINATED;
+reset does not imply guest health. One IPv4 NIC and one boot disk are required.
+Machine changes require a stopped VM. Ephemeral external addresses are released
+on stop; reserved addresses remain associated.
+
+Zonal disks support insert/get/list/aggregatedList/delete/resize/update/setLabels.
+Attached disks cannot be deleted. Deleting an instance retains disks unless their
+attachment enables autoDelete. Disk sizes and source sizes are validated. Only
+supported Hyperdisk types accept provisioned IOPS/throughput; unsupported knobs
+fail. Performance limits are basic API checks, not complete machine/disk quota
+or size-ratio emulation. Multi-writer disks and regional disks are unsupported.

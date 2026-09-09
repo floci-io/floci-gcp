@@ -10,16 +10,21 @@ floci-gcp is a Java-based local GCP emulator built on Quarkus.
 
 Its goal is full GCP SDK and gcloud CLI compatibility through real GCP wire protocols, not convenience APIs or simplified abstractions.
 
-floci-gcp acts as an open-source alternative to the GCP-provided emulators, unified under a single port.
+Read `README.md` and the relevant page under `docs/services/` before changing a service. They describe the current user-facing feature and protocol surface.
 
-- Port: 4588
-- Stack:
-  - Java 25
-  - Quarkus 3.34.6
-  - JUnit 5
-  - RestAssured
-  - Jackson
-  - quarkus-grpc (gRPC + HTTP/2 via ALPN on the same port)
+### Sources of truth
+
+Do not copy changing repository inventories into this file. Resolve current facts from their owning sources:
+
+- `pom.xml`: Java, Quarkus, dependency, plugin, and build versions
+- `src/main/resources/application.yml`: effective runtime defaults, ports, and service configuration
+- `src/test/resources/application.yml`: test-specific configuration
+- `README.md` and `docs/`: supported user-facing services, protocols, features, and setup
+- `src/main/java/` and tests: implemented behavior and transport-specific limitations
+- `.github/workflows/`: current CI, release, and compatibility jobs
+- `compatibility-tests/`: current compatibility suites and their invocation requirements
+
+Documentation is not a substitute for implementation evidence. When changing or reviewing a factual claim, confirm it against the owning configuration, implementation, tests, or workflow. Update the user-facing documentation when behavior changes.
 
 ---
 
@@ -99,15 +104,23 @@ Copy an existing service pattern before introducing a new one.
 
 floci-gcp must implement real GCP wire protocols.
 
-| Protocol | Services | Transport | Implementation |
-|----------|----------|-----------|----------------|
-| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass (Datastore implements `BindableService` directly) + `GcpGrpcController.grpcError` |
-| REST JSON | GCS (management), IAM, Secret Manager (REST) | HTTP/1.1 or HTTP/2 | JAX-RS |
-| REST XML | GCS (object operations) | HTTP/1.1 or HTTP/2 | JAX-RS + `XmlBuilder` |
+Before changing protocol behavior, error handling, or response shapes, read and follow [Protocol Compatibility and Upstream Evidence](CONTRIBUTING.md#protocol-compatibility-and-upstream-evidence). Do not infer behavior across gRPC, REST JSON, REST XML, or HTTP/protobuf transports.
+
+Before changing resource lifecycles, parent deletion, concurrency, locking, or storage-key formats, read and follow [Concurrency and Storage Invariants](CONTRIBUTING.md#concurrency-and-storage-invariants). State the invariant and inventory every competing mutation path before editing.
+
+- Determine a service's current transports from its controllers, tests, and service documentation.
+- Treat feature support as transport-specific. A service exposing both gRPC and HTTP does not imply that every operation works over both transports.
+- Use generated gRPC service bases where the available stubs support them. Follow an existing `BindableService` implementation when they do not.
+- Implement HTTP APIs with the repository's existing JAX-RS patterns.
+- Use `XmlBuilder` and `XmlParser` for GCS XML behavior.
+- Read `pom.xml` for the current pre-compiled GCP stub dependencies. Do not add raw `.proto` code generation.
 
 ### Single-port design
 
-Both gRPC and REST are served on port **4588** via ALPN negotiation:
+gRPC and HTTP APIs share the configured Quarkus listener through ALPN negotiation. Read `application.yml` for the effective port and HTTP/2 settings. Preserve the shared-listener design unless the task explicitly changes it.
+
+The relevant Quarkus settings include:
+
 - `quarkus.http.http2=true`
 - `quarkus.grpc.server.use-separate-server=false`
 
@@ -127,7 +140,6 @@ Resolution order in `ProjectContextFilter`:
 ### Important exceptions
 
 - GCS uses REST XML for object operations and REST JSON for bucket management; keep them aligned
-- gRPC services use pre-compiled stubs from `grpc-google-cloud-*-java` artifacts. Do not introduce raw `.proto` codegen
 - Management APIs should be validated with GCP SDK clients, not only handcrafted HTTP requests
 
 ---
@@ -144,12 +156,7 @@ Resolution order in `ProjectContextFilter`:
 
 ## Storage Rules
 
-Supported storage modes:
-
-- `memory`
-- `persistent`
-- `hybrid`
-- `wal`
+Read `EmulatorConfig`, `StorageFactory`, and `application.yml` for the current storage modes and defaults.
 
 Rules:
 
@@ -216,42 +223,21 @@ Critical areas:
 
 Compatibility tests live in `./compatibility-tests/` and validate floci-gcp against real GCP tooling (SDK clients and Infrastructure-as-Code providers), not just handcrafted HTTP.
 
-### Layout
+Inspect `compatibility-tests/` for the current suite inventory and `.github/workflows/compatibility.yml` for the authoritative CI matrix, environment variables, container topology, and execution commands. Do not assume that every language suite uses the same runner or endpoint variables.
 
-Each subdirectory is a self-contained suite with its own `Dockerfile`:
-
-- `sdk-test-java`: GCP SDK for Java. **Default / reference suite**; preferred for management-plane validation.
-- `sdk-test-node`: GCP SDK for Node.js
-- `sdk-test-python`: GCP SDK for Python
-- `sdk-test-go`: GCP SDK for Go
-- `sdk-test-gcloud`: gcloud CLI (bats-based)
-- `compat-terraform`: Terraform `hashicorp/google` provider (bats-based)
-- `compat-opentofu`: OpenTofu `hashicorp/google` provider (bats-based)
-
-`justfile` provides per-suite recipes (`just test-java`, `just test-terraform`, …) for running a suite locally against a running floci-gcp instance.
-
-### How suites run in CI
-
-`.github/workflows/compatibility.yml` builds the floci-gcp image once, then runs one matrix job per suite:
-
-1. Start floci-gcp as a container on a shared Docker network (`compat-net`), reachable as `http://floci-gcp:4588`.
-2. Build the suite image from `compatibility-tests/<suite>`.
-3. `docker run` the suite against the emulator with `/results` mounted.
-4. Each suite writes JUnit XML to `/results`, consumed by the test-summary step; emulator logs are dumped on failure.
-
-The endpoint is passed via env: `FLOCI_GCP_ENDPOINT` for the SDK suites; `FLOCI_ENDPOINT` / `FLOCI_HOST` / `FLOCI_PROJECT` for the bats/IaC suites.
+The Java SDK suite is the preferred reference for management-plane validation when it covers the affected API. Use another official SDK or gcloud suite when it better represents the changed client path.
 
 ### Adding a suite to CI
 
-1. Give the suite directory a `Dockerfile` whose entrypoint runs the tests and writes JUnit XML to `/results`.
-2. Add the directory name to the `matrix.test` list in `compatibility.yml`.
-3. Keep test output visible: do not silence the runner (e.g. avoid `mvn test -q`); a hanging test must be diagnosable from the streamed log.
+1. Make the suite self-contained under `compatibility-tests/<suite>/` and provide a `Dockerfile` whose entrypoint runs the suite and writes results in the format consumed by `.github/workflows/compatibility.yml`.
+2. Add the suite to the matrix in `.github/workflows/compatibility.yml`.
+3. Keep test output visible. A hanging test must be diagnosable from the streamed log.
 
 ### IaC suites (Terraform / OpenTofu)
 
 - Configure the google provider with `*_custom_endpoint` values pointing each service at the emulator. **Custom endpoints must include the API version**, e.g. `secret_manager_custom_endpoint = "${var.endpoint}/v1/"` and `storage_custom_endpoint = "${var.endpoint}/storage/v1/"`. Omitting the version makes the provider hit an unversioned path and the emulator returns `405`/`404`.
 - Auth is bypassed with a fake `GOOGLE_OAUTH_ACCESS_TOKEN`; the emulator ignores it.
-- Only REST-exposed services are reachable via Terraform custom endpoints (GCS, IAM, Secret Manager). gRPC-only services (Pub/Sub, Firestore, Datastore) are not, without REST transcoding.
+- A provider resource is testable only when the provider can target an implemented compatible HTTP API. Do not infer IaC compatibility merely because a service exposes some HTTP or gRPC transport.
 
 ### Guidelines
 
@@ -445,11 +431,4 @@ If a task would require broad architectural changes, stop and surface the tradeo
 
 Don't try to look into jars from `~/.m2/repository`: they are not source code. Refer to the actual GCP SDK source code for accurate behavior and protocol details.
 
-The proto definitions for each gRPC service are the authoritative source for request/response shapes and field semantics.
-
-Pre-compiled stub artifacts used (do not add raw `.proto` codegen):
-- `com.google.api.grpc:grpc-google-cloud-pubsub-java`
-- `com.google.api.grpc:grpc-google-cloud-firestore-v1-java`
-- `com.google.api.grpc:grpc-google-cloud-datastore-v1-java`
-- `com.google.api.grpc:grpc-google-cloud-secretmanager-v1-java`
-- `com.google.api.grpc:proto-google-common-protos`
+The proto definitions for each gRPC service are the authoritative source for request/response shapes and field semantics. Read `pom.xml` for the current pre-compiled stub artifacts, and do not add raw `.proto` code generation.

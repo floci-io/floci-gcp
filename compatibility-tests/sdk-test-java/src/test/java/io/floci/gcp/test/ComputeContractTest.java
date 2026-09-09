@@ -25,6 +25,14 @@ class ComputeContractTest {
                         .addDisks(AttachedDisk.newBuilder().setBoot(true).setAutoDelete(false).setInitializeParams(AttachedDiskInitializeParams.newBuilder().setDiskSizeGb(20))).build();
                 instances.insertAsync(project, zone, vm).get(20, TimeUnit.SECONDS);
                 assertThat(instances.get(project, zone, "vm").getStatus()).isEqualTo("RUNNING");
+                var current = instances.get(project, zone, "vm");
+                var labels = InstancesSetLabelsRequest.newBuilder().setLabelFingerprint(current.getLabelFingerprint()).putLabels("purpose", "contract").build();
+                instances.setLabelsAsync(project, zone, "vm", labels).get(20, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> instances.setLabelsAsync(project, zone, "vm", labels).get(20, TimeUnit.SECONDS)).isInstanceOf(java.util.concurrent.ExecutionException.class);
+                instances.setMetadataAsync(project, zone, "vm", Metadata.newBuilder().setFingerprint(current.getMetadata().getFingerprint())
+                        .addItems(Items.newBuilder().setKey("startup-script").setValue("echo synthetic")).build()).get(20, TimeUnit.SECONDS);
+                instances.setTagsAsync(project, zone, "vm", Tags.newBuilder().setFingerprint(current.getTags().getFingerprint()).addItems("desktop").build()).get(20, TimeUnit.SECONDS);
+                assertThat(instances.get(project, zone, "vm").getTags().getItemsList()).containsExactly("desktop");
                 instances.stopAsync(project, zone, "vm").get(20, TimeUnit.SECONDS);
                 instances.setMachineTypeAsync(project, zone, "vm", InstancesSetMachineTypeRequest.newBuilder().setMachineType("zones/" + zone + "/machineTypes/n2-standard-8").build()).get(20, TimeUnit.SECONDS);
                 instances.startAsync(project, zone, "vm").get(20, TimeUnit.SECONDS);
@@ -36,6 +44,11 @@ class ComputeContractTest {
                 assertThatThrownBy(() -> disks.deleteAsync(project, zone, "data").get(20, TimeUnit.SECONDS)).hasCauseInstanceOf(com.google.api.gax.rpc.InvalidArgumentException.class);
                 instances.detachDiskAsync(project, zone, "vm", "data").get(20, TimeUnit.SECONDS);
                 snapshots.insertAsync(project, Snapshot.newBuilder().setName("snapshot").setSourceDisk("zones/" + zone + "/disks/data").build()).get(20, TimeUnit.SECONDS);
+                snapshots.setLabelsAsync(project, "snapshot", GlobalSetLabelsRequest.newBuilder()
+                        .setLabelFingerprint(snapshots.get(project, "snapshot").getLabelFingerprint()).putLabels("purpose", "restore").build()).get(20, TimeUnit.SECONDS);
+                assertThat(snapshots.get(project, "snapshot").getLabelsMap()).containsEntry("purpose", "restore");
+                assertThatThrownBy(() -> disks.insertAsync(project, zone, Disk.newBuilder().setName("missing-source").setSourceSnapshot("global/snapshots/missing").build()).get(20, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(com.google.api.gax.rpc.NotFoundException.class);
                 disks.insertAsync(project, "us-central1-b", Disk.newBuilder().setName("restored").setSourceSnapshot("global/snapshots/snapshot").build()).get(20, TimeUnit.SECONDS);
                 assertThat(disks.get(project, "us-central1-b", "restored").getSizeGb()).isEqualTo(100);
                 images.insertAsync(project, Image.newBuilder().setName("image").setFamily("desktop").setSourceDisk("zones/" + zone + "/disks/data").build()).get(20, TimeUnit.SECONDS);

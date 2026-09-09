@@ -94,6 +94,9 @@ class ComputeContractTest < Minitest::Test
     assert_equal "copied", client("Images").get_from_family(project: @project, family: "desktop").name
     assert_equal %w[copied forced image], client("Images").list(project: @project, max_results: 1).map(&:name).sort
     assert_raises(Google::Cloud::NotFoundError) { client("Instances").get(project: unique("other"), zone: ZONE, instance: "vm") }
+    wait client("Instances").delete(args)
+    assert_equal "READY", client("Disks").get(project: @project, zone: ZONE, disk: "data").status
+    assert_raises(Google::Cloud::NotFoundError) { client("Disks").get(project: @project, zone: ZONE, disk: "vm") }
   end
   def test_deduplication_numeric_ids_scoped_operations_and_catalogs
     args = {project: @project, request_id: SecureRandom.uuid, network_resource: {name: "dedup", auto_create_subnetworks: false}}

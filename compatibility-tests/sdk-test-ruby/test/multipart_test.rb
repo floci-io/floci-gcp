@@ -37,6 +37,21 @@ class MultipartContractTest < Minitest::Test
     tail = request("PUT", {"uploadId" => id, "partNumber" => "2"}, "tail")
     assert_equal "200", tail.code, tail.body
     assert_equal first["etag"], request("PUT", {"uploadId" => id, "partNumber" => "1"}, bytes)["etag"]
+    page = REXML::Document.new(request("GET", {"uploadId" => id, "max-parts" => "1"}).body)
+    assert_equal "true", page.elements["ListPartsResult/IsTruncated"].text
+    assert_equal "1", page.elements["ListPartsResult/NextPartNumberMarker"].text
+    page = REXML::Document.new(request("GET", {"uploadId" => id, "part-number-marker" => "1"}).body)
+    assert_equal "2", page.elements["ListPartsResult/Part/PartNumber"].text
+    pending = initiate
+    page = REXML::Document.new(http("get", "/#{@bucket.name}?uploads&max-uploads=1").body)
+    assert_equal "true", page.elements["ListMultipartUploadsResult/IsTruncated"].text
+    marker = page.elements["ListMultipartUploadsResult/NextUploadIdMarker"].text
+    query = URI.encode_www_form("uploads" => "", "max-uploads" => "1", "key-marker" => @key, "upload-id-marker" => marker)
+    next_page = REXML::Document.new(http("get", "/#{@bucket.name}?#{query}").body)
+    assert_equal [id, pending].sort, [page.elements["ListMultipartUploadsResult/Upload/UploadId"].text,
+      next_page.elements["ListMultipartUploadsResult/Upload/UploadId"].text].sort
+    assert_equal "204", request("DELETE", {"uploadId" => pending}).code
+    @uploads.delete(pending)
     assert_nil @bucket.file(@key)
     part = ->(n, token) { "<Part><PartNumber>#{n}</PartNumber><ETag>#{CGI.escapeHTML(token)}</ETag></Part>" }
     bad = request("POST", {"uploadId" => id}, "<CompleteMultipartUpload>#{part.call(1, 'wrong')}</CompleteMultipartUpload>")
@@ -49,5 +64,6 @@ class MultipartContractTest < Minitest::Test
     assert_equal "204", request("DELETE", {"uploadId" => abort}).code
     @uploads.delete(abort)
     assert_equal "404", request("GET", {"uploadId" => abort}).code
+    assert_equal "404", request("POST", {"uploadId" => abort}, "<CompleteMultipartUpload/>").code
   end
 end

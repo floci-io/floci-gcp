@@ -76,3 +76,16 @@ URL-map updates require current fingerprints. Path matchers, host rules, pathRul
 and session-affinity configuration are validated; actual request routing, health
 checks, TLS certificates, regional load balancing and advanced routeRules are not
 implemented. Endpoint membership is stored separately from the public NEG resource.
+
+### Address ownership and release
+
+Global external HTTP forwarding rules can share a PREMIUM IPv4 address when
+their TCP ports do not overlap. Ownership uses complete resource links, and
+deleting one rule preserves every other owner. A forwarding rule's IP address
+is immutable; changing it requires replacing the rule.
+
+Deleting an in-use address reservation through the API releases the reservation,
+not the IP attached to its instance or forwarding rule. The attached address
+remains unavailable to the allocator until the consumer releases it. This follows
+[Google's API release semantics](https://docs.cloud.google.com/vpc/docs/reserve-static-external-ip-address#release_ip),
+which differ from the Cloud console's restriction on releasing in-use addresses.

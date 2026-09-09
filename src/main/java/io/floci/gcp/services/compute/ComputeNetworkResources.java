@@ -117,6 +117,21 @@ public class ComputeNetworkResources implements ComputeResourceHandler {
         }
         throw GcpException.resourceExhausted("Emulator external IPv4 pool exhausted");
     }
+    static void claim(ObjectNode address, String owner) {
+        var users = address.withArray("users");
+        boolean present = false;
+        for (JsonNode user : users) { if (user.asText().equals(owner)) { present = true; } }
+        if (!present) { users.add(owner); }
+        address.put("status", "IN_USE");
+    }
+    static void release(ObjectNode address, String owner) {
+        var remaining = object().putArray("users");
+        for (JsonNode user : address.path("users")) {
+            if (!user.asText().equals(owner)) { remaining.add(user); }
+        }
+        address.set("users", remaining);
+        address.put("status", remaining.isEmpty() ? "RESERVED" : "IN_USE");
+    }
     static boolean used(ComputeService.Context c, String address) {
         for (ObjectNode r : c.state.resources.values()) {
             if (r.path("address").asText().equals(address) || r.path("IPAddress").asText().equals(address)) { return true; }

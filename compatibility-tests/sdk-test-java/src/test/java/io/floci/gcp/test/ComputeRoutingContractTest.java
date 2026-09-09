@@ -41,6 +41,24 @@ class ComputeRoutingContractTest {
                 addresses.insertAsync(project, Address.newBuilder().setName("frontend").build()).get(20, TimeUnit.SECONDS);
                 forwarding.insertAsync(project, ForwardingRule.newBuilder().setName("frontend").setIPProtocol("TCP").setIPAddress("global/addresses/frontend")
                         .setPortRange("80").setTarget("global/targetHttpProxies/proxy").setLoadBalancingScheme("EXTERNAL_MANAGED").build()).get(20, TimeUnit.SECONDS);
+                var firstRule = forwarding.get(project, "frontend");
+                assertThatThrownBy(() -> forwarding.insertAsync(project, firstRule.toBuilder().setName("frontend2").clearId().clearSelfLink().build()).get(20, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(com.google.api.gax.rpc.InvalidArgumentException.class);
+                forwarding.insertAsync(project, firstRule.toBuilder().setName("frontend2").clearId().clearSelfLink().setPortRange("8080").build()).get(20, TimeUnit.SECONDS);
+                assertThat(addresses.get(project, "frontend").getUsersList()).containsExactlyInAnyOrder(firstRule.getSelfLink(), forwarding.get(project, "frontend2").getSelfLink());
+                addresses.insertAsync(project, Address.newBuilder().setName("other").build()).get(20, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> forwarding.patchAsync(project, "frontend", ForwardingRule.newBuilder().setFingerprint(firstRule.getFingerprint()).setIPAddress("global/addresses/other").build()).get(20, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(com.google.api.gax.rpc.InvalidArgumentException.class);
+                assertThat(forwarding.get(project, "frontend")).isEqualTo(firstRule);
+                assertThat(addresses.get(project, "other").getUsersList()).isEmpty();
+                forwarding.deleteAsync(project, "frontend2").get(20, TimeUnit.SECONDS);
+                assertThat(addresses.get(project, "frontend").getUsersList()).containsExactly(firstRule.getSelfLink());
+                addresses.deleteAsync(project, "frontend").get(20, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> addresses.get(project, "frontend")).isInstanceOf(com.google.api.gax.rpc.NotFoundException.class);
+                assertThat(forwarding.get(project, "frontend").getIPAddress()).isEqualTo(firstRule.getIPAddress());
+                forwarding.patchAsync(project, "frontend", ForwardingRule.newBuilder().setFingerprint(firstRule.getFingerprint()).setDescription("released reservation").build()).get(20, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> addresses.insertAsync(project, Address.newBuilder().setName("reuse").setAddress(firstRule.getIPAddress()).build()).get(20, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(com.google.api.gax.rpc.InvalidArgumentException.class);
                 String fingerprint = maps.get(project, "routes").getFingerprint();
                 matcher.clearPathRules().addPathRules(PathRule.newBuilder().addPaths("/two/*").setService("global/backendServices/backend"));
                 maps.patchAsync(project, "routes", UrlMap.newBuilder().setFingerprint(fingerprint).addPathMatchers(matcher).build()).get(20, TimeUnit.SECONDS);

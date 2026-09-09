@@ -13,11 +13,11 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         return Set.of("networkEndpointGroups", "healthChecks", "backendServices", "urlMaps", "targetHttpProxies", "forwardingRules").contains(kind);
     }
     public void create(ComputeService.Context c, ObjectNode r) {
-        validate(c, r);
+        validate(c, r, true);
         if (Set.of("backendServices", "urlMaps", "forwardingRules").contains(c.collection())) { r.put("fingerprint", fingerprint()); }
         if (c.collection().equals("networkEndpointGroups")) { r.put("size", 0); c.state.endpoints.put(c.key(), new ArrayList<>()); }
     }
-    private void validate(ComputeService.Context c, ObjectNode r) {
+    private void validate(ComputeService.Context c, ObjectNode r, boolean creating) {
         if (c.collection().equals("networkEndpointGroups")) {
             c.scope("zones");
             if (!r.path("networkEndpointType").asText().equals("GCE_VM_IP_PORT")) { throw GcpException.unimplemented("Only GCE_VM_IP_PORT network endpoints are implemented"); }
@@ -84,20 +84,33 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
             case "forwardingRules" -> {
                 if (!r.path("loadBalancingScheme").asText().equals("EXTERNAL_MANAGED") || !r.path("IPProtocol").asText().equals("TCP")) { throw GcpException.unimplemented("Only EXTERNAL_MANAGED TCP forwarding rules are supported"); }
                 c.reference(r, "target", "targetHttpProxies");
-                String range = required(r, "portRange");
-                String[] ports = range.split("-", -1);
-                int start = integer(ports[0], 1, 65535, "portRange");
-                if (ports.length > 2 || ports.length == 2 && integer(ports[1], 1, 65535, "portRange") < start) { throw GcpException.invalidArgument("Invalid portRange"); }
-                if (r.has("IPAddress")) {
-                    String address = r.path("IPAddress").asText();
-                    ObjectNode reservation = c.state.resources.entrySet().stream()
-                            .filter(e -> e.getKey().startsWith("global/addresses/") && (e.getValue().path("address").asText().equals(address)
-                                    || e.getValue().path("selfLink").asText().equals(address) || e.getKey().equals(address)))
-                            .map(Map.Entry::getValue).findFirst().orElseThrow(() -> GcpException.invalidArgument("A global address reservation is required"));
-                    if (!reservation.path("users").isEmpty() && !reservation.path("users").toString().contains(r.path("selfLink").asText())) { throw GcpException.invalidArgument("Address already in use"); }
-                    r.put("IPAddress", reservation.path("address").asText());
-                    reservation.putArray("users").add(r.path("selfLink").asText()); reservation.put("status", "IN_USE");
-                } else { r.put("IPAddress", ComputeNetworkResources.allocateExternal(c)); }
+                int[] ports = portRange(r);
+                if (!r.path("networkTier").asText("PREMIUM").equals("PREMIUM")) {
+                    throw GcpException.invalidArgument("Global external forwarding rules require PREMIUM network tier");
+                }
+                r.put("networkTier", "PREMIUM");
+                ObjectNode reservation = null;
+                if (creating) {
+                    if (r.has("IPAddress")) {
+                        reservation = reservation(c, required(r, "IPAddress"));
+                        r.put("IPAddress", reservation.path("address").asText());
+                    } else { r.put("IPAddress", ComputeNetworkResources.allocateExternal(c)); }
+                }
+                for (var entry : c.state.resources.entrySet()) {
+                    ObjectNode other = entry.getValue();
+                    if (!entry.getKey().startsWith("global/forwardingRules/")
+                            || other.path("selfLink").equals(r.path("selfLink"))
+                            || !other.path("IPAddress").equals(r.path("IPAddress"))) { continue; }
+                    if (!other.path("loadBalancingScheme").equals(r.path("loadBalancingScheme"))
+                            || !other.path("networkTier").asText("PREMIUM").equals(r.path("networkTier").asText())) {
+                        throw GcpException.invalidArgument("Shared forwarding address requires matching scheme and tier");
+                    }
+                    int[] otherPorts = portRange(other);
+                    if (other.path("IPProtocol").equals(r.path("IPProtocol")) && ports[0] <= otherPorts[1] && otherPorts[0] <= ports[1]) {
+                        throw GcpException.invalidArgument("Forwarding address protocol and ports are already in use");
+                    }
+                }
+                if (reservation != null) { ComputeNetworkResources.claim(reservation, r.path("selfLink").asText()); }
             }
             default -> throw GcpException.unimplemented("Unknown routing resource");
         }
@@ -105,10 +118,17 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
     public void update(ComputeService.Context c, ObjectNode r, ObjectNode body, String verb) {
         if (c.collection().equals("networkEndpointGroups")) { ComputeResourceHandler.super.update(c, r, body, verb); return; }
         if (r.has("fingerprint")) { checkFingerprint(r, body, "fingerprint"); }
+        if (c.collection().equals("forwardingRules") && body.has("IPAddress")) {
+            String requested = required(body, "IPAddress"), current = r.path("IPAddress").asText();
+            String normalized = requested.equals(current) ? current : reservation(c, requested).path("address").asText();
+            if (!normalized.equals(current)) { throw GcpException.invalidArgument("Forwarding rule IPAddress cannot be changed"); }
+            body = body.deepCopy();
+            body.put("IPAddress", current);
+        }
         for (var e : body.properties()) {
             if (!Set.of("id", "kind", "selfLink", "creationTimestamp", "name").contains(e.getKey())) { r.set(e.getKey(), e.getValue()); }
         }
-        validate(c, r);
+        validate(c, r, false);
         if (r.has("fingerprint")) { r.put("fingerprint", fingerprint()); }
     }
     public void action(ComputeService.Context c, ObjectNode r, String action, ObjectNode body, Map<String,String> query) {
@@ -145,10 +165,28 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         if (c.collection().equals("forwardingRules")) {
             for (ObjectNode address : c.state.resources.values()) {
                 if (address.path("address").asText().equals(r.path("IPAddress").asText()) && address.path("kind").asText().equals("compute#address")) {
-                    address.putArray("users"); address.put("status", "RESERVED");
+                    ComputeNetworkResources.release(address, r.path("selfLink").asText());
                 }
             }
         }
+    }
+    private static ObjectNode reservation(ComputeService.Context c, String value) {
+        ObjectNode address = c.state.resources.entrySet().stream()
+                .filter(e -> e.getKey().startsWith("global/addresses/") && (e.getValue().path("address").asText().equals(value)
+                        || e.getValue().path("selfLink").asText().equals(value) || e.getKey().equals(value)))
+                .map(Map.Entry::getValue).findFirst().orElseThrow(() -> GcpException.invalidArgument("A global address reservation is required"));
+        if (!address.path("addressType").asText().equals("EXTERNAL") || !address.path("ipVersion").asText().equals("IPV4")
+                || !address.path("networkTier").asText("PREMIUM").equals("PREMIUM")) {
+            throw GcpException.invalidArgument("A global external PREMIUM IPv4 address is required");
+        }
+        return address;
+    }
+    private static int[] portRange(ObjectNode r) {
+        String[] values = required(r, "portRange").split("-", -1);
+        int first = integer(values[0], 1, 65535, "portRange");
+        if (values.length > 2) { throw GcpException.invalidArgument("Invalid portRange"); }
+        int last = values.length == 2 ? integer(values[1], first, 65535, "portRange") : first;
+        return new int[]{first, last};
     }
     private static void port(JsonNode value) { integer(value.asText(), 1, 65535, "port"); }
 }

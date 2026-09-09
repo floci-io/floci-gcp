@@ -52,6 +52,38 @@ class ComputeContractTest < Minitest::Test
       network_interfaces: [{subnetwork: "regions/#{REGION}/subnetworks/subnet"}],
       disks: [{boot: true, auto_delete: true, initialize_params: {disk_size_gb: 20}}]}, zone: ZONE)
   end
+  def test_shared_forwarding_address_ownership_and_immutable_ip
+    create("HealthChecks", "health_check", {name: "health", type: "HTTP"})
+    create("BackendServices", "backend_service", {name: "backend", health_checks: ["global/healthChecks/health"]})
+    create("UrlMaps", "url_map", {name: "map", default_service: "global/backendServices/backend"})
+    create("TargetHttpProxies", "target_http_proxy", {name: "proxy", url_map: "global/urlMaps/map"})
+    create("GlobalAddresses", "address", {name: "reserved"})
+    rule = {name: "frontend2", I_p_address: "global/addresses/reserved", I_p_protocol: "TCP", port_range: "80",
+      target: "global/targetHttpProxies/proxy", load_balancing_scheme: "EXTERNAL_MANAGED"}
+    create("GlobalForwardingRules", "forwarding_rule", rule)
+    args = {project: @project, forwarding_rule: "frontend2"}
+    first = client("GlobalForwardingRules").get(**args)
+    assert_raises(Google::Cloud::InvalidArgumentError) do
+      wait client("GlobalForwardingRules").insert(project: @project, forwarding_rule_resource: rule.merge(name: "frontend"))
+    end
+    create("GlobalForwardingRules", "forwarding_rule", rule.merge(name: "frontend", port_range: "8080"))
+    address_args = {project: @project, address: "reserved"}
+    assert_equal 2, client("GlobalAddresses").get(**address_args).users.size
+    create("GlobalAddresses", "address", {name: "other"})
+    assert_raises(Google::Cloud::InvalidArgumentError) do
+      wait client("GlobalForwardingRules").patch(**args, forwarding_rule_resource: {fingerprint: first.fingerprint, I_p_address: "global/addresses/other"})
+    end
+    assert_equal first, client("GlobalForwardingRules").get(**args)
+    wait client("GlobalForwardingRules").delete(project: @project, forwarding_rule: "frontend")
+    assert_equal [first.self_link], client("GlobalAddresses").get(**address_args).users.to_a
+    wait client("GlobalAddresses").delete(**address_args)
+    assert_raises(Google::Cloud::NotFoundError) { client("GlobalAddresses").get(**address_args) }
+    assert_equal first.I_p_address, client("GlobalForwardingRules").get(**args).I_p_address
+    wait client("GlobalForwardingRules").patch(**args, forwarding_rule_resource: {fingerprint: first.fingerprint, description: "released reservation"})
+    assert_raises(Google::Cloud::InvalidArgumentError) do
+      wait client("GlobalAddresses").insert(project: @project, address_resource: {name: "reuse", address: first.I_p_address})
+    end
+  end
   def test_compute_lifecycle_images_retained_disks_and_errors
     network
     vm

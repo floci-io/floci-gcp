@@ -251,11 +251,11 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
             if (address == null || !address.path("users").isEmpty() || !address.path("addressType").asText().equals("EXTERNAL")) { throw GcpException.invalidArgument("natIP must be an available reserved external address"); }
             String region = c.scope().substring(6, c.scope().lastIndexOf('-'));
             if (!address.path("region").asText().equals(c.link("regions/" + region))) { throw GcpException.invalidArgument("External address and instance regions differ"); }
-            address.withArray("users").add(instance.path("selfLink").asText()); address.put("status", "IN_USE");
+            ComputeNetworkResources.claim(address, instance.path("selfLink").asText());
         } else { access.put("natIP", ComputeNetworkResources.allocateExternal(c)); }
     }
     private static void release(ComputeService.Context c, String ip, String instance) {
         ObjectNode address = reserved(c, ip);
-        if (address != null) { address.putArray("users"); address.put("status", "RESERVED"); }
+        if (address != null) { ComputeNetworkResources.release(address, instance); }
     }
 }

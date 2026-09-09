@@ -62,6 +62,7 @@ public class GcsService {
     private static final Logger LOG = Logger.getLogger(GcsService.class);
     private static final int OBJECT_LOCK_COUNT = 256;
     private static final int COMPLETED_RESUMABLE_UPLOAD_HISTORY = 1024;
+    private static final int UNIFORM_BUCKET_LEVEL_ACCESS_LOCK_DAYS = 90;
 
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
@@ -218,6 +219,10 @@ public class GcsService {
             if (body.containsKey("softDeletePolicy")) {
                 bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
             }
+            if (body.containsKey("iamConfiguration")) {
+                bucket.setIamConfiguration(updateIamConfiguration(
+                        null, (Map<String, Object>) body.get("iamConfiguration"), true));
+            }
             if (body.containsKey("defaultEventBasedHold")) {
                 bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
             }
@@ -234,8 +239,24 @@ public class GcsService {
 
     @SuppressWarnings("unchecked")
     public GcsBucket updateBucket(String name, Map<String, Object> patch) {
+        return applyBucketUpdate(name, patch, false);
+    }
+
+    GcsBucket updateBucketWithResolvedFields(String name, Map<String, Object> fields) {
+        return applyBucketUpdate(name, fields, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private GcsBucket applyBucketUpdate(String name, Map<String, Object> patch,
+            boolean replaceIamConfiguration) {
         LOG.debugf("updateBucket name=%s", name);
         GcsBucket bucket = getBucket(name);
+        Map<String, Object> updatedIamConfiguration = patch.containsKey("iamConfiguration")
+                ? updateIamConfiguration(
+                        bucket.getIamConfiguration(),
+                        (Map<String, Object>) patch.get("iamConfiguration"),
+                        replaceIamConfiguration)
+                : null;
         if (patch.containsKey("labels")) {
             bucket.setLabels((Map<String, String>) patch.get("labels"));
         }
@@ -255,6 +276,9 @@ public class GcsService {
         if (patch.containsKey("softDeletePolicy")) {
             bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
         }
+        if (patch.containsKey("iamConfiguration")) {
+            bucket.setIamConfiguration(updatedIamConfiguration);
+        }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
         }
@@ -266,6 +290,97 @@ public class GcsService {
         bucket.setUpdated(nowTimestamp());
         bucketStore.put(name, bucket);
         return bucket;
+    }
+
+    private Map<String, Object> updateIamConfiguration(Map<String, Object> current,
+            Map<String, Object> requested, boolean replace) {
+        if (requested == null) {
+            validateUniformBucketLevelAccessChange(current, null);
+            return null;
+        }
+        Map<String, Object> merged = replace
+                ? new LinkedHashMap<>()
+                : mutableNestedMap(current);
+        Map<String, Object> sanitized = mutableNestedMap(requested);
+        if (sanitized.get("uniformBucketLevelAccess") instanceof Map<?, ?> requestedAccess) {
+            Map<String, Object> writableAccess = mutableNestedMap(requestedAccess);
+            // GCS generates lockedTime when uniform access is enabled. Client values are output-only.
+            writableAccess.remove("lockedTime");
+            sanitized.put("uniformBucketLevelAccess", writableAccess);
+        }
+        mergeNestedMap(merged, sanitized);
+        normalizeUniformBucketLevelAccess(current, merged);
+        return merged;
+    }
+
+    private void normalizeUniformBucketLevelAccess(Map<String, Object> current,
+            Map<String, Object> updated) {
+        validateUniformBucketLevelAccessChange(current, updated);
+        if (!(updated.get("uniformBucketLevelAccess") instanceof Map<?, ?> access)) {
+            return;
+        }
+        Map<String, Object> normalized = mutableNestedMap(access);
+        boolean enabled = Boolean.TRUE.equals(normalized.get("enabled"));
+        boolean wasEnabled = current != null
+                && current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess
+                && Boolean.TRUE.equals(currentAccess.get("enabled"));
+        if (!enabled) {
+            normalized.remove("lockedTime");
+        } else if (wasEnabled
+                && current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess
+                && currentAccess.get("lockedTime") instanceof String lockedTime) {
+            normalized.put("lockedTime", lockedTime);
+        } else {
+            normalized.put("lockedTime", Instant.parse(nowTimestamp())
+                    .plus(UNIFORM_BUCKET_LEVEL_ACCESS_LOCK_DAYS, ChronoUnit.DAYS)
+                    .toString());
+        }
+        updated.put("uniformBucketLevelAccess", normalized);
+    }
+
+    private void validateUniformBucketLevelAccessChange(Map<String, Object> current,
+            Map<String, Object> updated) {
+        if (current == null
+                || !(current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess)
+                || !Boolean.TRUE.equals(currentAccess.get("enabled"))
+                || !(currentAccess.get("lockedTime") instanceof String lockedTime)) {
+            return;
+        }
+        boolean remainsEnabled = updated != null
+                && updated.get("uniformBucketLevelAccess") instanceof Map<?, ?> updatedAccess
+                && Boolean.TRUE.equals(updatedAccess.get("enabled"));
+        if (!remainsEnabled && !Instant.parse(lockedTime).isAfter(Instant.parse(nowTimestamp()))) {
+            throw GcpException.invalidArgument(
+                    "Uniform bucket-level access cannot be disabled after its locked time.");
+        }
+    }
+
+    private static void mergeNestedMap(Map<String, Object> target, Map<String, Object> patch) {
+        for (Map.Entry<String, Object> entry : patch.entrySet()) {
+            if (entry.getValue() == null) {
+                target.remove(entry.getKey());
+            } else if (entry.getValue() instanceof Map<?, ?> nestedPatch
+                    && target.get(entry.getKey()) instanceof Map<?, ?> nestedTarget) {
+                Map<String, Object> merged = mutableNestedMap(nestedTarget);
+                mergeNestedMap(merged, mutableNestedMap(nestedPatch));
+                target.put(entry.getKey(), merged);
+            } else {
+                target.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    private static Map<String, Object> mutableNestedMap(Map<?, ?> source) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        if (source != null) {
+            for (Map.Entry<?, ?> entry : source.entrySet()) {
+                Object value = entry.getValue() instanceof Map<?, ?> nested
+                        ? mutableNestedMap(nested)
+                        : entry.getValue();
+                copy.put(String.valueOf(entry.getKey()), value);
+            }
+        }
+        return copy;
     }
 
     public void deleteBucket(String name) {
@@ -313,12 +428,28 @@ public class GcsService {
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
             GcsObjectMeta metadataTemplate, GcsObjectPreconditions preconditions, String baseUrl) {
+		return putObject(bucket, objectName, contentType, data, customerEncryption, userMetadata,
+				metadataTemplate, preconditions, baseUrl, null);
+	}
+
+	public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+			GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
+			GcsObjectMeta metadataTemplate, GcsObjectPreconditions preconditions, String baseUrl,
+			Runnable requireOverwritePermission) {
         synchronized (objectLock(bucket, objectName)) {
-            checkPreconditions(bucket, objectName, preconditions);
+			requireOverwritePermission(bucket, objectName, requireOverwritePermission);
+			checkPreconditions(bucket, objectName, preconditions);
             return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
                     userMetadata, metadataTemplate, baseUrl);
         }
     }
+
+	private void requireOverwritePermission(String bucket, String objectName,
+			Runnable requireOverwritePermission) {
+		if (requireOverwritePermission != null && getLiveObjectMeta(bucket, objectName).isPresent()) {
+			requireOverwritePermission.run();
+		}
+	}
 
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
@@ -661,6 +792,11 @@ public class GcsService {
 
     /** Restores a soft-deleted generation back to live, as {@code objects.restore} does. */
     public GcsObjectMeta restoreObject(String bucket, String objectName, String generation) {
+		return restoreObject(bucket, objectName, generation, null);
+	}
+
+	public GcsObjectMeta restoreObject(String bucket, String objectName, String generation,
+			Runnable requireOverwritePermission) {
         synchronized (objectLock(bucket, objectName)) {
             if (generation == null || generation.isBlank()) {
                 throw GcpException.invalidArgument("generation is required to restore an object");
@@ -677,6 +813,9 @@ public class GcsService {
             // straight over it would destroy a live generation, which is the opposite of what
             // this feature exists to do.
             if (getLiveObjectMeta(bucket, objectName).isPresent()) {
+				if (requireOverwritePermission != null) {
+					requireOverwritePermission.run();
+				}
                 deleteObjectLocked(bucket, objectName);
             }
             GcsObjectMeta restored = cloneMeta(archived);
@@ -799,6 +938,14 @@ public class GcsService {
         return composeObject(bucket, destObject, sourceNames, contentType, null, preconditions, baseUrl);
     }
 
+	public GcsObjectMeta composeObject(String bucket, String destObject,
+			List<String> sourceNames, String contentType, GcsObjectPreconditions preconditions, String baseUrl,
+			Runnable requireOverwritePermission) {
+		return composeObjectSources(bucket, destObject,
+				sourceNames.stream().map(name -> new GcsComposeSource(name, null, null)).toList(),
+				contentType, null, preconditions, baseUrl, requireOverwritePermission);
+	}
+
     public GcsObjectMeta composeObject(String bucket, String destObject,
             List<String> sourceNames, String contentType, GcsObjectMeta metadataTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
@@ -810,6 +957,13 @@ public class GcsService {
     public GcsObjectMeta composeObjectSources(String bucket, String destObject,
             List<GcsComposeSource> sources, String contentType, GcsObjectMeta metadataTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
+		return composeObjectSources(bucket, destObject, sources, contentType, metadataTemplate,
+				preconditions, baseUrl, null);
+	}
+
+	private GcsObjectMeta composeObjectSources(String bucket, String destObject,
+			List<GcsComposeSource> sources, String contentType, GcsObjectMeta metadataTemplate,
+			GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
         LOG.debugf("composeObject bucket=%s dest=%s sources=%d", bucket, destObject, sources.size());
         // GCS caps a single compose at 32 sources and requires at least one. Accepting
         // more here would let a client build a composite locally that production rejects.
@@ -847,10 +1001,10 @@ public class GcsService {
         if (resolvedType == null && firstSourceMeta != null) {
             resolvedType = firstSourceMeta.getContentType();
         }
-        var meta = putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
-                composed, GcsCustomerEncryption.none(),
-                metadataTemplate != null ? metadataTemplate.getMetadata() : null,
-                metadataTemplate, preconditions, baseUrl);
+		var meta = putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
+				composed, GcsCustomerEncryption.none(),
+				metadataTemplate != null ? metadataTemplate.getMetadata() : null,
+				metadataTemplate, preconditions, baseUrl, requireOverwritePermission);
         // Real GCS composite objects report a componentCount and no md5Hash, and
         // composing an already composite source adds its component count.
         meta.setComponentCount(componentCount);
@@ -916,6 +1070,13 @@ public class GcsService {
     public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
             Long maxBytesPerCall, String rewriteToken, String destinationStorageClass,
             GcsObjectPreconditions preconditions, String baseUrl) {
+		return rewriteObject(srcBucket, srcObject, dstBucket, dstObject, maxBytesPerCall, rewriteToken,
+				destinationStorageClass, preconditions, baseUrl, null);
+	}
+
+	public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
+			Long maxBytesPerCall, String rewriteToken, String destinationStorageClass,
+			GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
         if (maxBytesPerCall != null && (maxBytesPerCall <= 0 || maxBytesPerCall % ONE_MIB != 0)) {
             throw GcpException.invalidArgument(
                     "maxBytesRewrittenPerCall must be an integral multiple of 1 MiB (1048576), got: " + maxBytesPerCall);
@@ -976,7 +1137,8 @@ public class GcsService {
         }
         // Pinned to the generation the token was bound to, not whatever is live now.
         GcsObjectMeta meta = copyObject(srcBucket, srcObject, session.srcGeneration(),
-                dstBucket, dstObject, destinationTemplate, session.preconditions(), baseUrl);
+				dstBucket, dstObject, destinationTemplate, session.preconditions(), baseUrl,
+				requireOverwritePermission);
         // Only once the copy has actually succeeded: retiring the token first would turn a failed
         // destination precondition into an unretryable rewrite, since the client's token would
         // already be gone.
@@ -994,6 +1156,12 @@ public class GcsService {
             GcsObjectPreconditions preconditions, String baseUrl) {
         return copyObject(srcBucket, srcObject, null, dstBucket, dstObject, preconditions, baseUrl);
     }
+
+	public GcsObjectMeta copyObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
+			GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
+		return copyObject(srcBucket, srcObject, null, dstBucket, dstObject, null, preconditions, baseUrl,
+				requireOverwritePermission);
+	}
 
     /**
      * Copies a specific source generation when one is given. A completing chunked rewrite passes
@@ -1013,12 +1181,20 @@ public class GcsService {
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
             String dstBucket, String dstObject, GcsObjectMeta destinationTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
+		return copyObject(srcBucket, srcObject, srcGeneration, dstBucket, dstObject, destinationTemplate,
+				preconditions, baseUrl, null);
+	}
+
+	private GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
+			String dstBucket, String dstObject, GcsObjectMeta destinationTemplate,
+			GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
         // Read the source before taking the destination lock. Nesting two
         // stripe locks could deadlock with a copy running in the other direction.
         var src = getObjectForDownload(srcBucket, srcObject, srcGeneration, GcsCustomerEncryption.none());
         synchronized (objectLock(dstBucket, dstObject)) {
-            checkPreconditions(dstBucket, dstObject, preconditions);
+			requireOverwritePermission(dstBucket, dstObject, requireOverwritePermission);
+			checkPreconditions(dstBucket, dstObject, preconditions);
             return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
         }
     }
@@ -1073,6 +1249,13 @@ public class GcsService {
     public GcsObjectMeta moveObject(String bucket, String srcObject, String dstObject,
             GcsObjectPreconditions sourcePreconditions, GcsObjectPreconditions destinationPreconditions,
             String baseUrl) {
+		return moveObject(bucket, srcObject, dstObject, sourcePreconditions, destinationPreconditions,
+				baseUrl, null);
+	}
+
+	public GcsObjectMeta moveObject(String bucket, String srcObject, String dstObject,
+			GcsObjectPreconditions sourcePreconditions, GcsObjectPreconditions destinationPreconditions,
+			String baseUrl, Runnable requireOverwritePermission) {
         LOG.debugf("moveObject bucket=%s src=%s dst=%s", bucket, srcObject, dstObject);
         if (srcObject.equals(dstObject)) {
             throw GcpException.invalidArgument("Source and destination object names must be different.");
@@ -1086,7 +1269,8 @@ public class GcsService {
                 var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
                 checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
                 checkObjectMutable(source.meta());
-                checkPreconditions(bucket, dstObject, destinationPreconditions);
+				requireOverwritePermission(bucket, dstObject, requireOverwritePermission);
+				checkPreconditions(bucket, dstObject, destinationPreconditions);
 
                 GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
                 deleteObjectLocked(bucket, srcObject);
@@ -1332,7 +1516,16 @@ public class GcsService {
     public String startResumableUpload(String bucket, String objectName, String contentType,
             GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
             GcsObjectMeta systemMetadata, GcsObjectPreconditions preconditions) {
+		return startResumableUpload(bucket, objectName, contentType, customerEncryption, metadata,
+				systemMetadata, preconditions, null);
+	}
+
+	public String startResumableUpload(String bucket, String objectName, String contentType,
+			GcsCustomerEncryption customerEncryption, Map<String, String> metadata,
+			GcsObjectMeta systemMetadata, GcsObjectPreconditions preconditions,
+			Runnable requireOverwritePermission) {
         synchronized (objectLock(bucket, objectName)) {
+			requireOverwritePermission(bucket, objectName, requireOverwritePermission);
             return startResumableUploadLocked(bucket, objectName, contentType, customerEncryption, metadata,
                     systemMetadata, preconditions);
         }
@@ -1362,6 +1555,11 @@ public class GcsService {
     // finalization waits and then replays the stored metadata instead of uploading twice.
     public ResumableChunkOutcome applyResumableChunk(String uploadId, GcsContentRange range, byte[] data,
             String baseUrl) {
+		return applyResumableChunk(uploadId, range, data, baseUrl, null);
+	}
+
+	public ResumableChunkOutcome applyResumableChunk(String uploadId, GcsContentRange range, byte[] data,
+			String baseUrl, Runnable requireOverwritePermission) {
         synchronized (uploadLock(uploadId)) {
             CompletedResumableUpload completed = completedResumableUploads.get(uploadId);
             if (completed != null) {
@@ -1375,14 +1573,16 @@ public class GcsService {
             if (range == null) {
                 byte[] combined = appendChunk(upload, upload.data().length, data);
                 validateResumableTotalSize(upload, (long) combined.length);
-                return ResumableChunkOutcome.completed(finishResumableUpload(uploadId, upload, combined, baseUrl));
+				return ResumableChunkOutcome.completed(finishResumableUpload(uploadId, upload, combined, baseUrl,
+						requireOverwritePermission));
             }
             if (range.statusQuery()) {
                 validateResumableTotalSize(upload, range.totalSize());
                 byte[] received = upload.data();
                 if (range.totalSize() != null && received.length == range.totalSize()) {
                     return ResumableChunkOutcome.completed(
-                            finishResumableUpload(uploadId, upload, received, baseUrl));
+							finishResumableUpload(uploadId, upload, received, baseUrl,
+									requireOverwritePermission));
                 }
                 return ResumableChunkOutcome.incomplete(received.length);
             }
@@ -1400,7 +1600,8 @@ public class GcsService {
                 throw GcpException.invalidArgument(
                         "Content-Range total size does not match uploaded bytes: " + range.totalSize());
             }
-            return ResumableChunkOutcome.completed(finishResumableUpload(uploadId, upload, combined, baseUrl));
+			return ResumableChunkOutcome.completed(finishResumableUpload(uploadId, upload, combined, baseUrl,
+					requireOverwritePermission));
         }
     }
 
@@ -1410,10 +1611,11 @@ public class GcsService {
 
     // The completed session is recorded before the active one is dropped. Callers rely on
     // that order: a miss on the active map means the completed entry is already visible.
-    private GcsObjectMeta finishResumableUpload(String uploadId, ResumableUpload upload, byte[] data, String baseUrl) {
+	private GcsObjectMeta finishResumableUpload(String uploadId, ResumableUpload upload, byte[] data, String baseUrl,
+			Runnable requireOverwritePermission) {
         GcsObjectMeta meta = putObject(upload.bucket(), upload.objectName(), upload.contentType(), data,
                 GcsCustomerEncryption.fromMetadata(upload.customerEncryption()), upload.metadata(),
-                upload.systemMetadata(), upload.preconditions(), baseUrl);
+				upload.systemMetadata(), upload.preconditions(), baseUrl, requireOverwritePermission);
         completedResumableUploads.put(uploadId,
                 new CompletedResumableUpload(upload.bucket(), upload.objectName(), meta));
         resumableUploads.remove(uploadId);
@@ -1644,6 +1846,10 @@ public class GcsService {
         String key = objectKey(bucket, objectName);
         return objectMetaStore.get(key)
                 .filter(meta -> isReadableLiveObject(key, meta));
+    }
+
+    public boolean objectExists(String bucket, String objectName) {
+        return getLiveObjectMeta(bucket, objectName).isPresent();
     }
 
     private boolean isReadableLiveObject(String key, GcsObjectMeta meta) {

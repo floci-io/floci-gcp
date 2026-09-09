@@ -51,6 +51,47 @@ class GcsServiceTest {
     }
 
     @Test
+    void uniformBucketLevelAccessRoundTripsOnCreateAndPatch() {
+        service.createBucket("my-bucket", "p1", BASE_URL, Map.of(
+                "iamConfiguration", Map.of(
+                        "uniformBucketLevelAccess", Map.of(
+                                "enabled", true,
+                                "lockedTime", "2100-01-01T00:00:00Z"),
+                        "publicAccessPrevention", "enforced")));
+
+        Map<String, Object> created = service.getBucket("my-bucket").getIamConfiguration();
+        assertEquals("enforced", created.get("publicAccessPrevention"));
+        assertNotEquals("2100-01-01T00:00:00Z",
+                ((Map<?, ?>) created.get("uniformBucketLevelAccess")).get("lockedTime"));
+
+        service.updateBucket("my-bucket", Map.of(
+                "iamConfiguration", Map.of("uniformBucketLevelAccess", Map.of("enabled", false))));
+
+        assertEquals(Map.of(
+                        "uniformBucketLevelAccess", Map.of("enabled", false),
+                        "publicAccessPrevention", "enforced"),
+                service.getBucket("my-bucket").getIamConfiguration());
+    }
+
+    @Test
+    void uniformBucketLevelAccessCannotBeDisabledAfterLockedTime() {
+        service.createBucket("locked-bucket", "p1", BASE_URL, Map.of());
+        service.getBucket("locked-bucket").setIamConfiguration(Map.of(
+                "uniformBucketLevelAccess", Map.of(
+                        "enabled", true,
+                        "lockedTime", "2020-01-01T00:00:00Z")));
+
+        GcpException exception = assertThrows(GcpException.class, () -> service.updateBucket(
+                "locked-bucket",
+                Map.of("iamConfiguration", Map.of(
+                        "uniformBucketLevelAccess", Map.of("enabled", false)))));
+
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(Boolean.TRUE.equals(((Map<?, ?>) service.getBucket("locked-bucket")
+                .getIamConfiguration().get("uniformBucketLevelAccess")).get("enabled")));
+    }
+
+    @Test
     void timestampsUseAtMostMicrosecondPrecision() {
         service.createBucket("ts-bucket", "p1", BASE_URL, Map.of());
         GcsObjectMeta meta = service.putObject("ts-bucket", "obj.txt", "text/plain",
@@ -106,6 +147,40 @@ class GcsServiceTest {
         byte[] retrieved = service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none());
         assertArrayEquals(data, retrieved);
     }
+
+	@Test
+	void overwritePermissionIsCheckedInsideTheDestinationMutation() {
+		service.createBucket("bucket", "p1", BASE_URL, Map.of());
+		service.putObject("bucket", "object", "text/plain", "original".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), BASE_URL);
+		AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+		GcpException exception = assertThrows(GcpException.class, () -> service.putObject(
+				"bucket", "object", "text/plain", "replacement".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL, () -> {
+					overwriteCheckInvoked.set(true);
+					throw GcpException.permissionDenied("overwrite denied");
+				}));
+
+		assertEquals(403, exception.getHttpStatus());
+		assertTrue(overwriteCheckInvoked.get());
+		assertArrayEquals("original".getBytes(StandardCharsets.UTF_8),
+				service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+	}
+
+	@Test
+	void overwritePermissionIsNotRequiredForANewDestination() {
+		service.createBucket("bucket", "p1", BASE_URL, Map.of());
+		AtomicBoolean overwriteCheckInvoked = new AtomicBoolean();
+
+		service.putObject("bucket", "object", "text/plain", "created".getBytes(StandardCharsets.UTF_8),
+				GcsCustomerEncryption.none(), null, null, GcsObjectPreconditions.NONE, BASE_URL,
+				() -> overwriteCheckInvoked.set(true));
+
+		assertFalse(overwriteCheckInvoked.get());
+		assertArrayEquals("created".getBytes(StandardCharsets.UTF_8),
+				service.getObjectData("bucket", "object", GcsCustomerEncryption.none()));
+	}
 
     @Test
     void getObjectForDownloadReturnsMatchingMetaAndData() {

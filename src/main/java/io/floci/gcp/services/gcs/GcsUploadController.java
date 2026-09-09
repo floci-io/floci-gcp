@@ -7,6 +7,7 @@ import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
@@ -36,14 +37,16 @@ public class GcsUploadController {
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
 	public GcsUploadController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper,
-			GcsAuthorizationService authorizationService) {
+			GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
         this.objectMapper = objectMapper;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @POST
@@ -107,15 +110,15 @@ public class GcsUploadController {
             bucket = completed.bucket();
             objectName = completed.objectName();
         }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
+		Runnable requireOverwritePermission = iamAuthorizationService.authorizeObjectCreate(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
 
         String contentRange = headers.getHeaderString("Content-Range");
         GcsContentRange range = contentRange != null && !contentRange.isBlank()
                 ? parseContentRange(contentRange, body.length)
                 : null;
-        ResumableChunkOutcome outcome = service.applyResumableChunk(
-                uploadId, range, body, requestBaseUrl(headers, uriInfo));
+		ResumableChunkOutcome outcome = service.applyResumableChunk(
+				uploadId, range, body, requestBaseUrl(headers, uriInfo), requireOverwritePermission);
         if (outcome.completed() != null) {
             return Response.ok(outcome.completed()).build();
         }
@@ -264,15 +267,15 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
+		Runnable requireOverwritePermission = iamAuthorizationService.authorizeObjectCreate(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
         var userMetadata = extractUserMetadata(metadata);
         // The metadata part wins over the query string when both carry a field.
         GcsObjectMeta system = mergeSystemMetadata(systemMetadata, metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
         GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
                 GcsCustomerEncryption.fromHeaders(headers), userMetadata, system, preconditions,
-                requestBaseUrl(headers, uriInfo));
+				requestBaseUrl(headers, uriInfo), requireOverwritePermission);
         return Response.ok(meta).build();
     }
 
@@ -311,10 +314,11 @@ public class GcsUploadController {
             contentType = "application/octet-stream";
         }
 
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
+		Runnable requireOverwritePermission = iamAuthorizationService.authorizeObjectCreate(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         String uploadId = service.startResumableUpload(bucket, name, contentType,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, systemMetadata, preconditions);
+				GcsCustomerEncryption.fromHeaders(headers), userMetadata, systemMetadata, preconditions,
+				requireOverwritePermission);
         String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
                 + "/o?uploadType=resumable&upload_id=" + uploadId;
 
@@ -324,11 +328,11 @@ public class GcsUploadController {
     private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions, GcsObjectMeta systemMetadata) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
+		Runnable requireOverwritePermission = iamAuthorizationService.authorizeObjectCreate(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
         GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
                 GcsCustomerEncryption.fromHeaders(headers), null, systemMetadata, preconditions,
-                requestBaseUrl(headers, uriInfo));
+				requestBaseUrl(headers, uriInfo), requireOverwritePermission);
         return Response.ok(meta).build();
     }
 

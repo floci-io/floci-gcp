@@ -4,7 +4,9 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.core.common.XmlBuilder;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -36,13 +38,15 @@ public class GcsXmlDownloadController {
     private final GcsService service;
     private final EmulatorConfig config;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
 	public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
-			GcsAuthorizationService authorizationService) {
+			GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @OPTIONS
@@ -68,7 +72,7 @@ public class GcsXmlDownloadController {
             @HeaderParam("Range") String rangeHeader,
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectRead(authorization, bucket, objectPath);
+        iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
@@ -85,12 +89,13 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             byte[] body) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
+		Runnable requireOverwritePermission = iamAuthorizationService.authorizeObjectCreate(
+				headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String baseUrl = RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port());
         GcsObjectMeta meta = service.putObject(bucket, objectPath, contentType, body != null ? body : new byte[0],
-                GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), baseUrl);
+				GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), null,
+				GcsObjectPreconditions.NONE, baseUrl, requireOverwritePermission);
         return Response.ok(meta).build();
     }
 
@@ -107,7 +112,7 @@ public class GcsXmlDownloadController {
             @QueryParam("generation") String generation,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectDelete(authorization, bucket, objectPath);
+		iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath);
         if (generation != null && !generation.isBlank()) {
             service.deleteObjectVersion(bucket, objectPath, generation);
         } else if (!service.deleteObject(bucket, objectPath)) {
@@ -133,7 +138,7 @@ public class GcsXmlDownloadController {
             @QueryParam("marker") String marker,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorizationService.requireObjectList(authorization, bucket, prefix);
+		iamAuthorizationService.requireObjectList(authorization, bucket, prefix);
         service.getBucket(bucket);
 
         // "The object name after which you want to start listing objects. Objects whose names

@@ -119,6 +119,8 @@ The GCP Datastore SDK uses this variable to route requests to floci-gcp instead 
 
 ## Transactions
 
+Transaction RPCs are available over both transports, but transaction IDs are currently advisory. Commits apply their mutations without isolation or conflict detection, and rollback is a no-op.
+
 ```java
 TransactionCallable<Void> callable = transaction -> {
     Key taskKey = datastore.newKeyFactory().setKind("Task").newKey(1);
@@ -142,7 +144,7 @@ floci-gcp does not load `datastore.indexes.yaml` or enforce Datastore index requ
 
 ## GQL Queries
 
-Datastore supports GQL (Google Query Language) syntax:
+Datastore supports GQL (Google Query Language) over HTTP/protobuf. The gRPC `RunQuery` handler currently supports structured queries only.
 
 ```java
 Query<Entity> query = Query.newGqlQueryBuilder(Query.ResultType.ENTITY,
@@ -163,11 +165,11 @@ Supported GQL syntax:
 
 ## Supported Operations
 
-- `Lookup`
-- `RunQuery` (structured query and GQL)
-- `RunAggregationQuery` (COUNT)
-- `BeginTransaction`
-- `Commit`
-- `Rollback`
-- `AllocateIds`
-- `ReserveIds`
+- `Lookup` (gRPC and HTTP/protobuf)
+- `RunQuery` (structured queries over both transports; GQL over HTTP/protobuf)
+- `RunAggregationQuery` (COUNT over HTTP/protobuf)
+- `BeginTransaction` (gRPC and HTTP/protobuf; limited semantics described above)
+- `Commit` (gRPC and HTTP/protobuf; limited semantics described above)
+- `Rollback` (gRPC and HTTP/protobuf; no-op)
+- `AllocateIds` (gRPC and HTTP/protobuf)
+- `ReserveIds` (gRPC and HTTP/protobuf)

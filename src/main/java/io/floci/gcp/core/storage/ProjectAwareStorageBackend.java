@@ -78,6 +78,21 @@ public class ProjectAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     // --- Explicit-project methods for async workers ---
 
+    /** A request-independent view for protocols whose project is carried in a message. */
+    public StorageBackend<String, V> forProject(String projectId) {
+        return new StorageBackend<>() {
+            public void put(String key, V value) { putForProject(projectId, key, value); }
+            public Optional<V> get(String key) { return getForProject(projectId, key); }
+            public void delete(String key) { deleteForProject(projectId, key); }
+            public List<V> scan(Predicate<String> filter) { return scanForProject(projectId, filter); }
+            public Set<String> keys() { return keysForProject(projectId); }
+            public void flush() { delegate.flush(); }
+            public void checkpoint() { delegate.checkpoint(); }
+            public void load() { delegate.load(); }
+            public void clear() { keys().forEach(this::delete); }
+        };
+    }
+
     public Optional<V> getForProject(String projectId, String key) {
         return delegate.get(projectId + "/" + key);
     }

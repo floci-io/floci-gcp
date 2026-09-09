@@ -120,6 +120,14 @@ public class CloudMonitoringService {
         grpcServerManager.bind(new CloudMonitoringController(this));
     }
 
+    private static <T> StorageBackend<String, T> scoped(StorageBackend<String, T> store, String resourceName) {
+        String[] parts = resourceName.split("/", -1);
+        if (parts.length < 2 || !parts[0].equals("projects") || parts[1].isBlank()) {
+            throw GcpException.invalidArgument("A projects/{project} resource name is required");
+        }
+        return store instanceof ProjectAwareStorageBackend<T> aware ? aware.forProject(parts[1]) : store;
+    }
+
     private static long maxStoredSequence(StorageBackend<String, StoredTimeSeriesPoint> store) {
         List<StoredTimeSeriesPoint> all = store instanceof ProjectAwareStorageBackend<StoredTimeSeriesPoint> projectAware
                 ? projectAware.scanAllProjects(k -> true)
@@ -130,6 +138,8 @@ public class CloudMonitoringService {
     // ── Metric Descriptors ───────────────────────────────────────────────────
 
     public MetricDescriptor createMetricDescriptor(String parentProject, MetricDescriptor descriptor) {
+        var descriptorStore = scoped(this.descriptorStore, parentProject);
+        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         String type = descriptor.getType();
         if (type == null || type.isBlank()) {
             throw GcpException.invalidArgument("MetricDescriptor must have a non-empty type");
@@ -173,6 +183,8 @@ public class CloudMonitoringService {
     }
 
     public MetricDescriptor getMetricDescriptor(String name) {
+        var descriptorStore = scoped(this.descriptorStore, name);
+        var timeSeriesStore = scoped(this.timeSeriesStore, name);
         String type = parseMetricType(name);
         return descriptorStore.get(type)
                 .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
@@ -181,6 +193,8 @@ public class CloudMonitoringService {
 
     public PageToken.Page<MetricDescriptor> listMetricDescriptors(String parentProject, String filter,
                                                                   int pageSize, String pageToken) {
+        var descriptorStore = scoped(this.descriptorStore, parentProject);
+        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         List<MetricDescriptor> all = descriptorStore.scan(k -> true).stream()
                 .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
                 .sorted(Comparator.comparing(MetricDescriptor::getType))
@@ -199,6 +213,8 @@ public class CloudMonitoringService {
     }
 
     public void deleteMetricDescriptor(String name) {
+        var descriptorStore = scoped(this.descriptorStore, name);
+        var timeSeriesStore = scoped(this.timeSeriesStore, name);
         String type = parseMetricType(name);
         if (!type.startsWith("custom.googleapis.com/") && !type.startsWith("external.googleapis.com/")) {
             throw GcpException.invalidArgument("Only user-created custom metrics can be deleted: " + name);
@@ -237,6 +253,8 @@ public class CloudMonitoringService {
     // ── Time Series ──────────────────────────────────────────────────────────
 
     public void createTimeSeries(String parentProject, List<TimeSeries> timeSeriesList) {
+        var descriptorStore = scoped(this.descriptorStore, parentProject);
+        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         if (timeSeriesList.isEmpty()) {
             throw GcpException.invalidArgument("CreateTimeSeriesRequest must contain at least one time series");
         }
@@ -423,6 +441,8 @@ public class CloudMonitoringService {
     public PageToken.Page<TimeSeries> listTimeSeries(String parentProject, String filter,
                                                      TimeInterval requestInterval, Aggregation aggregation,
                                                      String view, int pageSize, String pageToken) {
+        var descriptorStore = scoped(this.descriptorStore, parentProject);
+        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         if (filter == null || filter.isBlank()) {
             throw GcpException.invalidArgument("filter is required");
         }

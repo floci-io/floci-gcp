@@ -27,6 +27,8 @@ on:
       - 'compatibility-tests/*/Dockerfile'
       - 'compatibility-tests/*/pom.xml'            # sdk-test-java
       - 'compatibility-tests/*/requirements.txt'   # sdk-test-python
+      - 'compatibility-tests/sdk-test-ruby/Gemfile'
+      - 'compatibility-tests/sdk-test-ruby/Gemfile.lock'
       - 'compatibility-tests/*/package*.json'      # sdk-test-node
       # sdk-test-go and sdk-test-rust are the exceptions: both Dockerfiles do
       # `COPY . .` *before* `go mod tidy` / `cargo build --locked`, so their
@@ -63,6 +65,7 @@ jobs:
         # Mirrors compatibility.yml's native-compat-test legs exactly.
         test:
           - sdk-test-java
+          - sdk-test-ruby
           - sdk-test-node
           - sdk-test-python
           - sdk-test-go

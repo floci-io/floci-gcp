@@ -100,8 +100,8 @@ the API hostname as a **path**, which floci-gcp serves directly on its single po
   surface (create/lookup/update/delete/batchGet/batchDelete). Not yet implemented: OOB codes
   (email verification / password reset), email-link, IdP, phone, MFA, passkeys, tenants
   (including the tenant-scoped `projects/{p}/tenants/{t}:createSessionCookie`), and the
-  legacy v3 `relyingparty` paths — these return 404 (the official emulator returns 501 for
+  legacy v3 `relyingparty` paths: these return 404 (the official emulator returns 501 for
   unimplemented operations).
-- Passwords are stored in the emulator's literal `fakeHash:salt=...:password=...` format —
-  a dev fixture, not a security boundary, identical to the official emulator.
+- Passwords are stored in the emulator's literal `fakeHash:salt=...:password=...` format.
+  This is a development fixture, not a security boundary, and is identical to the official emulator.
 - `securetoken` responses report `project_id: "12345"`, the emulator's hardcoded project number.

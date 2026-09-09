@@ -1,6 +1,6 @@
 # Services Overview
 
-floci-gcp emulates GCP services on a single port (`4588`). All services use real GCP wire protocols — your existing GCP SDK calls and gcloud CLI commands work without modification.
+floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP wire protocols. Supported SDK and gcloud operations work after the client is configured to use the emulator endpoint.
 
 ## Service Matrix
 
@@ -9,7 +9,7 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 | [Cloud Storage (GCS)](gcs.md) | gRPC v2 + REST XML + REST JSON | `google.storage.v2.Storage`, `/{bucket}/{object}`, `/storage/v1/b/{bucket}` |
 | [Pub/Sub](pubsub.md) | gRPC + REST JSON | `google.pubsub.v1.Publisher`, `google.pubsub.v1.Subscriber`, `/v1/projects/{project}/topics` |
 | [Firestore](firestore.md) | gRPC | `google.firestore.v1.Firestore` |
-| [Datastore](datastore.md) | HTTP/protobuf | `/v1/projects/{project}:{method}` |
+| [Datastore](datastore.md) | gRPC + HTTP/protobuf | `google.datastore.v1.Datastore`, `/v1/projects/{project}:{method}` |
 | [Secret Manager](secret-manager.md) | gRPC + REST JSON | `google.cloud.secretmanager.v1.SecretManagerService`, `/v1/projects/{project}/secrets` |
 | [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, `/v2/entries:write`, `/v2/entries:list` |
 | [Cloud KMS](kms.md) | gRPC + REST JSON | `google.cloud.kms.v1.KeyManagementService`, `/v1/projects/{project}/locations/{location}/keyRings` |
@@ -32,12 +32,12 @@ floci-gcp emulates GCP services on a single port (`4588`). All services use real
 
 ## Single-Port Design
 
-All services — gRPC and REST — are available on port **4588** via ALPN negotiation:
+All emulated API endpoints, including gRPC, REST, and binary HTTP/protobuf, are available on port **4588** via ALPN negotiation:
 
-- `http2=true` — enables HTTP/2 support
-- `grpc.server.use-separate-server=false` — gRPC and REST share the same port
+- `http2=true`: enables HTTP/2 support
+- `grpc.server.use-separate-server=false`: gRPC and HTTP APIs share the same port
 
-Clients using plain HTTP/1.1 are served REST endpoints. Clients using HTTP/2 (gRPC) are served gRPC endpoints. No separate ports or proxy configuration is required.
+Clients using plain HTTP/1.1 are served REST or binary HTTP/protobuf endpoints. Clients using HTTP/2 (gRPC) are served gRPC endpoints. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose separate generated endpoints for their native protocols.
 
 ## Common Setup
 

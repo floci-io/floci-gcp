@@ -4,7 +4,7 @@
   <img src="assets/floci.svg" alt="floci-gcp" width="500" />
 </p>
 
-<p align="center"><em>Light, fluffy, and always free — GCP Local Emulator</em></p>
+<p align="center"><em>Light, fluffy, and always free: GCP Local Emulator</em></p>
 
 ---
 
@@ -14,10 +14,10 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, object compose, ACLs, bucket IAM, conditional requests, versioning, pre-signed URLs |
+| **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, compose, rewrite, move, soft delete and restore, HMAC keys, decompressive transcoding, ACLs, bucket IAM, conditional requests, versioning, pre-signed URLs |
 | **Pub/Sub** | gRPC + REST | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, subscription filters |
 | **Firestore** | gRPC | Documents, collections, queries, field transforms, aggregation, transactions, real-time listeners |
-| **Datastore** | HTTP/protobuf | Entities, structured queries, GQL queries, aggregation, transactions |
+| **Datastore** | gRPC + HTTP/protobuf | Entities, structured queries, GQL queries, aggregation, transactions |
 | **Secret Manager** | gRPC + REST | Secrets, versions, access, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with filter subset, `ListLogs`, `DeleteLog` |
 | **Cloud KMS** | gRPC + REST | Key rings, crypto keys, versions, symmetric encrypt/decrypt, asymmetric sign/decrypt, `GenerateRandomBytes` |
@@ -42,9 +42,9 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 
 **No account required.** No auth tokens, no sign-ups, no telemetry. Pull the image and start building.
 
-**Single port.** All GCP services — gRPC and REST — on port `4588` via ALPN negotiation. No per-service setup.
+**Single API port.** All emulated GCP API endpoints, both gRPC and REST, use port `4588` via ALPN negotiation. Docker-backed data planes expose separate generated endpoints when their native protocols require them.
 
-**No feature gates.** Every feature is available to everyone — no community-edition restrictions.
+**No feature gates.** Every feature is available to everyone: no community-edition restrictions.
 
 **No CI restrictions.** Run in your CI pipeline with zero limitations. No credits, no quotas, no paid tiers.
 
@@ -84,7 +84,7 @@ export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All GCP services are immediately available at `http://localhost:4588`. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+All emulated GCP APIs are immediately available at `http://localhost:4588`. Credentials are not cryptographically validated. The exception is a Floci-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
 
 [Get started →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [View services →](services/index.md){ .md-button }

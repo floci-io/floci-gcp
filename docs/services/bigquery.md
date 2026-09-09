@@ -13,7 +13,7 @@ GoogleSQL engine (Phase 2) and the Storage Read/Write gRPC API (Phase 3) are out
 
 ## Endpoint
 
-BigQuery has **no `*_EMULATOR_HOST` convention in the Java SDK** — point the client at floci-gcp
+BigQuery has **no `*_EMULATOR_HOST` convention in the Java SDK**: point the client at floci-gcp
 with `setHost` and disable credentials:
 
 ```java
@@ -33,7 +33,7 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
 - **Tables**: insert, get, list, patch/update, delete. Schemas accept standard or legacy type
   names and are normalized to legacy names (`INT64`→`INTEGER`, `FLOAT64`→`FLOAT`, `BOOL`→`BOOLEAN`,
   `STRUCT`→`RECORD`) with `NULLABLE` as the default mode, matching SDK round-trips.
-- **tabledata.insertAll**: schema-validated per row — HTTP 200 always, failures reported via
+- **tabledata.insertAll**: schema-validated per row: HTTP 200 always, failures reported via
   `insertErrors` (unknown fields honor `ignoreUnknownValues`; `skipInvalidRows=false` inserts
   nothing and marks valid rows `stopped`; missing `REQUIRED` fields and uncoercible values are
   rejected with reason `invalid`).
@@ -62,7 +62,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   literal type → 400 `invalidQuery` ("No matching signature for operator =").
 - `COUNT(*)` returns a single `INTEGER` column named `f0_` and respects `WHERE`.
 - **Anything else** (JOIN, GROUP BY, ORDER BY, OR, `!=`, `<`, functions, aliases, subqueries,
-  DML/DDL, `= NULL`) fails fast with 400 and reason `invalidQuery` naming the construct — never
+  DML/DDL, `= NULL`) fails fast with 400 and reason `invalidQuery` naming the construct: never
   silent divergence.
 - Invalid SQL via `jobs.query` → HTTP 400; via `jobs.insert` → HTTP 200 `DONE` job carrying
   `status.errorResult` (and `getQueryResults` on that job → HTTP 400), matching real job semantics.
@@ -82,7 +82,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 ## Deviations from real BigQuery
 
 - No `insertId` de-duplication (real BigQuery is best-effort anyway).
-- Jobs always complete synchronously (`jobComplete=true`, state `DONE`) — no PENDING/RUNNING phase.
+- Jobs always complete synchronously (`jobComplete=true`, state `DONE`): no PENDING/RUNNING phase.
 - `useLegacySql` is ignored; the SQL subset above is the only dialect.
 - `WHERE` on `TIMESTAMP`/`RECORD`/`REPEATED` columns is not supported.
 - Cross-project table references are rejected.

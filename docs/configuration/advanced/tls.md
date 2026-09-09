@@ -4,7 +4,7 @@ By default floci-gcp serves plain HTTP on port `4588`. Most GCP SDKs skip TLS wh
 them at an emulator through a `*_EMULATOR_HOST` variable, so this is all you need for local
 development.
 
-Enable TLS when a client insists on `https://` — a tool that only accepts HTTPS endpoints, a
+Enable TLS when a client insists on `https://`: a tool that only accepts HTTPS endpoints, a
 `gcloud` custom `api_endpoint_overrides`, or code under test that builds its channel with real
 transport credentials.
 
@@ -21,7 +21,7 @@ of every connection:
 ```
                           :4588  (public)            :443  (optional)
                              |                          |
-                       TlsProxyServer — first-byte protocol sniff
+                       TlsProxyServer: first-byte protocol sniff
                              |                          |
    0x16 (TLS ClientHello) ──► 127.0.0.1:4581   Quarkus HTTPS
    anything else          ──► 127.0.0.1:4580   Quarkus HTTP / h2c
@@ -64,7 +64,7 @@ data/tls/floci-gcp-selfsigned.metadata.json
 ```
 
 The certificate is reused across restarts. It is regenerated automatically when the hostname
-configuration changes — the metadata file records which names went into it, and a changed
+configuration changes: the metadata file records which names went into it, and a changed
 `FLOCI_GCP_HOSTNAME` or `FLOCI_GCP_BASE_URL` triggers a new one.
 
 Default Subject Alternative Names:
@@ -108,7 +108,7 @@ docker run \
   -p 4588:4588 floci/floci-gcp
 ```
 
-Both paths must be set together, and both must be readable — floci-gcp fails fast at startup
+Both paths must be set together, and both must be readable: floci-gcp fails fast at startup
 otherwise. Setting `FLOCI_GCP_TLS_SELF_SIGNED=false` without supplying a certificate is also a
 startup error, which is the point: it stops floci-gcp from silently generating a certificate
 you did not intend to use.

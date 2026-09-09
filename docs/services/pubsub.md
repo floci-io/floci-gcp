@@ -174,7 +174,7 @@ IAM policy methods are served for topics, subscriptions, and snapshots:
 ## Subscription Filters
 
 A subscription can declare a `filter` so it only receives messages whose attributes match it.
-Non-matching messages are never delivered to that subscription — as in GCP, which acknowledges
+Non-matching messages are never delivered to that subscription. As in GCP, the service acknowledges
 them automatically on your behalf. Subscriptions without a filter receive every message published
 to the topic.
 
@@ -214,7 +214,7 @@ Rules that mirror GCP:
 - `NOT` has the highest precedence; `-` is a unary alias for it.
 - `AND` and `OR` **cannot be combined without parentheses**. `a AND b OR c` is a syntax error;
   write `a AND (b OR c)`.
-- `hasPrefix` is the only function — there is no regular-expression support.
+- `hasPrefix` is the only function: there is no regular-expression support.
 - String literals may contain unicode, hexadecimal and octal escape sequences, for example
   `attributes:"みんな"`. Escapes outside a string literal are invalid.
 - A filter must be at most **256 bytes**.
@@ -226,9 +226,9 @@ time, rather than being accepted and silently ignored.
 
 As in GCP, the filter is a property of the subscription that cannot change after creation. A
 `subscriptions.patch` that names `filter` in its update mask is rejected with `INVALID_ARGUMENT`,
-whatever value it carries — GCP rejects on the presence of the field in the mask, not on whether the
+whatever value it carries. GCP rejects on the presence of the field in the mask, not on whether the
 value differs, so restating the current filter fails too. A patch that does not name `filter` in its
-mask succeeds and leaves the filter untouched, even when the request body carries one — the update
+mask succeeds and leaves the filter untouched, even when the request body carries one. The update
 mask governs, so clients that echo a whole subscription back keep working.
 
 GCP requires an update mask on `subscriptions.patch`; floci-gcp also accepts a patch without one and
@@ -241,7 +241,7 @@ the desired filter, `Seek` to the snapshot, move subscribers over, then delete t
 
 ## Push Subscriptions
 
-floci-gcp supports push subscriptions — it delivers messages to an HTTP endpoint you configure:
+floci-gcp supports push subscriptions: it delivers messages to an HTTP endpoint you configure:
 
 ```java
 subscriptionAdminClient.createSubscription(
@@ -276,8 +276,8 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
 
 IAM policies on topics, subscriptions, and snapshots are **stored and returned,
 never enforced**. `setIamPolicy` followed by `getIamPolicy` returns exactly the
-bindings that were set — including `condition` blocks, which are stored verbatim
-and never evaluated — but no request is ever denied because of a policy. Do not
+bindings that were set, including `condition` blocks, which are stored verbatim
+and never evaluated, but no request is ever denied because of a policy. Do not
 build authorization tests on top of the emulator.
 
 Policy semantics:
@@ -293,7 +293,7 @@ Policy semantics:
 - Deleting a resource deletes its policy; recreating the same name starts empty.
 - `testIamPermissions` echoes the requested permissions for an existing
   resource, never consulting stored bindings. For a resource that does not
-  exist it fails open with an empty permission set — not `NOT_FOUND` — matching
+  exist it fails open with an empty permission set, not `NOT_FOUND`, matching
   the service config.
 - Schemas are not implemented, so schema IAM paths are not served.
 
@@ -347,7 +347,7 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `DeleteSnapshot`
 - `Seek`
 
-**IAM (`google.iam.v1.IAMPolicy` mixin — stored, never enforced):**
+**IAM (`google.iam.v1.IAMPolicy` mixin: stored, never enforced):**
 
 - `GetIamPolicy`
 - `SetIamPolicy`

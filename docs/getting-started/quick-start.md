@@ -2,7 +2,7 @@
 
 This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI commands work against it in under five minutes.
 
-## Step 1 — Start floci-gcp
+## Step 1: Start floci-gcp
 
 === "Docker Compose"
 
@@ -46,7 +46,7 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
     ./mvnw quarkus:dev   # hot reload, port 4588
     ```
 
-## Step 2 — Configure GCP emulator environment variables
+## Step 2: Configure GCP emulator environment variables
 
 GCP SDKs automatically skip credential validation when these emulator variables are set:
 
@@ -60,26 +60,26 @@ export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 
 Add these to your shell profile (`.bashrc` / `.zshrc`) to persist across sessions.
 
-## Step 3 — Verify the Setup
+## Step 3: Verify the Setup
 
 Run a few quick smoke tests using the gcloud CLI:
 
 ```bash
 gcloud config set project floci-local
 
-# Pub/Sub — create a topic and publish a message
+# Pub/Sub: create a topic and publish a message
 gcloud pubsub topics create my-topic
 gcloud pubsub subscriptions create my-sub --topic=my-topic
 gcloud pubsub topics publish my-topic --message="hello from floci-gcp"
 gcloud pubsub subscriptions pull my-sub --auto-ack
 
-# Cloud Storage — create a bucket and upload a file
+# Cloud Storage: create a bucket and upload a file
 gcloud storage buckets create gs://my-bucket
 echo "hello floci-gcp" | gcloud storage cp - gs://my-bucket/hello.txt
 gcloud storage ls gs://my-bucket
 ```
 
-## Step 4 — Use in Your Application
+## Step 4: Use in Your Application
 
 Point your GCP SDK clients at floci-gcp:
 

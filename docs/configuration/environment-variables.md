@@ -2,7 +2,7 @@
 
 floci-gcp is configured entirely through environment variables. Every setting maps to a `FLOCI_GCP_*` variable, so when you run the published Docker image you never need to write or mount an `application.yml`.
 
-Variable names follow the config path, uppercased with dots and dashes replaced by underscores — e.g. `floci-gcp.services.gcs.enabled` becomes `FLOCI_GCP_SERVICES_GCS_ENABLED`.
+Variable names follow the config path, uppercased with dots and dashes replaced by underscores: e.g. `floci-gcp.services.gcs.enabled` becomes `FLOCI_GCP_SERVICES_GCS_ENABLED`.
 
 ---
 
@@ -10,7 +10,7 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_PORT` | `4588` | Port for all services (gRPC + REST, single port) |
+| `FLOCI_GCP_PORT` | `4588` | Shared API port for gRPC and HTTP endpoints |
 | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL embedded in service responses (GCS object URLs, pre-signed URLs, etc.) |
 | `FLOCI_GCP_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_GCP_BASE_URL`. Set to the Compose/container service name so other containers can reach floci-gcp by DNS |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID used when no project is specified in the request |
@@ -20,7 +20,7 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 
 ## TLS
 
-Off by default — floci-gcp serves plain HTTP, which is what GCP SDKs expect from an emulator.
+Off by default: floci-gcp serves plain HTTP, which is what GCP SDKs expect from an emulator.
 When enabled, HTTP and HTTPS are served on the **same** port (`FLOCI_GCP_PORT`), so existing
 plain-HTTP clients keep working. See [TLS / HTTPS](./advanced/tls.md) for details.
 
@@ -91,9 +91,9 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_SCHEDULER_TICK_INTERVAL_SECONDS` | `10` | How often the Scheduler background dispatcher checks for due jobs |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Managed Service for Apache Kafka |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_ENABLED` | `true` | Cloud SQL for PostgreSQL |
-| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode — no Docker-backed PostgreSQL data-plane instances |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | Mock mode: no Docker-backed PostgreSQL data-plane instances |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED` | `true` | Cloud Run |
-| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Mock mode — control plane only, no Docker-backed execution containers |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` | `false` | Mock mode: control plane only, no Docker-backed execution containers |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_DEFAULT_PORT` | `8080` | Default Cloud Run runtime container port |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT` | `240s` | Cloud Run runtime startup timeout |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_REQUEST_TIMEOUT` | `300s` | Cloud Run invocation proxy timeout |
@@ -121,7 +121,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | When `true`, emulate the Kafka control plane only — no Redpanda broker container is started |
+| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | When `true`, emulate the Kafka control plane only: no Redpanda broker container is started |
 | `FLOCI_GCP_SERVICES_KAFKA_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Broker image used for spawned Kafka clusters |
 | `FLOCI_GCP_SERVICES_KAFKA_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for Kafka sidecars only |
 
@@ -129,7 +129,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | When `true`, emulate the Cloud SQL control plane only — no Docker-backed PostgreSQL containers are started |
+| `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` | `false` | When `true`, emulate the Cloud SQL control plane only: no Docker-backed PostgreSQL containers are started |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES15_IMAGE` | `postgres:15.18-alpine` | Docker image used for `POSTGRES_15` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` | Docker image used for `POSTGRES_16` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` | Docker image used for `POSTGRES_17` instances |
@@ -140,7 +140,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_SERVICES_GKE_MOCK` | `false` | When `true`, emulate the GKE control plane only — no real `k3s` clusters are started |
+| `FLOCI_GCP_SERVICES_GKE_MOCK` | `false` | When `true`, emulate the GKE control plane only: no real `k3s` clusters are started |
 | `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` | Image used for spawned k3s control-plane containers |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT` | `6550` | Lowest host port assigned to a cluster's Kubernetes API server |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | Highest host port assigned to a cluster's Kubernetes API server |
@@ -175,13 +175,13 @@ These variables control the Docker daemon used by floci-gcp's embedded DNS and s
 | `FLOCI_GCP_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep |
 | `FLOCI_GCP_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Registry prefix applied to every sidecar image floci-gcp launches (e.g. an internal mirror like `mirror.example.com`) |
 
-Private-registry credentials (`floci-gcp.docker.registry-credentials`, a list of `server`/`username`/`password` entries) are best set in an `application.yml` — see the [application.yml reference](./advanced/application-yml.md).
+Private-registry credentials (`floci-gcp.docker.registry-credentials`, a list of `server`/`username`/`password` entries) are best set in an `application.yml`: see the [application.yml reference](./advanced/application-yml.md).
 
 ---
 
 ## Logging
 
-floci-gcp uses standard [Quarkus logging](https://quarkus.io/guides/logging) — also driven by environment variables. The default level is `INFO`; services log operation-level events at `DEBUG` and full request/response payloads at `TRACE`.
+floci-gcp uses standard [Quarkus logging](https://quarkus.io/guides/logging), which is also driven by environment variables. The default level is `INFO`; services log operation-level events at `DEBUG` and full request/response payloads at `TRACE`.
 
 Enable `TRACE` for a single service by setting its category level (note the double underscores around the category):
 

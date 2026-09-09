@@ -2,7 +2,7 @@
 
 floci-gcp emulates Google Cloud Monitoring (the Metrics API) over gRPC and REST using the real
 `google.monitoring.v3.MetricService` protocol. Define **metric descriptors**, write **time series**
-data points, and read them back — useful for exercising custom-metric ingestion and queries without
+data points, and read them back: useful for exercising custom-metric ingestion and queries without
 a real Monitoring backend.
 
 ## Configuration
@@ -63,7 +63,7 @@ Write-path rules matching the documented API behavior:
   `CUMULATIVE`, and the value type is inferred from the point (`BOOL`, `INT64`, `DOUBLE` or
   `DISTRIBUTION`).
 - `CreateMetricDescriptor` is an upsert: re-creating an existing type updates it, but labels are
-  unioned — existing label keys are never removed. `BOOL`/`STRING` value types are only valid with
+  unioned: existing label keys are never removed. `BOOL`/`STRING` value types are only valid with
   `GAUGE`. The metric type must be domain-prefixed (e.g. `custom.googleapis.com/...`).
 - `DeleteMetricDescriptor` only accepts user-created metrics (`custom.googleapis.com/` or
   `external.googleapis.com/` prefixes).
@@ -75,7 +75,7 @@ Write-path rules matching the documented API behavior:
 - `CreateTimeSeries` is all-or-nothing: on any invalid series the whole request fails with
   `INVALID_ARGUMENT` and nothing is written (real GCP writes the valid subset and reports partial
   failures via `CreateTimeSeriesSummary` error details).
-- Alignment emits points only for buckets that contain data — no interpolation of empty periods for
+- Alignment emits points only for buckets that contain data: no interpolation of empty periods for
   `ALIGN_DELTA`/`ALIGN_RATE`.
 - `DISTRIBUTION` and `STRING` values cannot be aggregated.
 - A missing read `interval.startTime` is treated as unbounded (real GCP defaults it to the end time).

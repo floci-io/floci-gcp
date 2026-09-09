@@ -19,8 +19,8 @@ REST JSON under `/v1/projects/{project}/locations/{location}`:
 | Get trigger | `GET /triggers/{id}` |
 | Update trigger | `PATCH /triggers/{id}` (supports `updateMask`, `allowMissing`, `validateOnly`) |
 | Delete trigger | `DELETE /triggers/{id}` (supports `allowMissing`, `validateOnly`) |
-| List providers | `GET /providers` — returns `storage.googleapis.com` and `pubsub.googleapis.com` |
-| List channels | `GET /channels` — always empty (stub) |
+| List providers | `GET /providers`: returns `storage.googleapis.com` and `pubsub.googleapis.com` |
+| List channels | `GET /channels`: always empty (stub) |
 
 Mutations return completed `google.longrunning.Operation` responses, readable via the shared operations surface at `/v2/projects/{project}/locations/{location}/operations`.
 
@@ -28,8 +28,8 @@ Mutations return completed `google.longrunning.Operation` responses, readable vi
 
 Matching triggers receive a CloudEvents **binary-mode** HTTP POST (`ce-id`, `ce-source`, `ce-specversion: 1.0`, `ce-type`, `ce-time` headers):
 
-- **Pub/Sub** — event type `google.cloud.pubsub.topic.v1.messagePublished`, source `//pubsub.googleapis.com/{topic}`, body in push-delivery format (`message` with base64 `data`, `attributes`, `messageId`, `publishTime`).
-- **Cloud Storage** — source `//storage.googleapis.com/projects/_/buckets/{bucket}`, body is the object metadata JSON.
+- **Pub/Sub**: event type `google.cloud.pubsub.topic.v1.messagePublished`, source `//pubsub.googleapis.com/{topic}`, body in push-delivery format (`message` with base64 `data`, `attributes`, `messageId`, `publishTime`).
+- **Cloud Storage**: source `//storage.googleapis.com/projects/_/buckets/{bucket}`, body is the object metadata JSON.
 
 Supported destinations: **Cloud Run services** (resolved through the emulator's Cloud Run URL routing, honoring `path`) and **HTTP endpoints** (`httpEndpoint.uri`).
 
@@ -76,8 +76,8 @@ Supported destinations: **Cloud Run services** (resolved through the emulator's 
 ## Not Yet Supported
 
 - GKE, Workflows, and Cloud Functions destinations (logged and dropped)
-- `match-path-pattern` operators — event filters use exact-value matching (with a last-segment fallback for `topic`/`bucket` attributes)
-- Delivery retries and dead-lettering — delivery is fire-and-forget; failures are logged, not surfaced
+- `match-path-pattern` operators: event filters use exact-value matching (with a last-segment fallback for `topic`/`bucket` attributes)
+- Delivery retries and dead-lettering: delivery is fire-and-forget; failures are logged, not surfaced
 - Channels and third-party providers (stubs)
 
 A trigger with no `eventFilters` never matches. A trigger whose `transport.pubsub` topic matches the published topic receives the event even if its filters do not match.

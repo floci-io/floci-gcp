@@ -4,7 +4,7 @@ floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 
 - **gRPC v2**, bucket and object management plus streaming reads and writes
 - **REST XML**, object operations (upload, download, delete, list objects)
-- **REST JSON**, bucket management (create bucket, list buckets, get bucket metadata)
+- **REST JSON**, bucket and object management, IAM, ACLs, notifications, HMAC keys, and uploads
 
 ## Configuration
 

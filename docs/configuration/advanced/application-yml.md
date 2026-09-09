@@ -1,7 +1,7 @@
 # application.yml Reference
 
 !!! note "Source builds only"
-    This page is for users who build floci-gcp from source or mount a custom `application.yml` into the container. **If you run the published Docker image, you don't need this file** — all settings are configured through `FLOCI_GCP_*` environment variables. See the [Environment Variables Reference](../environment-variables.md) for the complete list.
+    This page is for users who build floci-gcp from source or mount a custom `application.yml` into the container. **If you run the published Docker image, you don't need this file**: all settings are configured through `FLOCI_GCP_*` environment variables. See the [Environment Variables Reference](../environment-variables.md) for the complete list.
 
 All settings can be provided as YAML (in `src/main/resources/application.yml`) or overridden via environment variables using the `FLOCI_GCP_` prefix with dots and dashes replaced by underscores.
 
@@ -16,7 +16,7 @@ floci-gcp generates absolute URLs for certain response fields (GCS object URLs, 
 
 When `floci-gcp.hostname` is set it replaces just the host portion of `base-url`, leaving the scheme and port unchanged. Setting `FLOCI_GCP_HOSTNAME: floci-gcp` is equivalent to changing `base-url` from `http://localhost:4588` to `http://floci-gcp:4588`.
 
-**Example — Docker Compose multi-container setup:**
+**Example: Docker Compose multi-container setup:**
 
 ```yaml
 environment:
@@ -24,7 +24,7 @@ environment:
   FLOCI_GCP_BASE_URL: http://floci-gcp:4588
 ```
 
-See [Docker Compose — Multi-container networking](../docker-compose.md#multi-container-networking) for a full example.
+See [Docker Compose: Multi-container networking](../docker-compose.md#multi-container-networking) for a full example.
 
 ## Full Reference
 
@@ -67,6 +67,8 @@ floci-gcp:
     iam:
       enabled: true
     iamcredentials:
+      enabled: true
+    sts:
       enabled: true
     secretmanager:
       enabled: true

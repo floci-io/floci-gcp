@@ -11,5 +11,6 @@ public class ComputeProject {
     public long sequence = 1000;
     public Map<String, ObjectNode> resources = new LinkedHashMap<>();
     public Map<String, ComputeOperation> operations = new LinkedHashMap<>();
+    public Map<String, java.util.List<ObjectNode>> endpoints = new LinkedHashMap<>();
     public Map<String, String> requests = new LinkedHashMap<>();
 }

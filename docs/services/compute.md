@@ -66,3 +66,13 @@ restored disks cannot be smaller than their source. Images do not acquire invent
 backing snapshots. Copying a snapshot means restoring a disk and snapshotting it.
 Guest disk bytes, regional/instant snapshots and public OS image catalogs are not
 emulated.
+
+## Global external application load balancer
+
+Zonal GCE_VM_IP_PORT endpoint groups support endpoint attach/detach/list. Global
+HTTP health checks, EXTERNAL_MANAGED backend services, URL maps, HTTP target proxies
+and TCP forwarding rules support configuration and ordered cleanup. Backend and
+URL-map updates require current fingerprints. Path matchers, host rules, pathRules
+and session-affinity configuration are validated; actual request routing, health
+checks, TLS certificates, regional load balancing and advanced routeRules are not
+implemented. Endpoint membership is stored separately from the public NEG resource.

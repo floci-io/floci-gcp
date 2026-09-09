@@ -163,7 +163,12 @@ public class ComputeService {
         }
         ComputeResourceHandler handler = handler(c);
         if (verb.equals("POST") && "listNetworkEndpoints".equals(c.action)) {
-            return page(c, toObjects(c.require(c.key()).path("networkEndpoints")), bodyToQuery(body));
+            if (!c.collection().equals("networkEndpointGroups")) { throw GcpException.unimplemented("Unknown action"); }
+            c.require(c.key());
+            ObjectNode result = page(c, c.state.endpoints.getOrDefault(c.key(), List.of()).stream()
+                    .map(e -> { ObjectNode item = object(); item.set("networkEndpoint", e); return item; }).toList(), query);
+            result.put("kind", "compute#networkEndpointGroupsListNetworkEndpoints");
+            return result;
         }
         String requestId = query.get("requestId");
         String requestKey = null;
@@ -402,6 +407,11 @@ public class ComputeService {
         public void noReferences(String target, String except) {
             for (var e : state.resources.entrySet()) {
                 if (!e.getKey().equals(except) && references(e.getValue(), target)) {
+                    throw GcpException.failedPrecondition("Resource is in use by " + e.getKey());
+                }
+            }
+            for (var e : state.endpoints.entrySet()) {
+                if (!e.getKey().equals(except) && e.getValue().stream().anyMatch(n -> references(n, target))) {
                     throw GcpException.failedPrecondition("Resource is in use by " + e.getKey());
                 }
             }

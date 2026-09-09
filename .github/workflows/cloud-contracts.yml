@@ -63,12 +63,16 @@ jobs:
           }
           java_contract() {
             mkdir -p "evidence/java-$1"
+            rm -f compatibility-tests/sdk-test-java/target/surefire-reports/*.xml
+            local status=0
             docker run --rm --network contracts --cap-drop=ALL --security-opt=no-new-privileges:true \
               -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 -e FLOCI_GCP_GRPC_ENDPOINT=floci-gcp:4588 \
               -e FLOCI_GCP_RESTART_PHASE="$1" -e FLOCI_GCP_RESTART_STATE=/state/java-restart.properties \
               -v "$PWD/evidence:/state" -v "$PWD/compatibility-tests/sdk-test-java:/workspace" -v "$HOME/.m2:/root/.m2:ro" -w /workspace \
               maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753 \
-              mvn -o -B -ntp -Dtest="$2" -Dsurefire.reportsDirectory="/state/java-$1" test
+              mvn -o -B -ntp -Dtest="$2" test || status=$?
+            cp compatibility-tests/sdk-test-java/target/surefire-reports/*.xml "evidence/java-$1/"
+            return "$status"
           }
           ruby_contract all all
           java_contract roundtrip 'ComputeContractTest,ComputeRoutingContractTest,GcsXmlMultipartContractTest,NetworkUsageContractTest,StorageContractTest,GcsDownscopedTokenTest,GcsResumableUploadTest,GcsSignedUrlTest'

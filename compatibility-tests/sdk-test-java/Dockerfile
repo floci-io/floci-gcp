@@ -1,4 +1,5 @@
-FROM maven:3.9-eclipse-temurin-21
+ARG JAVA_BUILD_IMAGE=maven:3.9-eclipse-temurin-21
+FROM ${JAVA_BUILD_IMAGE}
 
 WORKDIR /app
 

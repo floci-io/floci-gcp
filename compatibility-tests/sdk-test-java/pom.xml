@@ -13,10 +13,9 @@
     <description>GCP SDK Java compatibility tests for Floci GCP emulator</description>
 
     <properties>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <gcp.bom.version>26.53.0</gcp.bom.version>
+        <gcp.bom.version>26.87.0</gcp.bom.version>
         <junit.version>5.12.2</junit.version>
         <assertj.version>3.27.3</assertj.version>
         <surefire.version>3.5.5</surefire.version>
@@ -36,6 +35,10 @@
 
     <dependencies>
         <!-- GCP Client Libraries -->
+        <dependency>
+            <groupId>com.google.cloud</groupId>
+            <artifactId>google-cloud-compute</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-pubsub</artifactId>

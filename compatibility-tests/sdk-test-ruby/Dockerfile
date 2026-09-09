@@ -1,4 +1,5 @@
-FROM ruby:3.4.5
+ARG RUBY_BUILD_IMAGE=ruby:3.4.5
+FROM ${RUBY_BUILD_IMAGE}
 WORKDIR /app
 COPY Gemfile Gemfile.lock ./
 RUN bundle config set frozen true && bundle install

@@ -1,0 +1,91 @@
+name: Cloud SDK contracts
+
+on:
+  push:
+    branches: ['codex/vagon-integration']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-contracts:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2
+        with:
+          java-version: '25'
+          distribution: mandrel
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: JVM regression suite
+        run: mvn -B -ntp test
+      - name: Preserve JVM results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-regression
+          path: target/surefire-reports/*.xml
+      - name: Native image check
+        run: |
+          mvn -B -ntp package -Dnative -DskipTests -Dquarkus.native.additional-build-args-append=-Ob
+          mkdir -p native/arm64 evidence
+          cp target/*-runner native/arm64/application
+          cp target/*.so native/arm64/ 2>/dev/null || true
+          docker build -f docker/Dockerfile.native-package --build-arg TARGETARCH=arm64 --label org.opencontainers.image.revision="$GITHUB_SHA" -t floci-contract-native .
+          docker image inspect floci-contract-native --format '{{.Id}}' > evidence/native-image.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+          sha256sum native/arm64/application > evidence/native-binary.txt
+      - name: Prepare isolated SDK clients
+        run: |
+          docker build --build-arg RUBY_BUILD_IMAGE=ruby:3.4.5@sha256:73e085e58f9496502b0463a787b497b961d946bc1db43c6782c0c3c95281e432 -t floci-contract-ruby compatibility-tests/sdk-test-ruby
+          mvn -B -ntp -f compatibility-tests/sdk-test-java/pom.xml -DskipTests test
+          docker pull maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753
+          docker network create --internal contracts
+          docker run -d --name floci-gcp --network contracts -p 127.0.0.1:4588:4588 \
+            -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 -e FLOCI_GCP_STORAGE_MODE=persistent \
+            -e FLOCI_GCP_SERVICES_KAFKA_MOCK=true -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true \
+            -e FLOCI_GCP_SERVICES_CLOUDSQL_MOCK=true -e FLOCI_GCP_SERVICES_GKE_MOCK=true \
+            "$(cat evidence/native-image.txt)"
+          timeout 60 bash -c 'until curl -sf http://localhost:4588/health; do sleep 1; done'
+      - name: Java and Ruby native SDK contracts with restart
+        run: |
+          ruby_contract() {
+            mkdir -p "evidence/ruby-$1"
+            docker run --rm --network contracts --cap-drop=ALL --security-opt=no-new-privileges:true \
+              -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 -e FLOCI_GCP_GRPC_ENDPOINT=floci-gcp:4588 \
+              -e FLOCI_GCP_RESTART_PHASE="$1" -e FLOCI_GCP_RESTART_STATE=/state/ruby-restart.json \
+              -v "$PWD/evidence:/state" -v "$PWD/evidence/ruby-$1:/results" --entrypoint bundle \
+              floci-contract-ruby exec ruby "test/$2.rb"
+          }
+          java_contract() {
+            mkdir -p "evidence/java-$1"
+            docker run --rm --network contracts --cap-drop=ALL --security-opt=no-new-privileges:true \
+              -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 -e FLOCI_GCP_GRPC_ENDPOINT=floci-gcp:4588 \
+              -e FLOCI_GCP_RESTART_PHASE="$1" -e FLOCI_GCP_RESTART_STATE=/state/java-restart.properties \
+              -v "$PWD/evidence:/state" -v "$PWD/compatibility-tests/sdk-test-java:/workspace" -v "$HOME/.m2:/root/.m2:ro" -w /workspace \
+              maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753 \
+              mvn -o -B -ntp -Dtest="$2" -Dsurefire.reportsDirectory="/state/java-$1" test
+          }
+          ruby_contract all all
+          java_contract roundtrip 'ComputeContractTest,ComputeRoutingContractTest,GcsXmlMultipartContractTest,NetworkUsageContractTest,StorageContractTest,GcsDownscopedTokenTest,GcsResumableUploadTest,GcsSignedUrlTest'
+          ruby_contract seed restart_probe
+          java_contract seed RestartContractTest
+          docker restart floci-gcp
+          timeout 60 bash -c 'until curl -sf http://localhost:4588/health; do sleep 1; done'
+          ruby_contract verify restart_probe
+          java_contract verify RestartContractTest
+      - name: Teardown and logs
+        if: always()
+        run: |
+          mkdir -p evidence
+          docker logs floci-gcp > evidence/emulator.log 2>&1 || true
+          docker rm -fv floci-gcp || true
+          docker network rm contracts || true
+      - name: Contract evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-sdk-contracts
+          path: evidence/

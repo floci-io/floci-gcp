@@ -144,6 +144,62 @@ ln -s AGENTS.md COPILOT.md
 
 Always implement the **real GCP wire protocol**. Never invent custom endpoints. The GCP SDK must work against floci-gcp without modification.
 
+## Protocol Compatibility and Upstream Evidence
+
+Changes to request parsing, response shapes, status codes, error details, headers, persistence semantics, or supported operations must be based on evidence for the exact API version and transport being changed.
+
+Before implementing or reviewing protocol behavior:
+
+1. Identify the service, API version, operation, and transport.
+2. Consult the canonical source for that transport.
+3. Check the official SDK source when the client request or response handling matters.
+4. When the documentation does not settle observable behavior, verify it against the live GCP service using the same API version and transport, when access is available.
+5. Record the documentation links or live-service observation in the pull request description.
+6. If upstream behavior could not be verified, state that limitation. Do not claim exact compatibility or invent exact error details.
+
+Use these sources:
+
+| Transport or question | Canonical source |
+|---|---|
+| gRPC request and response shapes | Published proto definitions in [`googleapis/googleapis`](https://github.com/googleapis/googleapis), followed by the official RPC reference |
+| REST JSON behavior | The service's official REST method and error references, plus its [Google API discovery document](https://discovery.googleapis.com/discovery/v1/apis) |
+| Cloud Storage REST JSON | The [Cloud Storage JSON API reference](https://docs.cloud.google.com/storage/docs/json_api), including its [status and error codes](https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes) and [v1 discovery document](https://storage.googleapis.com/discovery/v1/apis/storage/v1/rest) |
+| Cloud Storage REST XML | The [Cloud Storage XML API reference](https://docs.cloud.google.com/storage/docs/xml-api/overview), including its [status and error codes](https://docs.cloud.google.com/storage/docs/xml-api/reference-status) |
+| Client wire behavior | The relevant official SDK's upstream source repository, not generated Javadocs or a locally installed JAR |
+| General Google API conventions | The applicable [Google API Improvement Proposal](https://google.aip.dev/), such as [AIP-193](https://google.aip.dev/193) for errors |
+| Undocumented observable behavior | A response captured from the live GCP service using the exact API version and transport |
+
+Do not transfer behavior between gRPC, REST JSON, and REST XML without direct evidence. Similarly named operations can use different routes, status codes, error reasons, error codes, messages, headers, and response bodies. Search results, snippets, third-party articles, and emulator behavior can help locate evidence, but they are not protocol authorities.
+
+For exact error compatibility, verify each applicable field independently:
+
+- HTTP or gRPC status
+- REST JSON `error.errors[].reason`
+- REST XML `<Code>`
+- Message text
+- Response headers and body shape
+
+Use disposable resources for live-service verification and do not modify unrelated cloud resources.
+
+## Concurrency and Storage Invariants
+
+Changes to resource lifecycles, parent deletion, object publication, locking, or storage-key formats must be designed and tested around an explicit invariant.
+
+Before implementing or reviewing such a change:
+
+1. State the invariant. For parent deletion, define which child states block deletion and which states must be purged.
+2. Inventory every operation that can create, publish, move, restore, version, soft-delete, hard-delete, or otherwise change the protected state.
+3. Serialize the invariant check and mutation with every competing state transition. Fix the invariant boundary, not only the call path that exposed the bug.
+4. Define and preserve a global lock order. Confirm that no path acquires the same resource locks in the opposite order.
+5. Keep authoritative state checks in the service operation. Controllers must not perform unlocked prechecks that can produce timing-dependent results or statuses.
+6. Treat user-controlled identifiers as opaque. A storage-key encoding or delimiter scheme must be demonstrably unambiguous for every valid identifier, including identifiers containing the delimiter.
+7. For storage-key format changes, account for legacy data, collisions, partial migration, retry safety, and every supported persistent backend.
+8. Add deterministic interleaving tests for each competing operation. Do not rely on sleeps or probabilistic timing.
+9. Cover both outcomes: the child mutation wins and parent deletion fails consistently, or parent deletion wins and the child mutation cannot publish orphaned state.
+10. Verify that protocol errors and persisted state remain consistent regardless of the interleaving.
+
+Document the invariant, competing mutation paths, lock order, and test coverage in the pull request. If a competing path is intentionally deferred, identify it explicitly and explain why the invariant remains safe without it.
+
 ## Pull Request Guidelines
 
 1. Branch off `main`: `git checkout -b feature/my-feature`

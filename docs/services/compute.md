@@ -56,3 +56,13 @@ attachment enables autoDelete. Disk sizes and source sizes are validated. Only
 supported Hyperdisk types accept provisioned IOPS/throughput; unsupported knobs
 fail. Performance limits are basic API checks, not complete machine/disk quota
 or size-ratio emulation. Multi-writer disks and regional disks are unsupported.
+
+## Images and snapshots
+
+Global images support sources from disks, images and snapshots, family lookup,
+labels, inventory and deletion. Global standard snapshots support disk sources,
+labels, inventory and deletion. Source identity and size survive source deletion;
+restored disks cannot be smaller than their source. Images do not acquire invented
+backing snapshots. Copying a snapshot means restoring a disk and snapshotting it.
+Guest disk bytes, regional/instant snapshots and public OS image catalogs are not
+emulated.

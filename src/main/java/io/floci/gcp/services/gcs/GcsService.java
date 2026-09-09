@@ -355,7 +355,7 @@ public class GcsService {
         meta.setBucket(bucket);
         meta.setGeneration(String.valueOf(generation));
         meta.setSize(String.valueOf(data.length));
-        meta.setContentType(contentType != null ? contentType : "application/octet-stream");
+        meta.setContentType(contentType != null && !contentType.isBlank() ? contentType : "application/octet-stream");
         meta.setCustomerEncryption(customerEncryption.metadata());
         if (userMetadata != null && !userMetadata.isEmpty()) {
             meta.setMetadata(new LinkedHashMap<>(userMetadata));

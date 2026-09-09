@@ -33,7 +33,9 @@ jobs:
           mkdir -p native/arm64 evidence
           cp target/*-runner native/arm64/application
           cp target/*.so native/arm64/ 2>/dev/null || true
-          docker build -f docker/Dockerfile.native-package --build-arg TARGETARCH=arm64 --label org.opencontainers.image.revision="$GITHUB_SHA" -t floci-contract-native .
+          docker pull registry.access.redhat.com/ubi9-micro:9.7
+          docker image inspect registry.access.redhat.com/ubi9-micro:9.7 --format '{{index .RepoDigests 0}}' > evidence/native-runtime.txt
+          docker build -f docker/Dockerfile.native-package --build-arg TARGETARCH=arm64 --build-arg NATIVE_RUNTIME_IMAGE="$(cat evidence/native-runtime.txt)" --label org.opencontainers.image.revision="$GITHUB_SHA" -t floci-contract-native .
           docker image inspect floci-contract-native --format '{{.Id}}' > evidence/native-image.txt
           git rev-parse HEAD > evidence/source-sha.txt
           sha256sum native/arm64/application > evidence/native-binary.txt

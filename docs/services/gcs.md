@@ -380,3 +380,9 @@ across those stores is not guaranteed.
 Authentication retains the existing emulator credential acceptance and limited
 CAB checks. Signed URL expiry checks do not prove cryptographic signature
 enforcement. The SDK suite uses only synthetic credentials and fixture signing keys.
+
+Multipart object metadata is finalized before storage publication and Pub/Sub or
+Eventarc finalization events. The event and stored generation agree on the opaque
+ETag, CRC32C, content metadata and absence of MD5. Ordinary uploads continue to
+include their MD5. Object publication and multipart-session removal still use
+separate checkpoints; crash-atomic multipart completion is not guaranteed.

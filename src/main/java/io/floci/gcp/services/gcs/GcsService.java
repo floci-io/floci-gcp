@@ -316,13 +316,15 @@ public class GcsService {
         synchronized (objectLock(bucket, objectName)) {
             checkPreconditions(bucket, objectName, preconditions);
             return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                    userMetadata, metadataTemplate, baseUrl);
+                    userMetadata, metadataTemplate, baseUrl, ObjectWriteMode.ORDINARY);
         }
     }
 
+    private enum ObjectWriteMode { ORDINARY, XML_MULTIPART }
+
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
-            GcsObjectMeta metadataTemplate, String baseUrl) {
+            GcsObjectMeta metadataTemplate, String baseUrl, ObjectWriteMode mode) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -375,9 +377,13 @@ public class GcsService {
         meta.setIsLatest(true);
         String crc32c = computeCrc32c(data);
         meta.setCrc32c(crc32c);
-        String md5 = computeMd5(data);
-        meta.setMd5Hash(md5);
-        meta.setEtag(md5);
+        if (mode == ObjectWriteMode.XML_MULTIPART) {
+            meta.setEtag(Base64.getEncoder().encodeToString(meta.getGeneration().getBytes(StandardCharsets.UTF_8)));
+        } else {
+            String md5 = computeMd5(data);
+            meta.setMd5Hash(md5);
+            meta.setEtag(md5);
+        }
 
         String retentionExpiry = computeRetentionExpiry(bucket, now);
         if (retentionExpiry != null) {
@@ -428,10 +434,9 @@ public class GcsService {
     public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
             byte[] data, Map<String, String> metadata, String baseUrl) {
         synchronized (objectLock(bucket, objectName)) {
-            GcsObjectMeta result = putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), metadata, baseUrl);
-            result.setMd5Hash(null);
-            result.setEtag(Base64.getEncoder().encodeToString(result.getGeneration().getBytes(StandardCharsets.UTF_8)));
-            objectMetaStore.put(objectKey(bucket, objectName), result);
+            checkPreconditions(bucket, objectName, GcsObjectPreconditions.NONE);
+            GcsObjectMeta result = putObjectLocked(bucket, objectName, contentType, data,
+                    GcsCustomerEncryption.none(), metadata, null, baseUrl, ObjectWriteMode.XML_MULTIPART);
             objectDataStore.checkpoint();
             objectMetaStore.checkpoint();
             return result;
@@ -1072,7 +1077,7 @@ public class GcsService {
             GcsObjectMeta destinationTemplate, String baseUrl) {
         var srcMeta = src.meta();
         var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl);
+                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl, ObjectWriteMode.ORDINARY);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }

@@ -8,7 +8,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-class ComputeRoutingIntegrationTest extends ComputeIntegrationTest {
+class ComputeRoutingIntegrationTest extends ComputeTestSupport {
     @Test void routingMembershipAndDependencyCleanup() throws Exception {
         String root = root(), zone = "/zones/us-central1-a";
         done(root, post(root + "/global/networks", Map.of("name", "net", "autoCreateSubnetworks", false)));

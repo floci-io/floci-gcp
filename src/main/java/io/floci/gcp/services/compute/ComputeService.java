@@ -69,7 +69,10 @@ public class ComputeService {
                 changed = true;
             }
         }
-        if (changed) { save(project, state); }
+        if (changed) {
+            state.operations.values().removeIf(op -> op.deleted && op.response.path("status").asText().equals("DONE"));
+            save(project, state);
+        }
         return state;
     }
     private void save(String project, ComputeProject state) {
@@ -109,7 +112,7 @@ public class ComputeService {
         Context c = context(project, path, state(project));
         if (c.collection().equals("operations")) {
             if (c.name() != null) { return operation(c).response.deepCopy(); }
-            return page(c, c.state.operations.entrySet().stream().filter(e -> e.getKey().startsWith(c.scope() + "/operations/"))
+            return page(c, c.state.operations.entrySet().stream().filter(e -> !e.getValue().deleted && e.getKey().startsWith(c.scope() + "/operations/"))
                     .map(e -> e.getValue().response).toList(), query);
         }
         if (ComputeCatalog.COLLECTIONS.contains(c.collection())) {
@@ -150,12 +153,14 @@ public class ComputeService {
     public synchronized ObjectNode mutate(String project, String path, String verb, ObjectNode input, Map<String, String> query) {
         Context c = context(project, path, state(project));
         ObjectNode body = input == null ? object() : input.deepCopy();
+        c.query = query;
         if (c.collection().equals("operations")) {
             ComputeOperation op = operation(c);
             if (verb.equals("POST") && "wait".equals(c.action)) { return op.response.deepCopy(); }
             if (verb.equals("DELETE") && c.action == null) {
-                if (!op.response.path("status").asText().equals("DONE")) { throw GcpException.invalidArgument("Operation is not complete"); }
-                c.state.operations.remove(c.key());
+                // Deleting the operation handle does not cancel the resource transition.
+                if (op.response.path("status").asText().equals("DONE")) { c.state.operations.remove(c.key()); }
+                else { op.deleted = true; }
                 save(project, c.state);
                 return object();
             }
@@ -181,7 +186,7 @@ public class ComputeService {
             String prior = c.state.requests.get(requestKey);
             if (prior != null) {
                 ComputeOperation op = c.state.operations.get(prior);
-                if (op != null) { return op.response.deepCopy(); }
+                if (op != null && !op.deleted) { return op.response.deepCopy(); }
                 throw GcpException.alreadyExists("The request has already completed and its operation was deleted");
             }
         }
@@ -190,6 +195,7 @@ public class ComputeService {
         if (verb.equals("POST") && c.name() == null) {
             name(required(body, "name"));
             c = context(project, path + "/" + body.path("name").asText(), c.state);
+            c.query = query;
             if (c.state.resources.containsKey(c.key())) { throw GcpException.alreadyExists("Resource already exists: " + c.key()); }
             resource = body;
             resource.put("id", Long.toString(++c.state.sequence)).put("kind", "compute#" + singular(c.collection()))
@@ -204,6 +210,10 @@ public class ComputeService {
             operationType = "insert";
         } else {
             resource = c.require(c.key());
+            // Numeric IDs resolve to the same canonical key as resource names.
+            c = context(project, localPath(project, resource.path("selfLink").asText())
+                    + (c.action == null ? "" : "/" + c.action), c.state);
+            c.query = query;
             c.ready(resource);
             if (verb.equals("DELETE") && c.action == null) {
                 handler.delete(c, resource);
@@ -243,7 +253,7 @@ public class ComputeService {
     }
     private ComputeOperation operation(Context c) {
         ComputeOperation op = c.state.operations.get(c.key());
-        if (op == null) { throw GcpException.notFound("Operation not found: " + c.key()); }
+        if (op == null || op.deleted) { throw GcpException.notFound("Operation not found: " + c.key()); }
         return op;
     }
     public ObjectNode page(Context c, List<ObjectNode> input, Map<String, String> query) {
@@ -349,6 +359,7 @@ public class ComputeService {
         private final String project, scope, collection, name, action;
         public final ComputeProject state;
         private Map<String, String> finalStates = new LinkedHashMap<>();
+        private Map<String, String> query = Map.of();
         Context(String project, String scope, String collection, String name, String action, ComputeProject state) {
             this.project = project; this.scope = scope; this.collection = collection; this.name = name; this.action = action; this.state = state;
         }
@@ -356,6 +367,7 @@ public class ComputeService {
         public String scope() { return scope; }
         public String collection() { return collection; }
         public String name() { return name; }
+        public String option(String name, String fallback) { return query.getOrDefault(name, fallback); }
         public String key() { return (scope.isEmpty() ? "" : scope + "/") + collection + "/" + name; }
         public ObjectNode object() { return ComputeService.object(); }
         public String link(String path) { return "https://www.googleapis.com/compute/v1/projects/" + project + "/" + path; }

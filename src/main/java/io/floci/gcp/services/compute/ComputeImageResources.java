@@ -25,7 +25,7 @@ public class ComputeImageResources implements ComputeResourceHandler {
         String collection = switch (source) { case "sourceDisk" -> "disks"; case "sourceSnapshot" -> "snapshots"; default -> "images"; };
         ObjectNode original = c.reference(r, source, collection);
         if (c.collection().equals("images") && source.equals("sourceDisk") && !original.path("users").isEmpty()
-                && !r.path("forceCreate").asBoolean()) { throw GcpException.failedPrecondition("Source disk is in use; forceCreate is required"); }
+                && !c.option("forceCreate", "false").equals("true")) { throw GcpException.failedPrecondition("Source disk is in use; forceCreate is required"); }
         r.put(source + "Id", original.path("id").asText());
         r.put("diskSizeGb", original.path(source.equals("sourceDisk") ? "sizeGb" : "diskSizeGb").asText());
         for (String field : List.of("licenses", "guestOsFeatures", "architecture")) {
@@ -35,7 +35,12 @@ public class ComputeImageResources implements ComputeResourceHandler {
             if (!Set.of("us", "eu", "asia").contains(location.asText())) { c.require("regions/" + location.asText()); }
         }
         if (r.has("family")) { name(required(r, "family")); }
-        if (c.collection().equals("snapshots")) { r.put("snapshotType", "STANDARD"); }
+        if (c.collection().equals("snapshots")) {
+            if (!r.path("snapshotType").asText("STANDARD").equals("STANDARD")) {
+                throw GcpException.unimplemented("Only standard snapshots are supported");
+            }
+            r.put("snapshotType", "STANDARD");
+        }
         r.remove("forceCreate");
         c.transition(r, c.collection().equals("images") ? "PENDING" : "CREATING", "READY");
     }

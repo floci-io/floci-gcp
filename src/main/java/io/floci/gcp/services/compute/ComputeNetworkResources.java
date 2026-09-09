@@ -82,8 +82,9 @@ public class ComputeNetworkResources implements ComputeResourceHandler {
         String direction = r.path("direction").asText("INGRESS");
         if (!Set.of("INGRESS", "EGRESS").contains(direction)) { throw GcpException.invalidArgument("Invalid firewall direction"); }
         r.put("direction", direction);
-        if (r.has("allowed") == r.has("denied")) { throw GcpException.invalidArgument("Specify exactly one of allowed or denied"); }
-        JsonNode rules = r.has("allowed") ? r.get("allowed") : r.get("denied");
+        boolean allowed = !r.path("allowed").isEmpty(), denied = !r.path("denied").isEmpty();
+        if (allowed == denied) { throw GcpException.invalidArgument("Specify exactly one of allowed or denied"); }
+        JsonNode rules = allowed ? r.get("allowed") : r.get("denied");
         if (!rules.isArray() || rules.isEmpty()) { throw GcpException.invalidArgument("Empty firewall rules"); }
         for (JsonNode rule : rules) {
             String protocol = rule.path("IPProtocol").asText();

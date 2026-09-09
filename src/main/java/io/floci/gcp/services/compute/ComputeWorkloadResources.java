@@ -66,10 +66,13 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         r.put("lastStartTimestamp", Instant.now().toString());
     }
     private void machine(ComputeService.Context c, ObjectNode r) {
-        ObjectNode machine = c.reference(r, "machineType", "machineTypes");
+        c.reference(r, "machineType", "machineTypes");
         if (!r.path("machineType").asText().startsWith(c.link(c.scope() + "/machineTypes/"))) { throw GcpException.invalidArgument("Machine type must be in VM zone"); }
         for (JsonNode accelerator : r.path("guestAccelerators")) {
             c.reference((ObjectNode) accelerator, "acceleratorType", "acceleratorTypes");
+            if (!accelerator.path("acceleratorType").asText().startsWith(c.link(c.scope() + "/acceleratorTypes/"))) {
+                throw GcpException.invalidArgument("Accelerator type must be in VM zone");
+            }
             integer(accelerator.path("acceleratorCount").asText(), 1, 4, "acceleratorCount");
         }
         if (!r.path("guestAccelerators").isEmpty() && !r.path("scheduling").path("onHostMaintenance").asText().equals("TERMINATE")) {
@@ -115,6 +118,9 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
     }
     public void update(ComputeService.Context c, ObjectNode r, ObjectNode body, String verb) {
         if (!c.collection().equals("disks")) { ComputeResourceHandler.super.update(c, r, body, verb); return; }
+        if (body.has("type") && !c.path(body.path("type").asText()).equals(c.path(r.path("type").asText()))) {
+            throw GcpException.unimplemented("Disk type changes are not implemented");
+        }
         for (String field : List.of("sizeGb", "provisionedIops", "provisionedThroughput")) {
             if (body.has(field)) {
                 if (field.equals("sizeGb") && body.path(field).asLong() < r.path(field).asLong()) { throw GcpException.invalidArgument("Disk shrinking is not supported"); }
@@ -178,7 +184,6 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
             }
             case "deleteAccessConfig" -> {
                 ObjectNode nic = nic(r, query.get("networkInterface"));
-                JsonNode found = nic.path("accessConfigs").findValue("name");
                 boolean matches = false;
                 for (JsonNode access : nic.path("accessConfigs")) {
                     if (access.path("name").asText().equals(query.get("accessConfig"))) { release(c, access.path("natIP").asText(), r.path("selfLink").asText()); matches = true; }
@@ -221,7 +226,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
     }
     private void detach(ComputeService.Context c, ObjectNode instance, ObjectNode attachment) {
         ObjectNode disk = c.require(attachment.path("source").asText());
-        var users = disk.putArray("users");
+        disk.putArray("users");
     }
     private static void requireState(ObjectNode r, String status) {
         if (!r.path("status").asText().equals(status)) { throw GcpException.failedPrecondition("Instance must be " + status); }

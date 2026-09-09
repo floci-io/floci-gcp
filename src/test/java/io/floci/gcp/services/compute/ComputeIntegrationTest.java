@@ -9,20 +9,16 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-class ComputeIntegrationTest {
-    String root() { return "/compute/v1/projects/compute-" + UUID.randomUUID(); }
-    Response post(String path, Object body) { return given().contentType("application/json").body(body).post(path); }
-    void done(String root, Response response) throws Exception {
-        response.then().statusCode(200);
-        String link = response.jsonPath().getString("selfLink");
-        assertNotNull(link);
-        String operation = link.substring(link.indexOf("/compute/v1/"));
-        for (int i = 0; i < 100; i++) {
-            var result = given().get(operation).then().statusCode(200).extract().response();
-            if ("DONE".equals(result.jsonPath().getString("status"))) { return; }
-            Thread.sleep(10);
-        }
-        fail("Compute operation did not finish");
+class ComputeIntegrationTest extends ComputeTestSupport {
+    @Test void deletingAnOperationDoesNotCancelItsResource() throws Exception {
+        String root = root();
+        var created = post(root + "/zones/us-central1-a/disks", Map.of("name", "retained", "sizeGb", "20"));
+        created.then().statusCode(200);
+        String op = created.jsonPath().getString("selfLink").replaceFirst("https://www.googleapis.com", "");
+        given().delete(op).then().statusCode(200);
+        given().get(op).then().statusCode(404);
+        Thread.sleep(100);
+        assertEquals("READY", given().get(root + "/zones/us-central1-a/disks/retained").jsonPath().getString("status"));
     }
     @Test void networksOperationsAndIsolation() throws Exception {
         String root = root();

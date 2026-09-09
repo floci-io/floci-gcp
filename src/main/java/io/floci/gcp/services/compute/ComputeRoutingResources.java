@@ -74,7 +74,7 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
                             if (!path.asText().startsWith("/") || path.asText().contains("?")) { throw GcpException.invalidArgument("Invalid path rule"); }
                         }
                     }
-                    if (matcher.has("routeRules")) { throw GcpException.unimplemented("Advanced routeRules are not implemented; use pathRules"); }
+                    if (!matcher.path("routeRules").isEmpty()) { throw GcpException.unimplemented("Advanced routeRules are not implemented; use pathRules"); }
                 }
                 for (JsonNode host : r.path("hostRules")) {
                     if (!matchers.contains(host.path("pathMatcher").asText())) { throw GcpException.invalidArgument("Host rule references a missing path matcher"); }

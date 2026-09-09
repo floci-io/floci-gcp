@@ -7,7 +7,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-class ComputeImageIntegrationTest extends ComputeIntegrationTest {
+class ComputeImageIntegrationTest extends ComputeTestSupport {
     @Test void imageSnapshotAndDiskRestoration() throws Exception {
         String root = root();
         done(root, post(root + "/zones/us-central1-a/disks", Map.of("name", "source", "sizeGb", "30")));

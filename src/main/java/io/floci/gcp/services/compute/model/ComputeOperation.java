@@ -10,5 +10,6 @@ public class ComputeOperation {
     public ObjectNode response;
     public long startedAt;
     public long readyAt;
+    public boolean deleted;
     public Map<String, String> finalStates = new LinkedHashMap<>();
 }

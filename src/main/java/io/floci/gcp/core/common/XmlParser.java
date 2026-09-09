@@ -31,6 +31,46 @@ public final class XmlParser {
 
     private XmlParser() {}
 
+    /** Strict repeated records for APIs where accepting a partial XML document is unsafe. */
+    public static List<Map<String, String>> parseRecords(String xml, String root, String record) {
+        List<Map<String, String>> result = new ArrayList<>();
+        XMLStreamReader reader = null;
+        try {
+            synchronized (FACTORY) { reader = FACTORY.createXMLStreamReader(new StringReader(xml == null ? "" : xml)); }
+            int depth = 0;
+            Map<String, String> current = null;
+            boolean seenRoot = false;
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.DTD || event == XMLStreamConstants.ENTITY_REFERENCE) { throw new XMLStreamException("Entities are not permitted"); }
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    depth++;
+                    String name = reader.getLocalName();
+                    if (depth == 1) {
+                        if (seenRoot || !name.equals(root)) { throw new XMLStreamException("Unexpected root"); }
+                        seenRoot = true;
+                    } else if (depth == 2) {
+                        if (!name.equals(record)) { throw new XMLStreamException("Unexpected record"); }
+                        current = new LinkedHashMap<>();
+                    } else if (depth == 3 && current != null) {
+                        String value = reader.getElementText().strip();
+                        if (current.put(name, value) != null) { throw new XMLStreamException("Duplicate field"); }
+                        depth--;
+                    } else { throw new XMLStreamException("Unexpected nested element"); }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (depth == 2) { result.add(current); current = null; }
+                    depth--;
+                }
+            }
+            if (!seenRoot || depth != 0) { throw new XMLStreamException("Incomplete document"); }
+            return result;
+        } catch (XMLStreamException e) {
+            throw GcpException.invalidArgument("Malformed XML request").withReason("MalformedXML");
+        } finally {
+            if (reader != null) { try { reader.close(); } catch (XMLStreamException ignored) {} }
+        }
+    }
+
     private static String readLeafText(XMLStreamReader r) throws XMLStreamException {
         StringBuilder sb = new StringBuilder();
         while (r.hasNext()) {

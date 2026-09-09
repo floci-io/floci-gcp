@@ -425,6 +425,19 @@ public class GcsService {
         return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), baseUrl);
     }
 
+    public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
+            byte[] data, Map<String, String> metadata, String baseUrl) {
+        synchronized (objectLock(bucket, objectName)) {
+            GcsObjectMeta result = putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), metadata, baseUrl);
+            result.setMd5Hash(null);
+            result.setEtag(Base64.getEncoder().encodeToString(result.getGeneration().getBytes(StandardCharsets.UTF_8)));
+            objectMetaStore.put(objectKey(bucket, objectName), result);
+            objectDataStore.checkpoint();
+            objectMetaStore.checkpoint();
+            return result;
+        }
+    }
+
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
         LOG.debugf("getObjectMeta bucket=%s name=%s", bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)

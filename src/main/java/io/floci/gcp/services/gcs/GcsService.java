@@ -62,6 +62,7 @@ public class GcsService {
     private static final Logger LOG = Logger.getLogger(GcsService.class);
     private static final int OBJECT_LOCK_COUNT = 256;
     private static final int COMPLETED_RESUMABLE_UPLOAD_HISTORY = 1024;
+    private static final int UNIFORM_BUCKET_LEVEL_ACCESS_LOCK_DAYS = 90;
 
     private final StorageBackend<String, GcsBucket> bucketStore;
     private final StorageBackend<String, GcsObjectMeta> objectMetaStore;
@@ -218,6 +219,10 @@ public class GcsService {
             if (body.containsKey("softDeletePolicy")) {
                 bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
             }
+            if (body.containsKey("iamConfiguration")) {
+                bucket.setIamConfiguration(updateIamConfiguration(
+                        null, (Map<String, Object>) body.get("iamConfiguration"), true));
+            }
             if (body.containsKey("defaultEventBasedHold")) {
                 bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
             }
@@ -234,8 +239,24 @@ public class GcsService {
 
     @SuppressWarnings("unchecked")
     public GcsBucket updateBucket(String name, Map<String, Object> patch) {
+        return applyBucketUpdate(name, patch, false);
+    }
+
+    GcsBucket updateBucketWithResolvedFields(String name, Map<String, Object> fields) {
+        return applyBucketUpdate(name, fields, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private GcsBucket applyBucketUpdate(String name, Map<String, Object> patch,
+            boolean replaceIamConfiguration) {
         LOG.debugf("updateBucket name=%s", name);
         GcsBucket bucket = getBucket(name);
+        Map<String, Object> updatedIamConfiguration = patch.containsKey("iamConfiguration")
+                ? updateIamConfiguration(
+                        bucket.getIamConfiguration(),
+                        (Map<String, Object>) patch.get("iamConfiguration"),
+                        replaceIamConfiguration)
+                : null;
         if (patch.containsKey("labels")) {
             bucket.setLabels((Map<String, String>) patch.get("labels"));
         }
@@ -255,6 +276,9 @@ public class GcsService {
         if (patch.containsKey("softDeletePolicy")) {
             bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
         }
+        if (patch.containsKey("iamConfiguration")) {
+            bucket.setIamConfiguration(updatedIamConfiguration);
+        }
         if (patch.containsKey("storageClass")) {
             bucket.setStorageClass((String) patch.get("storageClass"));
         }
@@ -266,6 +290,97 @@ public class GcsService {
         bucket.setUpdated(nowTimestamp());
         bucketStore.put(name, bucket);
         return bucket;
+    }
+
+    private Map<String, Object> updateIamConfiguration(Map<String, Object> current,
+            Map<String, Object> requested, boolean replace) {
+        if (requested == null) {
+            validateUniformBucketLevelAccessChange(current, null);
+            return null;
+        }
+        Map<String, Object> merged = replace
+                ? new LinkedHashMap<>()
+                : mutableNestedMap(current);
+        Map<String, Object> sanitized = mutableNestedMap(requested);
+        if (sanitized.get("uniformBucketLevelAccess") instanceof Map<?, ?> requestedAccess) {
+            Map<String, Object> writableAccess = mutableNestedMap(requestedAccess);
+            // GCS generates lockedTime when uniform access is enabled. Client values are output-only.
+            writableAccess.remove("lockedTime");
+            sanitized.put("uniformBucketLevelAccess", writableAccess);
+        }
+        mergeNestedMap(merged, sanitized);
+        normalizeUniformBucketLevelAccess(current, merged);
+        return merged;
+    }
+
+    private void normalizeUniformBucketLevelAccess(Map<String, Object> current,
+            Map<String, Object> updated) {
+        validateUniformBucketLevelAccessChange(current, updated);
+        if (!(updated.get("uniformBucketLevelAccess") instanceof Map<?, ?> access)) {
+            return;
+        }
+        Map<String, Object> normalized = mutableNestedMap(access);
+        boolean enabled = Boolean.TRUE.equals(normalized.get("enabled"));
+        boolean wasEnabled = current != null
+                && current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess
+                && Boolean.TRUE.equals(currentAccess.get("enabled"));
+        if (!enabled) {
+            normalized.remove("lockedTime");
+        } else if (wasEnabled
+                && current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess
+                && currentAccess.get("lockedTime") instanceof String lockedTime) {
+            normalized.put("lockedTime", lockedTime);
+        } else {
+            normalized.put("lockedTime", Instant.parse(nowTimestamp())
+                    .plus(UNIFORM_BUCKET_LEVEL_ACCESS_LOCK_DAYS, ChronoUnit.DAYS)
+                    .toString());
+        }
+        updated.put("uniformBucketLevelAccess", normalized);
+    }
+
+    private void validateUniformBucketLevelAccessChange(Map<String, Object> current,
+            Map<String, Object> updated) {
+        if (current == null
+                || !(current.get("uniformBucketLevelAccess") instanceof Map<?, ?> currentAccess)
+                || !Boolean.TRUE.equals(currentAccess.get("enabled"))
+                || !(currentAccess.get("lockedTime") instanceof String lockedTime)) {
+            return;
+        }
+        boolean remainsEnabled = updated != null
+                && updated.get("uniformBucketLevelAccess") instanceof Map<?, ?> updatedAccess
+                && Boolean.TRUE.equals(updatedAccess.get("enabled"));
+        if (!remainsEnabled && !Instant.parse(lockedTime).isAfter(Instant.parse(nowTimestamp()))) {
+            throw GcpException.invalidArgument(
+                    "Uniform bucket-level access cannot be disabled after its locked time.");
+        }
+    }
+
+    private static void mergeNestedMap(Map<String, Object> target, Map<String, Object> patch) {
+        for (Map.Entry<String, Object> entry : patch.entrySet()) {
+            if (entry.getValue() == null) {
+                target.remove(entry.getKey());
+            } else if (entry.getValue() instanceof Map<?, ?> nestedPatch
+                    && target.get(entry.getKey()) instanceof Map<?, ?> nestedTarget) {
+                Map<String, Object> merged = mutableNestedMap(nestedTarget);
+                mergeNestedMap(merged, mutableNestedMap(nestedPatch));
+                target.put(entry.getKey(), merged);
+            } else {
+                target.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    private static Map<String, Object> mutableNestedMap(Map<?, ?> source) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        if (source != null) {
+            for (Map.Entry<?, ?> entry : source.entrySet()) {
+                Object value = entry.getValue() instanceof Map<?, ?> nested
+                        ? mutableNestedMap(nested)
+                        : entry.getValue();
+                copy.put(String.valueOf(entry.getKey()), value);
+            }
+        }
+        return copy;
     }
 
     public void deleteBucket(String name) {

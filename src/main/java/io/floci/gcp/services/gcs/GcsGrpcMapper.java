@@ -66,6 +66,24 @@ final class GcsGrpcMapper {
             value.setVersioning(Bucket.Versioning.newBuilder()
                     .setEnabled(Boolean.TRUE.equals(stored.getVersioning().get("enabled"))));
         }
+        if (stored.getIamConfiguration() != null) {
+            Bucket.IamConfig.Builder iamConfig = Bucket.IamConfig.newBuilder();
+            if (stored.getIamConfiguration().get("uniformBucketLevelAccess") instanceof Map<?, ?> access) {
+                Bucket.IamConfig.UniformBucketLevelAccess.Builder uniformAccess =
+                        Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                                .setEnabled(Boolean.TRUE.equals(access.get("enabled")));
+                if (access.get("lockedTime") instanceof String lockedTime) {
+                    timestamp(lockedTime).ifPresent(uniformAccess::setLockTime);
+                }
+                iamConfig.setUniformBucketLevelAccess(uniformAccess);
+            }
+            if (stored.getIamConfiguration().get("publicAccessPrevention") instanceof String prevention) {
+                iamConfig.setPublicAccessPrevention(prevention);
+            }
+            if (iamConfig.hasUniformBucketLevelAccess() || !iamConfig.getPublicAccessPrevention().isBlank()) {
+                value.setIamConfig(iamConfig);
+            }
+        }
         return value.build();
     }
 
@@ -83,22 +101,37 @@ final class GcsGrpcMapper {
         if (bucket.hasVersioning()) {
             body.put("versioning", Map.of("enabled", bucket.getVersioning().getEnabled()));
         }
+        iamConfiguration(bucket).ifPresent(iamConfiguration -> body.put("iamConfiguration", iamConfiguration));
         body.put("defaultEventBasedHold", bucket.getDefaultEventBasedHold());
         return body;
     }
 
-    static Map<String, java.lang.Object> bucketUpdateFields(Bucket bucket,
+    static Map<String, java.lang.Object> bucketUpdateFields(GcsBucket current, Bucket bucket,
             java.util.List<String> paths) {
-        Map<String, java.lang.Object> all = bucketCreateFields(bucket);
         if (paths.contains("*")) {
+            Map<String, java.lang.Object> all = bucketCreateFields(bucket);
+            all.putIfAbsent("iamConfiguration", Map.of());
             return all;
         }
         Map<String, java.lang.Object> patch = new LinkedHashMap<>();
+        boolean mergeIamConfigurationMessage = false;
+        boolean mergeUniformBucketLevelAccessMessage = false;
+        boolean updateUniformBucketLevelAccessEnabled = false;
+        boolean updateUniformBucketLevelAccessLockTime = false;
+        boolean updatePublicAccessPrevention = false;
         for (String path : paths) {
             switch (path) {
                 case "labels" -> patch.put("labels", new LinkedHashMap<>(bucket.getLabelsMap()));
                 case "versioning", "versioning.enabled" ->
                         patch.put("versioning", Map.of("enabled", bucket.getVersioning().getEnabled()));
+                case "iam_config" -> mergeIamConfigurationMessage = true;
+                case "iam_config.uniform_bucket_level_access" ->
+                        mergeUniformBucketLevelAccessMessage = true;
+                case "iam_config.uniform_bucket_level_access.enabled" ->
+                        updateUniformBucketLevelAccessEnabled = true;
+                case "iam_config.uniform_bucket_level_access.lock_time" ->
+                        updateUniformBucketLevelAccessLockTime = true;
+                case "iam_config.public_access_prevention" -> updatePublicAccessPrevention = true;
                 case "storage_class" -> patch.put("storageClass", bucket.getStorageClass());
                 case "default_event_based_hold" ->
                         patch.put("defaultEventBasedHold", bucket.getDefaultEventBasedHold());
@@ -111,7 +144,110 @@ final class GcsGrpcMapper {
                 }
             }
         }
+        if (mergeIamConfigurationMessage || mergeUniformBucketLevelAccessMessage
+                || updateUniformBucketLevelAccessEnabled || updateUniformBucketLevelAccessLockTime
+                || updatePublicAccessPrevention) {
+            patch.put("iamConfiguration", mergeIamConfiguration(
+                    current.getIamConfiguration(), bucket,
+                    mergeIamConfigurationMessage, mergeUniformBucketLevelAccessMessage,
+                    updateUniformBucketLevelAccessEnabled, updateUniformBucketLevelAccessLockTime,
+                    updatePublicAccessPrevention));
+        }
         return patch;
+    }
+
+    private static Map<String, java.lang.Object> mergeIamConfiguration(
+            Map<String, java.lang.Object> current, Bucket bucket,
+            boolean mergeIamConfigurationMessage, boolean mergeUniformBucketLevelAccessMessage,
+            boolean updateUniformBucketLevelAccessEnabled,
+            boolean updateUniformBucketLevelAccessLockTime,
+            boolean updatePublicAccessPrevention) {
+        Map<String, java.lang.Object> merged = current == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(current);
+        Bucket.IamConfig requested = bucket.getIamConfig();
+        // Protobuf FieldMask update semantics merge a selected message into the
+        // stored message, preserving omitted siblings. A leaf mask can clear one field.
+        if (mergeIamConfigurationMessage) {
+            if (bucket.hasIamConfig()) {
+                if (requested.hasUniformBucketLevelAccess()) {
+                    merged.put("uniformBucketLevelAccess", mergeUniformBucketLevelAccess(
+                            merged.get("uniformBucketLevelAccess"),
+                            requested.getUniformBucketLevelAccess()));
+                }
+                if (!requested.getPublicAccessPrevention().isBlank()) {
+                    merged.put("publicAccessPrevention", requested.getPublicAccessPrevention());
+                }
+            }
+            return merged;
+        }
+
+        if (mergeUniformBucketLevelAccessMessage) {
+            if (requested.hasUniformBucketLevelAccess()) {
+                merged.put("uniformBucketLevelAccess", mergeUniformBucketLevelAccess(
+                        merged.get("uniformBucketLevelAccess"),
+                        requested.getUniformBucketLevelAccess()));
+            }
+        } else if (updateUniformBucketLevelAccessEnabled || updateUniformBucketLevelAccessLockTime) {
+            Map<String, java.lang.Object> uniformAccess = mutableMap(
+                    merged.get("uniformBucketLevelAccess"));
+            if (updateUniformBucketLevelAccessEnabled) {
+                uniformAccess.put("enabled", requested.getUniformBucketLevelAccess().getEnabled());
+            }
+            if (updateUniformBucketLevelAccessLockTime) {
+                if (requested.getUniformBucketLevelAccess().hasLockTime()) {
+                    uniformAccess.put("lockedTime",
+                            instant(requested.getUniformBucketLevelAccess().getLockTime()));
+                } else {
+                    uniformAccess.remove("lockedTime");
+                }
+            }
+            merged.put("uniformBucketLevelAccess", uniformAccess);
+        }
+
+        if (updatePublicAccessPrevention) {
+            if (requested.getPublicAccessPrevention().isBlank()) {
+                merged.remove("publicAccessPrevention");
+            } else {
+                merged.put("publicAccessPrevention", requested.getPublicAccessPrevention());
+            }
+        }
+        return merged;
+    }
+
+    private static Map<String, java.lang.Object> mergeUniformBucketLevelAccess(
+            java.lang.Object current, Bucket.IamConfig.UniformBucketLevelAccess requested) {
+        Map<String, java.lang.Object> merged = mutableMap(current);
+        // Official clients can select the parent IAM field while sending only this
+        // submessage. Its presence makes the plain proto3 false value intentional.
+        merged.put("enabled", requested.getEnabled());
+        return merged;
+    }
+
+    private static Map<String, java.lang.Object> mutableMap(java.lang.Object value) {
+        Map<String, java.lang.Object> copy = new LinkedHashMap<>();
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                copy.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        return copy;
+    }
+
+    private static java.util.Optional<Map<String, java.lang.Object>> iamConfiguration(Bucket bucket) {
+        if (!bucket.hasIamConfig()) {
+            return java.util.Optional.empty();
+        }
+        Map<String, java.lang.Object> iamConfiguration = new LinkedHashMap<>();
+        if (bucket.getIamConfig().hasUniformBucketLevelAccess()) {
+            Map<String, java.lang.Object> uniformAccess = new LinkedHashMap<>();
+            uniformAccess.put("enabled", bucket.getIamConfig().getUniformBucketLevelAccess().getEnabled());
+            iamConfiguration.put("uniformBucketLevelAccess", uniformAccess);
+        }
+        if (!bucket.getIamConfig().getPublicAccessPrevention().isBlank()) {
+            iamConfiguration.put("publicAccessPrevention", bucket.getIamConfig().getPublicAccessPrevention());
+        }
+        return iamConfiguration.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(iamConfiguration);
     }
 
     static com.google.storage.v2.Object toProto(GcsObjectMeta stored) {
@@ -214,6 +350,10 @@ final class GcsGrpcMapper {
         Instant instant = Instant.parse(value);
         return java.util.Optional.of(Timestamp.newBuilder()
                 .setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build());
+    }
+
+    private static String instant(Timestamp timestamp) {
+        return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos()).toString();
     }
 
     private static long parseLong(String value) {

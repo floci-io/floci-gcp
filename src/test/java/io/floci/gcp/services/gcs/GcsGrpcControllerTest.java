@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.storage.v2.BidiWriteObjectRequest;
 import com.google.storage.v2.BidiWriteObjectResponse;
@@ -8,6 +9,7 @@ import com.google.storage.v2.Bucket;
 import com.google.storage.v2.ChecksummedData;
 import com.google.storage.v2.ComposeObjectRequest;
 import com.google.storage.v2.CreateBucketRequest;
+import com.google.storage.v2.DeleteBucketRequest;
 import com.google.storage.v2.GetBucketRequest;
 import com.google.storage.v2.ListBucketsRequest;
 import com.google.storage.v2.ListBucketsResponse;
@@ -35,11 +37,18 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GcsGrpcControllerTest {
@@ -331,6 +340,73 @@ class GcsGrpcControllerTest {
         assertEquals("true", response.single().getMetadataOrThrow("updated"));
     }
 
+    @Test
+    void deleteNonEmptyBucketReturnsFailedPrecondition() {
+        createBucket("non-empty-delete-bucket");
+        service.putObject("non-empty-delete-bucket", "object", "text/plain", new byte[] {1}, BASE_URL);
+
+        RecordingObserver<Empty> response = new RecordingObserver<>();
+        controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                .setName("projects/_/buckets/non-empty-delete-bucket")
+                .build(), response);
+
+        assertEquals(Status.Code.FAILED_PRECONDITION, Status.fromThrowable(response.error).getCode());
+        assertNotNull(service.getBucket("non-empty-delete-bucket"));
+    }
+
+    @Test
+    void deleteBucketReturnsFailedPreconditionWhenUploadWinsRace() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        service = new GcsService(new InMemoryStorage<>(),
+                new BlockingFirstPutStorage<>(metadataWriteStarted, allowMetadataWrite),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        controller = new GcsGrpcController(service, BASE_URL);
+        createBucket("concurrent-delete-bucket");
+
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var upload = executor.submit(() -> service.putObject(
+                    "concurrent-delete-bucket", "object", "text/plain", new byte[]{1}, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            RecordingObserver<Empty> response = new RecordingObserver<>();
+            var deletion = executor.submit(() -> controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                    .setName("projects/_/buckets/concurrent-delete-bucket")
+                    .build(), response));
+            assertThrows(TimeoutException.class,
+                    () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            upload.get(5, TimeUnit.SECONDS);
+            deletion.get(5, TimeUnit.SECONDS);
+
+            assertEquals(Status.Code.FAILED_PRECONDITION,
+                    Status.fromThrowable(response.error).getCode());
+            assertNotNull(service.getBucket("concurrent-delete-bucket"));
+            assertArrayEquals(new byte[]{1}, service.getObjectData("concurrent-delete-bucket", "object"));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWithOnlySoftDeletedObjectsSucceeds() {
+        service.createBucket("soft-deleted-delete-bucket", "test-project", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("soft-deleted-delete-bucket", "object", "text/plain", new byte[] {1}, BASE_URL);
+        service.deleteObject("soft-deleted-delete-bucket", "object");
+
+        RecordingObserver<Empty> response = new RecordingObserver<>();
+        controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                .setName("projects/_/buckets/soft-deleted-delete-bucket")
+                .build(), response);
+
+        assertNull(response.error);
+        assertEquals(1, response.values.size());
+    }
+
     private void createBucket(String name) {
         service.createBucket(name, "test-project", BASE_URL, Map.of());
     }
@@ -354,6 +430,33 @@ class GcsGrpcControllerTest {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         responses.forEach(response -> output.writeBytes(response.getChecksummedData().getContent().toByteArray()));
         return output.toByteArray();
+    }
+
+    private static final class BlockingFirstPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockFirstPut = new AtomicBoolean(true);
+
+        private BlockingFirstPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockFirstPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
+        }
     }
 
     private static final class RecordingObserver<T> implements StreamObserver<T> {

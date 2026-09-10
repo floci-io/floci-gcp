@@ -45,6 +45,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -78,6 +79,7 @@ public class GcsService {
                 }
             });
     private final ConcurrentHashMap<String, GcsStreamingUpload> streamingUploads = new ConcurrentHashMap<>();
+    private final Object[] bucketLocks = createObjectLocks();
     private final Object[] objectLocks = createObjectLocks();
     private final Object[] uploadLocks = createObjectLocks();
     private final AtomicLong generationSequence;
@@ -111,9 +113,10 @@ public class GcsService {
                 new TypeReference<Map<String, GcsBucket>>() {});
         this.objectMetaStore = storageFactory.createGlobal("gcs-objects", "gcs-objects.json",
                 new TypeReference<Map<String, GcsObjectMeta>>() {});
-        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = storageFactory.createGlobal("gcs-object-data", "gcs-object-data.json",
                 new TypeReference<Map<String, byte[]>>() {});
+        migrateLegacyObjectKeys();
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
         this.notificationStore = storageFactory.createGlobal("gcs-notifications", "gcs-notifications.json",
@@ -135,8 +138,9 @@ public class GcsService {
             String defaultProjectId) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
-        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.objectDataStore = objectDataStore;
+        migrateLegacyObjectKeys();
+        this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
         this.notificationStore = new io.floci.gcp.core.storage.InMemoryStorage<>();
@@ -270,11 +274,43 @@ public class GcsService {
 
     public void deleteBucket(String name) {
         LOG.debugf("deleteBucket name=%s", name);
-        if (bucketStore.get(name).isEmpty()) {
-            LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
-            throw GcpException.notFound("Bucket not found: " + name);
+        if (!deleteBucketIfEmpty(name)) {
+            LOG.warnf("deleteBucket failed: bucket not empty name=%s", name);
+            throw GcpException.alreadyExists("The bucket you tried to delete is not empty.")
+                    .withReason("conflict");
         }
-        bucketStore.delete(name);
+    }
+
+    public boolean deleteBucketIfEmpty(String name) {
+        synchronized (bucketLock(name)) {
+            if (bucketStore.get(name).isEmpty()) {
+                LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
+                throw GcpException.notFound("Bucket not found: " + name);
+            }
+            if (hasLiveOrVersionedObjects(name)) {
+                return false;
+            }
+            purgeSoftDeletedObjects(name);
+            bucketStore.delete(name);
+            return true;
+        }
+    }
+
+    /** Soft-deleted objects do not keep a bucket from being deleted. */
+    public boolean hasLiveOrVersionedObjects(String bucket) {
+        String bucketPrefix = bucket + "\0";
+        return objectMetaStore.keys().stream()
+                .anyMatch(key -> key.startsWith(bucketPrefix) && !isSoftDeletedObject(key));
+    }
+
+    private void purgeSoftDeletedObjects(String bucket) {
+        String bucketPrefix = bucket + "\0";
+        objectMetaStore.keys().stream()
+                .filter(key -> key.startsWith(bucketPrefix) && isSoftDeletedObject(key))
+                .forEach(key -> {
+                    objectMetaStore.delete(key);
+                    objectDataStore.delete(key);
+                });
     }
 
     public List<GcsBucket> listBuckets(String projectId) {
@@ -313,10 +349,12 @@ public class GcsService {
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
             GcsObjectMeta metadataTemplate, GcsObjectPreconditions preconditions, String baseUrl) {
-        synchronized (objectLock(bucket, objectName)) {
-            checkPreconditions(bucket, objectName, preconditions);
-            return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                    userMetadata, metadataTemplate, baseUrl);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                checkPreconditions(bucket, objectName, preconditions);
+                return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
+                        userMetadata, metadataTemplate, baseUrl);
+            }
         }
     }
 
@@ -520,9 +558,11 @@ public class GcsService {
     }
 
     public boolean deleteObject(String bucket, String objectName, GcsObjectPreconditions preconditions) {
-        synchronized (objectLock(bucket, objectName)) {
-            checkPreconditions(bucket, objectName, preconditions);
-            return deleteObjectLocked(bucket, objectName);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                checkPreconditions(bucket, objectName, preconditions);
+                return deleteObjectLocked(bucket, objectName);
+            }
         }
     }
 
@@ -583,8 +623,119 @@ public class GcsService {
 
     private static final String SOFT_DELETE_MARKER = "\0softDeleted\0";
 
+    private void migrateLegacyObjectKeys() {
+        List<String> pending = new ArrayList<>();
+        for (String storeKey : objectMetaStore.keys()) {
+            GcsObjectMeta meta = objectMetaStore.get(storeKey).orElse(null);
+            if (legacyMigrationTarget(storeKey, meta) != null) {
+                pending.add(storeKey);
+            }
+        }
+
+        int migrated = 0;
+        boolean progressed;
+        do {
+            progressed = false;
+            for (var iterator = pending.iterator(); iterator.hasNext();) {
+                String legacyKey = iterator.next();
+                GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
+                String targetKey = legacyMigrationTarget(legacyKey, meta);
+                if (targetKey == null) {
+                    iterator.remove();
+                    continue;
+                }
+                GcsObjectMeta targetMeta = objectMetaStore.get(targetKey).orElse(null);
+                boolean matchingTarget = targetMeta != null && sameObjectGeneration(meta, targetMeta);
+                if (targetMeta != null && !matchingTarget) {
+                    continue;
+                }
+                Optional<byte[]> legacyData = objectDataStore.get(legacyKey);
+                Optional<byte[]> targetData = objectDataStore.get(targetKey);
+                if (targetData.isPresent()
+                        && (legacyData.isPresent() && !Arrays.equals(legacyData.get(), targetData.get())
+                                || legacyData.isEmpty() && !matchingTarget)) {
+                    continue;
+                }
+                if (targetData.isEmpty()) {
+                    legacyData.ifPresent(data -> objectDataStore.put(targetKey, data));
+                }
+                if (targetMeta == null) {
+                    objectMetaStore.put(targetKey, meta);
+                }
+                objectDataStore.delete(legacyKey);
+                objectMetaStore.delete(legacyKey);
+                iterator.remove();
+                migrated++;
+                progressed = true;
+            }
+        } while (progressed && !pending.isEmpty());
+
+        for (String legacyKey : pending) {
+            GcsObjectMeta meta = objectMetaStore.get(legacyKey).orElse(null);
+            if (meta != null) {
+                LOG.warnf("Cannot migrate legacy GCS object key because target is occupied"
+                                + " bucket=%s name=%s generation=%s",
+                        meta.getBucket(), meta.getName(), meta.getGeneration());
+            }
+        }
+        if (migrated > 0) {
+            objectDataStore.checkpoint();
+            objectMetaStore.checkpoint();
+            LOG.infof("Migrated %d legacy GCS object storage keys", migrated);
+        }
+    }
+
+    private static String legacyMigrationTarget(String storeKey, GcsObjectMeta meta) {
+        if (meta == null || meta.getBucket() == null || meta.getName() == null
+                || meta.getName().indexOf('\0') < 0) {
+            return null;
+        }
+        String legacyLiveKey = legacyObjectKey(meta.getBucket(), meta.getName());
+        if (storeKey.equals(legacyLiveKey)) {
+            return objectKey(meta.getBucket(), meta.getName());
+        }
+        if (meta.getGeneration() == null) {
+            return null;
+        }
+        if (meta.getSoftDeleteTime() != null
+                && storeKey.equals(legacyLiveKey + SOFT_DELETE_MARKER + meta.getGeneration())) {
+            return objectKey(meta.getBucket(), meta.getName())
+                    + SOFT_DELETE_MARKER + meta.getGeneration();
+        }
+        if (storeKey.equals(legacyLiveKey + "\0" + meta.getGeneration())) {
+            return objectKey(meta.getBucket(), meta.getName()) + "\0" + meta.getGeneration();
+        }
+        return null;
+    }
+
+    private static boolean sameObjectGeneration(GcsObjectMeta left, GcsObjectMeta right) {
+        return java.util.Objects.equals(left.getBucket(), right.getBucket())
+                && java.util.Objects.equals(left.getName(), right.getName())
+                && java.util.Objects.equals(left.getGeneration(), right.getGeneration());
+    }
+
     private String softDeleteKey(String bucket, String objectName, String generation) {
         return objectKey(bucket, objectName) + SOFT_DELETE_MARKER + generation;
+    }
+
+    private boolean isSoftDeletedObject(String storeKey) {
+        return objectMetaStore.get(storeKey)
+                .filter(meta -> meta.getBucket() != null && meta.getName() != null
+                        && meta.getGeneration() != null && meta.getSoftDeleteTime() != null)
+                .map(meta -> storeKey.equals(softDeleteKey(
+                        meta.getBucket(), meta.getName(), meta.getGeneration())))
+                .orElse(false);
+    }
+
+    private static boolean isLiveObjectKey(String storeKey, GcsObjectMeta meta) {
+        return meta.getBucket() != null && meta.getName() != null
+                && storeKey.equals(objectKey(meta.getBucket(), meta.getName()));
+    }
+
+    private static boolean isVersionedObjectKey(String storeKey, GcsObjectMeta meta) {
+        return meta.getBucket() != null && meta.getName() != null && meta.getGeneration() != null
+                && storeKey.equals(
+                        objectKey(meta.getBucket(), meta.getName()) + "\0" + meta.getGeneration());
     }
 
     public boolean isSoftDeleteEnabled(String bucket) {
@@ -645,7 +796,7 @@ public class GcsService {
         String bucketPrefix = objectKey(bucket, "");
         List<GcsObjectMeta> out = new ArrayList<>();
         for (String storeKey : objectMetaStore.keys()) {
-            if (!storeKey.startsWith(bucketPrefix) || !storeKey.contains(SOFT_DELETE_MARKER)) {
+            if (!storeKey.startsWith(bucketPrefix) || !isSoftDeletedObject(storeKey)) {
                 continue;
             }
             objectMetaStore.get(storeKey).ifPresent(meta -> {
@@ -661,43 +812,45 @@ public class GcsService {
 
     /** Restores a soft-deleted generation back to live, as {@code objects.restore} does. */
     public GcsObjectMeta restoreObject(String bucket, String objectName, String generation) {
-        synchronized (objectLock(bucket, objectName)) {
-            if (generation == null || generation.isBlank()) {
-                throw GcpException.invalidArgument("generation is required to restore an object");
-            }
-            String archiveKey = softDeleteKey(bucket, objectName, generation);
-            GcsObjectMeta archived = objectMetaStore.get(archiveKey)
-                    .orElseThrow(() -> GcpException.notFound(
-                            "Soft-deleted object not found: " + objectName + " generation " + generation));
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                if (generation == null || generation.isBlank()) {
+                    throw GcpException.invalidArgument("generation is required to restore an object");
+                }
+                String archiveKey = softDeleteKey(bucket, objectName, generation);
+                GcsObjectMeta archived = objectMetaStore.get(archiveKey)
+                        .orElseThrow(() -> GcpException.notFound(
+                                "Soft-deleted object not found: " + objectName + " generation " + generation));
 
-            String key = objectKey(bucket, objectName);
-            // Restoring onto a name that is live again displaces that object, so route it
-            // through the ordinary delete path first: that enforces holds and retention, archives
-            // it when versioning is on, and retains it under the soft delete policy. Writing
-            // straight over it would destroy a live generation, which is the opposite of what
-            // this feature exists to do.
-            if (getLiveObjectMeta(bucket, objectName).isPresent()) {
-                deleteObjectLocked(bucket, objectName);
-            }
-            GcsObjectMeta restored = cloneMeta(archived);
-            restored.setSoftDeleteTime(null);
-            restored.setHardDeleteTime(null);
-            restored.setIsLatest(true);
-            restored.setTimeDeleted(null);
-            restored.setUpdated(nowTimestamp());
+                String key = objectKey(bucket, objectName);
+                // Restoring onto a name that is live again displaces that object, so route it
+                // through the ordinary delete path first: that enforces holds and retention, archives
+                // it when versioning is on, and retains it under the soft delete policy. Writing
+                // straight over it would destroy a live generation, which is the opposite of what
+                // this feature exists to do.
+                if (getLiveObjectMeta(bucket, objectName).isPresent()) {
+                    deleteObjectLocked(bucket, objectName);
+                }
+                GcsObjectMeta restored = cloneMeta(archived);
+                restored.setSoftDeleteTime(null);
+                restored.setHardDeleteTime(null);
+                restored.setIsLatest(true);
+                restored.setTimeDeleted(null);
+                restored.setUpdated(nowTimestamp());
 
-            objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
-            objectMetaStore.put(key, restored);
-            objectMetaStore.delete(archiveKey);
-            objectDataStore.delete(archiveKey);
-            // With versioning on, the original delete also left this generation in the noncurrent
-            // namespace. It is live again now, so drop that copy: leaving both would list the same
-            // generation twice, once current and once noncurrent.
-            String versionKey = key + "\0" + generation;
-            objectMetaStore.delete(versionKey);
-            objectDataStore.delete(versionKey);
-            LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
-            return restored;
+                objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
+                objectMetaStore.put(key, restored);
+                objectMetaStore.delete(archiveKey);
+                objectDataStore.delete(archiveKey);
+                // With versioning on, the original delete also left this generation in the noncurrent
+                // namespace. It is live again now, so drop that copy: leaving both would list the same
+                // generation twice, once current and once noncurrent.
+                String versionKey = key + "\0" + generation;
+                objectMetaStore.delete(versionKey);
+                objectDataStore.delete(versionKey);
+                LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
+                return restored;
+            }
         }
     }
 
@@ -707,8 +860,10 @@ public class GcsService {
 
     public void deleteObjectVersion(String bucket, String objectName, String generation,
             GcsObjectPreconditions preconditions) {
-        synchronized (objectLock(bucket, objectName)) {
-            deleteObjectVersionLocked(bucket, objectName, generation, preconditions);
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                deleteObjectVersionLocked(bucket, objectName, generation, preconditions);
+            }
         }
     }
 
@@ -1014,12 +1169,14 @@ public class GcsService {
             String dstBucket, String dstObject, GcsObjectMeta destinationTemplate,
             GcsObjectPreconditions preconditions, String baseUrl) {
         LOG.debugf("copyObject src=%s/%s dst=%s/%s", srcBucket, srcObject, dstBucket, dstObject);
-        // Read the source before taking the destination lock. Nesting two
+        // Read the source before taking the destination locks. Nesting two
         // stripe locks could deadlock with a copy running in the other direction.
         var src = getObjectForDownload(srcBucket, srcObject, srcGeneration, GcsCustomerEncryption.none());
-        synchronized (objectLock(dstBucket, dstObject)) {
-            checkPreconditions(dstBucket, dstObject, preconditions);
-            return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
+        synchronized (bucketLock(dstBucket)) {
+            synchronized (objectLock(dstBucket, dstObject)) {
+                checkPreconditions(dstBucket, dstObject, preconditions);
+                return copyObjectLocked(src, dstBucket, dstObject, destinationTemplate, baseUrl);
+            }
         }
     }
 
@@ -1078,19 +1235,21 @@ public class GcsService {
             throw GcpException.invalidArgument("Source and destination object names must be different.");
         }
 
-        int sourceLockIndex = objectLockIndex(bucket, srcObject);
-        int destinationLockIndex = objectLockIndex(bucket, dstObject);
-        // Lock stripes in a stable order so opposite-direction moves cannot deadlock.
-        synchronized (objectLocks[Math.min(sourceLockIndex, destinationLockIndex)]) {
-            synchronized (objectLocks[Math.max(sourceLockIndex, destinationLockIndex)]) {
-                var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
-                checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
-                checkObjectMutable(source.meta());
-                checkPreconditions(bucket, dstObject, destinationPreconditions);
+        synchronized (bucketLock(bucket)) {
+            int sourceLockIndex = objectLockIndex(bucket, srcObject);
+            int destinationLockIndex = objectLockIndex(bucket, dstObject);
+            // Lock stripes in a stable order so opposite-direction moves cannot deadlock.
+            synchronized (objectLocks[Math.min(sourceLockIndex, destinationLockIndex)]) {
+                synchronized (objectLocks[Math.max(sourceLockIndex, destinationLockIndex)]) {
+                    var source = getObjectForDownload(bucket, srcObject, null, GcsCustomerEncryption.none());
+                    checkPreconditions(Optional.of(source.meta()), sourcePreconditions);
+                    checkObjectMutable(source.meta());
+                    checkPreconditions(bucket, dstObject, destinationPreconditions);
 
-                GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
-                deleteObjectLocked(bucket, srcObject);
-                return moved;
+                    GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
+                    deleteObjectLocked(bucket, srcObject);
+                    return moved;
+                }
             }
         }
     }
@@ -1102,13 +1261,13 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String prefix = bucket + "\0";
-        int prefixLen = prefix.length();
         List<GcsObjectMeta> objects = new ArrayList<>();
         for (String key : objectMetaStore.keys()) {
-            if (!key.startsWith(prefix) || key.indexOf('\0', prefixLen) != -1) {
+            if (!key.startsWith(prefix)) {
                 continue;
             }
             objectMetaStore.get(key)
+                    .filter(meta -> isLiveObjectKey(key, meta))
                     .filter(meta -> isReadableLiveObject(key, meta))
                     .ifPresent(objects::add);
         }
@@ -1122,8 +1281,10 @@ public class GcsService {
             throw GcpException.notFound("Bucket not found: " + bucket);
         }
         String bucketPrefix = bucket + "\0";
-        List<GcsObjectMeta> all = objectMetaStore.scan(k -> k.startsWith(bucketPrefix));
-        List<GcsObjectMeta> result = all.stream()
+        List<GcsObjectMeta> result = objectMetaStore.keys().stream()
+                .filter(key -> key.startsWith(bucketPrefix))
+                .flatMap(key -> objectMetaStore.get(key).stream()
+                        .filter(meta -> isLiveObjectKey(key, meta) || isVersionedObjectKey(key, meta)))
                 .filter(m -> prefix == null || prefix.isBlank() || m.getName() != null && m.getName().startsWith(prefix))
                 .toList();
         LOG.debugf("listObjectVersions bucket=%s count=%d", bucket, result.size());
@@ -1703,6 +1864,10 @@ public class GcsService {
         return objectLocks[objectLockIndex(bucket, objectName)];
     }
 
+    private Object bucketLock(String bucket) {
+        return bucketLocks[Math.floorMod(bucket.hashCode(), bucketLocks.length)];
+    }
+
     private int objectLockIndex(String bucket, String objectName) {
         return Math.floorMod(objectKey(bucket, objectName).hashCode(), objectLocks.length);
     }
@@ -1721,6 +1886,15 @@ public class GcsService {
     }
 
     private static String objectKey(String bucket, String objectName) {
+        if (objectName.indexOf('\0') >= 0) {
+            String encodedName = Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(objectName.getBytes(StandardCharsets.UTF_8));
+            return bucket + "\0\0" + encodedName;
+        }
+        return bucket + "\0" + objectName;
+    }
+
+    private static String legacyObjectKey(String bucket, String objectName) {
         return bucket + "\0" + objectName;
     }
 

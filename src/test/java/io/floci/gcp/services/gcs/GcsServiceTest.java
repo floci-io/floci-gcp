@@ -2,9 +2,11 @@ package io.floci.gcp.services.gcs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.core.storage.WalStorage;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
@@ -14,13 +16,28 @@ import io.floci.gcp.services.gcs.model.StoredAcl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -264,6 +281,290 @@ class GcsServiceTest {
     }
 
     @Test
+    void legacyNulObjectKeysAreMigratedAcrossPersistentReloads() {
+        Path root = tempDir.resolve("legacy-nul-keys");
+        StorageBackend<String, GcsBucket> buckets = persistent(
+                root.resolve("gcs-buckets.json"), new TypeReference<Map<String, GcsBucket>>() {});
+        StorageBackend<String, GcsObjectMeta> metadata = persistent(
+                root.resolve("gcs-objects.json"), new TypeReference<Map<String, GcsObjectMeta>>() {});
+        StorageBackend<String, byte[]> data = persistent(
+                root.resolve("gcs-object-data.json"), new TypeReference<Map<String, byte[]>>() {});
+        GcsService seedingService = new GcsService(
+                buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        seedingService.createBucket("bucket", "p1", BASE_URL, Map.of());
+        seedingService.createBucket("soft-only", "p1", BASE_URL, Map.of());
+
+        String objectName = "legacy\0object";
+        String legacyLiveKey = "bucket\0" + objectName;
+        putLegacyObject(metadata, data, legacyLiveKey,
+                storedObject("bucket", objectName, "3", true), new byte[]{3});
+        putLegacyObject(metadata, data, legacyLiveKey + "\0" + "2",
+                storedObject("bucket", objectName, "2", false), new byte[]{2});
+        GcsObjectMeta softDeleted = storedObject("bucket", objectName, "1", false);
+        softDeleted.setSoftDeleteTime(Instant.now().minusSeconds(60).toString());
+        softDeleted.setHardDeleteTime(Instant.now().plusSeconds(86_400).toString());
+        putLegacyObject(metadata, data, legacyLiveKey + "\0softDeleted\0" + "1",
+                softDeleted, new byte[]{1});
+
+        String softOnlyName = "legacy\0soft-only";
+        GcsObjectMeta softOnly = storedObject("soft-only", softOnlyName, "4", false);
+        softOnly.setSoftDeleteTime(Instant.now().minusSeconds(60).toString());
+        softOnly.setHardDeleteTime(Instant.now().plusSeconds(86_400).toString());
+        putLegacyObject(metadata, data,
+                "soft-only\0" + softOnlyName + "\0softDeleted\0" + "4",
+                softOnly, new byte[]{4});
+
+        GcsService restarted = persistentService(root);
+
+        assertArrayEquals(new byte[]{3}, restarted.getObjectData("bucket", objectName));
+        assertArrayEquals(new byte[]{2}, restarted.getObjectData(
+                "bucket", objectName, "2", GcsCustomerEncryption.none()));
+        assertEquals(Set.of("2", "3"), restarted.listObjectVersions("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .collect(java.util.stream.Collectors.toSet()));
+        assertEquals(List.of("1"), restarted.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .toList());
+        assertEquals("1", restarted.restoreObject("bucket", objectName, "1").getGeneration());
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+
+        assertEquals(List.of("4"), restarted.listSoftDeletedObjects("soft-only", null).stream()
+                .map(GcsObjectMeta::getGeneration)
+                .toList());
+        restarted.deleteBucket("soft-only");
+
+        GcsService afterPurge = persistentService(root);
+        assertTrue(afterPurge.listSoftDeletedObjects("soft-only", null).isEmpty());
+        GcpException missing = assertThrows(GcpException.class,
+                () -> afterPurge.getBucket("soft-only"));
+        assertEquals("NOT_FOUND", missing.getGcpStatus());
+    }
+
+    @ParameterizedTest
+    @EnumSource(LegacyMigrationStorageMode.class)
+    void legacyNulObjectKeyMigrationIsCheckpointed(LegacyMigrationStorageMode mode) {
+        Path root = tempDir.resolve("legacy-nul-checkpoint-" + mode);
+        TypeReference<Map<String, GcsObjectMeta>> metadataType = new TypeReference<>() {};
+        TypeReference<Map<String, byte[]>> dataType = new TypeReference<>() {};
+        StorageBackend<String, GcsObjectMeta> metadata = openMigrationStorage(
+                mode, root, "metadata", metadataType);
+        StorageBackend<String, byte[]> data = openMigrationStorage(
+                mode, root, "data", dataType);
+        metadata.load();
+        data.load();
+        StorageBackend<String, GcsBucket> buckets = new InMemoryStorage<>();
+        GcsService seedingService = new GcsService(
+                buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        seedingService.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String objectName = "legacy\0object";
+        putLegacyObject(metadata, data, "bucket\0" + objectName,
+                storedObject("bucket", objectName, "1", true), new byte[]{1});
+
+        new GcsService(buckets, metadata, data, new InMemoryStorage<>(), "test-project");
+        closeMigrationStorage(metadata);
+        closeMigrationStorage(data);
+
+        StorageBackend<String, GcsObjectMeta> reloadedMetadata = openMigrationStorage(
+                mode, root, "metadata", metadataType);
+        StorageBackend<String, byte[]> reloadedData = openMigrationStorage(
+                mode, root, "data", dataType);
+        reloadedMetadata.load();
+        reloadedData.load();
+        try {
+            GcsService restarted = new GcsService(
+                    buckets, reloadedMetadata, reloadedData, new InMemoryStorage<>(), "test-project");
+            assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+        } finally {
+            closeMigrationStorage(reloadedMetadata);
+            closeMigrationStorage(reloadedData);
+        }
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationCompletesAfterPartialMigration() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = "bucket\0\0bGVnYWN5AG9iamVjdA";
+        GcsObjectMeta meta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, meta, new byte[]{1});
+        metadata.put(migratedKey, meta);
+        data.put(migratedKey, new byte[]{1});
+
+        GcsService restarted = new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
+        assertTrue(metadata.get(legacyKey).isEmpty());
+        assertTrue(data.get(legacyKey).isEmpty());
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationResolvesLegacyKeyCollisionInOneRestart() {
+        StorageBackend<String, GcsObjectMeta> metadata = new OrderedStorage<>();
+        StorageBackend<String, byte[]> data = new OrderedStorage<>();
+        String firstName = "legacy\0object";
+        String firstLegacyKey = "bucket\0" + firstName;
+        String firstTargetKey = encodedObjectKey("bucket", firstName);
+        String collidingName = "\0" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(firstName.getBytes(StandardCharsets.UTF_8));
+        String collidingLegacyKey = "bucket\0" + collidingName;
+        assertEquals(firstTargetKey, collidingLegacyKey);
+        putLegacyObject(metadata, data, firstLegacyKey,
+                storedObject("bucket", firstName, "1", true), new byte[]{1});
+        putLegacyObject(metadata, data, collidingLegacyKey,
+                storedObject("bucket", collidingName, "2", true), new byte[]{2});
+
+        GcsService restarted = new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", firstName));
+        assertArrayEquals(new byte[]{2}, restarted.getObjectData("bucket", collidingName));
+        assertTrue(metadata.get(firstLegacyKey).isEmpty());
+        assertEquals(firstName, metadata.get(firstTargetKey).orElseThrow().getName());
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationDoesNotAcceptMismatchedOrphanTargetData() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = encodedObjectKey("bucket", objectName);
+        GcsObjectMeta legacyMeta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, legacyMeta, new byte[]{1});
+        data.put(migratedKey, new byte[]{2});
+
+        new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertSame(legacyMeta, metadata.get(legacyKey).orElseThrow());
+        assertArrayEquals(new byte[]{1}, data.get(legacyKey).orElseThrow());
+        assertTrue(metadata.get(migratedKey).isEmpty());
+        assertArrayEquals(new byte[]{2}, data.get(migratedKey).orElseThrow());
+    }
+
+    @Test
+    void legacyNulObjectKeyMigrationDoesNotOverwriteConflictingTarget() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        StorageBackend<String, byte[]> data = new InMemoryStorage<>();
+        String objectName = "legacy\0object";
+        String legacyKey = "bucket\0" + objectName;
+        String migratedKey = "bucket\0\0bGVnYWN5AG9iamVjdA";
+        GcsObjectMeta legacyMeta = storedObject("bucket", objectName, "1", true);
+        putLegacyObject(metadata, data, legacyKey, legacyMeta, new byte[]{1});
+        metadata.put(migratedKey, storedObject("bucket", objectName, "2", true));
+        data.put(migratedKey, new byte[]{2});
+
+        new GcsService(
+                new InMemoryStorage<>(), metadata, data, new InMemoryStorage<>(), "test-project");
+
+        assertSame(legacyMeta, metadata.get(legacyKey).orElseThrow());
+        assertArrayEquals(new byte[]{1}, data.get(legacyKey).orElseThrow());
+        assertEquals("2", metadata.get(migratedKey).orElseThrow().getGeneration());
+        assertArrayEquals(new byte[]{2}, data.get(migratedKey).orElseThrow());
+    }
+
+    private static GcsObjectMeta storedObject(
+            String bucket, String name, String generation, boolean latest) {
+        GcsObjectMeta meta = new GcsObjectMeta();
+        meta.setBucket(bucket);
+        meta.setName(name);
+        meta.setGeneration(generation);
+        meta.setIsLatest(latest);
+        return meta;
+    }
+
+    private static void putLegacyObject(
+            StorageBackend<String, GcsObjectMeta> metadata,
+            StorageBackend<String, byte[]> data,
+            String key, GcsObjectMeta meta, byte[] bytes) {
+        data.put(key, bytes);
+        metadata.put(key, meta);
+    }
+
+    private static String encodedObjectKey(String bucket, String objectName) {
+        return bucket + "\0\0" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(objectName.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static <V> StorageBackend<String, V> openMigrationStorage(
+            LegacyMigrationStorageMode mode, Path root, String name,
+            TypeReference<Map<String, V>> type) {
+        return switch (mode) {
+            case PERSISTENT -> new PersistentStorage<>(root.resolve(name + ".json"), type);
+            case HYBRID -> new HybridStorage<>(root.resolve(name + ".json"), type, 60_000);
+            case WAL -> new WalStorage<>(
+                    root.resolve(name + ".json"), root.resolve(name + ".wal"), type, 60_000);
+        };
+    }
+
+    private static void closeMigrationStorage(StorageBackend<?, ?> storage) {
+        if (storage instanceof HybridStorage<?, ?> hybrid) {
+            hybrid.shutdown();
+        } else if (storage instanceof WalStorage<?, ?> wal) {
+            wal.shutdown();
+        }
+    }
+
+    private enum LegacyMigrationStorageMode {
+        PERSISTENT,
+        HYBRID,
+        WAL
+    }
+
+    private enum SoftDeleteOperation {
+        BY_NAME,
+        BY_GENERATION
+    }
+
+    private static final class OrderedStorage<V> implements StorageBackend<String, V> {
+        private final Map<String, V> values = new LinkedHashMap<>();
+
+        @Override
+        public void put(String key, V value) {
+            values.put(key, value);
+        }
+
+        @Override
+        public Optional<V> get(String key) {
+            return Optional.ofNullable(values.get(key));
+        }
+
+        @Override
+        public void delete(String key) {
+            values.remove(key);
+        }
+
+        @Override
+        public List<V> scan(Predicate<String> keyFilter) {
+            return values.entrySet().stream()
+                    .filter(entry -> keyFilter.test(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .collect(Collectors.toCollection(java.util.ArrayList::new));
+        }
+
+        @Override
+        public Set<String> keys() {
+            return new LinkedHashSet<>(values.keySet());
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void load() {
+        }
+
+        @Override
+        public void clear() {
+            values.clear();
+        }
+    }
+
+    @Test
     void stalePersistedObjectMetadataWithoutDataIsIgnoredAndCleaned() {
         StorageBackend<String, GcsBucket> bucketStore = new InMemoryStorage<>();
         StorageBackend<String, GcsObjectMeta> objectMetaStore = new InMemoryStorage<>();
@@ -329,6 +630,348 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteNonEmptyBucketThrowsConflict() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.deleteBucket("bucket"));
+
+        assertEquals(409, ex.getHttpStatus());
+        assertEquals("conflict", ex.getReason());
+        assertNotNull(service.getBucket("bucket"));
+        assertArrayEquals(new byte[]{1},
+                service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none()));
+    }
+
+    @Test
+    void softDeleteMarkerInLiveObjectNameDoesNotBypassNonEmptyCheck() {
+        String objectName = "live\0softDeleted\0object.txt";
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", objectName, "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.deleteBucket("bucket"));
+
+        assertEquals("conflict", ex.getReason());
+        assertArrayEquals(new byte[]{1},
+                service.getObjectData("bucket", objectName, GcsCustomerEncryption.none()));
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @Test
+    void softDeleteKeyDoesNotAliasLiveObjectName() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta deleted = service.putObject("bucket", "object", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        String liveObjectName = "object\0softDeleted\0" + deleted.getGeneration();
+        service.putObject("bucket", liveObjectName, "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.deleteObject("bucket", "object");
+
+        assertArrayEquals(new byte[]{2},
+                service.getObjectData("bucket", liveObjectName, GcsCustomerEncryption.none()));
+        assertEquals(List.of(liveObjectName), service.listObjects("bucket").stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        assertEquals(List.of(liveObjectName), service.listObjectVersions("bucket", null).stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        assertEquals(List.of("object"), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getName)
+                .toList());
+        GcpException ex = assertThrows(GcpException.class, () -> service.deleteBucket("bucket"));
+        assertEquals("conflict", ex.getReason());
+    }
+
+    @Test
+    void deleteBucketWithOnlySoftDeletedObjectsPurgesTheirArchivedState() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+
+        assertEquals(1, service.listSoftDeletedObjects("bucket", null).size());
+
+        service.deleteBucket("bucket");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @ParameterizedTest
+    @EnumSource(SoftDeleteOperation.class)
+    void deleteBucketWaitsForSoftDeletePublication(SoftDeleteOperation operation) throws Exception {
+        CountDownLatch softDeleteWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowSoftDeleteWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                softDeleteWriteStarted, allowSoftDeleteWrite);
+        var dataStore = new InMemoryStorage<String, byte[]>();
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                dataStore, new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta object = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var objectDeletion = executor.submit(() -> {
+                if (operation == SoftDeleteOperation.BY_NAME) {
+                    service.deleteObject("bucket", "obj.txt");
+                } else {
+                    service.deleteObjectVersion("bucket", "obj.txt", object.getGeneration());
+                }
+            });
+            assertTrue(softDeleteWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var bucketDeletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class,
+                    () -> bucketDeletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowSoftDeleteWrite.countDown();
+            objectDeletion.get(5, TimeUnit.SECONDS);
+            bucketDeletion.get(5, TimeUnit.SECONDS);
+
+            assertTrue(metadataStore.keys().isEmpty());
+            assertTrue(dataStore.keys().isEmpty());
+            service.createBucket("bucket", "p1", BASE_URL, Map.of());
+            assertTrue(service.listObjects("bucket").isEmpty());
+            assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        } finally {
+            allowSoftDeleteWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForAnUploadToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        service = new GcsService(new InMemoryStorage<>(),
+                new BlockingFirstPutStorage<>(metadataWriteStarted, allowMetadataWrite),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var upload = executor.submit(() -> service.putObject("bucket", "obj.txt", "text/plain",
+                    new byte[]{1}, GcsCustomerEncryption.none(), BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            upload.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertNotNull(service.getBucket("bucket"));
+            assertArrayEquals(new byte[]{1},
+                    service.getObjectData("bucket", "obj.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForACopyToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("source-bucket", "p1", BASE_URL, Map.of());
+        service.createBucket("destination-bucket", "p1", BASE_URL, Map.of());
+        service.putObject("source-bucket", "source.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var copy = executor.submit(() -> service.copyObject(
+                    "source-bucket", "source.txt", "destination-bucket", "copy.txt", BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("destination-bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            copy.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "destination-bucket", "copy.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForAMoveToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "source.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var move = executor.submit(() -> service.moveObject(
+                    "bucket", "source.txt", "moved.txt",
+                    GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            move.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "moved.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForARestoreToPublishMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta object = service.putObject("bucket", "object.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "object.txt");
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var restore = executor.submit(() -> service.restoreObject(
+                    "bucket", "object.txt", object.getGeneration()));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            restore.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "object.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForResumableUploadFinalization() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        String uploadId = service.startResumableUpload("bucket", "resumable.txt", "text/plain",
+                GcsCustomerEncryption.none(), Map.of());
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var finalization = executor.submit(() -> service.applyResumableChunk(
+                    uploadId, null, new byte[]{1}, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            finalization.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "resumable.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void deleteBucketWaitsForStreamingUploadFinalization() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                metadataWriteStarted, allowMetadataWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta input = new GcsObjectMeta();
+        input.setBucket("bucket");
+        input.setName("streaming.txt");
+        input.setContentType("text/plain");
+        String uploadId = service.startStreamingUpload(
+                input, GcsObjectPreconditions.NONE, null, null, null);
+        service.getStreamingUpload(uploadId).append(0, new byte[]{1});
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var finalization = executor.submit(() -> service.finalizeStreamingUpload(uploadId, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            finalization.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{1}, service.getObjectData(
+                    "bucket", "streaming.txt", GcsCustomerEncryption.none()));
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentOverwriteNeverMixesGenerations() throws Exception {
         service.createBucket("race-bucket", "p1", BASE_URL, Map.of());
         var payloads = Map.of(
@@ -359,6 +1002,64 @@ class GcsServiceTest {
         } finally {
             stop.set(true);
             writer.join();
+        }
+    }
+
+    private static final class BlockingFirstPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockFirstPut = new AtomicBoolean(true);
+
+        private BlockingFirstPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockFirstPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
+        }
+    }
+
+    private static final class ArmableBlockingPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockNextPut = new AtomicBoolean();
+
+        private ArmableBlockingPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        private void blockNextPut() {
+            blockNextPut.set(true);
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockNextPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
         }
     }
 

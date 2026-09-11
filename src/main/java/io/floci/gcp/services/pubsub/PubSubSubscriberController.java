@@ -33,7 +33,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         try {
             StoredSubscription stored = service.createSubscription(
                     request.getName(), request.getTopic(), request.getAckDeadlineSeconds(),
-                    request.getFilter());
+                    null, false, null, request.getFilter(),
+                    request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
+                    null, null, null, null, 0, false, false);
             responseObserver.onNext(buildSubscription(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {

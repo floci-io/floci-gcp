@@ -7,6 +7,7 @@ import com.google.container.v1.DeleteClusterRequest;
 import com.google.container.v1.GetClusterRequest;
 import com.google.container.v1.ListClustersRequest;
 import com.google.container.v1.Operation;
+import com.google.container.v1.UpdateMasterRequest;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -84,6 +85,29 @@ class GkeTest {
 
     @Test
     @Order(4)
+    void updateMasterUpgradesOnlyTheControlPlane() {
+        Cluster before = client.getCluster(GetClusterRequest.newBuilder()
+                .setName(CLUSTER_NAME)
+                .build());
+
+        Operation op = client.updateMaster(UpdateMasterRequest.newBuilder()
+                .setName(CLUSTER_NAME)
+                .setMasterVersion("1.31.5-gke.1")
+                .build());
+
+        assertThat(op.getOperationType()).isEqualTo(Operation.Type.UPGRADE_MASTER);
+        assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
+
+        Cluster after = client.getCluster(GetClusterRequest.newBuilder()
+                .setName(CLUSTER_NAME)
+                .build());
+        assertThat(after.getCurrentMasterVersion()).isEqualTo("1.31.5-gke.1");
+        // Real GKE upgrades the control plane independently of node pools.
+        assertThat(after.getCurrentNodeVersion()).isEqualTo(before.getCurrentNodeVersion());
+    }
+
+    @Test
+    @Order(5)
     void deleteCluster() {
         Operation op = client.deleteCluster(DeleteClusterRequest.newBuilder()
                 .setName(CLUSTER_NAME)

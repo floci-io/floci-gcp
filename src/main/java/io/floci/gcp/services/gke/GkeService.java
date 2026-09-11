@@ -370,6 +370,27 @@ public class GkeService {
         return operationService.createOperation(project, location, clusterId, OperationType.UPDATE_CLUSTER);
     }
 
+    /** {@code ClusterManager.UpdateMaster} ({@code POST .../clusters/{id}:updateMaster}).
+     *
+     * <p>Only the control plane moves: real GKE upgrades the master independently of node
+     * pools, so {@code currentNodeVersion} and every pool's own {@code version} are left
+     * untouched, unlike {@code UpdateCluster} with {@code desiredNodeVersion}. The proto marks
+     * {@code master_version} REQUIRED, so an absent or blank value is rejected before the
+     * cluster is touched. Reported as {@code UPGRADE_MASTER}, the {@code Operation.Type} real
+     * GKE uses for a master upgrade. */
+    public StoredOperation updateMaster(String project, String location, String clusterId,
+                                        Map<String, Object> body) {
+        StoredCluster cluster = requireCluster(project, location, clusterId);
+        String masterVersion = body == null ? null : (String) body.get("masterVersion");
+        if (masterVersion == null || masterVersion.isBlank()) {
+            throw GcpException.invalidArgument("masterVersion is required");
+        }
+        cluster.setCurrentMasterVersion(resolveMasterVersion(masterVersion));
+        touch(cluster);
+        clusterStore.put(clusterKey(project, location, clusterId), cluster);
+        return operationService.createOperation(project, location, clusterId, OperationType.UPGRADE_MASTER);
+    }
+
     public StoredOperation setLabels(String project, String location, String clusterId,
                                      Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
@@ -783,6 +804,22 @@ public class GkeService {
     private StoredNodePool requireNodePool(String project, String location, String clusterId, String nodePoolId) {
         return nodePoolStore.get(nodePoolKey(project, location, clusterId, nodePoolId))
                 .orElseThrow(() -> GcpException.notFound("Not found: nodePool " + nodePoolId));
+    }
+
+    /** Resolves the version aliases {@code master_version} accepts (cluster_service.proto,
+     * {@code UpdateMasterRequest}): {@code "latest"} and {@code "-"} pick the highest valid and
+     * the default version respectively, and {@code "1.X"} / {@code "1.X.Y"} pick the highest
+     * valid version under that prefix. {@link #getServerConfig()} advertises exactly one valid
+     * master version, so every alias that matches it resolves to it. An explicit version that is
+     * not the advertised one is kept verbatim, as {@code createCluster} and {@code UpdateCluster}
+     * already do, so clients pinning a specific version keep working against the emulator. */
+    private static String resolveMasterVersion(String requested) {
+        if ("latest".equals(requested) || "-".equals(requested)
+                || DEFAULT_MASTER_VERSION.startsWith(requested + ".")
+                || DEFAULT_MASTER_VERSION.startsWith(requested + "-")) {
+            return DEFAULT_MASTER_VERSION;
+        }
+        return requested;
     }
 
     /** The node pools an {@code UpdateCluster} carrying {@code desiredNodeVersion} upgrades.

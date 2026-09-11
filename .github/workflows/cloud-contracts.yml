@@ -86,7 +86,7 @@ jobs:
             return "$status"
           }
           ruby_contract all all
-          java_contract roundtrip 'ComputeContractTest,ComputeRoutingContractTest,GcsXmlMultipartContractTest,NetworkUsageContractTest,StorageContractTest,GcsDownscopedTokenTest,GcsResumableUploadTest,GcsSignedUrlTest'
+          java_contract roundtrip 'ComputeContractTest,ComputeRoutingContractTest,GcsXmlMultipartContractTest,NetworkUsageContractTest,StorageContractTest,GcsDownscopedTokenTest,GcsResumableUploadTest,GcsSignedUrlTest,GcsGrpcTest,GcsServiceAccountAuthenticationTest'
           ruby_contract seed restart_probe
           java_contract seed RestartContractTest
           docker restart floci-gcp

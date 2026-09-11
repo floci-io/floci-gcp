@@ -279,6 +279,10 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - Data path: `ReadObject`, `WriteObject`, `BidiWriteObject`
 - Resumable writes: `StartResumableWrite`, `QueryWriteStatus`
 
+Bucket responses use `projects/{projectNumber}`, matching the REST bucket's
+`projectNumber`. Project IDs remain the storage isolation key; the emulator
+currently assigns the synthetic project number `1` to buckets.
+
 The v2 MVP does not implement IAM policy RPCs, retention locking, rewrite,
 move, restore, resumable cancellation, bidi reads, appendable objects, write
 handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.

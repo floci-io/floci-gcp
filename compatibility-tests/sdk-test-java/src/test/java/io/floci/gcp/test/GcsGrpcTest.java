@@ -8,6 +8,7 @@ import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.Storage;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -36,6 +37,11 @@ class GcsGrpcTest {
 
             assertThat(storage.get(bucketName).getLabels()).containsEntry("transport", "grpc");
             assertThat(storage.get(bucketName).getGeneratedId()).isEqualTo(bucketName);
+            try (Storage rest = TestFixtures.storageClient()) {
+                BigInteger projectNumber = rest.get(bucketName).getProject();
+                assertThat(projectNumber).isNotNull();
+                assertThat(storage.get(bucketName).getProject()).isEqualTo(projectNumber);
+            }
             assertThat(StreamSupport.stream(storage.list().iterateAll().spliterator(), false)
                     .map(bucket -> bucket.getName())).contains(bucketName);
             assertThat(storage.update(storage.get(bucketName).toBuilder()

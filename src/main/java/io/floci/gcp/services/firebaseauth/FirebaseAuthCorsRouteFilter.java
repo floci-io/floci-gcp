@@ -11,10 +11,12 @@ import jakarta.inject.Inject;
 @ApplicationScoped
 public class FirebaseAuthCorsRouteFilter {
 
-    // FirebaseAuthController (sign-in/sign-up) and SecureTokenController (token refresh).
+    // FirebaseAuthController (sign-in/sign-up), SecureTokenController (token refresh) and
+    // FirebaseAuthEmulatorController, which the Emulator UI calls from the browser.
     private static final String[] PATH_PREFIXES = {
             "/identitytoolkit.googleapis.com/*",
             "/securetoken.googleapis.com/*",
+            "/emulator/v1/*",
     };
 
     // Matches expressjs/cors' defaults, which is what firebase-tools' Auth Emulator uses.
@@ -35,6 +37,8 @@ public class FirebaseAuthCorsRouteFilter {
     }
 
     private void handle(RoutingContext ctx) {
+        ctx.response().putHeader("Vary", "Origin");
+
         String origin = ctx.request().getHeader("Origin");
         if (origin == null) {
             ctx.next();
@@ -43,7 +47,6 @@ public class FirebaseAuthCorsRouteFilter {
         ctx.response().putHeader("Access-Control-Allow-Origin", origin);
 
         if (!"OPTIONS".equalsIgnoreCase(ctx.request().method().name())) {
-            ctx.response().putHeader("Vary", "Origin");
             ctx.next();
             return;
         }

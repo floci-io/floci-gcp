@@ -97,6 +97,18 @@ class GcsListFiltersTest {
         assertThat(itemNames(withFlag)).contains("logs/");
     }
 
+    @Test
+    void maxResultsPaginatesDirectoryPrefixes() {
+        var page = storage.list(BUCKET,
+                Storage.BlobListOption.currentDirectory(),
+                Storage.BlobListOption.pageSize(1));
+
+        assertThat(page.getValues()).singleElement()
+                .extracting(Blob::getName)
+                .isEqualTo("logs/");
+        assertThat(page.getNextPageToken()).isNotNull();
+    }
+
     private static String listRaw(String query) throws Exception {
         URI uri = URI.create(TestFixtures.endpoint() + "/storage/v1/b/" + BUCKET + "/o?" + query);
         HttpResponse<String> response = HttpClient.newHttpClient().send(

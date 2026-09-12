@@ -121,6 +121,77 @@ class GcsListFilterRestIntegrationTest {
     }
 
     @Test
+    void maxResultsPaginatesItemsAndPrefixesTogether() {
+        seed();
+        String nextPageToken = given().queryParam("delimiter", "/").queryParam("maxResults", 2)
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items", org.hamcrest.Matchers.anyOf(org.hamcrest.Matchers.nullValue(), empty()))
+                .body("prefixes", contains("a/", "b/"))
+                .extract().path("nextPageToken");
+
+        given().queryParam("delimiter", "/").queryParam("maxResults", 2)
+                .queryParam("pageToken", nextPageToken)
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("c.txt"))
+                .body("prefixes", contains("logs/"));
+    }
+
+    @Test
+    void trailingDelimiterItemAndPrefixShareOneResultSlot() {
+        seed();
+        given().queryParam("delimiter", "/")
+                .queryParam("includeTrailingDelimiter", true)
+                .queryParam("maxResults", 1)
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("a/"))
+                .body("prefixes", contains("a/"))
+                .body("nextPageToken", org.hamcrest.Matchers.notNullValue());
+    }
+
+    @Test
+    void versionedTrailingDelimiterGenerationsHaveStablePages() {
+        String bucket = "versioned-list-filter-bucket";
+        given().contentType("application/json")
+                .body(Map.of("name", bucket, "versioning", Map.of("enabled", true)))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+        String firstGeneration = given().contentType("text/plain").body("first")
+                .queryParam("uploadType", "media").queryParam("name", "versioned/")
+                .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .extract().path("generation");
+        String secondGeneration = given().contentType("text/plain").body("second")
+                .queryParam("uploadType", "media").queryParam("name", "versioned/")
+                .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .extract().path("generation");
+
+        String nextPageToken = given().queryParam("delimiter", "/")
+                .queryParam("versions", true)
+                .queryParam("includeTrailingDelimiter", true)
+                .queryParam("maxResults", 1)
+                .when().get("/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("versioned/"))
+                .body("items.generation", contains(firstGeneration))
+                .body("prefixes", contains("versioned/"))
+                .extract().path("nextPageToken");
+
+        given().queryParam("delimiter", "/")
+                .queryParam("versions", true)
+                .queryParam("includeTrailingDelimiter", true)
+                .queryParam("maxResults", 1)
+                .queryParam("pageToken", nextPageToken)
+                .when().get("/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("versioned/"))
+                .body("items.generation", contains(secondGeneration));
+    }
+
+    @Test
     void repeatedDoubleStarsAreCollapsedRatherThanCompounded() {
         // "**/**/x" means the same as "**/x"; emitting both groups multiplies the backtracking
         // the regex engine does on a name that does not match.

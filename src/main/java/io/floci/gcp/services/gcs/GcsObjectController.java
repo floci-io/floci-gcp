@@ -83,15 +83,22 @@ public class GcsObjectController {
         }
         // startOffset is inclusive, endOffset exclusive.
         GcsObjectGlob.GlobMatcher globMatcher = GcsObjectGlob.matcher(GcsObjectGlob.compile(matchGlob));
+        String basePrefix = prefix != null ? prefix : "";
+        if (delimiter != null && !delimiter.isEmpty()) {
+            String globPrefix = GcsObjectGlob.fixedDirectoryPrefix(matchGlob);
+            if (globPrefix.startsWith(basePrefix)) {
+                basePrefix = globPrefix;
+            }
+        }
+        String listingPrefix = basePrefix;
         all = all.stream()
                 .sorted(Comparator.comparing(GcsObjectMeta::getName))
                 .filter(o -> startOffset == null || o.getName().compareTo(startOffset) >= 0)
                 .filter(o -> endOffset == null || o.getName().compareTo(endOffset) < 0)
-                .filter(o -> globMatcher.matches(o.getName()))
+                .filter(o -> o.getName().startsWith(listingPrefix))
                 .toList();
         Set<String> prefixes = new TreeSet<>();
         if (delimiter != null && !delimiter.isEmpty()) {
-            String basePrefix = prefix != null ? prefix : "";
             List<GcsObjectMeta> rolledUp = new ArrayList<>();
             for (GcsObjectMeta meta : all) {
                 String rest = meta.getName().substring(basePrefix.length());
@@ -110,6 +117,10 @@ public class GcsObjectController {
             }
             all = rolledUp;
         }
+        all = all.stream()
+                .filter(o -> globMatcher.matches(o.getName()))
+                .toList();
+        prefixes.removeIf(prefixEntry -> !globMatcher.matches(prefixEntry));
         PageToken.Page<GcsObjectMeta> page = PageToken.paginate(all, maxResults, pageToken);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#objects");

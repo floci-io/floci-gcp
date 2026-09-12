@@ -103,6 +103,55 @@ class GcsListFilterRestIntegrationTest {
     }
 
     @Test
+    void matchGlobFiltersPrefixesAfterDelimiterRollup() {
+        seed();
+        given().queryParam("delimiter", "/").queryParam("matchGlob", "*/")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items", org.hamcrest.Matchers.anyOf(org.hamcrest.Matchers.nullValue(), empty()))
+                .body("prefixes", containsInAnyOrder("a/", "b/", "logs/"));
+    }
+
+    @Test
+    void matchGlobFixedDirectoryPrefixControlsDelimiterRollup() {
+        seed();
+        given().queryParam("delimiter", "/").queryParam("matchGlob", "a/*")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.name", containsInAnyOrder("a/", "a/1.txt", "a/2.txt"))
+                .body("prefixes", org.hamcrest.Matchers.anyOf(org.hamcrest.Matchers.nullValue(), empty()));
+
+        given().queryParam("delimiter", "/").queryParam("matchGlob", "a/**")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.name", containsInAnyOrder("a/", "a/1.txt", "a/2.txt"))
+                .body("prefixes", contains("a/b/"));
+    }
+
+    @Test
+    void matchGlobBackslashEscapesTheNextCharacter() {
+        String bucket = "glob-backslash-bucket";
+        given().contentType("application/json").body(Map.of("name", bucket))
+                .when().post("/storage/v1/b?project=test-project");
+        for (String name : new String[] {"ab/file.txt", "a\\b/file.txt"}) {
+            given().contentType("text/plain").body("x")
+                    .queryParam("uploadType", "media")
+                    .queryParam("name", name)
+                    .when().post("/upload/storage/v1/b/" + bucket + "/o");
+        }
+
+        given().queryParam("delimiter", "/").queryParam("matchGlob", "a\\b/*")
+                .when().get("/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("ab/file.txt"));
+
+        given().queryParam("delimiter", "/").queryParam("matchGlob", "a\\\\b/*")
+                .when().get("/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .body("items.name", contains("a\\b/file.txt"));
+    }
+
+    @Test
     void trailingDelimiterPlaceholderIsRolledUpByDefault() {
         seed();
         given().queryParam("delimiter", "/").when().get("/storage/v1/b/" + BUCKET + "/o")

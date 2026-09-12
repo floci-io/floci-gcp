@@ -76,6 +76,13 @@ final class GcsObjectGlob {
                     }
                 }
                 case ',' -> out.append(depth > 0 ? "|" : "\\,");
+                case '\\' -> {
+                    if (i + 1 < glob.length()) {
+                        appendLiteral(out, glob.charAt(++i));
+                    } else {
+                        appendLiteral(out, c);
+                    }
+                }
                 default -> appendLiteral(out, c);
             }
         }
@@ -132,6 +139,29 @@ final class GcsObjectGlob {
     /** A glob bound to one request, carrying that request's remaining matching budget. */
     static GlobMatcher matcher(Pattern pattern) {
         return new GlobMatcher(pattern);
+    }
+
+    /** Literal path segments before the first glob token act as a prefix for delimiter roll-up. */
+    static String fixedDirectoryPrefix(String glob) {
+        if (glob == null || glob.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder fixedPrefix = new StringBuilder();
+        for (int i = 0; i < glob.length(); i++) {
+            char c = glob.charAt(i);
+            if (c == '\\' && i + 1 < glob.length()) {
+                fixedPrefix.append(glob.charAt(++i));
+                continue;
+            }
+            if ("*?[{".indexOf(c) >= 0) {
+                break;
+            }
+            fixedPrefix.append(c);
+        }
+
+        int delimiter = fixedPrefix.lastIndexOf("/");
+        return delimiter < 0 ? "" : fixedPrefix.substring(0, delimiter + 1);
     }
 
     static final class GlobMatcher {

@@ -1,6 +1,7 @@
 package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.PubsubMessage;
@@ -24,9 +25,19 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -58,6 +69,10 @@ public class PubSubService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final IamService iamService;
+    private final HttpClient httpClient;
+    private final ExecutorService pushDeliveryExecutor;
+    private final ScheduledExecutorService pushRetryExecutor;
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
     jakarta.enterprise.inject.Instance<io.floci.gcp.services.eventarc.EventarcService> eventarcServiceInstance;
@@ -69,6 +84,11 @@ public class PubSubService {
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.iamService = iamService;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        this.pushDeliveryExecutor = Executors.newCachedThreadPool();
+        this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.topicStore = storageFactory.createGlobal("pubsub-topics", "pubsub-topics.json",
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.subStore = storageFactory.createGlobal("pubsub-subs", "pubsub-subs.json",
@@ -85,6 +105,11 @@ public class PubSubService {
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
         this.iamService = iamService;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        this.pushDeliveryExecutor = Executors.newCachedThreadPool();
+        this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
@@ -438,8 +463,12 @@ public class PubSubService {
                 StoredSubscription sub = subStore.get(entry).orElse(null);
                 if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())
                         && matchesFilter(sub, attributes)) {
-                    queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
-                    notifyListeners(entry);
+                    if (sub.getPushEndpoint() != null) {
+                        pushDeliveryExecutor.submit(() -> deliverPushMessage(sub, stored));
+                    } else {
+                        queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
+                        notifyListeners(entry);
+                    }
                     fanOut++;
                 }
             }
@@ -453,6 +482,57 @@ public class PubSubService {
             }
         }
         return messageIds;
+    }
+
+    private void deliverPushMessage(StoredSubscription subscription, StoredMessage message) {
+        Map<String, Object> messageBody = new LinkedHashMap<>();
+        messageBody.put("data", Base64.getEncoder().encodeToString(message.getData()));
+        messageBody.put("attributes",
+                message.getAttributes() == null ? Map.of() : message.getAttributes());
+        messageBody.put("messageId", message.getMessageId());
+        messageBody.put("publishTime", message.getPublishTime());
+        if (message.getOrderingKey() != null) {
+            messageBody.put("orderingKey", message.getOrderingKey());
+        }
+
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("message", messageBody);
+        envelope.put("subscription", subscription.getName());
+
+        try {
+            String body = OBJECT_MAPPER.writeValueAsString(envelope);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(subscription.getPushEndpoint()))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+
+            HttpResponse<Void> response =
+                    httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                LOG.debugf("Push delivery succeeded subscription=%s messageId=%s status=%d",
+                        subscription.getName(), message.getMessageId(), response.statusCode());
+            } else {
+                LOG.warnf("Push delivery failed subscription=%s messageId=%s status=%d; retrying",
+                        subscription.getName(), message.getMessageId(), response.statusCode());
+                schedulePushRetry(subscription, message);
+            }
+        } catch (Exception e) {
+            LOG.warnf(e, "Push delivery failed subscription=%s messageId=%s; retrying",
+                    subscription.getName(), message.getMessageId());
+            schedulePushRetry(subscription, message);
+        }
+    }
+
+    private void schedulePushRetry(StoredSubscription subscription, StoredMessage message) {
+        pushRetryExecutor.schedule(
+                () -> pushDeliveryExecutor.submit(
+                        () -> deliverPushMessage(subscription, message)),
+                1,
+                TimeUnit.SECONDS);
     }
 
     // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request

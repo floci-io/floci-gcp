@@ -26,7 +26,7 @@ floci-gcp supports four storage backends configurable via `FLOCI_GCP_STORAGE_MOD
 
 === "Fast CI"
 
-    All in memory — fastest possible startup and test execution:
+    All in memory: fastest possible startup and test execution:
 
     ```bash
     FLOCI_GCP_STORAGE_MODE=memory
@@ -34,7 +34,7 @@ floci-gcp supports four storage backends configurable via `FLOCI_GCP_STORAGE_MOD
 
 === "Local development"
 
-    Hybrid — survive restarts without slowing down writes:
+    Hybrid: survive restarts without slowing down writes:
 
     ```bash
     FLOCI_GCP_STORAGE_MODE=hybrid
@@ -53,7 +53,7 @@ floci-gcp supports four storage backends configurable via `FLOCI_GCP_STORAGE_MOD
 
 === "Durable development"
 
-    Persistent — every write is immediately on disk:
+    Persistent: every write is immediately on disk:
 
     ```bash
     FLOCI_GCP_STORAGE_MODE=persistent

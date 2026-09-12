@@ -1,13 +1,13 @@
 # Service Usage
 
-floci-gcp emulates the Service Usage API (`serviceusage.googleapis.com` v1) over REST JSON —
-the API that enables and lists a project's GCP services. It is the first thing most IaC
+floci-gcp emulates the Service Usage API (`serviceusage.googleapis.com` v1) over REST JSON.
+The API enables and lists a project's GCP services. It is the first thing most IaC
 tooling touches: Terraform's `google_project_service` and Pulumi's `gcp.projects.Service`
 call it before managing any other resource, and `gcloud services` is built on it.
 
 The emulator is an accept-and-succeed control plane: enabling a service flips it to
 `ENABLED` (persisted, project-namespaced), disabling reverses it, and get/list echo that
-state. There is no real API gating or dependency resolution — services work whether or not
+state. There is no real API gating or dependency resolution: services work whether or not
 they were "enabled".
 
 ## Configuration
@@ -113,7 +113,7 @@ enforced by the emulator; they do not restrict access to emulated resources.
   the emulator does not ship a catalog of Google APIs.
 - `Service.config` carries only the service `name`; real GCP includes title, quota, auth,
   and endpoint configuration.
-- `disableDependentServices` and `checkIfServiceHasUsage` are accepted and ignored — there
+- `disableDependentServices` and `checkIfServiceHasUsage` are accepted and ignored: there
   is no dependency graph or usage tracking.
 - Batch limits match real GCP: 20 services per `batchEnable`, 30 names per `batchGet`,
   page size capped at 200.

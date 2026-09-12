@@ -1,8 +1,8 @@
 # Cloud Tasks
 
 floci-gcp emulates Google Cloud Tasks over gRPC using the real
-`google.cloud.tasks.v2.CloudTasks` protocol. It implements the control plane for queues and tasks —
-creating queues, enqueuing tasks, listing, pausing/resuming, and purging — with state tracked in the
+`google.cloud.tasks.v2.CloudTasks` protocol. It implements the control plane for queues and tasks,
+including creating queues, enqueuing tasks, listing, pausing/resuming, and purging, with state tracked in the
 configured storage backend.
 
 !!! note "Control plane only"
@@ -122,9 +122,9 @@ transport channel to `localhost:4588` over plaintext and disabling credentials (
 `CreateQueue` stores a queue under `projects/{project}/locations/{location}/queues/{queue}`. The
 following fields are honored:
 
-- **Rate limits** — `max_dispatches_per_second`, `max_concurrent_dispatches`
-- **Retry config** — `max_attempts`
-- **State** — `PauseQueue` / `ResumeQueue` toggle the queue state; `PurgeQueue` clears its tasks
+- **Rate limits**: `max_dispatches_per_second`, `max_concurrent_dispatches`
+- **Retry config**: `max_attempts`
+- **State**: `PauseQueue` / `ResumeQueue` toggle the queue state; `PurgeQueue` clears its tasks
 
 `UpdateQueue` applies the same rate-limit and retry fields.
 
@@ -132,8 +132,8 @@ following fields are honored:
 
 `CreateTask` accepts both task target shapes:
 
-- **HTTP target** (`http_request`) — `url`, `http_method`, `headers`, `body`
-- **App Engine target** (`app_engine_http_request`) — `relative_uri`, `http_method`, `headers`, `body`
+- **HTTP target** (`http_request`): `url`, `http_method`, `headers`, `body`
+- **App Engine target** (`app_engine_http_request`): `relative_uri`, `http_method`, `headers`, `body`
 
 `schedule_time` is stored when provided. Tasks with neither target default to an HTTP-typed task.
 
@@ -142,12 +142,12 @@ following fields are honored:
 - `ListQueues`, `GetQueue`, `CreateQueue`, `UpdateQueue`, `DeleteQueue`
 - `PurgeQueue`, `PauseQueue`, `ResumeQueue`
 - `ListTasks`, `GetTask`, `CreateTask`, `DeleteTask`, `RunTask`
-- `GetIamPolicy`, `SetIamPolicy`, `TestIamPermissions` (accepted but not persisted/enforced — see below)
+- `GetIamPolicy`, `SetIamPolicy`, `TestIamPermissions` (accepted but not persisted or enforced; see below)
 
 ## Not Yet Supported
 
-- **Actual task dispatch** — `RunTask` and queue processing do not deliver requests to HTTP or
+- **Actual task dispatch**: `RunTask` and queue processing do not deliver requests to HTTP or
   App Engine targets; tasks are tracked, not executed.
-- **IAM enforcement** — `GetIamPolicy` returns an empty policy, `SetIamPolicy` echoes the request,
+- **IAM enforcement**: `GetIamPolicy` returns an empty policy, `SetIamPolicy` echoes the request,
   and `TestIamPermissions` echoes the requested permissions; nothing is stored or enforced.
 - Automatic retry/backoff scheduling, `BufferTask`, and queue-level routing overrides.

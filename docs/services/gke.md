@@ -99,12 +99,12 @@ kubectl get nodes
 
 `get-credentials` writes a kubeconfig that authenticates with the GCP access token produced by
 the `gke-gcloud-auth-plugin`. k3s forwards any bearer token it does not recognise to floci-gcp's
-token-authentication webhook, which — since floci-gcp does not validate credentials — accepts any
+token-authentication webhook. Because floci-gcp does not validate credentials, the webhook accepts any
 non-empty token and maps it to `cluster-admin`. The cluster endpoint is advertised as a reachable
 `host:port` (`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so the kubeconfig server URL
 resolves correctly.
 
-This flow requires a real cluster — it does not apply in mock mode, where no API server is started.
+This flow requires a real cluster: it does not apply in mock mode, where no API server is started.
 
 ## Mock Mode
 

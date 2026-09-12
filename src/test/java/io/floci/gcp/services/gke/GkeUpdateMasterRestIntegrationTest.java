@@ -87,14 +87,18 @@ class GkeUpdateMasterRestIntegrationTest {
                 .statusCode(200)
                 .extract().path("currentMasterVersion");
 
-        given()
-                .urlEncodingEnabled(false)
-                .contentType("application/json")
-                .body("{}")
-                .when().post(clusterPath + ":updateMaster")
-                .then()
-                .statusCode(400)
-                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        // Missing, and present but not a string: both are valid JSON that must map to the GCP
+        // error shape rather than to an unmapped ClassCastException (a 500).
+        for (String body : new String[] {"{}", "{\"masterVersion\":123}", "{\"masterVersion\":{\"v\":\"1\"}}"}) {
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .body(body)
+                    .when().post(clusterPath + ":updateMaster")
+                    .then()
+                    .statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"));
+        }
 
         given()
                 .when().get(clusterPath)

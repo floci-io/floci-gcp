@@ -375,15 +375,17 @@ public class GkeService {
      * <p>Only the control plane moves: real GKE upgrades the master independently of node
      * pools, so {@code currentNodeVersion} and every pool's own {@code version} are left
      * untouched, unlike {@code UpdateCluster} with {@code desiredNodeVersion}. The proto marks
-     * {@code master_version} REQUIRED, so an absent or blank value is rejected before the
-     * cluster is touched. Reported as {@code UPGRADE_MASTER}, the {@code Operation.Type} real
-     * GKE uses for a master upgrade. */
+     * {@code master_version} REQUIRED, so an absent, blank or non-string value is rejected
+     * before the cluster is touched. Reported as {@code UPGRADE_MASTER}, the
+     * {@code Operation.Type} real GKE uses for a master upgrade. */
     public StoredOperation updateMaster(String project, String location, String clusterId,
                                         Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
-        String masterVersion = body == null ? null : (String) body.get("masterVersion");
-        if (masterVersion == null || masterVersion.isBlank()) {
-            throw GcpException.invalidArgument("masterVersion is required");
+        // stringField, not a cast: a syntactically valid body such as {"masterVersion": 123}
+        // must come back as 400 INVALID_ARGUMENT, not as an unmapped ClassCastException.
+        String masterVersion = body == null ? null : stringField(body, "masterVersion", null);
+        if (masterVersion == null) {
+            throw GcpException.invalidArgument("masterVersion is required and must be a string");
         }
         cluster.setCurrentMasterVersion(resolveMasterVersion(masterVersion));
         touch(cluster);

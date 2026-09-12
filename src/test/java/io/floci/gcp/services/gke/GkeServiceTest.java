@@ -369,6 +369,9 @@ class GkeServiceTest {
         assertEquals(400, blank.getHttpStatus());
         assertThrows(GcpException.class,
                 () -> service.updateMaster(PROJECT, LOCATION, "needs-version", null));
+        GcpException notAString = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "needs-version", Map.of("masterVersion", 123)));
+        assertEquals(400, notAString.getHttpStatus());
 
         StoredCluster after = service.getCluster(PROJECT, LOCATION, "needs-version");
         assertEquals(before.getCurrentMasterVersion(), after.getCurrentMasterVersion());

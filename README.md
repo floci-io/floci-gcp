@@ -205,6 +205,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Messaging and events | Pub/Sub, Managed Kafka, Eventarc |
 | Security and identity | Secret Manager, Cloud KMS, IAM, IAM Service Account Credentials, Firebase Auth (Identity Platform) |
 | Container orchestration | GKE (Kubernetes Engine) |
+| Virtual machine control plane | Compute Engine, VPC networking, global external application load-balancer configuration |
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL |
@@ -217,6 +218,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
+| **[Compute Engine](docs/services/compute.md)** | REST JSON | Scoped operations, synthetic catalogs, VPC/subnets/firewalls/addresses, VM and disk lifecycle, images/snapshots, NEGs and global HTTP load-balancer configuration; no guest execution or traffic forwarding |
 | **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, object compose, ACLs, bucket IAM, conditional requests (preconditions), versioning, lifecycle, CORS, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, queries (all operators), field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |

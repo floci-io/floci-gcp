@@ -35,14 +35,25 @@ public class GcsXmlDownloadController {
 
     private final GcsService service;
     private final EmulatorConfig config;
+    private final GcsXmlMultipartHandler multipart;
 	private final GcsAuthorizationService authorizationService;
 
     @Inject
 	public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
-			GcsAuthorizationService authorizationService) {
+			GcsAuthorizationService authorizationService, GcsXmlMultipartHandler multipart) {
+        this.multipart = multipart;
         this.service = service;
         this.config = config;
 		this.authorizationService = authorizationService;
+    }
+
+    @POST
+    @Consumes(MediaType.WILDCARD)
+    @Produces(MediaType.APPLICATION_XML)
+    @Path("/{object: .+}")
+    public Response multipart(@PathParam("bucket") String bucket, @PathParam("object") String object,
+            @Context UriInfo uri, @Context HttpHeaders headers, byte[] body) {
+        return multipart.handle("POST", bucket, object, uri, headers, body);
     }
 
     @OPTIONS
@@ -62,11 +73,13 @@ public class GcsXmlDownloadController {
             @PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @Context UriInfo uriInfo,
+            @Context HttpHeaders headers,
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader,
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
+        if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
         authorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
@@ -84,6 +97,7 @@ public class GcsXmlDownloadController {
             @Context UriInfo uriInfo,
             @Context HttpHeaders headers,
             byte[] body) {
+        if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("PUT", bucket, objectPath, uriInfo, headers, body); }
         GcsSignedUrl.checkNotExpired(uriInfo);
         authorizationService.requireObjectWrite(
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectPath);
@@ -104,8 +118,10 @@ public class GcsXmlDownloadController {
             @PathParam("bucket") String bucket,
             @PathParam("object") String objectPath,
             @Context UriInfo uriInfo,
+            @Context HttpHeaders headers,
             @QueryParam("generation") String generation,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+        if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("DELETE", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
         authorizationService.requireObjectDelete(authorization, bucket, objectPath);
         if (generation != null && !generation.isBlank()) {
@@ -127,11 +143,13 @@ public class GcsXmlDownloadController {
     public Response listObjects(
             @PathParam("bucket") String bucket,
             @Context UriInfo uriInfo,
+            @Context HttpHeaders headers,
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
             @QueryParam("max-keys") Integer maxKeys,
             @QueryParam("marker") String marker,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+        if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
         authorizationService.requireObjectList(authorization, bucket, prefix);
         service.getBucket(bucket);

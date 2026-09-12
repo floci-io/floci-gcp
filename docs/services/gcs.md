@@ -279,6 +279,10 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 - Data path: `ReadObject`, `WriteObject`, `BidiWriteObject`
 - Resumable writes: `StartResumableWrite`, `QueryWriteStatus`
 
+Bucket responses use `projects/{projectNumber}`, matching the REST bucket's
+`projectNumber`. Project IDs remain the storage isolation key; the emulator
+currently assigns the synthetic project number `1` to buckets.
+
 The v2 MVP does not implement IAM policy RPCs, retention locking, rewrite,
 move, restore, resumable cancellation, bidi reads, appendable objects, write
 handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
@@ -359,3 +363,30 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 - `ifSourceMetagenerationMatch` / `ifSourceMetagenerationNotMatch` for object moves
 - Returns HTTP 412 on precondition failure
 - Enforced atomically on object mutation paths under object locks, with a monotonic generation sequence, concurrent writers with `ifGenerationMatch=0` race safely (exactly one wins)
+
+## XML multipart uploads
+
+Native XML object routes support POST `?uploads`, PUT `?uploadId=...&partNumber=...`,
+GET parts, POST completion and DELETE abort. Bucket GET `?uploads` lists pending
+uploads with prefix and key/upload-ID markers. Parts and sessions use StorageFactory
+and survive graceful restarts in persistent, hybrid and WAL modes. Incomplete
+uploads do not appear in ordinary object inventory.
+
+Part numbers range from 1 to 10000. Completion validates increasing order, ETags
+and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
+a failed completion preserves the session. Completed objects have CRC32C and an
+opaque ETag, but no MD5 hash. Multipart upload delimiter grouping, customer-supplied
+encryption, upload preconditions and lifecycle expiry of incomplete sessions are
+unsupported. The emulator buffers parts and completed bytes in memory. Object
+publication and session removal are separate checkpoints; crash-atomic completion
+across those stores is not guaranteed.
+
+Authentication retains the existing emulator credential acceptance and limited
+CAB checks. Signed URL expiry checks do not prove cryptographic signature
+enforcement. The SDK suite uses only synthetic credentials and fixture signing keys.
+
+Multipart object metadata is finalized before storage publication and Pub/Sub or
+Eventarc finalization events. The event and stored generation agree on the opaque
+ETag, CRC32C, content metadata and absence of MD5. Ordinary uploads continue to
+include their MD5. Object publication and multipart-session removal still use
+separate checkpoints; crash-atomic multipart completion is not guaranteed.

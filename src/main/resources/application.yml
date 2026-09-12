@@ -62,6 +62,10 @@ floci-gcp:
     wal:
       compaction-interval-ms: 30000
   services:
+    compute:
+      enabled: true
+      operation-delay-ms: 50
+      regions: us-central1,europe-west1
     gcs:
       enabled: true
       upload-session-idle-timeout-seconds: 604800

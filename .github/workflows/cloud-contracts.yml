@@ -1,0 +1,108 @@
+name: Cloud SDK contracts
+
+on:
+  push:
+    branches: ['codex/vagon-integration']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-contracts:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2
+        with:
+          java-version: '25'
+          distribution: mandrel
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: JVM regression suite
+        run: mvn -B -ntp test
+      - name: Preserve JVM results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-regression
+          path: target/surefire-reports/*.xml
+      - name: Native image check
+        run: |
+          mvn -B -ntp package -Dnative -DskipTests -Dquarkus.native.additional-build-args-append=-Ob
+          mkdir -p native/arm64 evidence
+          cp target/*-runner native/arm64/application
+          cp target/*.so native/arm64/ 2>/dev/null || true
+          docker pull registry.access.redhat.com/ubi9-micro:9.7
+          docker image inspect registry.access.redhat.com/ubi9-micro:9.7 --format '{{index .RepoDigests 0}}' > evidence/native-runtime.txt
+          docker build -f docker/Dockerfile.native-package --build-arg TARGETARCH=arm64 --build-arg NATIVE_RUNTIME_IMAGE="$(cat evidence/native-runtime.txt)" --label org.opencontainers.image.revision="$GITHUB_SHA" -t floci-contract-native .
+          docker image inspect floci-contract-native --format '{{.Id}}' > evidence/native-image.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+          sha256sum native/arm64/application > evidence/native-binary.txt
+      - name: Prepare isolated SDK clients
+        run: |
+          docker build --build-arg RUBY_BUILD_IMAGE=ruby:3.4.5@sha256:73e085e58f9496502b0463a787b497b961d946bc1db43c6782c0c3c95281e432 -t floci-contract-ruby compatibility-tests/sdk-test-ruby
+          docker pull maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753
+          docker run --rm -v "$PWD/compatibility-tests/sdk-test-java:/workspace" -v "$HOME/.m2:/root/.m2" -w /workspace \
+            maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753 \
+            mvn -B -ntp -DskipTests test dependency:go-offline dependency:get -Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.5.5
+          docker run --rm -v "$HOME/.m2:/root/.m2" \
+            maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753 \
+            mvn -B -ntp dependency:get -Dartifact=org.junit.platform:junit-platform-launcher:1.12.2
+          docker network create --internal contracts
+          docker run -d --name floci-gcp --network contracts \
+            -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 -e FLOCI_GCP_STORAGE_MODE=persistent \
+            -e FLOCI_GCP_SERVICES_KAFKA_MOCK=true -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true \
+            -e FLOCI_GCP_SERVICES_CLOUDSQL_MOCK=true -e FLOCI_GCP_SERVICES_GKE_MOCK=true \
+            "$(cat evidence/native-image.txt)"
+          timeout 60 bash -c 'until docker exec floci-gcp /usr/local/bin/healthcheck.sh; do sleep 1; done'
+      - name: Java and Ruby native SDK contracts with restart
+        run: |
+          ruby_contract() {
+            mkdir -p "evidence/ruby-$1"
+            # Capability-free containers still need write access to synthetic results/state.
+            chmod 777 evidence "evidence/ruby-$1"
+            docker run --rm --network contracts --cap-drop=ALL --security-opt=no-new-privileges:true \
+              -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 -e FLOCI_GCP_GRPC_ENDPOINT=floci-gcp:4588 \
+              -e FLOCI_GCP_RESTART_PHASE="$1" -e FLOCI_GCP_RESTART_STATE=/state/ruby-restart.json \
+              -v "$PWD/evidence:/state" -v "$PWD/evidence/ruby-$1:/results" --entrypoint bundle \
+              floci-contract-ruby exec ruby "test/$2.rb"
+          }
+          java_contract() {
+            mkdir -p "evidence/java-$1"
+            chmod 777 evidence "evidence/java-$1"
+            local status=0
+            docker run --rm --network contracts --cap-drop=ALL --security-opt=no-new-privileges:true \
+              -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 -e FLOCI_GCP_GRPC_ENDPOINT=floci-gcp:4588 \
+              -e FLOCI_GCP_RESTART_PHASE="$1" -e FLOCI_GCP_RESTART_STATE=/state/java-restart.properties \
+              -v "$PWD/evidence:/state" -v "$PWD/compatibility-tests/sdk-test-java:/workspace" -v "$HOME/.m2:/root/.m2:ro" -w /workspace --entrypoint /bin/bash \
+              maven:3.9-eclipse-temurin-25@sha256:d67198007bb4441b07d45587320f83154de80ece3608f80408ef14c6ea847753 \
+              -c 'rm -f target/surefire-reports/*.xml; exec mvn -o -B -ntp -Dtest="$1" test' _ "$2" || status=$?
+            cp compatibility-tests/sdk-test-java/target/surefire-reports/*.xml "evidence/java-$1/"
+            return "$status"
+          }
+          ruby_contract all all
+          java_contract roundtrip 'ComputeContractTest,ComputeRoutingContractTest,GcsXmlMultipartContractTest,NetworkUsageContractTest,StorageContractTest,GcsDownscopedTokenTest,GcsResumableUploadTest,GcsSignedUrlTest,GcsGrpcTest,GcsServiceAccountAuthenticationTest'
+          ruby_contract seed restart_probe
+          java_contract seed RestartContractTest
+          docker restart floci-gcp
+          timeout 60 bash -c 'until docker exec floci-gcp /usr/local/bin/healthcheck.sh; do sleep 1; done'
+          ruby_contract verify restart_probe
+          java_contract verify RestartContractTest
+      - name: Teardown and logs
+        if: always()
+        run: |
+          mkdir -p evidence
+          docker logs floci-gcp > evidence/emulator.log 2>&1 || true
+          docker rm -fv floci-gcp || true
+          docker network rm contracts || true
+      - name: Contract evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-sdk-contracts
+          path: evidence/

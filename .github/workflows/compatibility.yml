@@ -90,6 +90,7 @@ jobs:
       matrix:
         test:
           - sdk-test-java
+          - sdk-test-ruby
           - sdk-test-node
           - sdk-test-python
           - sdk-test-go

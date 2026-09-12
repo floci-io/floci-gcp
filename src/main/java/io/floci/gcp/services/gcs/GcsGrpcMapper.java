@@ -52,7 +52,7 @@ final class GcsGrpcMapper {
         Bucket.Builder value = Bucket.newBuilder()
                 .setName(bucketName(stored.getName()))
                 .setBucketId(stored.getName())
-                .setProject("projects/" + stored.getProjectId())
+                .setProject("projects/" + stored.getProjectNumber())
                 .setMetageneration(parseLong(stored.getMetageneration()))
                 .setLocation(orEmpty(stored.getLocation()))
                 .setStorageClass(orEmpty(stored.getStorageClass()))

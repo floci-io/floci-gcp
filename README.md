@@ -227,7 +227,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
 | **IAM Service Account Credentials** | REST JSON | `generateAccessToken` (`iamcredentials.googleapis.com` v1) for service-account impersonation with scopes and lifetime; tokens are opaque emulator stubs |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
-| **GKE (Kubernetes Engine)** | REST JSON | Clusters and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. Reached by SDKs/gcloud through host-based routing (`container.*`) or the `/container/v1` path prefix |
+| **GKE (Kubernetes Engine)** | REST JSON | Clusters, node pools, and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. `remove_default_node_pool` + standalone `google_container_node_pool` (Terraform/OpenTofu) works end to end. Reached by SDKs/gcloud/Terraform through host-based routing (`container.*`) or the `/container/v1` path prefix |
 | **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; Docker-backed invocation on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
 | **Eventarc** | REST JSON | Trigger CRUD (`eventarc.googleapis.com` v1); delivers CloudEvents from Pub/Sub publishes and GCS object events to Cloud Run and HTTP endpoint destinations |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |

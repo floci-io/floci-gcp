@@ -42,16 +42,30 @@ public class GkeOperationService {
             String clusterId,
             OperationType type) {
 
+        return createOperation(project, location, type,
+                "projects/" + project + "/locations/" + location + "/clusters/" + clusterId);
+    }
+
+    /** For node-pool-scoped mutations, whose target is the pool, not the cluster. */
+    public StoredOperation createNodePoolOperation(
+            String project,
+            String location,
+            String clusterId,
+            String nodePoolId,
+            OperationType type) {
+
+        return createOperation(project, location, type,
+                "projects/" + project + "/locations/" + location
+                        + "/clusters/" + clusterId + "/nodePools/" + nodePoolId);
+    }
+
+    private StoredOperation createOperation(String project, String location, OperationType type, String targetLink) {
         String operationId = "operation-" + UUID.randomUUID();
         String now = Instant.now().toString();
 
         String selfLink = "projects/" + project
                 + "/locations/" + location
                 + "/operations/" + operationId;
-
-        String targetLink = "projects/" + project
-                + "/locations/" + location
-                + "/clusters/" + clusterId;
 
         StoredOperation op = new StoredOperation(
                 operationId,

@@ -1,13 +1,23 @@
 ARG VERSION=latest
-FROM floci/floci-gcp:${VERSION}
+# BASE_IMAGE is the image produced by Dockerfile.native-package. Release and nightly
+# tags use VERSION; reusable builds override BASE_IMAGE with the digest-qualified
+# native image they just published.
+#
+# That image is ubi9-micro and has no package manager, so this image cannot extend it.
+ARG BASE_IMAGE=floci/floci-gcp:${VERSION}
+FROM ${BASE_IMAGE} AS native
+
+# Everything that does not depend on the floci-gcp version. CI builds this stage
+# alone (target: tools) to warm the layer cache, so it pulls no floci-gcp image.
+FROM registry.access.redhat.com/ubi9-minimal:9.7 AS tools
 
 LABEL org.opencontainers.image.title="floci-gcp (compat)" \
       org.opencontainers.image.description="floci-gcp compatibility image with Python GCP SDK pre-installed" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Floci"
 
-USER root
-RUN microdnf install -y --nodocs python3.11 python3.11-pip \
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
+    && microdnf install -y --nodocs python3.11 python3.11-pip \
     && python3.11 -m pip install --upgrade pip \
     && python3.11 -m pip install --no-cache-dir \
          google-cloud-pubsub \
@@ -15,10 +25,37 @@ RUN microdnf install -y --nodocs python3.11 python3.11-pip \
          google-cloud-firestore \
          google-cloud-datastore \
          google-cloud-secret-manager \
+    # The system Python keeps pip, setuptools and what the SDKs import; the optimised
+    # .pyc variants, lib2to3 and ensurepip (pip is already installed) are build-time extras.
+    && rm -rf /usr/lib64/python3.11/lib2to3 /usr/lib64/python3.11/ensurepip \
+    && python3.11 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.11","/usr/lib/python3.11") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 
-COPY bin/gcplocal /usr/local/bin/gcplocal
-RUN chmod +x /usr/local/bin/gcplocal
+COPY --chmod=755 bin/gcplocal /usr/local/bin/gcplocal
+
+WORKDIR /app
+# A chmod after the copy below would rewrite the binary into a second layer.
+RUN chown 1001:root /app && chmod g+rwX /app
+
+FROM tools
+
+ARG VERSION
+ENV FLOCI_GCP_VERSION=${VERSION}
+ENV FLOCI_GCP_STORAGE_PERSISTENT_PATH=/app/data
+
+COPY --from=native --chown=1001:root /app/ /app/
+VOLUME /app/data
+
+COPY --from=native /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+# From the build context, not the native image: a published native image may predate the script.
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+EXPOSE 4588
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthcheck.sh"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
 
 USER 1001

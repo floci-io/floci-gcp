@@ -85,6 +85,12 @@ class GcsListFiltersTest {
     }
 
     @Test
+    void matchGlobFiltersDirectoryPrefixes() {
+        assertThat(names(Storage.BlobListOption.currentDirectory(), Storage.BlobListOption.matchGlob("*/")))
+                .containsExactlyInAnyOrder("logs/", "metrics/");
+    }
+
+    @Test
     void includeTrailingDelimiterAddsThePlaceholderObjectToItems() throws Exception {
         // Driven raw: google-cloud-storage 2.47.0 exposes no BlobListOption for this parameter,
         // so the SDK cannot send it. Without the flag "logs/" only rolls up into prefixes[] and

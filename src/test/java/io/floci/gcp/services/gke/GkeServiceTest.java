@@ -304,6 +304,88 @@ class GkeServiceTest {
     }
 
     @Test
+    void updateMasterMovesOnlyTheControlPlaneVersion() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "upgrade-master",
+                "nodePools", List.of(Map.of("name", "pool-a"), Map.of("name", "pool-b"))));
+        StoredCluster before = service.getCluster(PROJECT, LOCATION, "upgrade-master");
+        String nodeVersionBefore = before.getCurrentNodeVersion();
+        String etagBefore = before.getEtag();
+
+        StoredOperation op = service.updateMaster(PROJECT, LOCATION, "upgrade-master",
+                Map.of("masterVersion", "1.31.5-gke.1"));
+
+        assertEquals(OperationType.UPGRADE_MASTER, op.getOperationType());
+        assertEquals("DONE", op.getStatus());
+        assertTrue(op.getTargetLink().endsWith("/clusters/upgrade-master"));
+
+        StoredCluster after = service.getCluster(PROJECT, LOCATION, "upgrade-master");
+        assertEquals("1.31.5-gke.1", after.getCurrentMasterVersion());
+        // Real GKE upgrades the control plane independently of node pools, so neither the
+        // cluster's node version aggregate nor any pool's own version moves with the master.
+        assertEquals(nodeVersionBefore, after.getCurrentNodeVersion());
+        for (StoredNodePool pool : service.listNodePools(PROJECT, LOCATION, "upgrade-master")) {
+            assertEquals(nodeVersionBefore, pool.getVersion());
+        }
+        assertEquals(before.getInitialClusterVersion(), after.getInitialClusterVersion());
+        assertNotEquals(etagBefore, after.getEtag());
+    }
+
+    @Test
+    void updateMasterResolvesVersionAliasesToTheAdvertisedVersion() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "alias-cluster",
+                "initialClusterVersion", "1.29.0-gke.1"));
+        String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
+
+        // "-" and "latest" are the aliases the proto documents for UpdateMasterRequest.master_version.
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "-"));
+        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.29.0-gke.1"));
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "latest"));
+        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+
+        // A "1.X" / "1.X.Y" prefix of the advertised version picks that version.
+        String minor = advertised.substring(0, advertised.indexOf('.', advertised.indexOf('.') + 1));
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.29.0-gke.1"));
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", minor));
+        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+
+        // A prefix that only shares leading characters is not a match ("1.3" is not "1.30").
+        String notAPrefix = minor.substring(0, minor.length() - 1);
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", notAPrefix));
+        assertEquals(notAPrefix, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+    }
+
+    @Test
+    void updateMasterRejectsAMissingVersionWithoutTouchingTheCluster() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "needs-version"));
+        StoredCluster before = service.getCluster(PROJECT, LOCATION, "needs-version");
+
+        GcpException missing = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "needs-version", Map.of()));
+        assertEquals(400, missing.getHttpStatus());
+        GcpException blank = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "needs-version", Map.of("masterVersion", " ")));
+        assertEquals(400, blank.getHttpStatus());
+        assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "needs-version", null));
+        GcpException notAString = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "needs-version", Map.of("masterVersion", 123)));
+        assertEquals(400, notAString.getHttpStatus());
+
+        StoredCluster after = service.getCluster(PROJECT, LOCATION, "needs-version");
+        assertEquals(before.getCurrentMasterVersion(), after.getCurrentMasterVersion());
+        assertEquals(before.getEtag(), after.getEtag());
+    }
+
+    @Test
+    void updateMasterRequiresAnExistingCluster() {
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "ghost", Map.of("masterVersion", "1.31.5-gke.1")));
+        assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
     void getServerConfigReturnsVersionAndChannelInfo() {
         Map<String, Object> config = service.getServerConfig();
 

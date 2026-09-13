@@ -139,7 +139,7 @@ Terraform's plan/refresh diff, without hand-modeling the full `NodeConfig` proto
 
 ## Supported Operations
 
-- `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`
+- `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`, `UpdateMaster`
 - `SetResourceLabels`, `SetMasterAuth`, `SetNetworkPolicy`, `SetAddonsConfig`,
   `SetLoggingService`, `SetMonitoringService`, `SetLocations`, `SetLegacyAbac`,
   `SetMaintenancePolicy`, `StartIPRotation`, `CompleteIPRotation`
@@ -176,6 +176,14 @@ analysis, since floci-gcp has no real infrastructure behind them to inspect:
   omitted; with several it is required, and a request without it is rejected
   as `400 INVALID_ARGUMENT` rather than silently upgrading pools the caller
   did not name.
+- `UpdateMaster` moves only the control plane: `currentMasterVersion` changes and
+  `currentNodeVersion` and every node pool's `version` stay as they were, as in real
+  GKE, where the master and node pools upgrade independently. `masterVersion` is
+  required (`400 INVALID_ARGUMENT` when missing). The aliases the API documents
+  resolve against this emulator's single advertised version: `latest`, `-`, and a
+  `1.X` / `1.X.Y` prefix of it all pick that version; any other explicit version is
+  stored verbatim, as `CreateCluster` and `UpdateCluster` already do. The operation
+  is reported as `UPGRADE_MASTER`, the `Operation.Type` real GKE uses.
 
 **Autopilot mode** (`autopilot.enabled`) and **Fleet/Anthos registration**
 (`fleet`) are not semantically modeled — floci-gcp does not run a real

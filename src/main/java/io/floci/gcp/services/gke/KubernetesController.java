@@ -203,6 +203,17 @@ public class KubernetesController {
     }
 
     @POST
+    @Path("/clusters/{clusterId: [^:/]+}:updateMaster")
+    public Response updateMaster(
+            @PathParam("project") String project,
+            @PathParam("location") String location,
+            @PathParam("clusterId") String clusterId,
+            Map<String, Object> body) {
+
+        return Response.ok(gkeService.updateMaster(project, location, clusterId, body)).build();
+    }
+
+    @POST
     @Path("/clusters/{clusterId: [^:/]+}:startIpRotation")
     public Response startIpRotation(
             @PathParam("project") String project,

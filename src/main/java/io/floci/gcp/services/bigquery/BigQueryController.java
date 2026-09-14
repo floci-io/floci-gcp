@@ -3,6 +3,7 @@ package io.floci.gcp.services.bigquery;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.bigquery.model.Dataset;
+import io.floci.gcp.services.bigquery.model.UpdateMode;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.Job;
 import io.floci.gcp.services.bigquery.model.JobReference;
@@ -87,16 +88,20 @@ public class BigQueryController {
     @Path("/{projectId}/datasets/{datasetId}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response patchDataset(@PathParam("projectId") String projectId,
-            @PathParam("datasetId") String datasetId, Dataset body) {
-        return Response.ok(service.patchDataset(projectId, datasetId, body != null ? body : new Dataset())).build();
+            @PathParam("datasetId") String datasetId,
+            @QueryParam("updateMode") String updateMode, Dataset body) {
+        return Response.ok(service.patchDataset(projectId, datasetId,
+                body != null ? body : new Dataset(), UpdateMode.from(updateMode))).build();
     }
 
     @PUT
     @Path("/{projectId}/datasets/{datasetId}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response updateDataset(@PathParam("projectId") String projectId,
-            @PathParam("datasetId") String datasetId, Dataset body) {
-        return Response.ok(service.updateDataset(projectId, datasetId, body != null ? body : new Dataset())).build();
+            @PathParam("datasetId") String datasetId,
+            @QueryParam("updateMode") String updateMode, Dataset body) {
+        return Response.ok(service.updateDataset(projectId, datasetId,
+                body != null ? body : new Dataset(), UpdateMode.from(updateMode))).build();
     }
 
     @POST
@@ -104,9 +109,11 @@ public class BigQueryController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response postDatasetMethodOverride(@PathParam("projectId") String projectId,
             @PathParam("datasetId") String datasetId,
-            @HeaderParam("X-HTTP-Method-Override") String methodOverride, Dataset body) {
+            @HeaderParam("X-HTTP-Method-Override") String methodOverride,
+            @QueryParam("updateMode") String updateMode, Dataset body) {
         if ("PATCH".equalsIgnoreCase(methodOverride)) {
-            return Response.ok(service.patchDataset(projectId, datasetId, body != null ? body : new Dataset())).build();
+            return Response.ok(service.patchDataset(projectId, datasetId,
+                    body != null ? body : new Dataset(), UpdateMode.from(updateMode))).build();
         }
         throw GcpException.invalidArgument("unsupported method override: " + methodOverride);
     }

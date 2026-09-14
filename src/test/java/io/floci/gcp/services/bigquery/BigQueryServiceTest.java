@@ -4,6 +4,8 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.bigquery.model.Dataset;
 import io.floci.gcp.services.bigquery.model.DatasetAccessEntry;
+import io.floci.gcp.services.bigquery.model.DatasetAccessEntryTarget;
+import io.floci.gcp.services.bigquery.model.RoutineReference;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.StoredJob;
@@ -12,6 +14,7 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
+import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -181,6 +184,111 @@ class BigQueryServiceTest {
         assertEquals("projectWriters", stored.get(2).getSpecialGroup());
         assertEquals("serviceAccount:svc@example.iam.gserviceaccount.com",
                 stored.get(3).getIamMember());
+    }
+
+    // ---- updateMode ----
+    //
+    // Without it, every write covers metadata AND the ACL, so a client updating
+    // only friendlyName has to resend access[] or lose it. That is the whole
+    // reason the parameter exists, and it only bites once access[] is modelled.
+
+    @Test
+    void updateWithMetadataModeLeavesTheAclAlone() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
+        d.setDescription("original");
+        service.createDataset(PROJECT, d);
+
+        Dataset replacement = new Dataset();
+        replacement.setFriendlyName("metadata only");
+        Dataset updated = service.updateDataset(
+                PROJECT, DATASET, replacement, UpdateMode.UPDATE_METADATA);
+
+        assertEquals("metadata only", updated.getFriendlyName());
+        assertNull(updated.getDescription(), "metadata is still fully replaced");
+        assertEquals(1, updated.getAccess().size(), "the ACL must survive untouched");
+    }
+
+    @Test
+    void updateWithAclModeLeavesMetadataAlone() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
+        d.setDescription("keep me");
+        service.createDataset(PROJECT, d);
+
+        Dataset replacement = new Dataset();
+        replacement.setAccess(List.of(accessEntry("OWNER", "new@example.com")));
+        Dataset updated = service.updateDataset(PROJECT, DATASET, replacement, UpdateMode.UPDATE_ACL);
+
+        assertEquals("keep me", updated.getDescription(), "metadata must survive untouched");
+        assertEquals("OWNER", updated.getAccess().get(0).getRole());
+    }
+
+    @Test
+    void patchWithMetadataModeIgnoresAccessInTheBody() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "keep@example.com")));
+        service.createDataset(PROJECT, d);
+
+        Dataset patch = new Dataset();
+        patch.setFriendlyName("patched");
+        patch.setAccess(List.of(accessEntry("OWNER", "ignored@example.com")));
+        Dataset patched = service.patchDataset(
+                PROJECT, DATASET, patch, UpdateMode.UPDATE_METADATA);
+
+        assertEquals("patched", patched.getFriendlyName());
+        assertEquals("keep@example.com", patched.getAccess().get(0).getUserByEmail());
+    }
+
+    @Test
+    void patchWithAclModeIgnoresMetadataInTheBody() {
+        Dataset d = newDataset(DATASET);
+        d.setFriendlyName("keep me");
+        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
+        service.createDataset(PROJECT, d);
+
+        Dataset patch = new Dataset();
+        patch.setFriendlyName("ignored");
+        patch.setAccess(List.of(accessEntry("WRITER", "new@example.com")));
+        Dataset patched = service.patchDataset(PROJECT, DATASET, patch, UpdateMode.UPDATE_ACL);
+
+        assertEquals("keep me", patched.getFriendlyName());
+        assertEquals("WRITER", patched.getAccess().get(0).getRole());
+    }
+
+    @Test
+    void updateModeDefaultsToFullAndRejectsAnUnknownValue() {
+        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from(null));
+        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from(""));
+        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from("UPDATE_MODE_UNSPECIFIED"));
+        assertEquals(UpdateMode.UPDATE_ACL, UpdateMode.from("update_acl"));
+        GcpException ex = assertThrows(GcpException.class, () -> UpdateMode.from("UPDATE_SOMETHING"));
+        assertEquals("invalid", ex.getReason());
+    }
+
+    @Test
+    void nestedAccessVariantsRoundTrip() {
+        DatasetAccessEntry view = new DatasetAccessEntry();
+        view.setView(new TableReference(PROJECT, "other_ds", "auth_view"));
+
+        DatasetAccessEntry routine = new DatasetAccessEntry();
+        routine.setRoutine(new RoutineReference(PROJECT, "other_ds", "auth_routine"));
+
+        DatasetAccessEntryTarget target = new DatasetAccessEntryTarget();
+        target.setDataset(new DatasetReference(PROJECT, "linked_ds"));
+        target.setTargetTypes(List.of("VIEWS"));
+        DatasetAccessEntry linked = new DatasetAccessEntry();
+        linked.setDataset(target);
+
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(view, routine, linked));
+        service.createDataset(PROJECT, d);
+
+        List<DatasetAccessEntry> stored = service.getDataset(PROJECT, DATASET).getAccess();
+        assertEquals("auth_view", stored.get(0).getView().getTableId());
+        assertEquals("auth_routine", stored.get(1).getRoutine().getRoutineId());
+        assertEquals("linked_ds", stored.get(2).getDataset().getDataset().getDatasetId());
+        assertEquals(List.of("VIEWS"), stored.get(2).getDataset().getTargetTypes());
     }
 
     private static DatasetAccessEntry accessEntry(String role, String userByEmail) {

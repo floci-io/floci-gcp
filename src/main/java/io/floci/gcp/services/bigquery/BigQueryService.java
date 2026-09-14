@@ -17,6 +17,7 @@ import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
+import io.floci.gcp.services.bigquery.model.UpdateMode;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -117,17 +118,24 @@ public class BigQueryService {
     }
 
     public Dataset patchDataset(String projectId, String datasetId, Dataset patch) {
+        return patchDataset(projectId, datasetId, patch, UpdateMode.UPDATE_FULL);
+    }
+
+    /** datasets.patch, honouring {@code updateMode}. */
+    public Dataset patchDataset(String projectId, String datasetId, Dataset patch, UpdateMode mode) {
         Dataset existing = getDataset(projectId, datasetId);
-        if (patch.getFriendlyName() != null) {
-            existing.setFriendlyName(patch.getFriendlyName());
+        if (mode.touchesMetadata()) {
+            if (patch.getFriendlyName() != null) {
+                existing.setFriendlyName(patch.getFriendlyName());
+            }
+            if (patch.getDescription() != null) {
+                existing.setDescription(patch.getDescription());
+            }
+            if (patch.getLabels() != null) {
+                existing.setLabels(patch.getLabels());
+            }
         }
-        if (patch.getDescription() != null) {
-            existing.setDescription(patch.getDescription());
-        }
-        if (patch.getLabels() != null) {
-            existing.setLabels(patch.getLabels());
-        }
-        if (patch.getAccess() != null) {
+        if (mode.touchesAcl() && patch.getAccess() != null) {
             existing.setAccess(patch.getAccess());
         }
         existing.setLastModifiedTime(nowMillis());
@@ -138,11 +146,28 @@ public class BigQueryService {
 
     /** datasets.update (PUT): full replacement — mutable fields absent from the body are cleared. */
     public Dataset updateDataset(String projectId, String datasetId, Dataset update) {
+        return updateDataset(projectId, datasetId, update, UpdateMode.UPDATE_FULL);
+    }
+
+    /**
+     * datasets.update, honouring {@code updateMode}.
+     *
+     * <p>PUT replaces, so a field absent from the body is a cleared field. That
+     * is only safe for the half of the resource the caller addressed:
+     * UPDATE_METADATA leaves the ACL exactly as it was, UPDATE_ACL leaves the
+     * metadata alone, and UPDATE_FULL (the default) replaces both.
+     */
+    public Dataset updateDataset(
+            String projectId, String datasetId, Dataset update, UpdateMode mode) {
         Dataset existing = getDataset(projectId, datasetId);
-        existing.setFriendlyName(update.getFriendlyName());
-        existing.setDescription(update.getDescription());
-        existing.setLabels(update.getLabels());
-        existing.setAccess(update.getAccess());
+        if (mode.touchesMetadata()) {
+            existing.setFriendlyName(update.getFriendlyName());
+            existing.setDescription(update.getDescription());
+            existing.setLabels(update.getLabels());
+        }
+        if (mode.touchesAcl()) {
+            existing.setAccess(update.getAccess());
+        }
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         datasetStore.put(datasetId, existing);

@@ -94,6 +94,80 @@ class BigQueryRestIntegrationTest {
     }
 
     @Test
+    @Order(0)
+    void updateModeOverTheWireProtectsTheAclOnAMetadataOnlyWrite() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "ds_mode"},
+                         "description": "original",
+                         "access": [{"role": "READER", "userByEmail": "analyst@example.com"}]}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then().statusCode(200).body("access", hasSize(1));
+
+        // A PUT is a full replacement, so without updateMode this body would
+        // clear the ACL. That is the case the parameter exists for.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"friendlyName": "metadata only"}
+                        """)
+                .when().put(BASE + "/datasets/ds_mode?updateMode=UPDATE_METADATA")
+                .then()
+                .statusCode(200)
+                .body("friendlyName", equalTo("metadata only"))
+                .body("description", nullValue())
+                .body("access", hasSize(1));
+
+        // UPDATE_ACL is the mirror: the ACL is replaced, metadata is untouched.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"access": [{"role": "OWNER", "userByEmail": "owner@example.com"}]}
+                        """)
+                .when().put(BASE + "/datasets/ds_mode?updateMode=UPDATE_ACL")
+                .then()
+                .statusCode(200)
+                .body("friendlyName", equalTo("metadata only"))
+                .body("access[0].role", equalTo("OWNER"));
+
+        // An unknown value is rejected rather than guessed at.
+        given()
+                .contentType("application/json")
+                .body("{}")
+                .when().put(BASE + "/datasets/ds_mode?updateMode=UPDATE_SOMETHING")
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(0)
+    void nestedAccessVariantsRoundTripOverTheWire() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "ds_nested"},
+                         "access": [
+                           {"view": {"projectId": "p", "datasetId": "d", "tableId": "auth_view"}},
+                           {"routine": {"projectId": "p", "datasetId": "d", "routineId": "auth_routine"}},
+                           {"dataset": {"dataset": {"projectId": "p", "datasetId": "linked"},
+                                        "targetTypes": ["VIEWS"]}}]}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then().statusCode(200);
+
+        given()
+                .when().get(BASE + "/datasets/ds_nested")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(3))
+                .body("access[0].view.tableId", equalTo("auth_view"))
+                .body("access[1].routine.routineId", equalTo("auth_routine"))
+                .body("access[2].dataset.dataset.datasetId", equalTo("linked"))
+                .body("access[2].dataset.targetTypes[0]", equalTo("VIEWS"));
+    }
+
+    @Test
     @Order(1)
     void createDatasetAndTableWireShapes() {
         given()

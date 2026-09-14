@@ -22,6 +22,78 @@ class BigQueryRestIntegrationTest {
     private static String queryJobId;
 
     @Test
+    @Order(0)
+    void datasetAccessEntriesRoundTripOverTheWire() {
+        // The hashicorp/google provider writes access[] on create and reads it
+        // back on every refresh. If the emulator drops it, `terraform plan`
+        // reports a permanent diff on a resource nobody changed.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "ds_access"},
+                         "access": [
+                           {"role": "READER", "userByEmail": "analyst@example.com"},
+                           {"role": "READER", "groupByEmail": "team@example.com"},
+                           {"role": "WRITER", "specialGroup": "projectWriters"},
+                           {"role": "READER", "iamMember": "serviceAccount:svc@example.iam.gserviceaccount.com"},
+                           {"role": "READER", "domain": "example.com"}]}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(5))
+                .body("access[0].userByEmail", equalTo("analyst@example.com"));
+
+        // A GET is the call the provider actually makes on refresh.
+        given()
+                .when().get(BASE + "/datasets/ds_access")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(5))
+                .body("access[1].groupByEmail", equalTo("team@example.com"))
+                .body("access[2].specialGroup", equalTo("projectWriters"))
+                .body("access[3].iamMember",
+                        equalTo("serviceAccount:svc@example.iam.gserviceaccount.com"))
+                .body("access[4].domain", equalTo("example.com"));
+
+        // PATCH omitting access[] must not clear it. The provider PATCHes
+        // when only an unrelated attribute such as friendlyName changes.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"friendlyName": "Access DS"}
+                        """)
+                .when().patch(BASE + "/datasets/ds_access")
+                .then()
+                .statusCode(200)
+                .body("friendlyName", equalTo("Access DS"))
+                .body("access", hasSize(5));
+
+        // PATCH carrying access[] replaces it wholesale.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"access": [{"role": "OWNER", "userByEmail": "owner@example.com"}]}
+                        """)
+                .when().patch(BASE + "/datasets/ds_access")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(1))
+                .body("access[0].role", equalTo("OWNER"));
+
+        // PUT is a full replacement, so an omitted access[] is a cleared one.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"friendlyName": "Replaced"}
+                        """)
+                .when().put(BASE + "/datasets/ds_access")
+                .then()
+                .statusCode(200)
+                .body("access", nullValue());
+    }
+
+    @Test
     @Order(1)
     void createDatasetAndTableWireShapes() {
         given()

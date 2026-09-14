@@ -127,6 +127,9 @@ public class BigQueryService {
         if (patch.getLabels() != null) {
             existing.setLabels(patch.getLabels());
         }
+        if (patch.getAccess() != null) {
+            existing.setAccess(patch.getAccess());
+        }
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         datasetStore.put(datasetId, existing);
@@ -139,6 +142,7 @@ public class BigQueryService {
         existing.setFriendlyName(update.getFriendlyName());
         existing.setDescription(update.getDescription());
         existing.setLabels(update.getLabels());
+        existing.setAccess(update.getAccess());
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         datasetStore.put(datasetId, existing);

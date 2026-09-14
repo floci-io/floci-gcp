@@ -3,6 +3,7 @@ package io.floci.gcp.services.bigquery;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.bigquery.model.Dataset;
+import io.floci.gcp.services.bigquery.model.DatasetAccessEntry;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.StoredJob;
@@ -81,6 +82,112 @@ class BigQueryServiceTest {
 
         assertEquals("patched", patched.getFriendlyName());
         assertEquals("kept", patched.getDescription());
+    }
+
+    // ── Dataset access[] ──
+    //
+    // Storage fidelity only: entries round-trip so clients and the
+    // hashicorp/google Terraform provider see a stable resource. Nothing here
+    // evaluates them, and a read is still allowed regardless of what is granted.
+
+    @Test
+    void createDatasetPreservesAccessEntries() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(
+                accessEntry("READER", "analyst@example.com"),
+                accessEntry("OWNER", "owner@example.com")));
+
+        Dataset created = service.createDataset(PROJECT, d);
+
+        assertEquals(2, created.getAccess().size());
+        assertEquals("READER", created.getAccess().get(0).getRole());
+        assertEquals("analyst@example.com", created.getAccess().get(0).getUserByEmail());
+        assertEquals("owner@example.com", created.getAccess().get(1).getUserByEmail());
+        // and it survives a fresh read, not just the create response
+        assertEquals(2, service.getDataset(PROJECT, DATASET).getAccess().size());
+    }
+
+    @Test
+    void patchDatasetPreservesAccessWhenTheBodyOmitsIt() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
+        service.createDataset(PROJECT, d);
+
+        Dataset patch = new Dataset();
+        patch.setFriendlyName("patched");
+        Dataset patched = service.patchDataset(PROJECT, DATASET, patch);
+
+        assertEquals("patched", patched.getFriendlyName());
+        assertEquals(1, patched.getAccess().size(),
+                "PATCH must not drop access[], which is what makes a Terraform "
+                        + "update show a permanent diff");
+    }
+
+    @Test
+    void patchDatasetReplacesAccessWhenTheBodyCarriesIt() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
+        service.createDataset(PROJECT, d);
+
+        Dataset patch = new Dataset();
+        patch.setAccess(List.of(accessEntry("WRITER", "new@example.com")));
+        Dataset patched = service.patchDataset(PROJECT, DATASET, patch);
+
+        assertEquals(1, patched.getAccess().size());
+        assertEquals("WRITER", patched.getAccess().get(0).getRole());
+        assertEquals("new@example.com", patched.getAccess().get(0).getUserByEmail());
+    }
+
+    @Test
+    void updateDatasetClearsAccessWhenTheBodyOmitsIt() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
+        service.createDataset(PROJECT, d);
+
+        // PUT is a full replacement, so an omitted field is a cleared field,
+        // the same contract updateDatasetReplacesEntireResource pins for
+        // description.
+        Dataset replacement = new Dataset();
+        replacement.setFriendlyName("new name");
+        Dataset updated = service.updateDataset(PROJECT, DATASET, replacement);
+
+        assertNull(updated.getAccess());
+    }
+
+    @Test
+    void accessEntryCarriesEveryPrincipalKind() {
+        DatasetAccessEntry group = new DatasetAccessEntry();
+        group.setRole("READER");
+        group.setGroupByEmail("team@example.com");
+
+        DatasetAccessEntry domain = new DatasetAccessEntry();
+        domain.setRole("READER");
+        domain.setDomain("example.com");
+
+        DatasetAccessEntry special = new DatasetAccessEntry();
+        special.setRole("WRITER");
+        special.setSpecialGroup("projectWriters");
+
+        DatasetAccessEntry iam = new DatasetAccessEntry();
+        iam.setRole("READER");
+        iam.setIamMember("serviceAccount:svc@example.iam.gserviceaccount.com");
+
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(group, domain, special, iam));
+        List<DatasetAccessEntry> stored = service.createDataset(PROJECT, d).getAccess();
+
+        assertEquals("team@example.com", stored.get(0).getGroupByEmail());
+        assertEquals("example.com", stored.get(1).getDomain());
+        assertEquals("projectWriters", stored.get(2).getSpecialGroup());
+        assertEquals("serviceAccount:svc@example.iam.gserviceaccount.com",
+                stored.get(3).getIamMember());
+    }
+
+    private static DatasetAccessEntry accessEntry(String role, String userByEmail) {
+        DatasetAccessEntry e = new DatasetAccessEntry();
+        e.setRole(role);
+        e.setUserByEmail(userByEmail);
+        return e;
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.floci.gcp.services.bigquery.model;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -20,6 +21,7 @@ public class Dataset {
     private Map<String, String> labels;
     private String creationTime;
     private String lastModifiedTime;
+    private List<DatasetAccessEntry> access;
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -53,4 +55,7 @@ public class Dataset {
 
     public String getLastModifiedTime() { return lastModifiedTime; }
     public void setLastModifiedTime(String lastModifiedTime) { this.lastModifiedTime = lastModifiedTime; }
+
+    public List<DatasetAccessEntry> getAccess() { return access; }
+    public void setAccess(List<DatasetAccessEntry> access) { this.access = access; }
 }

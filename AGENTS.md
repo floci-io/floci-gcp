@@ -239,6 +239,7 @@ Each subdirectory is a self-contained suite with its own `Dockerfile`:
 - `sdk-test-java`: GCP SDK for Java. **Default / reference suite**; preferred for management-plane validation when it covers the affected API.
 - `sdk-test-node`: GCP SDK for Node.js
 - `sdk-test-python`: GCP SDK for Python
+- `sdk-test-ruby`: locked Ruby 3.4.5 Google SDK clients with Minitest and JUnit output
 - `sdk-test-go`: GCP SDK for Go
 - `sdk-test-rust`: official Rust client
 - `sdk-test-gcloud`: gcloud CLI (bats-based)

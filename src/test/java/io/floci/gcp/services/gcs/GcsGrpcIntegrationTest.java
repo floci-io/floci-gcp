@@ -35,14 +35,15 @@ class GcsGrpcIntegrationTest {
                 .build();
         try {
             StorageGrpc.StorageBlockingStub storage = StorageGrpc.newBlockingStub(channel);
-            storage.createBucket(CreateBucketRequest.newBuilder()
+            Bucket created = storage.createBucket(CreateBucketRequest.newBuilder()
                     .setParent("projects/_")
                     .setBucketId(bucket)
                     .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
                     .build());
 
-            given().when().get("/storage/v1/b/" + bucket)
-                    .then().statusCode(200);
+            String projectNumber = given().when().get("/storage/v1/b/" + bucket)
+                    .then().statusCode(200).extract().path("projectNumber");
+            assertEquals("projects/" + projectNumber, created.getProject());
 
             given()
                     .queryParam("uploadType", "media")

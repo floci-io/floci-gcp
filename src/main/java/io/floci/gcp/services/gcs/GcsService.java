@@ -487,21 +487,16 @@ public class GcsService {
             synchronized (objectLock(bucket, objectName)) {
                 checkPreconditions(bucket, objectName, preconditions);
                 return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                        userMetadata, metadataTemplate, baseUrl);
+                        userMetadata, metadataTemplate, baseUrl, ObjectWriteMode.ORDINARY, null);
             }
         }
     }
 
-    private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
-            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
-            GcsObjectMeta metadataTemplate, String baseUrl) {
-        return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                userMetadata, metadataTemplate, baseUrl, null);
-    }
+    private enum ObjectWriteMode { ORDINARY, XML_MULTIPART }
 
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
-            GcsObjectMeta metadataTemplate, String baseUrl, Integer compositeComponentCount) {
+            GcsObjectMeta metadataTemplate, String baseUrl, ObjectWriteMode mode, Integer compositeComponentCount) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -534,7 +529,7 @@ public class GcsService {
         meta.setBucket(bucket);
         meta.setGeneration(String.valueOf(generation));
         meta.setSize(String.valueOf(data.length));
-        meta.setContentType(contentType != null ? contentType : "application/octet-stream");
+        meta.setContentType(contentType != null && !contentType.isBlank() ? contentType : "application/octet-stream");
         meta.setCustomerEncryption(customerEncryption.metadata());
         if (userMetadata != null && !userMetadata.isEmpty()) {
             meta.setMetadata(new LinkedHashMap<>(userMetadata));
@@ -554,9 +549,13 @@ public class GcsService {
         meta.setIsLatest(true);
         String crc32c = computeCrc32c(data);
         meta.setCrc32c(crc32c);
-        String md5 = computeMd5(data);
-        meta.setMd5Hash(md5);
-        meta.setEtag(md5);
+        if (mode == ObjectWriteMode.XML_MULTIPART) {
+            meta.setEtag(Base64.getEncoder().encodeToString(meta.getGeneration().getBytes(StandardCharsets.UTF_8)));
+        } else {
+            String md5 = computeMd5(data);
+            meta.setMd5Hash(md5);
+            meta.setEtag(md5);
+        }
         if (compositeComponentCount != null) {
             meta.setComponentCount(compositeComponentCount);
             meta.setMd5Hash(null);
@@ -606,6 +605,20 @@ public class GcsService {
 
     public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data, String baseUrl) {
         return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), baseUrl);
+    }
+
+    public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
+            byte[] data, Map<String, String> metadata, String baseUrl) {
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                checkPreconditions(bucket, objectName, GcsObjectPreconditions.NONE);
+                GcsObjectMeta result = putObjectLocked(bucket, objectName, contentType, data,
+                        GcsCustomerEncryption.none(), metadata, null, baseUrl, ObjectWriteMode.XML_MULTIPART, null);
+                objectDataStore.checkpoint();
+                objectMetaStore.checkpoint();
+                return result;
+            }
+        }
     }
 
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
@@ -1176,7 +1189,7 @@ public class GcsService {
                         resolvedType != null ? resolvedType : "application/octet-stream",
                         composed, GcsCustomerEncryption.none(),
                         metadataTemplate != null ? metadataTemplate.getMetadata() : null,
-                        metadataTemplate, baseUrl, componentCount);
+                        metadataTemplate, baseUrl, ObjectWriteMode.ORDINARY, componentCount);
             }
         }
     }
@@ -1383,7 +1396,7 @@ public class GcsService {
             GcsObjectMeta destinationTemplate, String baseUrl) {
         var srcMeta = src.meta();
         var dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl);
+                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl, ObjectWriteMode.ORDINARY, null);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }

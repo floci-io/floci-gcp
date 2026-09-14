@@ -70,6 +70,7 @@ func TestGCSGRPC(t *testing.T) {
 		Metadata: map[string]string{"updated": "true"},
 	})
 	require.NoError(t, err)
+	assert.Equal(t, "bidi", updated.Metadata["mode"])
 	assert.Equal(t, "true", updated.Metadata["updated"])
 
 	composed := bucket.Object(composedName)

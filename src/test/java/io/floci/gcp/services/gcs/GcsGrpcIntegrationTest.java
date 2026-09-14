@@ -1,9 +1,11 @@
 package io.floci.gcp.services.gcs;
 
+import com.google.protobuf.FieldMask;
 import com.google.storage.v2.Bucket;
 import com.google.storage.v2.CreateBucketRequest;
 import com.google.storage.v2.GetObjectRequest;
 import com.google.storage.v2.StorageGrpc;
+import com.google.storage.v2.UpdateObjectRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -102,6 +105,62 @@ class GcsGrpcIntegrationTest {
                     .setObject("cached.txt")
                     .build());
             assertEquals("public, max-age=3600", object.getCacheControl());
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void grpcMetadataKeyMaskMergesAndDeletesIndividualKeys() throws Exception {
+        String bucket = "grpc-metadata-mask-bucket";
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext()
+                .build();
+        try {
+            StorageGrpc.StorageBlockingStub storage = StorageGrpc.newBlockingStub(channel);
+            storage.createBucket(CreateBucketRequest.newBuilder()
+                    .setParent("projects/_")
+                    .setBucketId(bucket)
+                    .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
+                    .build());
+
+            String body = """
+                    --metadata
+                    Content-Type: application/json
+
+                    {"name":"object","metadata":{"updated":"old","removed":"old","preserved":"old"}}
+                    --metadata
+                    Content-Type: text/plain
+
+                    content
+                    --metadata--
+                    """.replace("\n", "\r\n");
+            given()
+                    .queryParam("uploadType", "multipart")
+                    .header("Content-Type", "multipart/related; boundary=metadata")
+                    .body(body.getBytes(StandardCharsets.UTF_8))
+                    .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                    .then().statusCode(200);
+
+            com.google.storage.v2.Object updated = storage.updateObject(UpdateObjectRequest.newBuilder()
+                    .setObject(com.google.storage.v2.Object.newBuilder()
+                            .setBucket("projects/_/buckets/" + bucket)
+                            .setName("object")
+                            .putMetadata("updated", "new")
+                            .putMetadata("added", "new"))
+                    .setUpdateMask(FieldMask.newBuilder()
+                            .addPaths("metadata.updated")
+                            .addPaths("metadata.removed")
+                            .addPaths("metadata.added"))
+                    .build());
+
+            assertEquals(Map.of("updated", "new", "preserved", "old", "added", "new"),
+                    updated.getMetadataMap());
+            assertEquals(updated.getMetadataMap(), storage.getObject(GetObjectRequest.newBuilder()
+                    .setBucket("projects/_/buckets/" + bucket)
+                    .setObject("object")
+                    .build()).getMetadataMap());
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }

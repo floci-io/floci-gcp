@@ -52,6 +52,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Comparator;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -896,17 +897,24 @@ public class GcsService {
 
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch,
             GcsObjectPreconditions preconditions) {
+        return patchObject(bucket, objectName,
+                new GcsObjectPatch(patch, Map.of(), Set.of()), preconditions);
+    }
+
+    GcsObjectMeta patchObject(String bucket, String objectName, GcsObjectPatch patch,
+            GcsObjectPreconditions preconditions) {
         synchronized (objectLock(bucket, objectName)) {
             checkPreconditions(bucket, objectName, preconditions);
             return patchObjectLocked(bucket, objectName, patch);
         }
     }
 
-    private GcsObjectMeta patchObjectLocked(String bucket, String objectName, Map<String, Object> patch) {
+    private GcsObjectMeta patchObjectLocked(String bucket, String objectName, GcsObjectPatch objectPatch) {
         LOG.debugf("patchObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
                 .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+        Map<String, Object> patch = objectPatch.fields();
 
         // GCS never removes a custom time, so a null here leaves the field alone.
         String customTime = null;
@@ -929,6 +937,13 @@ public class GcsService {
         if (patch.containsKey("metadata")) {
             @SuppressWarnings("unchecked")
             Map<String, String> userMeta = (Map<String, String>) patch.get("metadata");
+            meta.setMetadata(userMeta);
+        } else if (!objectPatch.metadataUpdates().isEmpty() || !objectPatch.metadataRemovals().isEmpty()) {
+            Map<String, String> userMeta = meta.getMetadata() == null
+                    ? new LinkedHashMap<>()
+                    : new LinkedHashMap<>(meta.getMetadata());
+            userMeta.putAll(objectPatch.metadataUpdates());
+            objectPatch.metadataRemovals().forEach(userMeta::remove);
             meta.setMetadata(userMeta);
         }
         if (patch.containsKey("temporaryHold")) {

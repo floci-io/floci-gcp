@@ -183,8 +183,9 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
                     request.hasIfGenerationNotMatch(), request.getIfGenerationNotMatch(),
                     request.hasIfMetagenerationMatch(), request.getIfMetagenerationMatch(),
                     request.hasIfMetagenerationNotMatch(), request.getIfMetagenerationNotMatch());
-            return GcsGrpcMapper.toProto(service.patchObject(bucket, input.getName(),
-                    GcsGrpcMapper.objectUpdateFields(input, request.getUpdateMask().getPathsList()), conditions));
+            GcsObjectPatch patch = GcsGrpcMapper.objectUpdateFields(
+                    input, request.getUpdateMask().getPathsList());
+            return GcsGrpcMapper.toProto(service.patchObject(bucket, input.getName(), patch, conditions));
         });
     }
 

@@ -327,20 +327,46 @@ class GcsGrpcControllerTest {
     }
 
     @Test
-    void objectUpdateAcceptsSdkMetadataKeyMask() {
+    void objectUpdateMetadataKeyMaskMergesAndDeletesKeys() {
         createBucket("metadata-bucket");
         service.putObject("metadata-bucket", "object", "text/plain",
-                new byte[] {1}, BASE_URL);
+                new byte[] {1}, GcsCustomerEncryption.none(),
+                Map.of("updated", "old", "removed", "old", "preserved", "old"), BASE_URL);
         RecordingObserver<com.google.storage.v2.Object> response = new RecordingObserver<>();
 
         controller.updateObject(UpdateObjectRequest.newBuilder()
                 .setObject(object("metadata-bucket", "object").toBuilder()
-                        .putMetadata("updated", "true"))
-                .setUpdateMask(FieldMask.newBuilder().addPaths("metadata.updated"))
+                        .putMetadata("updated", "new")
+                        .putMetadata("added", "new"))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("metadata.updated")
+                        .addPaths("metadata.removed")
+                        .addPaths("metadata.added"))
                 .build(), response);
 
         assertNull(response.error);
-        assertEquals("true", response.single().getMetadataOrThrow("updated"));
+        assertEquals(Map.of("updated", "new", "preserved", "old", "added", "new"),
+                response.single().getMetadataMap());
+        assertEquals(response.single().getMetadataMap(),
+                service.getObjectMeta("metadata-bucket", "object").getMetadata());
+    }
+
+    @Test
+    void objectUpdateMetadataMaskReplacesTheWholeMap() {
+        createBucket("replace-metadata-bucket");
+        service.putObject("replace-metadata-bucket", "object", "text/plain",
+                new byte[] {1}, GcsCustomerEncryption.none(),
+                Map.of("replaced", "old", "removed", "old"), BASE_URL);
+        RecordingObserver<com.google.storage.v2.Object> response = new RecordingObserver<>();
+
+        controller.updateObject(UpdateObjectRequest.newBuilder()
+                .setObject(object("replace-metadata-bucket", "object").toBuilder()
+                        .putMetadata("replacement", "new"))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("metadata"))
+                .build(), response);
+
+        assertNull(response.error);
+        assertEquals(Map.of("replacement", "new"), response.single().getMetadataMap());
     }
 
     @Test

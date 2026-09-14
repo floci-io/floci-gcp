@@ -108,10 +108,11 @@ Before changing resource lifecycles, parent deletion, concurrency, locking, or s
 | Protocol | Services | Transport | Implementation |
 |----------|----------|-----------|----------------|
 | gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass (Datastore implements `BindableService` directly) + `GcpGrpcController.grpcError` |
-| REST JSON | 23 services under `src/main/java/io/floci/gcp/services/`; of the gRPC services above, only Firestore and Cloud Tasks have no JAX-RS controller | HTTP/1.1 or HTTP/2 | JAX-RS |
+| REST JSON | 22 services under `src/main/java/io/floci/gcp/services/`; of the gRPC services above, only Firestore and Cloud Tasks have no JAX-RS controller | HTTP/1.1 or HTTP/2 | JAX-RS |
+| HTTP/protobuf | Datastore | HTTP/1.1 or HTTP/2 | JAX-RS, `application/x-protobuf` |
 | REST XML | GCS (object operations) | HTTP/1.1 or HTTP/2 | JAX-RS + `XmlBuilder` |
 
-Sources of truth: classes extending `*Grpc.*ImplBase` or implementing `BindableService` for the gRPC row, `@Path`-annotated controllers for the REST rows. Update this table when you add or remove either.
+Sources of truth: classes extending `*Grpc.*ImplBase` or implementing `BindableService` for the gRPC row, `@Path`-annotated controllers for the HTTP rows. Update this table when you add or remove either.
 
 Treat feature support as transport-specific. A service exposing both gRPC and HTTP does not imply that every operation works over both transports.
 
@@ -259,7 +260,7 @@ Sources of truth: the `compatibility-tests/` subdirectories and `matrix.test` in
 3. `docker run` the suite against the emulator with `/results` mounted.
 4. Each suite writes JUnit XML to `/results`, consumed by the test-summary step; emulator logs are dumped on failure.
 
-Every suite receives the same endpoint variables: `FLOCI_GCP_ENDPOINT`, `FLOCI_ENDPOINT`, `FLOCI_HOST` and `FLOCI_PROJECT`. SDK suites read `FLOCI_GCP_ENDPOINT`; the bats and IaC suites read the others.
+Every suite receives the same endpoint variables: `FLOCI_GCP_ENDPOINT`, `FLOCI_ENDPOINT`, `FLOCI_HOST` and `FLOCI_PROJECT`. The SDK suites and `sdk-test-gcloud` read `FLOCI_GCP_ENDPOINT`; only `compat-terraform` and `compat-opentofu` read the other three.
 
 Source of truth: `.github/workflows/compatibility.yml`. Update this section when you change the network, the results mount, or the endpoint variables.
 
@@ -479,7 +480,12 @@ Pre-compiled stub artifacts used (do not add raw `.proto` codegen), all under `c
 - `grpc-google-cloud-logging-v2`
 - `grpc-google-cloud-monitoring-v3`
 - `grpc-google-cloud-storage-v2`
+- `grpc-google-iam-v1`
 - `proto-google-cloud-datastore-v1` (protos only; Datastore implements `BindableService` directly)
+- `proto-google-cloud-eventarc-v1`
+- `proto-google-cloud-functions-v2`
+- `proto-google-cloud-run-v2`
+- `proto-google-cloud-service-usage-v1`
 - `proto-google-common-protos`
 
-Source of truth: `pom.xml`. Update this list when you add or remove a stub dependency.
+Source of truth: the `com.google.api.grpc` dependencies in `pom.xml`. Update this list when you add or remove one.

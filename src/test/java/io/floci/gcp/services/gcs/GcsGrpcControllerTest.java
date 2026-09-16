@@ -353,6 +353,26 @@ class GcsGrpcControllerTest {
     }
 
     @Test
+    void syntheticResponseNumbersDoNotMergeProjectIdListings() {
+        for (String project : List.of("project-one", "project-two")) {
+            RecordingObserver<Bucket> created = new RecordingObserver<>();
+            controller.createBucket(CreateBucketRequest.newBuilder().setParent("projects/_")
+                    .setBucketId(project + "-bucket")
+                    .setBucket(Bucket.newBuilder().setProject("projects/" + project)).build(), created);
+            assertNull(created.error);
+            assertEquals("projects/1", created.single().getProject());
+            assertEquals(project, service.getBucket(project + "-bucket").getProjectId());
+        }
+        for (String project : List.of("project-one", "project-two")) {
+            RecordingObserver<ListBucketsResponse> listed = new RecordingObserver<>();
+            controller.listBuckets(ListBucketsRequest.newBuilder().setParent("projects/" + project).build(), listed);
+            assertNull(listed.error);
+            assertEquals(List.of(project + "-bucket"), listed.single().getBucketsList().stream()
+                    .map(Bucket::getBucketId).toList());
+        }
+    }
+
+    @Test
     void classicWriteAndRangeReadShareServiceState() {
         createBucket("classic-bucket");
         byte[] payload = "hello grpc storage".getBytes(StandardCharsets.UTF_8);

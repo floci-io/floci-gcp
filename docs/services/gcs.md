@@ -283,7 +283,13 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 
 Bucket responses use `projects/{projectNumber}`, matching the REST bucket's
 `projectNumber`. Project IDs remain the storage isolation key; the emulator
-currently assigns the synthetic project number `1` to buckets.
+currently assigns the synthetic project number `1` to buckets. This value is
+shared by all projects and is not a resolvable project alias. Continue using the
+original project ID for create and list requests; replaying `projects/1` from a
+bucket response does not resolve back to that project. Numeric project input
+resolution is an existing emulator limitation, not full Storage v2 compatibility.
+Supporting it requires unique persistent project identities and a policy for
+existing buckets with the shared synthetic number.
 
 The v2 MVP does not implement IAM policy RPCs, retention locking, rewrite,
 move, restore, resumable cancellation, bidi reads, appendable objects, write

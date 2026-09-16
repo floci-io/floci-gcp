@@ -306,9 +306,22 @@ public class ComputeService {
         body.properties().forEach(e -> query.put(e.getKey(), e.getValue().asText()));
         return query;
     }
-    static List<ObjectNode> toObjects(JsonNode node) {
+    static ObjectNode requireObject(JsonNode node, String field) {
+        if (!(node instanceof ObjectNode object)) {
+            throw GcpException.invalidArgument(field + " must be a JSON object");
+        }
+        return object;
+    }
+    static ObjectNode objectField(ObjectNode parent, String field) {
+        return parent.has(field) ? requireObject(parent.get(field), field) : parent.putObject(field);
+    }
+    static List<ObjectNode> objectArray(ObjectNode parent, String field) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode()) { return List.of(); }
+        if (!node.isArray()) { throw GcpException.invalidArgument(field + " must be a JSON array"); }
         List<ObjectNode> result = new ArrayList<>();
-        node.forEach(n -> result.add((ObjectNode) n)); return result;
+        for (int i = 0; i < node.size(); i++) { result.add(requireObject(node.get(i), field + "[" + i + "]")); }
+        return result;
     }
     public static ObjectNode object() { return JSON.createObjectNode(); }
     static String singular(String collection) {

@@ -16,9 +16,9 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         c.scope("zones");
         if (c.collection().equals("disks")) { disk(c, r); return; }
         machine(c, r);
-        JsonNode nics = r.path("networkInterfaces");
-        if (!nics.isArray() || nics.size() != 1) { throw GcpException.unimplemented("Exactly one IPv4 NIC is required"); }
-        ObjectNode nic = (ObjectNode) nics.get(0);
+        List<ObjectNode> nics = objectArray(r, "networkInterfaces");
+        if (nics.size() != 1) { throw GcpException.unimplemented("Exactly one IPv4 NIC is required"); }
+        ObjectNode nic = nics.getFirst();
         ObjectNode subnet = c.reference(nic, "subnetwork", "subnetworks");
         String region = c.scope().substring(6, c.scope().lastIndexOf('-'));
         if (!subnet.path("region").asText().equals(c.link("regions/" + region))) { throw GcpException.invalidArgument("VM and subnet regions differ"); }
@@ -28,22 +28,22 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         }
         nic.set("network", subnet.path("network")); nic.put("name", "nic0");
         nic.put("networkIP", ComputeNetworkResources.allocatePrivate(c, subnet, nic.path("networkIP").asText("")));
-        for (JsonNode access : nic.path("accessConfigs")) { access(c, r, (ObjectNode) access); }
+        for (ObjectNode access : objectArray(nic, "accessConfigs")) { access(c, r, access); }
         if (nic.path("accessConfigs").size() > 1) { throw GcpException.invalidArgument("One IPv4 access config is supported"); }
-        ObjectNode metadata = r.has("metadata") ? (ObjectNode) r.get("metadata") : r.putObject("metadata");
+        ObjectNode metadata = objectField(r, "metadata");
+        objectArray(metadata, "items");
         metadata.put("fingerprint", fingerprint());
-        ObjectNode tags = r.has("tags") ? (ObjectNode) r.get("tags") : r.putObject("tags");
+        ObjectNode tags = objectField(r, "tags");
         for (JsonNode tag : tags.path("items")) { name(tag.asText()); }
         tags.put("fingerprint", fingerprint());
-        JsonNode disks = r.path("disks");
-        if (!disks.isArray() || disks.isEmpty()) { throw GcpException.invalidArgument("A boot disk is required"); }
+        List<ObjectNode> disks = objectArray(r, "disks");
+        if (disks.isEmpty()) { throw GcpException.invalidArgument("A boot disk is required"); }
         int index = 0, boots = 0;
-        for (JsonNode node : disks) {
-            ObjectNode attachment = (ObjectNode) node;
+        for (ObjectNode attachment : disks) {
             if (attachment.path("boot").asBoolean()) { boots++; }
             if (attachment.has("initializeParams")) {
                 if (attachment.has("source")) { throw GcpException.invalidArgument("Specify source or initializeParams, not both"); }
-                ObjectNode params = (ObjectNode) attachment.remove("initializeParams");
+                ObjectNode params = requireObject(attachment.remove("initializeParams"), "initializeParams");
                 String diskName = params.path("diskName").asText(c.name() + (index == 0 ? "" : "-disk-" + index));
                 name(diskName);
                 String key = c.scope() + "/disks/" + diskName;
@@ -68,13 +68,14 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
     private void machine(ComputeService.Context c, ObjectNode r) {
         c.reference(r, "machineType", "machineTypes");
         if (!r.path("machineType").asText().startsWith(c.link(c.scope() + "/machineTypes/"))) { throw GcpException.invalidArgument("Machine type must be in VM zone"); }
-        for (JsonNode accelerator : r.path("guestAccelerators")) {
-            c.reference((ObjectNode) accelerator, "acceleratorType", "acceleratorTypes");
+        for (ObjectNode accelerator : objectArray(r, "guestAccelerators")) {
+            c.reference(accelerator, "acceleratorType", "acceleratorTypes");
             if (!accelerator.path("acceleratorType").asText().startsWith(c.link(c.scope() + "/acceleratorTypes/"))) {
                 throw GcpException.invalidArgument("Accelerator type must be in VM zone");
             }
             integer(accelerator.path("acceleratorCount").asText(), 1, 4, "acceleratorCount");
         }
+        if (r.has("scheduling")) { requireObject(r.get("scheduling"), "scheduling"); }
         if (!r.path("guestAccelerators").isEmpty() && !r.path("scheduling").path("onHostMaintenance").asText().equals("TERMINATE")) {
             throw GcpException.invalidArgument("GPU instances require onHostMaintenance=TERMINATE");
         }
@@ -159,6 +160,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                 String field = action.equals("setTags") ? "tags" : "metadata";
                 checkFingerprint((ObjectNode) r.get(field), body, "fingerprint");
                 if (field.equals("tags")) { for (JsonNode tag : body.path("items")) { name(tag.asText()); } }
+                if (field.equals("metadata")) { objectArray(body, "items"); }
                 ObjectNode replacement = body.deepCopy(); replacement.put("fingerprint", fingerprint()); r.set(field, replacement);
             }
             case "attachDisk" -> {

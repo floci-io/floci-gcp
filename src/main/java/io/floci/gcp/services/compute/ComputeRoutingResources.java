@@ -33,7 +33,7 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         switch (c.collection()) {
             case "healthChecks" -> {
                 if (!r.path("type").asText().equals("HTTP")) { throw GcpException.unimplemented("Only HTTP health check configuration is supported"); }
-                ObjectNode check = r.has("httpHealthCheck") ? (ObjectNode) r.get("httpHealthCheck") : r.putObject("httpHealthCheck");
+                ObjectNode check = objectField(r, "httpHealthCheck");
                 check.put("port", check.path("port").asInt(80)); port(check.path("port"));
                 check.put("requestPath", check.path("requestPath").asText("/"));
                 r.put("checkIntervalSec", integer(r.path("checkIntervalSec").asText("5"), 1, 300, "checkIntervalSec"));
@@ -50,11 +50,11 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
                     c.reference(wrapper, "check", "healthChecks"); checks.set(i, wrapper.get("check"));
                 }
                 Set<String> groups = new HashSet<>();
-                for (JsonNode backend : r.path("backends")) {
-                    ObjectNode group = c.reference((ObjectNode) backend, "group", "networkEndpointGroups");
+                for (ObjectNode backend : objectArray(r, "backends")) {
+                    ObjectNode group = c.reference(backend, "group", "networkEndpointGroups");
                     if (!groups.add(group.path("selfLink").asText())) { throw GcpException.invalidArgument("Duplicate backend group"); }
                     if (!backend.path("balancingMode").asText("RATE").equals("RATE")) { throw GcpException.unimplemented("Only RATE backend balancing is supported"); }
-                    ((ObjectNode) backend).put("balancingMode", "RATE");
+                    backend.put("balancingMode", "RATE");
                     if (backend.path("maxRatePerEndpoint").asDouble(1) <= 0) { throw GcpException.invalidArgument("maxRatePerEndpoint must be positive"); }
                 }
                 if (!Set.of("NONE", "CLIENT_IP", "GENERATED_COOKIE", "HTTP_COOKIE").contains(r.path("sessionAffinity").asText("NONE"))) { throw GcpException.unimplemented("Unsupported sessionAffinity"); }
@@ -62,13 +62,12 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
             case "urlMaps" -> {
                 c.reference(r, "defaultService", "backendServices");
                 Set<String> matchers = new HashSet<>();
-                for (JsonNode matcherNode : r.path("pathMatchers")) {
-                    ObjectNode matcher = (ObjectNode) matcherNode;
+                for (ObjectNode matcher : objectArray(r, "pathMatchers")) {
                     name(required(matcher, "name"));
                     if (!matchers.add(matcher.path("name").asText())) { throw GcpException.invalidArgument("Duplicate path matcher"); }
                     c.reference(matcher, "defaultService", "backendServices");
-                    for (JsonNode rule : matcher.path("pathRules")) {
-                        c.reference((ObjectNode) rule, "service", "backendServices");
+                    for (ObjectNode rule : objectArray(matcher, "pathRules")) {
+                        c.reference(rule, "service", "backendServices");
                         if (rule.path("paths").isEmpty()) { throw GcpException.invalidArgument("Path rules require paths"); }
                         for (JsonNode path : rule.path("paths")) {
                             if (!path.asText().startsWith("/") || path.asText().contains("?")) { throw GcpException.invalidArgument("Invalid path rule"); }
@@ -76,7 +75,7 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
                     }
                     if (!matcher.path("routeRules").isEmpty()) { throw GcpException.unimplemented("Advanced routeRules are not implemented; use pathRules"); }
                 }
-                for (JsonNode host : r.path("hostRules")) {
+                for (ObjectNode host : objectArray(r, "hostRules")) {
                     if (!matchers.contains(host.path("pathMatcher").asText())) { throw GcpException.invalidArgument("Host rule references a missing path matcher"); }
                 }
             }
@@ -143,8 +142,7 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         }
         List<ObjectNode> endpoints = c.state.endpoints.get(c.key());
         if (!body.path("networkEndpoints").isArray() || body.path("networkEndpoints").isEmpty()) { throw GcpException.invalidArgument("networkEndpoints are required"); }
-        for (JsonNode node : body.path("networkEndpoints")) {
-            ObjectNode endpoint = (ObjectNode) node;
+        for (ObjectNode endpoint : objectArray(body, "networkEndpoints")) {
             if (endpoint.has("instance") && !endpoint.path("instance").asText().contains("/")) { endpoint.put("instance", c.scope() + "/instances/" + endpoint.path("instance").asText()); }
             ObjectNode vm = c.reference(endpoint, "instance", "instances");
             if (!vm.path("zone").asText().equals(c.link(c.scope()))) { throw GcpException.invalidArgument("Endpoint and VM zones differ"); }

@@ -33,9 +33,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -839,14 +841,20 @@ class GcsServiceTest {
             var composition = executor.submit(() -> service.composeObject(
                     "bucket", "composed.txt", List.of("part1.txt", "part2.txt"), null, BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(composition.isDone());
 
+            CountDownLatch deletionStarted = new CountDownLatch(1);
+            var deletionThread = new AtomicReference<Thread>();
             var deletion = executor.submit(() -> {
+                deletionThread.set(Thread.currentThread());
+                deletionStarted.countDown();
                 service.deleteObject("bucket", "part1.txt");
                 service.deleteObject("bucket", "part2.txt");
                 service.deleteObject("bucket", "composed.txt");
                 service.deleteBucket("bucket");
             });
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            assertTrue(deletionStarted.await(5, TimeUnit.SECONDS));
+            assertThreadBlocked(deletionThread.get(), deletion, composition);
 
             allowMetadataWrite.countDown();
             composition.get(5, TimeUnit.SECONDS);
@@ -860,6 +868,17 @@ class GcsServiceTest {
             allowMetadataWrite.countDown();
             executor.shutdownNow();
         }
+    }
+
+    private static void assertThreadBlocked(Thread thread, Future<?> blockedOperation,
+            Future<?> lockHolder) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (thread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            assertFalse(blockedOperation.isDone(), "operation completed before reaching the contended lock");
+            assertFalse(lockHolder.isDone(), "lock holder completed before contention was observed");
+            Thread.sleep(1);
+        }
+        assertEquals(Thread.State.BLOCKED, thread.getState(), "operation did not block on the expected lock");
     }
 
     @Test

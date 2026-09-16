@@ -821,6 +821,48 @@ class GcsServiceTest {
     }
 
     @Test
+    void deleteBucketWaitsForComposeToPublishFinalMetadata() throws Exception {
+        CountDownLatch metadataWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowMetadataWrite = new CountDownLatch(1);
+        var metadataStore = new BlockingCompositeMetadataStorage(metadataWriteStarted, allowMetadataWrite);
+        var dataStore = new InMemoryStorage<String, byte[]>();
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                dataStore, new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "part1.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.putObject("bucket", "part2.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var composition = executor.submit(() -> service.composeObject(
+                    "bucket", "composed.txt", List.of("part1.txt", "part2.txt"), null, BASE_URL));
+            assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> {
+                service.deleteObject("bucket", "part1.txt");
+                service.deleteObject("bucket", "part2.txt");
+                service.deleteObject("bucket", "composed.txt");
+                service.deleteBucket("bucket");
+            });
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowMetadataWrite.countDown();
+            composition.get(5, TimeUnit.SECONDS);
+            deletion.get(5, TimeUnit.SECONDS);
+
+            assertTrue(metadataStore.keys().isEmpty());
+            assertTrue(dataStore.keys().isEmpty());
+            GcpException ex = assertThrows(GcpException.class, () -> service.getBucket("bucket"));
+            assertEquals("NOT_FOUND", ex.getGcpStatus());
+        } finally {
+            allowMetadataWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void deleteBucketWaitsForAMoveToPublishMetadata() throws Exception {
         CountDownLatch metadataWriteStarted = new CountDownLatch(1);
         CountDownLatch allowMetadataWrite = new CountDownLatch(1);
@@ -1057,6 +1099,32 @@ class GcsServiceTest {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new AssertionError("interrupted while publishing object metadata", e);
+                }
+            }
+            super.put(key, value);
+        }
+    }
+
+    private static final class BlockingCompositeMetadataStorage extends InMemoryStorage<String, GcsObjectMeta> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+
+        private BlockingCompositeMetadataStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        @Override
+        public void put(String key, GcsObjectMeta value) {
+            if (value.getComponentCount() != null) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish composite object metadata");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing composite object metadata", e);
                 }
             }
             super.put(key, value);

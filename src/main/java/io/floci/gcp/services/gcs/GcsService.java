@@ -361,6 +361,13 @@ public class GcsService {
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
             GcsObjectMeta metadataTemplate, String baseUrl) {
+        return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
+                userMetadata, metadataTemplate, baseUrl, null);
+    }
+
+    private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
+            GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
+            GcsObjectMeta metadataTemplate, String baseUrl, Integer compositeComponentCount) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -416,6 +423,10 @@ public class GcsService {
         String md5 = computeMd5(data);
         meta.setMd5Hash(md5);
         meta.setEtag(md5);
+        if (compositeComponentCount != null) {
+            meta.setComponentCount(compositeComponentCount);
+            meta.setMd5Hash(null);
+        }
 
         String retentionExpiry = computeRetentionExpiry(bucket, now);
         if (retentionExpiry != null) {
@@ -1008,16 +1019,18 @@ public class GcsService {
         if (resolvedType == null && firstSourceMeta != null) {
             resolvedType = firstSourceMeta.getContentType();
         }
-        var meta = putObject(bucket, destObject, resolvedType != null ? resolvedType : "application/octet-stream",
-                composed, GcsCustomerEncryption.none(),
-                metadataTemplate != null ? metadataTemplate.getMetadata() : null,
-                metadataTemplate, preconditions, baseUrl);
-        // Real GCS composite objects report a componentCount and no md5Hash, and
-        // composing an already composite source adds its component count.
-        meta.setComponentCount(componentCount);
-        meta.setMd5Hash(null);
-        objectMetaStore.put(objectKey(bucket, destObject), meta);
-        return meta;
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, destObject)) {
+                checkPreconditions(bucket, destObject, preconditions);
+                // Real GCS composite objects report a componentCount and no md5Hash, and
+                // composing an already composite source adds its component count.
+                return putObjectLocked(bucket, destObject,
+                        resolvedType != null ? resolvedType : "application/octet-stream",
+                        composed, GcsCustomerEncryption.none(),
+                        metadataTemplate != null ? metadataTemplate.getMetadata() : null,
+                        metadataTemplate, baseUrl, componentCount);
+            }
+        }
     }
 
     private void checkPreconditions(String bucket, String objectName,

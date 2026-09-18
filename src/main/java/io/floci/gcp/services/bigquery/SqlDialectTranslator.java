@@ -1,6 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -92,6 +93,506 @@ final class SqlDialectTranslator {
         return translator.run(sql);
     }
 
+    // ── Statements (DML / DDL) ──────────────────────────────────────────────
+
+    enum StatementKind {
+        QUERY, INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE_TABLE, CREATE_VIEW, DROP_TABLE, DROP_VIEW,
+        CREATE_SCHEMA, DROP_SCHEMA
+    }
+
+    /**
+     * A classified statement. {@code querySql} is the GoogleSQL text of the {@code SELECT} part
+     * of {@code CREATE TABLE ... AS} and {@code CREATE VIEW}; {@code columns} is the column list
+     * of a plain {@code CREATE TABLE}, already in BigQuery schema form.
+     */
+    record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
+                     boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
+                     boolean materialized, String querySql, List<TableFieldSchema> columns) {
+
+        boolean isDml() {
+            return kind == StatementKind.INSERT || kind == StatementKind.UPDATE || kind == StatementKind.DELETE
+                    || kind == StatementKind.MERGE;
+        }
+    }
+
+    /** Classifies a statement and resolves its target, without translating it to DuckDB. */
+    static Statement parseStatement(String sql, String projectId, String defaultDatasetId) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId,
+                QueryParameters.none());
+        return translator.classify(sql);
+    }
+
+    /**
+     * Translates {@code INSERT}, {@code UPDATE}, {@code DELETE} or {@code MERGE} to DuckDB. The
+     * target table is part of {@link Translation#tables()}; {@code MERGE} gains
+     * {@code RETURNING merge_action} so the engine can split its counts.
+     */
+    static Translation translateDml(String sql, String projectId, String defaultDatasetId,
+                                    QueryParameters parameters) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters);
+        return translator.runDml(sql);
+    }
+
+    private void prepare(String sql) {
+        if (sql == null || sql.isBlank()) {
+            throw invalidQuery("Syntax error: Unexpected end of script");
+        }
+        tokens = new Lexer(sql).tokenize();
+        stripTrailingSemicolons();
+        rejectScripts();
+    }
+
+    private Statement classify(String sql) {
+        prepare(sql);
+        List<Integer> sig = significantIndexes();
+        if (sig.isEmpty()) {
+            throw invalidQuery("Syntax error: Unexpected end of script");
+        }
+        String first = tokens.get(sig.getFirst()).upper();
+        if (first.equals("SELECT") || first.equals("WITH") || tokens.get(sig.getFirst()).isPunct("(")) {
+            return statement(StatementKind.QUERY, "SELECT", null);
+        }
+        return switch (first) {
+            case "INSERT", "UPDATE", "DELETE", "MERGE" -> {
+                int at = 1;
+                if (at < sig.size() && ((first.equals("INSERT") || first.equals("MERGE")) && keywordAt(sig, at, "INTO")
+                        || first.equals("DELETE") && keywordAt(sig, at, "FROM"))) {
+                    at++;
+                }
+                TableRef target = resolveTable(pathAt(sig, at).segments());
+                if ((first.equals("UPDATE") || first.equals("DELETE")) && !hasTopLevelKeyword("WHERE")) {
+                    throw invalidQuery(first + " must have a WHERE clause");
+                }
+                yield statement(StatementKind.valueOf(first), first, target);
+            }
+            case "TRUNCATE" -> {
+                expectKeyword(sig, 1, "TABLE");
+                yield statement(StatementKind.TRUNCATE, "TRUNCATE_TABLE", resolveTable(pathAt(sig, 2).segments()));
+            }
+            case "CREATE" -> classifyCreate(sig);
+            case "DROP" -> classifyDrop(sig);
+            default -> throw invalidQuery("Statement type " + first + " is not supported by the floci BigQuery"
+                    + " emulator yet.");
+        };
+    }
+
+    private Statement classifyCreate(List<Integer> sig) {
+        int at = 1;
+        boolean orReplace = false;
+        if (keywordAt(sig, at, "OR")) {
+            expectKeyword(sig, at + 1, "REPLACE");
+            orReplace = true;
+            at += 2;
+        }
+        if (keywordAt(sig, at, "TEMP") || keywordAt(sig, at, "TEMPORARY")) {
+            throw invalidQuery("Temporary tables need a multi-statement script, which the floci BigQuery"
+                    + " emulator does not support.");
+        }
+        boolean materialized = false;
+        if (keywordAt(sig, at, "MATERIALIZED")) {
+            materialized = true;
+            at++;
+        }
+        String object = at < sig.size() ? tokens.get(sig.get(at)).upper() : "";
+        at++;
+        boolean ifNotExists = false;
+        if (keywordAt(sig, at, "IF")) {
+            expectKeyword(sig, at + 1, "NOT");
+            expectKeyword(sig, at + 2, "EXISTS");
+            ifNotExists = true;
+            at += 3;
+        }
+        if (orReplace && ifNotExists) {
+            throw invalidQuery("CREATE statements cannot combine OR REPLACE and IF NOT EXISTS");
+        }
+        Path path = pathAt(sig, at);
+        switch (object) {
+            case "SCHEMA" -> {
+                return new Statement(StatementKind.CREATE_SCHEMA, "CREATE_SCHEMA", null, datasetOf(path.segments()),
+                        orReplace, ifNotExists, false, false, false, null, null);
+            }
+            case "TABLE" -> {
+                TableRef target = resolveTable(path.segments());
+                int asIndex = topLevelAsSelect(path.end());
+                if (asIndex >= 0) {
+                    return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_AS_SELECT", target, null,
+                            orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null);
+                }
+                int open = nextSignificant(path.end(), tokens.size());
+                if (open < 0 || !tokens.get(open).isPunct("(")) {
+                    throw invalidQuery("CREATE TABLE needs a column list or AS SELECT"
+                            + " (LIKE and COPY are not supported by the floci BigQuery emulator)");
+                }
+                List<TableFieldSchema> columns = columnDefinitions(open, matchingParen(open));
+                return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE", target, null, orReplace,
+                        ifNotExists, false, false, false, null, columns);
+            }
+            case "VIEW" -> {
+                TableRef target = resolveTable(path.segments());
+                int asIndex = topLevelAsSelect(path.end());
+                if (asIndex < 0) {
+                    throw invalidQuery("CREATE VIEW needs AS followed by a query");
+                }
+                return new Statement(StatementKind.CREATE_VIEW,
+                        materialized ? "CREATE_MATERIALIZED_VIEW" : "CREATE_VIEW", target, null, orReplace,
+                        ifNotExists, false, false, materialized, text(asIndex + 1, tokens.size()).trim(), null);
+            }
+            default -> throw invalidQuery("CREATE " + object + " is not supported by the floci BigQuery emulator yet.");
+        }
+    }
+
+    private Statement classifyDrop(List<Integer> sig) {
+        int at = 1;
+        boolean materialized = false;
+        if (keywordAt(sig, at, "MATERIALIZED")) {
+            materialized = true;
+            at++;
+        }
+        String object = at < sig.size() ? tokens.get(sig.get(at)).upper() : "";
+        at++;
+        boolean ifExists = false;
+        if (keywordAt(sig, at, "IF")) {
+            expectKeyword(sig, at + 1, "EXISTS");
+            ifExists = true;
+            at += 2;
+        }
+        Path path = pathAt(sig, at);
+        int after = nextSignificant(path.end(), tokens.size());
+        boolean cascade = after >= 0 && tokens.get(after).isKeyword("CASCADE");
+        return switch (object) {
+            case "SCHEMA" -> new Statement(StatementKind.DROP_SCHEMA, "DROP_SCHEMA", null, datasetOf(path.segments()),
+                    false, false, ifExists, cascade, false, null, null);
+            case "TABLE" -> new Statement(StatementKind.DROP_TABLE, "DROP_TABLE", resolveTable(path.segments()), null,
+                    false, false, ifExists, false, false, null, null);
+            case "VIEW" -> new Statement(StatementKind.DROP_VIEW,
+                    materialized ? "DROP_MATERIALIZED_VIEW" : "DROP_VIEW", resolveTable(path.segments()), null,
+                    false, false, ifExists, false, materialized, null, null);
+            default -> throw invalidQuery("DROP " + object + " is not supported by the floci BigQuery emulator yet.");
+        };
+    }
+
+    private Statement statement(StatementKind kind, String statementType, TableRef target) {
+        return new Statement(kind, statementType, target, null, false, false, false, false, false, null, null);
+    }
+
+    private String datasetOf(List<String> segments) {
+        if (segments.size() == 2) {
+            if (!segments.get(0).equals(projectId)) {
+                throw invalidQuery("Cross-project statements are not supported by the floci BigQuery emulator: "
+                        + String.join(".", segments));
+            }
+            return segments.get(1);
+        }
+        if (segments.size() != 1) {
+            throw invalidQuery("Invalid dataset name " + String.join(".", segments));
+        }
+        return segments.getFirst();
+    }
+
+    private Translation runDml(String sql) {
+        prepare(sql);
+        List<Integer> sig = significantIndexes();
+        String first = tokens.get(sig.getFirst()).upper();
+        int at = 1;
+        if ((first.equals("INSERT") || first.equals("MERGE")) && keywordAt(sig, at, "INTO")
+                || first.equals("DELETE") && keywordAt(sig, at, "FROM")) {
+            at++;
+        }
+        Path path = pathAt(sig, at);
+        TableRef target = resolveTable(path.segments());
+        tables.add(target);
+        String targetSql = DuckTypes.quoteIdentifier(target.datasetId()) + "."
+                + DuckTypes.quoteIdentifier(target.tableId());
+        String head = switch (first) {
+            case "INSERT" -> "INSERT INTO ";
+            case "DELETE" -> "DELETE FROM ";
+            case "MERGE" -> "MERGE INTO ";
+            default -> "UPDATE ";
+        };
+        StringBuilder out = new StringBuilder(head).append(targetSql);
+        int rest = path.end();
+        int next = nextSignificant(rest, tokens.size());
+        // UPDATE/DELETE/MERGE target alias: "t", "AS t"
+        if (next >= 0 && !first.equals("INSERT")) {
+            Token n = tokens.get(next);
+            int aliasIndex = -1;
+            if (n.isKeyword("AS")) {
+                aliasIndex = nextSignificant(next + 1, tokens.size());
+            } else if ((n.kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(n.upper()) && !n.isKeyword("SET")
+                    && !n.isKeyword("USING")) || n.kind == Kind.QIDENT) {
+                aliasIndex = next;
+            }
+            if (aliasIndex >= 0) {
+                out.append(" AS ").append(DuckTypes.quoteIdentifier(tokens.get(aliasIndex).identifierText()));
+                rest = aliasIndex + 1;
+            }
+        }
+        out.append(render(rest, tokens.size()));
+        if (first.equals("MERGE")) {
+            out.append(" RETURNING merge_action");
+        }
+        return new Translation(out.toString().trim(), tables);
+    }
+
+    // ── Statement parsing helpers ───────────────────────────────────────────
+
+    private record Path(List<String> segments, int end) {}
+
+    private List<Integer> significantIndexes() {
+        List<Integer> sig = new ArrayList<>();
+        for (int i = 0; i < tokens.size(); i++) {
+            if (tokens.get(i).kind != Kind.SPACE) {
+                sig.add(i);
+            }
+        }
+        return sig;
+    }
+
+    private boolean keywordAt(List<Integer> sig, int at, String keyword) {
+        return at < sig.size() && tokens.get(sig.get(at)).isKeyword(keyword);
+    }
+
+    private void expectKeyword(List<Integer> sig, int at, String keyword) {
+        if (!keywordAt(sig, at, keyword)) {
+            throw invalidQuery("Syntax error: Expected keyword " + keyword);
+        }
+    }
+
+    /** Reads a (possibly backtick-quoted, dotted) name starting at significant token {@code at}. */
+    private Path pathAt(List<Integer> sig, int at) {
+        if (at >= sig.size()) {
+            throw invalidQuery("Syntax error: Unexpected end of statement");
+        }
+        List<String> segments = new ArrayList<>();
+        int k = sig.get(at);
+        while (true) {
+            Token t = tokens.get(k);
+            if (t.kind == Kind.QIDENT) {
+                segments.addAll(List.of(t.value.split("\\.", -1)));
+            } else if (t.kind == Kind.IDENT) {
+                segments.add(t.text);
+            } else {
+                throw invalidQuery("Syntax error: Expected a name but got \"" + t.text + "\"");
+            }
+            int dot = nextSignificant(k + 1, tokens.size());
+            if (dot >= 0 && tokens.get(dot).isPunct(".")) {
+                int name = nextSignificant(dot + 1, tokens.size());
+                if (name >= 0 && (tokens.get(name).kind == Kind.IDENT || tokens.get(name).kind == Kind.QIDENT)) {
+                    k = name;
+                    continue;
+                }
+            }
+            return new Path(segments, k + 1);
+        }
+    }
+
+    private boolean hasTopLevelKeyword(String keyword) {
+        int depth = 0;
+        for (Token t : tokens) {
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && t.isKeyword(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Index of a top-level {@code AS} that is followed by a query, searching from {@code from}. */
+    private int topLevelAsSelect(int from) {
+        int depth = 0;
+        for (int k = from; k < tokens.size(); k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && t.isKeyword("AS")) {
+                int next = nextSignificant(k + 1, tokens.size());
+                if (next >= 0 && (tokens.get(next).isKeyword("SELECT") || tokens.get(next).isKeyword("WITH")
+                        || tokens.get(next).isPunct("("))) {
+                    return k;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private String text(int from, int to) {
+        StringBuilder sb = new StringBuilder();
+        for (int k = from; k < to; k++) {
+            sb.append(tokens.get(k).text);
+        }
+        return sb.toString();
+    }
+
+    /** {@code (name TYPE [NOT NULL] [OPTIONS(description = '...')], ...)} → BigQuery fields. */
+    private List<TableFieldSchema> columnDefinitions(int open, int close) {
+        List<TableFieldSchema> fields = new ArrayList<>();
+        for (List<Token> item : columnItems(open, close)) {
+            if (item.isEmpty()) {
+                continue;
+            }
+            if (item.getFirst().isKeyword("PRIMARY") || item.getFirst().isKeyword("FOREIGN")
+                    || item.getFirst().isKeyword("CONSTRAINT")) {
+                continue; // unenforced table constraints carry no data
+            }
+            int[] pos = {1};
+            TableFieldSchema field = columnType(item, pos);
+            field.setName(item.getFirst().identifierText());
+            while (pos[0] < item.size()) {
+                Token t = item.get(pos[0]);
+                if (t.isKeyword("NOT") && pos[0] + 1 < item.size() && item.get(pos[0] + 1).isKeyword("NULL")) {
+                    field.setMode("REQUIRED");
+                    pos[0] += 2;
+                } else if (t.isKeyword("OPTIONS")) {
+                    pos[0]++;
+                    String description = optionValue(item, pos, "description");
+                    if (description != null) {
+                        field.setDescription(description);
+                    }
+                } else {
+                    pos[0]++;
+                }
+            }
+            fields.add(field);
+        }
+        return fields;
+    }
+
+    /**
+     * Splits a column list on top-level commas. Commas inside parentheses and inside
+     * {@code ARRAY<...>} / {@code STRUCT<...>} brackets do not split; {@code >>} is split into
+     * two closing brackets.
+     */
+    private List<List<Token>> columnItems(int open, int close) {
+        List<List<Token>> items = new ArrayList<>();
+        List<Token> current = new ArrayList<>();
+        int parens = 0;
+        int angles = 0;
+        Token previous = null;
+        for (Token t : significant(open + 1, close)) {
+            if (t.isPunct("(")) {
+                parens++;
+            } else if (t.isPunct(")")) {
+                parens--;
+            } else if (t.isPunct("<") && previous != null
+                    && (previous.isKeyword("ARRAY") || previous.isKeyword("STRUCT"))) {
+                angles++;
+            } else if (t.isPunct(">>") && angles > 0) {
+                angles -= 2;
+                current.add(new Token(Kind.PUNCT, ">", null));
+                current.add(new Token(Kind.PUNCT, ">", null));
+                previous = t;
+                continue;
+            } else if (t.isPunct(">") && angles > 0) {
+                angles--;
+            } else if (t.isPunct(",") && parens == 0 && angles == 0) {
+                items.add(current);
+                current = new ArrayList<>();
+                previous = t;
+                continue;
+            }
+            current.add(t);
+            previous = t;
+        }
+        if (!current.isEmpty()) {
+            items.add(current);
+        }
+        return items;
+    }
+
+    /** A GoogleSQL column type ({@code INT64}, {@code ARRAY<...>}, {@code STRUCT<...>}) as a field. */
+    private static TableFieldSchema columnType(List<Token> item, int[] pos) {
+        TableFieldSchema field = new TableFieldSchema();
+        field.setMode("NULLABLE");
+        if (pos[0] >= item.size()) {
+            throw invalidQuery("Column " + item.getFirst().text + " has no type");
+        }
+        String type = item.get(pos[0]++).upper();
+        if (type.equals("ARRAY")) {
+            expectPunct(item, pos, "<");
+            TableFieldSchema element = columnType(item, pos);
+            expectPunct(item, pos, ">");
+            element.setMode("REPEATED");
+            return element;
+        }
+        if (type.equals("STRUCT")) {
+            expectPunct(item, pos, "<");
+            List<TableFieldSchema> children = new ArrayList<>();
+            while (pos[0] < item.size() && !item.get(pos[0]).isPunct(">")) {
+                if (!children.isEmpty()) {
+                    expectPunct(item, pos, ",");
+                }
+                String name = item.get(pos[0]++).identifierText();
+                TableFieldSchema child = columnType(item, pos);
+                child.setName(name);
+                if (pos[0] + 1 < item.size() && item.get(pos[0]).isKeyword("NOT")
+                        && item.get(pos[0] + 1).isKeyword("NULL")) {
+                    child.setMode("REQUIRED");
+                    pos[0] += 2;
+                }
+                children.add(child);
+            }
+            expectPunct(item, pos, ">");
+            field.setType("RECORD");
+            field.setFields(children);
+            return field;
+        }
+        field.setType(RowCodec.legacyType(switch (type) {
+            case "INT", "SMALLINT", "INTEGER", "BIGINT", "TINYINT", "BYTEINT" -> "INT64";
+            case "DECIMAL" -> "NUMERIC";
+            case "BIGDECIMAL" -> "BIGNUMERIC";
+            default -> type;
+        }));
+        if (pos[0] < item.size() && item.get(pos[0]).isPunct("(")) {
+            int depth = 0;
+            while (pos[0] < item.size()) {
+                Token t = item.get(pos[0]++);
+                if (t.isPunct("(")) {
+                    depth++;
+                } else if (t.isPunct(")") && --depth == 0) {
+                    break;
+                }
+            }
+        }
+        return field;
+    }
+
+    private static void expectPunct(List<Token> item, int[] pos, String punct) {
+        if (pos[0] < item.size() && item.get(pos[0]).isPunct(punct)) {
+            pos[0]++;
+            return;
+        }
+        throw invalidQuery("Syntax error in column definition: expected \"" + punct + "\"");
+    }
+
+    /** Reads {@code (key = 'value', ...)} after OPTIONS and returns {@code key}'s string value. */
+    private static String optionValue(List<Token> item, int[] pos, String key) {
+        if (pos[0] >= item.size() || !item.get(pos[0]).isPunct("(")) {
+            return null;
+        }
+        String value = null;
+        int depth = 0;
+        for (; pos[0] < item.size(); pos[0]++) {
+            Token t = item.get(pos[0]);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                if (--depth == 0) {
+                    pos[0]++;
+                    break;
+                }
+            } else if (depth == 1 && t.isKeyword(key) && pos[0] + 2 < item.size()
+                    && item.get(pos[0] + 1).isPunct("=") && item.get(pos[0] + 2).kind == Kind.STRING) {
+                value = item.get(pos[0] + 2).value;
+            }
+        }
+        return value;
+    }
+
     /** The statement type BigQuery would report, derived from the first keyword. */
     static String statementType(String sql) {
         for (Token t : new Lexer(sql).tokenize()) {
@@ -108,12 +609,7 @@ final class SqlDialectTranslator {
     }
 
     private Translation run(String sql) {
-        if (sql == null || sql.isBlank()) {
-            throw invalidQuery("Syntax error: Unexpected end of script");
-        }
-        tokens = new Lexer(sql).tokenize();
-        stripTrailingSemicolons();
-        rejectScripts();
+        prepare(sql);
         String statement = statementType(sql);
         if (!statement.equals("SELECT")) {
             throw invalidQuery("Statement type " + statement + " is not supported by the floci BigQuery"
@@ -126,7 +622,7 @@ final class SqlDialectTranslator {
     }
 
     private void stripTrailingSemicolons() {
-        while (!tokens.isEmpty() && tokens.getLast().isPunct(";")) {
+        while (!tokens.isEmpty() && (tokens.getLast().isPunct(";") || tokens.getLast().kind == Kind.SPACE)) {
             tokens.removeLast();
         }
     }
@@ -407,8 +903,12 @@ final class SqlDialectTranslator {
                 expectTable = true;
             } else if (upper.equals("JOIN")) {
                 expectTable = true;
-            } else if (upper.equals("ON") || upper.equals("USING")) {
+            } else if (upper.equals("ON")) {
                 expectTable = false;
+            } else if (upper.equals("USING")) {
+                // JOIN ... USING (columns) vs MERGE ... USING source_table
+                int after = nextSignificant(i + 1, end);
+                expectTable = after >= 0 && !tokens.get(after).isPunct("(");
             } else if (CLAUSE_END_KEYWORDS.contains(upper)) {
                 inFrom = false;
                 expectTable = false;
@@ -558,19 +1058,25 @@ final class SqlDialectTranslator {
             return i + 1;
         }
         int close = matchingParen(open);
-        out.append("UNNEST(").append(render(open + 1, close)).append(')');
+        String array = render(open + 1, close);
         int next = nextSignificant(close + 1, end);
-        if (next < 0) {
-            return close + 1;
-        }
         int nameIndex = -1;
-        if (tokens.get(next).isKeyword("AS")) {
+        if (next >= 0 && tokens.get(next).isKeyword("AS")) {
             nameIndex = nextSignificant(next + 1, end);
-        } else if ((tokens.get(next).kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(tokens.get(next).upper()))
-                || tokens.get(next).kind == Kind.QIDENT) {
+        } else if (next >= 0 && ((tokens.get(next).kind == Kind.IDENT
+                && !NON_ALIAS_KEYWORDS.contains(tokens.get(next).upper())) || tokens.get(next).kind == Kind.QIDENT)) {
             nameIndex = next;
         }
-        if (nameIndex >= 0 && (tokens.get(nameIndex).kind == Kind.IDENT || tokens.get(nameIndex).kind == Kind.QIDENT)) {
+        if (next >= 0 && tokens.get(next).isKeyword("WITH")) {
+            throw invalidQuery("UNNEST ... WITH OFFSET is not supported by the floci BigQuery emulator.");
+        }
+        if (nameIndex < 0) {
+            // Unaliased: GoogleSQL expands STRUCT elements into one column per field.
+            out.append("(SELECT UNNEST(").append(array).append(", max_depth := 2))");
+            return close + 1;
+        }
+        out.append("UNNEST(").append(array).append(')');
+        if (tokens.get(nameIndex).kind == Kind.IDENT || tokens.get(nameIndex).kind == Kind.QIDENT) {
             String element = tokens.get(nameIndex).identifierText();
             out.append(" AS ").append(DuckTypes.quoteIdentifier("_unnest_" + element)).append('(')
                     .append(DuckTypes.quoteIdentifier(element)).append(')');
@@ -844,7 +1350,16 @@ final class SqlDialectTranslator {
     }
 
     /** Maps a GoogleSQL type (possibly {@code ARRAY<...>} / {@code STRUCT<...>}) to DuckDB. */
-    private static String translateType(List<Token> type) {
+    private static String translateType(List<Token> tokens) {
+        List<Token> type = new ArrayList<>();
+        for (Token t : tokens) {
+            if (t.isPunct(">>")) {
+                type.add(new Token(Kind.PUNCT, ">", null));
+                type.add(new Token(Kind.PUNCT, ">", null));
+            } else {
+                type.add(t);
+            }
+        }
         StringBuilder sb = new StringBuilder();
         int[] pos = {0};
         sb.append(parseTypeTokens(type, pos));

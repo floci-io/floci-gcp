@@ -89,4 +89,40 @@ public class Table {
 
     @JsonAnySetter
     public void setExtra(String key, Object value) { extra.put(key, value); }
+
+    /**
+     * View definitions live in {@code extra} with every other writable Table property, so a PATCH
+     * or PUT of {@code view} round-trips through the same path as the rest. These read that one
+     * source rather than adding a second copy as typed fields.
+     */
+    @JsonIgnore
+    public Map<String, Object> viewDefinition() {
+        Object definition = extra.get("view") != null ? extra.get("view") : extra.get("materializedView");
+        return definition instanceof Map<?, ?> map ? asStringMap(map) : null;
+    }
+
+    /** The GoogleSQL of a logical or materialized view, or null for other table types. */
+    @JsonIgnore
+    public String viewQuery() {
+        Map<String, Object> definition = viewDefinition();
+        return definition != null && definition.get("query") instanceof String q ? q : null;
+    }
+
+    @JsonIgnore
+    public boolean isMaterializedView() {
+        return extra.get("view") == null && extra.get("materializedView") != null;
+    }
+
+    public void setViewDefinition(Map<String, Object> definition) {
+        extra.put("view", definition);
+    }
+
+    public void setMaterializedViewDefinition(Map<String, Object> definition) {
+        extra.put("materializedView", definition);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asStringMap(Map<?, ?> map) {
+        return (Map<String, Object>) map;
+    }
 }

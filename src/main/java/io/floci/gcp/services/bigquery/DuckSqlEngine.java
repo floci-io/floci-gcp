@@ -61,38 +61,104 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
 
         String flociEndpoint = flociEndpoint();
-        StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
-        Set<String> schemas = new HashSet<>();
-        long bytesProcessed = 0;
-        for (SqlDialectTranslator.TableRef ref : translation.tables()) {
-            Table table = tables.table(ref.datasetId(), ref.tableId());
-            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
-            bytesProcessed += estimateBytes(rows);
-            if (schemas.add(ref.datasetId())) {
-                setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
-                        .append(";\n");
-            }
-            setup.append(stageTable(request.projectId(), ref, table, rows.isEmpty(), flociEndpoint)).append('\n');
-        }
-
+        Staging staging = stage(request.projectId(), translation.tables(), tables, flociEndpoint);
         String sql = translation.sql();
-        String setupSql = setup.toString();
+        String setupSql = staging.setup();
         if (request.dryRun()) {
             List<Column> columns = describe(sql, setupSql, flociEndpoint);
-            return new Result(schemaOf(columns), List.of(), "SELECT", bytesProcessed);
+            return new Result(schemaOf(columns), List.of(), "SELECT", staging.bytesProcessed());
         }
 
-        DuckClient.DuckResult result = run(sql, setupSql, flociEndpoint);
+        DuckClient.DuckResult result = run(sql, setupSql, flociEndpoint, null);
         if (result.columns() == null) {
             List<Column> columns = describe(sql, setupSql, flociEndpoint);
             return new Result(schemaOf(columns), fetch(sql, setupSql, flociEndpoint, columns), "SELECT",
-                    bytesProcessed);
+                    staging.bytesProcessed());
         }
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
                 .toList());
-        List<Map<String, Object>> rows = new ArrayList<>(result.rows().size());
-        for (Map<String, Object> typedRow : result.rows()) {
+        return new Result(schemaOf(columns), decodeRows(result.rows(), columns), "SELECT",
+                staging.bytesProcessed());
+    }
+
+    @Override
+    public DmlResult executeDml(Request request, Tables tables) {
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(request.sql(),
+                request.projectId(), request.defaultDatasetId());
+        SqlDialectTranslator.TableRef target = statement.target();
+        Table targetTable = tables.table(target.datasetId(), target.tableId());
+        if (targetTable.viewQuery() != null) {
+            throw SqlDialectTranslator.invalidQuery("Cannot run " + statement.statementType() + " on view "
+                    + request.projectId() + ":" + target.datasetId() + "." + target.tableId());
+        }
+        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
+                request.projectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
+
+        String flociEndpoint = flociEndpoint();
+        Staging staging = stage(request.projectId(), translation.tables(), tables, flociEndpoint);
+        String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(target.datasetId()) + "."
+                + DuckTypes.quoteIdentifier(target.tableId());
+        DuckClient.DuckResult result = run(translation.sql(), staging.setup(), flociEndpoint, followup);
+        if (result.followup() == null || result.followup().columns() == null) {
+            throw GcpException.failedPrecondition("DML needs a floci-duck image that supports follow-up"
+                    + " statements; update " + config.services().bigquery().duck().defaultImage());
+        }
+
+        long inserted = 0;
+        long updated = 0;
+        long deleted = 0;
+        long affected;
+        if (statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
+            for (Map<String, Object> row : result.rows()) {
+                switch (String.valueOf(row.get("merge_action"))) {
+                    case "INSERT" -> inserted++;
+                    case "UPDATE" -> updated++;
+                    case "DELETE" -> deleted++;
+                    default -> {
+                        // merge_action is always one of the three
+                    }
+                }
+            }
+            affected = inserted + updated + deleted;
+        } else {
+            affected = rowCount(result);
+            switch (statement.kind()) {
+                case INSERT -> inserted = affected;
+                case UPDATE -> updated = affected;
+                default -> deleted = affected;
+            }
+        }
+
+        List<TableFieldSchema> targetFields = targetTable.getSchema() != null
+                && targetTable.getSchema().getFields() != null ? targetTable.getSchema().getFields() : List.of();
+        List<Column> columns = new ArrayList<>();
+        for (DuckClient.DuckColumn duckColumn : result.followup().columns()) {
+            DuckTypes.DuckType type = DuckTypes.parse(duckColumn.type());
+            TableFieldSchema field = targetFields.stream()
+                    .filter(f -> f.getName().equalsIgnoreCase(duckColumn.name()))
+                    .findFirst()
+                    .orElseGet(() -> DuckTypes.toField(duckColumn.name(), type));
+            columns.add(new Column(field.getName(), type, field, DuckTypes.projection(type)));
+        }
+        List<Map<String, Object>> tableRows = new ArrayList<>();
+        for (Map<String, Object> typedRow : result.followup().rows()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (Column column : columns) {
+                Object value = typedRow.containsKey(column.name()) ? typedRow.get(column.name())
+                        : typedRow.entrySet().stream().filter(e -> e.getKey().equalsIgnoreCase(column.name()))
+                                .map(Map.Entry::getValue).findFirst().orElse(null);
+                row.put(column.name(), DuckTypes.decodeTyped(value, column.type(), column.field()));
+            }
+            tableRows.add(row);
+        }
+        return new DmlResult(affected, inserted, updated, deleted, tableRows, staging.bytesProcessed());
+    }
+
+    private static List<Map<String, Object>> decodeRows(List<Map<String, Object>> typedRows, List<Column> columns) {
+        List<Map<String, Object>> rows = new ArrayList<>(typedRows.size());
+        for (Map<String, Object> typedRow : typedRows) {
             Map<String, Object> row = new LinkedHashMap<>();
             for (Column column : columns) {
                 row.put(column.name(), DuckTypes.decodeTyped(typedRow.get(column.name()), column.type(),
@@ -100,7 +166,60 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
             rows.add(row);
         }
-        return new Result(schemaOf(columns), rows, "SELECT", bytesProcessed);
+        return rows;
+    }
+
+    private record Staging(String setup, long bytesProcessed) {}
+
+    /**
+     * Setup SQL creating every referenced table in DuckDB. Views are expanded: their own
+     * references are staged first, then the view is created from its translated query.
+     */
+    private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs, Tables tables,
+                          String flociEndpoint) {
+        StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
+        long[] bytes = {0};
+        Set<String> schemas = new HashSet<>();
+        Set<SqlDialectTranslator.TableRef> staged = new HashSet<>();
+        for (SqlDialectTranslator.TableRef ref : refs) {
+            stageOne(projectId, ref, tables, flociEndpoint, setup, schemas, staged, new LinkedHashSet<>(), bytes);
+        }
+        return new Staging(setup.toString(), bytes[0]);
+    }
+
+    private void stageOne(String projectId, SqlDialectTranslator.TableRef ref, Tables tables, String flociEndpoint,
+                          StringBuilder setup, Set<String> schemas, Set<SqlDialectTranslator.TableRef> staged,
+                          Set<SqlDialectTranslator.TableRef> expanding, long[] bytes) {
+        if (staged.contains(ref)) {
+            return;
+        }
+        if (!expanding.add(ref)) {
+            throw SqlDialectTranslator.invalidQuery("View " + projectId + ":" + ref.datasetId() + "." + ref.tableId()
+                    + " references itself");
+        }
+        Table table = tables.table(ref.datasetId(), ref.tableId());
+        String viewQuery = table.viewQuery();
+        String ddl;
+        if (viewQuery != null) {
+            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
+                    ref.datasetId(), SqlDialectTranslator.QueryParameters.none());
+            for (SqlDialectTranslator.TableRef dependency : view.tables()) {
+                stageOne(projectId, dependency, tables, flociEndpoint, setup, schemas, staged, expanding, bytes);
+            }
+            ddl = "CREATE VIEW " + DuckTypes.quoteIdentifier(ref.datasetId()) + "."
+                    + DuckTypes.quoteIdentifier(ref.tableId()) + " AS " + view.sql() + ";";
+        } else {
+            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
+            bytes[0] += estimateBytes(rows);
+            ddl = stageTable(projectId, ref, table, rows.isEmpty(), flociEndpoint);
+        }
+        if (schemas.add(ref.datasetId())) {
+            setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
+                    .append(";\n");
+        }
+        setup.append(ddl).append('\n');
+        staged.add(ref);
+        expanding.remove(ref);
     }
 
     private static TableSchema schemaOf(List<Column> columns) {
@@ -108,7 +227,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     }
 
     private List<Column> describe(String sql, String setup, String flociEndpoint) {
-        return columns(run("DESCRIBE " + sql, setup, flociEndpoint).rows());
+        return columns(run("DESCRIBE " + sql, setup, flociEndpoint, null).rows());
     }
 
     /** Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names. */
@@ -148,7 +267,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         select.append(" FROM (").append(sql).append(") AS \"_q\"(").append(aliases).append(')');
 
-        List<Map<String, Object>> raw = run(select.toString(), setup, flociEndpoint).rows();
+        List<Map<String, Object>> raw = run(select.toString(), setup, flociEndpoint, null).rows();
         List<Map<String, Object>> rows = new ArrayList<>(raw.size());
         for (Map<String, Object> rawRow : raw) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -162,9 +281,22 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return rows;
     }
 
-    private DuckClient.DuckResult run(String sql, String setup, String flociEndpoint) {
+    /**
+     * The affected-row count DuckDB reports for INSERT, UPDATE and DELETE. The column name and
+     * type come from the sidecar, so neither is assumed: a missing, null or non-numeric value
+     * means the image does not report counts rather than a reason to fail the statement.
+     */
+    private static long rowCount(DuckClient.DuckResult result) {
+        if (result.rows().isEmpty()) {
+            return 0;
+        }
+        Object count = result.rows().getFirst().get("Count");
+        return count instanceof Number number ? number.longValue() : 0;
+    }
+
+    private DuckClient.DuckResult run(String sql, String setup, String flociEndpoint, String followupSql) {
         try {
-            return client.query(sql, setup, flociEndpoint);
+            return client.query(sql, setup, flociEndpoint, followupSql);
         } catch (DuckClient.DuckSqlException e) {
             throw engineFailure(e.getMessage());
         }

@@ -341,6 +341,67 @@ class BigQueryTest {
 
         assertThat(bigquery.delete(DatasetId.of(PROJECT_ID, dataset),
                 BigQuery.DatasetDeleteOption.deleteContents())).isTrue();
+
+    @Test
+    @Order(18)
+    void ddlAndDmlThroughTheSdk() throws InterruptedException {
+        String items = "`" + PROJECT_ID + "." + DATASET + ".items`";
+        TableResult created = bigquery.query(QueryJobConfiguration.newBuilder(
+                "CREATE TABLE " + items + " (id INT64 NOT NULL, name STRING, qty INT64)").build());
+        assertThat(created.getTotalRows()).isZero();
+        assertThat(bigquery.getTable(TableId.of(DATASET, "items")).getDefinition().getSchema().getFields()
+                .get("id").getMode()).isEqualTo(Field.Mode.REQUIRED);
+
+        Job insert = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(
+                "INSERT INTO " + items + " (id, name, qty) VALUES (1, 'a', 5), (2, 'b', 0), (3, 'c', 9)")
+                .build())).waitFor();
+        JobStatistics.QueryStatistics insertStats = insert.getStatistics();
+        assertThat(insertStats.getStatementType()).isEqualTo(JobStatistics.QueryStatistics.StatementType.INSERT);
+        assertThat(insertStats.getNumDmlAffectedRows()).isEqualTo(3L);
+        assertThat(insertStats.getDmlStats().getInsertedRowCount()).isEqualTo(3L);
+
+        bigquery.query(QueryJobConfiguration.newBuilder(
+                "UPDATE " + items + " SET qty = qty + 1 WHERE qty > 0").build());
+        bigquery.query(QueryJobConfiguration.newBuilder("DELETE " + items + " WHERE id = 2").build());
+
+        TableResult left = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT SUM(qty) AS total, COUNT(*) AS n FROM " + items).build());
+        FieldValueList row = left.iterateAll().iterator().next();
+        assertThat(row.get("total").getLongValue()).isEqualTo(16L);
+        assertThat(row.get("n").getLongValue()).isEqualTo(2L);
+    }
+
+    @Test
+    @Order(19)
+    void viewsAndDestinationTables() throws InterruptedException {
+        String items = PROJECT_ID + "." + DATASET + ".items";
+        Job view = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(
+                "CREATE VIEW `" + PROJECT_ID + "." + DATASET + ".busy` AS SELECT name FROM `" + items
+                        + "` WHERE qty > 5").build())).waitFor();
+        JobStatistics.QueryStatistics viewStats = view.getStatistics();
+        assertThat(viewStats.getDdlOperationPerformed()).isEqualTo("CREATE");
+        assertThat(bigquery.getTable(TableId.of(DATASET, "busy")).getDefinition().getType())
+                .isEqualTo(com.google.cloud.bigquery.TableDefinition.Type.VIEW);
+
+        TableResult busy = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT name FROM `" + PROJECT_ID + "." + DATASET + ".busy`").build());
+        assertThat(busy.getTotalRows()).isEqualTo(2);
+
+        TableId snapshot = TableId.of(DATASET, "snapshot");
+        bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder("SELECT id, name FROM `" + items + "`")
+                .setDestinationTable(snapshot).build())).waitFor();
+        Job append = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder("SELECT 42 AS id, 'z' AS name")
+                .setDestinationTable(snapshot)
+                .setWriteDisposition(JobInfo.WriteDisposition.WRITE_APPEND).build())).waitFor();
+        assertThat(append.getStatus().getError()).isNull();
+        assertThat(bigquery.getTable(snapshot).getNumRows().longValue()).isEqualTo(3L);
+
+        // WRITE_EMPTY (the default) onto a non-empty table fails the job with "duplicate".
+        Job duplicate = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder("SELECT 1 AS id")
+                .setDestinationTable(snapshot).build()));
+        assertThatThrownBy(duplicate::waitFor)
+                .isInstanceOfSatisfying(BigQueryException.class,
+                        e -> assertThat(e.getError().getReason()).isEqualTo("duplicate"));
     }
 
     @Test

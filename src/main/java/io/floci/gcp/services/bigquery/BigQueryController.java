@@ -11,6 +11,7 @@ import io.floci.gcp.services.bigquery.model.JobStatus;
 import io.floci.gcp.services.bigquery.model.QueryResponse;
 import io.floci.gcp.services.bigquery.model.StoredJob;
 import io.floci.gcp.services.bigquery.model.Table;
+import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -304,7 +305,7 @@ public class BigQueryController {
         } catch (GcpException e) {
             // A dry run reports an invalid query as an HTTP error; a real job records it
             // in its status instead.
-            if (e.getHttpStatus() == 409 || dryRun) {
+            if (BigQueryService.isDuplicateJobId(e) || dryRun) {
                 throw e;
             }
             job = service.failedJob(projectId, location, jobId, options.sql(), e);
@@ -360,9 +361,17 @@ public class BigQueryController {
         String defaultDatasetId = defaultDataset != null ? string(defaultDataset.get("datasetId"),
                 "defaultDataset.datasetId") : null;
         Boolean useLegacySql = config.get("useLegacySql") instanceof Boolean b ? b : null;
+        Map<String, Object> destination = asMap(config.get("destinationTable"));
+        TableReference destinationTable = destination != null
+                ? new TableReference(string(destination.get("projectId"), "destinationTable.projectId"),
+                        string(destination.get("datasetId"), "destinationTable.datasetId"),
+                        string(destination.get("tableId"), "destinationTable.tableId"))
+                : null;
         return new BigQueryService.QueryOptions(string(config.get("query"), "query"), defaultDatasetId,
-                queryParameters(config.get("queryParameters")), string(config.get("parameterMode"),
-                        "parameterMode"), dryRun, useLegacySql);
+                queryParameters(config.get("queryParameters")),
+                string(config.get("parameterMode"), "parameterMode"), dryRun, useLegacySql, destinationTable,
+                string(config.get("writeDisposition"), "writeDisposition"),
+                string(config.get("createDisposition"), "createDisposition"));
     }
 
     /**
@@ -416,6 +425,13 @@ public class BigQueryController {
         }
         resp.setCacheHit(false);
         resp.setTotalBytesProcessed(job.getTotalBytesProcessed() != null ? job.getTotalBytesProcessed() : "0");
+        if (job.getDestinationTableId() == null) {
+            // DML/DDL: no schema, so the SDK falls back to the job and an empty result.
+            resp.setNumDmlAffectedRows(job.getNumDmlAffectedRows());
+            resp.setDmlStats(job.getDmlStats());
+            resp.setTotalRows("0");
+            return resp;
+        }
 
         BigQueryService.TableData data = service.queryResults(job.getProjectId(), job, format);
         resp.setSchema(data.schema());
@@ -475,6 +491,21 @@ public class BigQueryController {
             queryStatistics.put("statementType", sj.getStatementType() != null ? sj.getStatementType() : "SELECT");
             if (sj.isDryRun() && sj.getSchema() != null) {
                 queryStatistics.put("schema", sj.getSchema());
+            }
+            if (sj.getNumDmlAffectedRows() != null) {
+                queryStatistics.put("numDmlAffectedRows", sj.getNumDmlAffectedRows());
+            }
+            if (sj.getDmlStats() != null) {
+                queryStatistics.put("dmlStats", sj.getDmlStats());
+            }
+            if (sj.getDdlOperationPerformed() != null) {
+                queryStatistics.put("ddlOperationPerformed", sj.getDdlOperationPerformed());
+            }
+            if (sj.getDdlTargetTable() != null) {
+                queryStatistics.put("ddlTargetTable", sj.getDdlTargetTable());
+            }
+            if (sj.getDdlTargetDataset() != null) {
+                queryStatistics.put("ddlTargetDataset", sj.getDdlTargetDataset());
             }
             statistics.put("query", queryStatistics);
             job.setStatistics(statistics);

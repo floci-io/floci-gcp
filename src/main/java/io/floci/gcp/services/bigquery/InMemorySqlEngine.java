@@ -32,4 +32,10 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
                 tables.rows(datasetId, ref.tableId()));
         return new Result(result.schema(), request.dryRun() ? List.of() : result.rows(), "SELECT", 0);
     }
+
+    @Override
+    public DmlResult executeDml(Request request, Tables tables) {
+        throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
+                + "set floci-gcp.services.bigquery.mock to false.");
+    }
 }

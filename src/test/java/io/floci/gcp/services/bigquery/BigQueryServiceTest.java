@@ -680,5 +680,61 @@ class BigQueryServiceTest {
             }
         });
         assertEquals(3, service.storedRows(PROJECT, DATASET, TABLE).size());
+
+    // ── DDL without the SQL engine ──
+
+    @Test
+    void ddlSchemaAndTableStatementsRunWithoutTheSqlEngine() {
+        StoredJob schema = service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
+        assertEquals("CREATE_SCHEMA", schema.getStatementType());
+        assertEquals("CREATE", schema.getDdlOperationPerformed());
+        assertNull(schema.getDestinationTableId());
+
+        StoredJob create = service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".events (id INT64 NOT NULL, at TIMESTAMP, tags ARRAY<STRING>)", null);
+        assertEquals("CREATE", create.getDdlOperationPerformed());
+        assertEquals("events", create.getDdlTargetTable().getTableId());
+        Table table = service.getTable(PROJECT, DATASET, "events");
+        assertEquals(List.of("INTEGER", "TIMESTAMP", "STRING"),
+                table.getSchema().getFields().stream().map(TableFieldSchema::getType).toList());
+        assertEquals("REQUIRED", table.getSchema().getFields().get(0).getMode());
+
+        GcpException duplicate = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".events (x INT64)", null));
+        assertEquals("duplicate", duplicate.getReason());
+        assertEquals("SKIP", service.query(PROJECT, null, null,
+                "CREATE TABLE IF NOT EXISTS " + DATASET + ".events (x INT64)", null).getDdlOperationPerformed());
+        assertEquals("REPLACE", service.query(PROJECT, null, null,
+                "CREATE OR REPLACE TABLE " + DATASET + ".events (x INT64)", null).getDdlOperationPerformed());
+        assertEquals(1, service.getTable(PROJECT, DATASET, "events").getSchema().getFields().size());
+    }
+
+    @Test
+    void truncateAndDropStatements() {
+        seedTwoRows();
+
+        StoredJob truncate = service.query(PROJECT, null, null, "TRUNCATE TABLE " + DATASET + "." + TABLE, null);
+        assertEquals("TRUNCATE_TABLE", truncate.getStatementType());
+        assertEquals(Map.of("deletedRowCount", "2"), truncate.getDmlStats());
+        assertTrue(service.listTableData(PROJECT, DATASET, TABLE).rows().isEmpty());
+        assertEquals(0, service.queryResults(PROJECT, truncate).rows().size());
+
+        assertEquals("DROP", service.query(PROJECT, null, null, "DROP TABLE " + DATASET + "." + TABLE, null)
+                .getDdlOperationPerformed());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "DROP TABLE " + DATASET + "." + TABLE, null)).getGcpStatus());
+        assertEquals("SKIP", service.query(PROJECT, null, null, "DROP TABLE IF EXISTS " + DATASET + "." + TABLE,
+                null).getDdlOperationPerformed());
+        assertEquals("DROP", service.query(PROJECT, null, null, "DROP SCHEMA " + DATASET, null)
+                .getDdlOperationPerformed());
+    }
+
+    @Test
+    void dmlNeedsTheSqlEngine() {
+        seedTable();
+        GcpException e = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "INSERT INTO " + DATASET + "." + TABLE + " (name) VALUES ('x')", null));
+        assertEquals("invalidQuery", e.getReason());
+        assertTrue(e.getMessage().contains("DuckDB"));
     }
 }

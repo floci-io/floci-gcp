@@ -27,5 +27,14 @@ interface BigQuerySqlEngine {
         List<Map<String, Object>> rows(String datasetId, String tableId);
     }
 
+    /**
+     * Outcome of {@code INSERT}/{@code UPDATE}/{@code DELETE}/{@code MERGE}: the counts, plus the
+     * target table's complete contents after the statement, in stored representation.
+     */
+    record DmlResult(long affectedRows, long insertedRows, long updatedRows, long deletedRows,
+                     List<Map<String, Object>> tableRows, long totalBytesProcessed) {}
+
     Result execute(Request request, Tables tables);
+
+    DmlResult executeDml(Request request, Tables tables);
 }

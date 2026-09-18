@@ -1,6 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerDetector;
@@ -21,10 +22,11 @@ import java.util.Optional;
  * Lazily starts the floci-duck sidecar that executes BigQuery SQL. The first query pulls
  * the image and starts the container; later calls reuse its URL. When
  * {@code floci-gcp.services.bigquery.duck.url} is set, that endpoint is used as-is and no
- * container is managed.
+ * container is managed. The container is stopped through {@link ContainerTeardown}, while the
+ * Docker client is still usable.
  */
 @ApplicationScoped
-public class BigQueryDuckManager {
+public class BigQueryDuckManager implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(BigQueryDuckManager.class);
     private static final String CONTAINER_BASE_NAME = "bigquery-duck";
@@ -130,13 +132,19 @@ public class BigQueryDuckManager {
         return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
     }
 
-    @PreDestroy
-    void shutdown() {
+    @Override
+    public synchronized void stopManagedContainers() {
         if (containerId == null) {
             return;
         }
         LOG.info("Stopping BigQuery SQL engine container");
         lifecycleManager.stopAndRemove(containerId, null);
         containerId = null;
+        resolvedUrl = null;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        stopManagedContainers();
     }
 }

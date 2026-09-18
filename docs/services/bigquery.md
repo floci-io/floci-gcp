@@ -259,16 +259,31 @@ try (JsonStreamWriter writer = JsonStreamWriter.newBuilder(
     days since the epoch or a string; `DATETIME` and `TIME` are `CivilTimeEncoder`-packed `int64`
     or a string; `TIMESTAMP` is epoch microseconds or `google.protobuf.Timestamp`; `NUMERIC` and
     `BIGNUMERIC` are `BigDecimalByteStringEncoder` bytes, a number or a string.
+- **Arrow rows** are `arrow_rows`: a serialized Arrow IPC schema message as `writer_schema`, then
+  record batch messages, as Arrow Java's `MessageSerializer` and pyarrow's `serialize()` write
+  them. Fields match columns by name, case-insensitively, and a null value is a missing value
+  (a null list is an empty array).
+  - Types follow BigQuery's supported Arrow types: `Int` for `INTEGER`, `FloatingPoint` (single
+    or double) for `FLOAT`, `Bool`, `Binary` for `BYTES`, `Utf8` for `STRING`, `JSON` and
+    `GEOGRAPHY`, `Date` (day) or `Utf8` or `int32` for `DATE`, and `Timestamp` in microseconds
+    with a time zone for `TIMESTAMP` or without one for `DATETIME`. `Decimal128` is `NUMERIC`,
+    `Decimal256` is `BIGNUMERIC`, `Interval` or `Utf8` is `INTERVAL`, `List` is a `REPEATED`
+    column and `Struct` is `RECORD`.
+  - `TIME` columns also accept `Time64` in microseconds or `Utf8`, which BigQuery's table does
+    not list.
+  - Nanosecond timestamps, dictionary-encoded fields and compressed (LZ4, ZSTD) record batches
+    are rejected with `INVALID_ARGUMENT`.
+  - A connection sends either proto or Arrow rows; switching format needs a new `writer_schema`.
 - **Errors**: rejected appends come back as in-stream error responses with a `StorageError`
   detail, and the connection stays open.
-  - A proto field with no column is `SCHEMA_MISMATCH_EXTRA_FIELDS`.
+  - A proto or Arrow field with no column is `SCHEMA_MISMATCH_EXTRA_FIELDS`.
   - An incompatible field type is `INVALID_ARGUMENT`.
   - A row that fails validation (for example, a missing `REQUIRED` field) rejects the whole
     request with `row_errors`.
   - Appending to a finalized stream is `STREAM_FINALIZED`.
 - `GetWriteStream` returns the table schema with the `FULL` view, and the stream's location.
 
-Not supported: `arrow_rows` (returns `UNIMPLEMENTED`; send `proto_rows`), column default values
+Not supported: column default values
 (`DEFAULT_VALUE` missing values are `NULL`, since table schemas carry no default expressions),
 `RANGE` columns, and partition decorators. Stream state, including rows not yet committed or
 flushed, is kept in the configured storage mode, so with persistent storage a PENDING or BUFFERED

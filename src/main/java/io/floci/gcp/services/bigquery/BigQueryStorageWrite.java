@@ -39,6 +39,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -171,7 +172,15 @@ public class BigQueryStorageWrite implements Resettable {
     static final class Connection {
         String writeStream;
         String schemaStream;
-        BigQueryProtoRows.Schema schema;
+        BigQueryProtoRows.Schema protoSchema;
+        BigQueryArrowRows.BoundSchema arrowSchema;
+    }
+
+    /** The rows of one request, decoded one at a time so each bad row is reported by index. */
+    private interface Rows {
+        int size();
+
+        Map<String, Object> row(int index);
     }
 
     private final BigQueryService service;
@@ -376,12 +385,9 @@ public class BigQueryStorageWrite implements Resettable {
         String streamName = connection.writeStream;
         Matcher name = streamName(streamName);
         TableRef table = new TableRef(name.group(2), name.group(3), name.group(4), name.group(1));
-        if (request.hasArrowRows()) {
-            throw new AppendException(Status.Code.UNIMPLEMENTED, null, streamName,
-                    "Arrow rows are not supported by the floci BigQuery emulator; send proto_rows");
-        }
-        if (!request.hasProtoRows()) {
-            throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName, "proto_rows must be set");
+        if (!request.hasProtoRows() && !request.hasArrowRows()) {
+            throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName,
+                    "proto_rows or arrow_rows must be set");
         }
         Table resource;
         try {
@@ -392,22 +398,18 @@ public class BigQueryStorageWrite implements Resettable {
         }
         List<TableFieldSchema> fields = resource.getSchema() != null && resource.getSchema().getFields() != null
                 ? resource.getSchema().getFields() : List.of();
-        if (request.getProtoRows().hasWriterSchema()) {
-            try {
-                connection.schema = BigQueryProtoRows.bind(
-                        request.getProtoRows().getWriterSchema().getProtoDescriptor(), fields);
-                connection.schemaStream = streamName;
-            } catch (BigQueryProtoRows.ExtraFieldsException e) {
-                throw new AppendException(Status.Code.INVALID_ARGUMENT, StorageErrorCode.SCHEMA_MISMATCH_EXTRA_FIELDS,
-                        streamName, e.getMessage());
-            } catch (GcpException e) {
-                throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName, e.getMessage());
-            }
-        } else if (connection.schema == null || !streamName.equals(connection.schemaStream)) {
-            throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName,
-                    "writer_schema must be set on the first request to " + streamName);
+        Rows decoded;
+        try {
+            decoded = request.hasArrowRows()
+                    ? arrowRows(connection, request.getArrowRows(), fields, streamName)
+                    : protoRows(connection, request.getProtoRows(), fields, streamName);
+        } catch (BigQueryProtoRows.ExtraFieldsException e) {
+            throw new AppendException(Status.Code.INVALID_ARGUMENT, StorageErrorCode.SCHEMA_MISMATCH_EXTRA_FIELDS,
+                    streamName, e.getMessage());
+        } catch (GcpException e) {
+            throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName, e.getMessage());
         }
-        List<Map<String, Object>> rows = decodeRows(connection.schema, request, fields, streamName);
+        List<Map<String, Object>> rows = validate(decoded, fields, streamName);
 
         if (isDefault(name)) {
             if (request.hasOffset()) {
@@ -452,26 +454,73 @@ public class BigQueryStorageWrite implements Resettable {
         }
     }
 
-    /** Decodes and validates every row; one bad row rejects the whole request with row errors. */
-    private static List<Map<String, Object>> decodeRows(BigQueryProtoRows.Schema schema, AppendRowsRequest request,
-                                                        List<TableFieldSchema> fields, String streamName) {
+    private static Rows protoRows(Connection connection, AppendRowsRequest.ProtoData data,
+                                  List<TableFieldSchema> fields, String streamName) {
+        if (data.hasWriterSchema()) {
+            connection.protoSchema = BigQueryProtoRows.bind(data.getWriterSchema().getProtoDescriptor(), fields);
+            connection.arrowSchema = null;
+            connection.schemaStream = streamName;
+        } else if (connection.protoSchema == null || !streamName.equals(connection.schemaStream)) {
+            throw GcpException.invalidArgument("writer_schema must be set on the first request to " + streamName);
+        }
+        BigQueryProtoRows.Schema schema = connection.protoSchema;
+        List<ByteString> serialized = data.getRows().getSerializedRowsList();
+        return new Rows() {
+            @Override
+            public int size() {
+                return serialized.size();
+            }
+
+            @Override
+            public Map<String, Object> row(int index) {
+                return BigQueryProtoRows.decode(schema, serialized.get(index));
+            }
+        };
+    }
+
+    private static Rows arrowRows(Connection connection, AppendRowsRequest.ArrowData data,
+                                  List<TableFieldSchema> fields, String streamName) {
+        if (data.hasWriterSchema()) {
+            connection.arrowSchema = BigQueryArrowRows.bind(data.getWriterSchema().getSerializedSchema(), fields);
+            connection.protoSchema = null;
+            connection.schemaStream = streamName;
+        } else if (connection.arrowSchema == null || !streamName.equals(connection.schemaStream)) {
+            throw GcpException.invalidArgument("writer_schema must be set on the first request to " + streamName);
+        }
+        BigQueryArrowRows.Batch batch = BigQueryArrowRows.decode(connection.arrowSchema,
+                data.getRows().getSerializedRecordBatch());
+        return new Rows() {
+            @Override
+            public int size() {
+                return batch.size();
+            }
+
+            @Override
+            public Map<String, Object> row(int index) {
+                return batch.row(index);
+            }
+        };
+    }
+
+    /** Validates every row; one bad row rejects the whole request with row errors. */
+    private static List<Map<String, Object>> validate(Rows decoded, List<TableFieldSchema> fields,
+                                                      String streamName) {
         // The model TableSchema is qualified: the storage v1 TableSchema is imported for the wire.
         io.floci.gcp.services.bigquery.model.TableSchema tableSchema =
                 new io.floci.gcp.services.bigquery.model.TableSchema(fields);
         List<Map<String, Object>> rows = new ArrayList<>();
         List<RowError> rowErrors = new ArrayList<>();
-        List<ByteString> serialized = request.getProtoRows().getRows().getSerializedRowsList();
-        for (int i = 0; i < serialized.size(); i++) {
+        for (int i = 0; i < decoded.size(); i++) {
             try {
                 Map<String, Object> normalized = new LinkedHashMap<>();
-                List<ErrorProto> errors = RowCodec.normalizeRow(tableSchema,
-                        BigQueryProtoRows.decode(schema, serialized.get(i)), true, normalized);
+                List<ErrorProto> errors = RowCodec.normalizeRow(tableSchema, decoded.row(i), true, normalized);
                 if (errors.isEmpty()) {
                     rows.add(normalized);
                 } else {
                     rowErrors.add(rowError(i, errors.get(0).getMessage()));
                 }
-            } catch (IllegalArgumentException | ArithmeticException | ClassCastException e) {
+            } catch (IllegalArgumentException | ArithmeticException | ClassCastException
+                     | IndexOutOfBoundsException | DateTimeException e) {
                 rowErrors.add(rowError(i, e.getMessage()));
             }
         }

@@ -3,6 +3,8 @@ package io.floci.gcp.services.bigquery;
 import com.google.cloud.bigquery.storage.v1.AnnotationsProto;
 import com.google.cloud.bigquery.storage.v1.AppendRowsRequest;
 import com.google.cloud.bigquery.storage.v1.AppendRowsResponse;
+import com.google.cloud.bigquery.storage.v1.ArrowRecordBatch;
+import com.google.cloud.bigquery.storage.v1.ArrowSchema;
 import com.google.cloud.bigquery.storage.v1.BatchCommitWriteStreamsRequest;
 import com.google.cloud.bigquery.storage.v1.BatchCommitWriteStreamsResponse;
 import com.google.cloud.bigquery.storage.v1.BigQueryWriteGrpc;
@@ -393,9 +395,9 @@ class BigQueryWriteGrpcIntegrationTest {
             AppendRowsResponse unknown = connection.send(request(TABLE + "/streams/missing", ROW, row("x", 1L)));
             assertEquals(StorageError.StorageErrorCode.STREAM_NOT_FOUND, storageError(unknown).getCode());
 
-            AppendRowsResponse arrow = connection.send(AppendRowsRequest.newBuilder()
+            AppendRowsResponse arrowWithoutSchema = connection.send(AppendRowsRequest.newBuilder()
                     .setWriteStream(TABLE + "/_default").setArrowRows(AppendRowsRequest.ArrowData.getDefaultInstance()));
-            assertEquals(Status.Code.UNIMPLEMENTED.value(), arrow.getError().getCode());
+            assertTrue(arrowWithoutSchema.getError().getMessage().contains("writer_schema"));
         }
         assertEquals(12, tableRows().size(), "a request with a bad row appends nothing");
 
@@ -411,8 +413,67 @@ class BigQueryWriteGrpcIntegrationTest {
         assertEquals(Status.Code.INVALID_ARGUMENT, noStream.getStatus().getCode());
     }
 
+    private static ByteString arrowFixture(String name) throws Exception {
+        try (java.io.InputStream in = BigQueryWriteGrpcIntegrationTest.class
+                .getResourceAsStream("/bigquery/arrow/" + name)) {
+            return ByteString.readFrom(in);
+        }
+    }
+
+    private static AppendRowsRequest.Builder arrowRequest(String stream, String schema, String batch) throws Exception {
+        AppendRowsRequest.ArrowData.Builder data = AppendRowsRequest.ArrowData.newBuilder()
+                .setRows(ArrowRecordBatch.newBuilder().setSerializedRecordBatch(arrowFixture(batch)));
+        if (schema != null) {
+            data.setWriterSchema(ArrowSchema.newBuilder().setSerializedSchema(arrowFixture(schema)));
+        }
+        AppendRowsRequest.Builder request = AppendRowsRequest.newBuilder().setArrowRows(data);
+        if (stream != null) {
+            request.setWriteStream(stream);
+        }
+        return request;
+    }
+
     @Test
     @Order(8)
+    void arrowRowsAppendToCommittedStreams() throws Exception {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "arrow"}, "schema": {"fields": [
+                  {"name": "name", "type": "STRING", "mode": "REQUIRED"}, {"name": "age", "type": "INT64"},
+                  {"name": "ts", "type": "TIMESTAMP"}, {"name": "d", "type": "DATE"},
+                  {"name": "dt", "type": "DATETIME"}, {"name": "n", "type": "NUMERIC"},
+                  {"name": "big", "type": "BIGNUMERIC"}, {"name": "tags", "type": "STRING", "mode": "REPEATED"},
+                  {"name": "addr", "type": "RECORD", "fields": [{"name": "city", "type": "STRING"}]},
+                  {"name": "f", "type": "FLOAT64"}, {"name": "ok", "type": "BOOL"}, {"name": "raw", "type": "BYTES"},
+                  {"name": "t", "type": "TIME"}, {"name": "iv", "type": "INTERVAL"}, {"name": "small", "type": "INT64"}]}}
+                """).when().post(BASE + "/datasets/writes/tables").then().statusCode(200);
+        String table = "projects/" + PROJECT + "/datasets/writes/tables/arrow";
+        WriteStream stream = write.createWriteStream(CreateWriteStreamRequest.newBuilder().setParent(table)
+                .setWriteStream(WriteStream.newBuilder().setType(WriteStream.Type.COMMITTED)).build());
+        try (Connection connection = new Connection()) {
+            AppendRowsResponse first = connection.send(arrowRequest(stream.getName(), "schema.bin", "batch.bin")
+                    .setOffset(Int64Value.of(0)));
+            assertEquals(0, first.getAppendResult().getOffset().getValue(), first.toString());
+            // Later batches reuse the connection's schema.
+            assertEquals(3, connection.send(arrowRequest(null, null, "batch.bin")).getAppendResult()
+                    .getOffset().getValue());
+            AppendRowsResponse nullName = connection.send(arrowRequest(null, null, "batch-null-name.bin"));
+            assertEquals(Status.Code.INVALID_ARGUMENT.value(), nullName.getError().getCode());
+            assertEquals(1, nullName.getRowErrors(0).getIndex());
+            // Switching a connection to proto rows needs a proto schema.
+            assertTrue(connection.send(request(null, null, row("x", 1L))).getError().getMessage()
+                    .contains("writer_schema"));
+        }
+        List<List<Object>> rows = given().queryParam("formatOptions.useInt64Timestamp", true)
+                .when().get(BASE + "/datasets/writes/tables/arrow/data")
+                .then().statusCode(200).extract().jsonPath().getList("rows.f.v");
+        assertEquals(6, rows.size());
+        assertEquals(Arrays.asList("ada", "36", "1704164645123456", "2024-01-01", "2024-01-02T03:04:05.000006",
+                "12.5", "1.25", List.of(Map.of("v", "a"), Map.of("v", "b")), Map.of("f", List.of(Map.of("v", "London"))),
+                "1.5", "true", "AQI=", "01:02:03.500000", "1-2 3 1:2:3.5", "255"), rows.get(0));
+    }
+
+    @Test
+    @Order(9)
     void unaryErrorsMapToGrpcCodes() {
         assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
                 () -> write.createWriteStream(CreateWriteStreamRequest.newBuilder().setParent(TABLE)

@@ -202,6 +202,13 @@
             <artifactId>grpc-google-cloud-bigquerystorage-v1</artifactId>
         </dependency>
 
+        <!-- Arrow IPC flatbuffer definitions (no Arrow memory runtime), for Storage Write API arrow_rows -->
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-format</artifactId>
+            <version>15.0.2</version>
+        </dependency>
+
         <!-- Cloud Tasks gRPC stubs (CloudTasksGrpc ImplBase) -->
         <dependency>
             <groupId>com.google.api.grpc</groupId>

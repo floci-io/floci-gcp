@@ -111,7 +111,8 @@ public class BigQueryService {
                 .storageKey("bigquery")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(BigQueryController.class, BigQueryInternalController.class,
-                        BigQueryUploadController.class, BigQueryReadController.class)
+                        BigQueryUploadController.class, BigQueryReadController.class,
+                        BigQueryWriteController.class)
                 .build());
     }
 
@@ -413,7 +414,6 @@ public class BigQueryService {
     public List<Map<String, Object>> insertAll(String projectId, String datasetId, String tableId,
             List<InsertRow> rows, boolean skipInvalidRows, boolean ignoreUnknownValues) {
         Table table = getTable(projectId, datasetId, tableId);
-        String key = tableKey(datasetId, tableId);
 
         List<Map<String, Object>> insertErrors = new ArrayList<>();
         List<Map<String, Object>> accepted = new ArrayList<>();
@@ -439,22 +439,30 @@ public class BigQueryService {
             return insertErrors;
         }
 
-        if (!accepted.isEmpty()) {
-            synchronized (writeLock) {
-                StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
-                List<Map<String, Object>> stored = data.getRows();
-                synchronized (stored) {
-                    stored.addAll(accepted);
-                }
-                dataStore.put(key, data);
-                table.setNumRows(String.valueOf(data.getRows().size()));
-                table.setLastModifiedTime(nowMillis());
-                tableStore.put(key, table);
-            }
-        }
+        appendRows(projectId, datasetId, tableId, accepted);
         LOG.debugf("insertAll project=%s dataset=%s table=%s accepted=%d rejected=%d",
                 projectId, datasetId, tableId, accepted.size(), insertErrors.size());
         return insertErrors;
+    }
+
+    /** Appends rows already normalized against the table schema. */
+    void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        String key = tableKey(datasetId, tableId);
+        synchronized (writeLock) {
+            Table table = getTable(projectId, datasetId, tableId);
+            StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
+            List<Map<String, Object>> stored = data.getRows();
+            synchronized (stored) {
+                stored.addAll(rows);
+            }
+            dataStore.put(key, data);
+            table.setNumRows(String.valueOf(data.getRows().size()));
+            table.setLastModifiedTime(nowMillis());
+            tableStore.put(key, table);
+        }
     }
 
     /** Encoded rows plus totals for {@code tabledata.list}. */

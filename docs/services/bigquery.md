@@ -3,7 +3,7 @@
 floci-gcp emulates the BigQuery v2 REST API (the surface the `google-cloud-bigquery` SDKs and
 the Discovery document define): datasets, tables with schemas, `tabledata.insertAll`,
 `tabledata.list`, and query jobs that run **GoogleSQL on an embedded DuckDB engine**, plus the
-**Storage Read API** over gRPC on the same port. The Storage Write API is not implemented yet.
+**Storage Read and Write APIs** over gRPC on the same port.
 
 ## Configuration
 
@@ -215,6 +215,64 @@ use `bqstorage_client=storage` as above, or `create_bqstorage_client=False` to r
 Not supported: views, nested `selected_fields` (`struct.field`), `table_modifiers.snapshot_time`,
 Arrow buffer compression, `sample_percentage`, and `ARROW` in mock mode (use `AVRO`).
 `BIGNUMERIC` columns come back as `decimal(38, 9)` in Arrow.
+
+## Storage Write API
+
+`google.cloud.bigquery.storage.v1.BigQueryWrite` is served over gRPC on the emulator port
+(`CreateWriteStream`, `AppendRows`, `GetWriteStream`, `FinalizeWriteStream`,
+`BatchCommitWriteStreams`, `FlushRows`). This is what Java's `JsonStreamWriter` and
+`StreamWriter`, Python's `AppendRowsStream`, Go's `managedwriter`, and the Beam and Dataflow
+BigQuery sinks use. In Java, give the client a plaintext channel:
+
+```java
+BigQueryWriteClient client = BigQueryWriteClient.create(BigQueryWriteSettings.newBuilder()
+        .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
+                .setEndpoint("localhost:4588")
+                .setChannelConfigurator(builder -> builder.usePlaintext())
+                .build())
+        .setCredentialsProvider(NoCredentialsProvider.create())
+        .build());
+try (JsonStreamWriter writer = JsonStreamWriter.newBuilder(
+        "projects/my-project/datasets/ds/tables/t", client).build()) {
+    writer.append(new JSONArray().put(new JSONObject().put("name", "ada"))).get();
+}
+```
+
+- **Stream types**:
+  - The `_default` stream (`.../tables/{table}/streams/_default` or `.../tables/{table}/_default`)
+    and `COMMITTED` streams make rows visible as soon as each append is acknowledged.
+  - `PENDING` streams hold their rows until `FinalizeWriteStream` and then
+    `BatchCommitWriteStreams`, which commits all listed streams atomically. It reports
+    `stream_errors` (`STREAM_NOT_FOUND`, `INVALID_STREAM_TYPE`, `INVALID_STREAM_STATE`,
+    `STREAM_ALREADY_COMMITTED`) and commits nothing when any stream fails.
+  - `BUFFERED` streams make rows visible up to the offset given to `FlushRows`.
+- **Offsets**: on application-created streams, an append with an `offset` must match the next
+  row of the stream. A lower offset returns `ALREADY_EXISTS` (`OFFSET_ALREADY_EXISTS`), a higher
+  one `OUT_OF_RANGE` (`OFFSET_OUT_OF_RANGE`), with the "expected offset N, received M" message the
+  Java client parses. The `_default` stream rejects offsets.
+- **Rows** are `proto_rows` with a `writer_schema` (a self-contained `DescriptorProto`) on the
+  first request of a connection or when the destination changes. They are decoded with proto2
+  semantics, so an unset field is a missing value (`NULL`).
+  - Fields match columns by name, case-insensitively, or by the `column_name` field option that
+    the client libraries use for column names that aren't valid proto identifiers.
+  - Field types follow BigQuery's supported protocol buffer types. For example: `DATE` is
+    days since the epoch or a string; `DATETIME` and `TIME` are `CivilTimeEncoder`-packed `int64`
+    or a string; `TIMESTAMP` is epoch microseconds or `google.protobuf.Timestamp`; `NUMERIC` and
+    `BIGNUMERIC` are `BigDecimalByteStringEncoder` bytes, a number or a string.
+- **Errors**: rejected appends come back as in-stream error responses with a `StorageError`
+  detail, and the connection stays open.
+  - A proto field with no column is `SCHEMA_MISMATCH_EXTRA_FIELDS`.
+  - An incompatible field type is `INVALID_ARGUMENT`.
+  - A row that fails validation (for example, a missing `REQUIRED` field) rejects the whole
+    request with `row_errors`.
+  - Appending to a finalized stream is `STREAM_FINALIZED`.
+- `GetWriteStream` returns the table schema with the `FULL` view, and the stream's location.
+
+Not supported: `arrow_rows` (returns `UNIMPLEMENTED`; send `proto_rows`), column default values
+(`DEFAULT_VALUE` missing values are `NULL`, since table schemas carry no default expressions),
+`RANGE` columns, and partition decorators. Stream state lives in memory, so rows that are not
+yet committed or flushed are lost on restart. The emulator's gRPC request limit is 4 MiB, below
+BigQuery's 10 MB `AppendRows` limit.
 
 ## Load jobs
 

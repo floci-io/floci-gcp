@@ -426,6 +426,30 @@ public final class TestFixtures {
                 .getService();
     }
 
+    /** Storage Write API client over plaintext gRPC on the emulator port. */
+    public static com.google.cloud.bigquery.storage.v1.BigQueryWriteClient bigQueryWriteClient() throws IOException {
+        return com.google.cloud.bigquery.storage.v1.BigQueryWriteClient.create(
+                com.google.cloud.bigquery.storage.v1.BigQueryWriteSettings.newBuilder()
+                        .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(grpcTarget())
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build());
+    }
+
+    /** Storage Read API client over plaintext gRPC on the emulator port. */
+    public static com.google.cloud.bigquery.storage.v1.BigQueryReadClient bigQueryReadClient() throws IOException {
+        return com.google.cloud.bigquery.storage.v1.BigQueryReadClient.create(
+                com.google.cloud.bigquery.storage.v1.BigQueryReadSettings.newBuilder()
+                        .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(grpcTarget())
+                                .setChannelConfigurator(builder -> builder.usePlaintext())
+                                .build())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build());
+    }
+
     public static SQLAdmin sqlAdminClient() {
         return new SQLAdmin.Builder(new NetHttpTransport(), GsonFactory.getDefaultInstance(), request -> {
             // instances.insert answers only once the engine container accepts connections. A

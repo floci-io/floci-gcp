@@ -3,14 +3,17 @@ package io.floci.gcp.services.bigquery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import io.floci.gcp.core.common.GcpException;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -24,11 +27,13 @@ import java.util.Map;
 public class BigQueryInternalController {
 
     private final BigQueryService service;
+    private final BigQueryLoadFiles loadFiles;
     private final ObjectMapper mapper;
 
     @Inject
-    public BigQueryInternalController(BigQueryService service, ObjectMapper mapper) {
+    public BigQueryInternalController(BigQueryService service, BigQueryLoadFiles loadFiles, ObjectMapper mapper) {
         this.service = service;
+        this.loadFiles = loadFiles;
         this.mapper = mapper;
     }
 
@@ -48,6 +53,48 @@ public class BigQueryInternalController {
                              @PathParam("tableId") String tableId) {
         service.storedRows(projectId, datasetId, tableId);
         return Response.ok().type("application/x-ndjson").header("Accept-Ranges", "none").build();
+    }
+
+    /**
+     * A load job's source file. Parquet is read with ranged requests, so HEAD and single
+     * {@code Range: bytes=a-b} requests are answered.
+     */
+    @GET
+    @Path("/projects/{projectId}/load-files/{fileId}")
+    @Produces("application/octet-stream")
+    public Response loadFile(@PathParam("fileId") String fileId, @HeaderParam("Range") String range) {
+        byte[] data = loadFiles.get(fileId).orElseThrow(() -> GcpException.notFound("Not found: load file " + fileId));
+        if (range == null || !range.startsWith("bytes=")) {
+            return Response.ok(data).header("Accept-Ranges", "bytes").build();
+        }
+        String[] bounds = range.substring("bytes=".length()).split("-", 2);
+        long start;
+        long end;
+        if (bounds[0].isEmpty()) {
+            long suffix = Long.parseLong(bounds[1]);
+            start = Math.max(0, data.length - suffix);
+            end = data.length - 1;
+        } else {
+            start = Long.parseLong(bounds[0]);
+            end = bounds.length > 1 && !bounds[1].isEmpty() ? Math.min(Long.parseLong(bounds[1]), data.length - 1)
+                    : data.length - 1;
+        }
+        if (start >= data.length || start > end) {
+            return Response.status(416).header("Content-Range", "bytes */" + data.length).build();
+        }
+        byte[] slice = Arrays.copyOfRange(data, (int) start, (int) end + 1);
+        return Response.status(206).entity(slice)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Range", "bytes " + start + "-" + end + "/" + data.length)
+                .build();
+    }
+
+    @HEAD
+    @Path("/projects/{projectId}/load-files/{fileId}")
+    public Response loadFileHead(@PathParam("fileId") String fileId) {
+        byte[] data = loadFiles.get(fileId).orElseThrow(() -> GcpException.notFound("Not found: load file " + fileId));
+        return Response.ok().header("Content-Length", data.length).header("Accept-Ranges", "bytes")
+                .type("application/octet-stream").build();
     }
 
     @GET

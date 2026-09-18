@@ -62,7 +62,7 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `{v}`, `RECORD` as nested `{f:[...]}`), `maxResults`/`pageToken`/`startIndex` paging.
   `maxResults=0` returns zero rows (the SDK's `Job.waitFor()` contract); a `pageToken` wins over
   `startIndex` (the SDK sends both when auto-paging).
-- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY only), `jobs.get`, `jobs.list`,
+- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY and LOAD), `jobs.get`, `jobs.list`,
   `jobs.cancel`, `jobs.delete`, `getQueryResults`. Query results are materialized into a hidden
   anonymous table (`_floci_anon.anon_<jobId>`) referenced as the job's
   `configuration.query.destinationTable`, which is how the SDK's `Job.getQueryResults()` reads
@@ -145,6 +145,39 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - Result schemas carry real types: `INTEGER`, `FLOAT`, `NUMERIC`, `BOOLEAN`, `STRING`, `BYTES`,
   `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `JSON`, `RECORD` (with nested fields) and `REPEATED`
   arrays.
+
+## Load jobs
+
+`jobs.insert` with `configuration.load` loads data into a table, synchronously:
+
+- **Sources**: `sourceUris` in floci's Cloud Storage (`gs://bucket/object`, with one `*`
+  wildcard after the bucket), or a media upload to `/upload/bigquery/v2/projects/{project}/jobs`
+  with `uploadType=multipart` or `uploadType=resumable` (what the SDKs' `load_table_from_file`,
+  `load_table_from_dataframe` and `bigquery.writer(...)` use).
+- **Formats**: `CSV` (the default), `NEWLINE_DELIMITED_JSON` and `PARQUET`.
+- **Schema**: the job's `schema`, else the destination table's, else auto-detection
+  (`autodetect: true`, CSV and JSON) or the Parquet file's own schema. Auto-detection infers
+  `INTEGER`, `FLOAT`, `BOOLEAN`, `TIMESTAMP`, `DATE`, `TIME`, `STRING`, and `RECORD` / `REPEATED`
+  for JSON; CSV header names have invalid characters replaced with underscores, and a CSV without
+  a header gets generic names such as `string_field_0`. `skipLeadingRows` follows BigQuery's
+  auto-detection rules (unset: detect a header; `0`: no header; `N`: skip `N-1` rows and detect a
+  header in row `N`).
+- **CSV options**: `skipLeadingRows`, `fieldDelimiter` (including `\t`), `quote`,
+  `allowJaggedRows`, `nullMarker`, `encoding` (`UTF-8`, `ISO-8859-1`) and `maxBadRecords`. Without
+  a `nullMarker`, an empty `STRING` value stays an empty string and empty values of other types
+  are `NULL`.
+- **JSON with a schema** is validated row by row exactly like `tabledata.insertAll`
+  (`ignoreUnknownValues`, `maxBadRecords`, and a precise `badRecords` count); it needs no SQL
+  engine, so it also works in mock mode.
+- **Dispositions**: `writeDisposition` (`WRITE_APPEND` by default for loads, `WRITE_TRUNCATE`,
+  `WRITE_TRUNCATE_DATA`, `WRITE_EMPTY`) and `createDisposition`.
+- **Results**: `statistics.load` reports `inputFiles`, `inputFileBytes`, `outputRows`,
+  `outputBytes` and `badRecords`. Data, schema and destination errors are reported in the DONE
+  job's `status.errorResult` (`invalid`, `notFound`, `duplicate`).
+
+Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
+`schemaUpdateOptions`, the `/resumable/upload/...` path variant, and non-GCS sources. For CSV,
+`maxBadRecords` greater than zero skips unparsable rows without counting them.
 
 ## DML and DDL
 

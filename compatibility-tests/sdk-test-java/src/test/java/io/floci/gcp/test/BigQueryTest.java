@@ -407,6 +407,59 @@ class BigQueryTest {
     }
 
     @Test
+    @Order(18)
+    void loadCsvFromCloudStorage() throws InterruptedException {
+        com.google.cloud.storage.Storage storage = TestFixtures.storageClient();
+        String bucket = TestFixtures.uniqueName("bq-load");
+        storage.create(com.google.cloud.storage.BucketInfo.of(bucket));
+        storage.create(com.google.cloud.storage.BlobInfo.newBuilder(bucket, "cities/part-0.csv").build(),
+                "city,population\nLima,10000000\nQuito,2800000\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        storage.create(com.google.cloud.storage.BlobInfo.newBuilder(bucket, "cities/part-1.csv").build(),
+                "city,population\nBogota,7900000\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        TableId cities = TableId.of(DATASET, "cities");
+        Job job = bigquery.create(JobInfo.of(com.google.cloud.bigquery.LoadJobConfiguration
+                .newBuilder(cities, "gs://" + bucket + "/cities/part-*.csv",
+                        com.google.cloud.bigquery.FormatOptions.csv())
+                .setAutodetect(true)
+                .build())).waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        JobStatistics.LoadStatistics stats = job.getStatistics();
+        assertThat(stats.getOutputRows()).isEqualTo(3L);
+        assertThat(stats.getInputFiles()).isEqualTo(2L);
+
+        Schema schema = bigquery.getTable(cities).getDefinition().getSchema();
+        assertThat(schema.getFields().get("population").getType().getStandardType())
+                .isEqualTo(StandardSQLTypeName.INT64);
+        TableResult biggest = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT city FROM `" + PROJECT_ID + "." + DATASET + ".cities` ORDER BY population DESC LIMIT 1")
+                .build());
+        assertThat(biggest.iterateAll().iterator().next().get("city").getStringValue()).isEqualTo("Lima");
+    }
+
+    @Test
+    @Order(19)
+    void loadThroughAResumableUpload() throws Exception {
+        TableId target = TableId.of(DATASET, "uploaded");
+        com.google.cloud.bigquery.WriteChannelConfiguration config = com.google.cloud.bigquery.WriteChannelConfiguration
+                .newBuilder(target)
+                .setFormatOptions(com.google.cloud.bigquery.FormatOptions.json())
+                .setSchema(Schema.of(Field.of("name", StandardSQLTypeName.STRING),
+                        Field.of("score", StandardSQLTypeName.FLOAT64)))
+                .build();
+        com.google.cloud.bigquery.JobId jobId = com.google.cloud.bigquery.JobId.of(TestFixtures.uniqueName("upload"));
+        com.google.cloud.bigquery.TableDataWriteChannel writer = bigquery.writer(jobId, config);
+        try (java.io.OutputStream out = java.nio.channels.Channels.newOutputStream(writer)) {
+            out.write("{\"name\": \"ana\", \"score\": 9.5}\n{\"name\": \"bo\", \"score\": 7}\n"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        Job job = writer.getJob().waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        assertThat(((JobStatistics.LoadStatistics) job.getStatistics()).getOutputRows()).isEqualTo(2L);
+        assertThat(bigquery.getTable(target).getNumRows().longValue()).isEqualTo(2L);
+    }
+
+    @Test
     @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),

@@ -34,6 +34,12 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
     }
 
     @Override
+    public Result readFiles(LoadSource source) {
+        throw QueryEngine.invalidQuery(source.format() + " load jobs need the DuckDB SQL engine; "
+                + "set floci-gcp.services.bigquery.mock to false.").withReason("invalid");
+    }
+
+    @Override
     public DmlResult executeDml(Request request, Tables tables) {
         throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
                 + "set floci-gcp.services.bigquery.mock to false.");

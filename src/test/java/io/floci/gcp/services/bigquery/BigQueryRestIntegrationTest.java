@@ -587,4 +587,71 @@ class BigQueryRestIntegrationTest {
                 .then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalidQuery"));
     }
+
+    private static final String LOAD_JOB = """
+            {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+              "destinationTable": {"datasetId": "loads", "tableId": "%s"},
+              "schema": {"fields": [{"name": "name", "type": "STRING"}, {"name": "n", "type": "INT64"}]}}}}
+            """;
+
+    @Test
+    @Order(12)
+    void multipartUploadRunsALoadJob() {
+        given().contentType("application/json").body("{\"datasetReference\": {\"datasetId\": \"loads\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+
+        String boundary = "floci_boundary";
+        String body = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+                + LOAD_JOB.formatted("multi") + "\r\n--" + boundary
+                + "\r\nContent-Type: application/octet-stream\r\n\r\n"
+                + "{\"name\": \"a\", \"n\": 1}\n{\"name\": \"b\", \"n\": 2}\r\n--" + boundary + "--\r\n";
+        given().contentType("multipart/related; boundary=" + boundary).body(body.getBytes())
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=multipart")
+                .then().statusCode(200)
+                .body("configuration.jobType", equalTo("LOAD"))
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("2"));
+        given().when().get(BASE + "/datasets/loads/tables/multi/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(13)
+    void resumableUploadAnswers308UntilTheLastChunk() {
+        String location = given().contentType("application/json").body(LOAD_JOB.formatted("resumable"))
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200)
+                .extract().header("Location");
+        org.junit.jupiter.api.Assertions.assertTrue(location.contains("upload_id="), location);
+        String path = location.substring(location.indexOf("/upload/"));
+
+        byte[] first = "{\"name\": \"a\", \"n\": 1}\n".getBytes();
+        byte[] last = "{\"name\": \"b\", \"n\": 2}\n".getBytes();
+        given().header("Content-Range", "bytes 0-" + (first.length - 1) + "/*").body(first)
+                .contentType("application/octet-stream")
+                .when().put(path)
+                .then().statusCode(308)
+                .header("Range", equalTo("bytes=0-" + (first.length - 1)));
+        int total = first.length + last.length;
+        given().header("Content-Range", "bytes " + first.length + "-" + (total - 1) + "/" + total).body(last)
+                .contentType("application/octet-stream")
+                .when().put(path)
+                .then().statusCode(200)
+                .body("statistics.load.outputRows", equalTo("2"))
+                .body("configuration.load.destinationTable.tableId", equalTo("resumable"));
+    }
+
+    @Test
+    @Order(14)
+    void loadJobThroughJobsInsertReportsErrorsInStatus() {
+        given().contentType("application/json").body("""
+                {"configuration": {"load": {"sourceUris": ["gs://no-such-bucket/*.csv"],
+                  "destinationTable": {"datasetId": "loads", "tableId": "gcs"}, "autodetect": true}}}
+                """)
+                .when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("configuration.jobType", equalTo("LOAD"))
+                .body("status.errorResult.reason", notNullValue());
+    }
 }

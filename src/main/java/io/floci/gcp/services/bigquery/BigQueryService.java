@@ -14,6 +14,7 @@ import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.StoredJob;
 import io.floci.gcp.services.bigquery.model.StoredTableData;
 import io.floci.gcp.services.bigquery.model.Table;
+import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
@@ -98,8 +99,14 @@ public class BigQueryService {
                     .withReason("duplicate");
         }
         String now = nowMillis();
+        Map<String, Object> extra = BigQueryMetadata.writable(body.getExtra(), BigQueryMetadata.DATASET_FIELDS);
+        BigQueryMetadata.validateDataset(extra);
+        body.getExtra().clear();
+        body.getExtra().putAll(extra);
+        BigQueryMetadata.fillDatasetOutputs(body);
         body.setDatasetReference(new DatasetReference(projectId, datasetId));
         body.setId(projectId + ":" + datasetId);
+        body.setSelfLink(selfLink(projectId, datasetId, null));
         body.setEtag(etag());
         body.setCreationTime(now);
         body.setLastModifiedTime(now);
@@ -124,6 +131,10 @@ public class BigQueryService {
     /** datasets.patch, honouring {@code updateMode}. */
     public Dataset patchDataset(String projectId, String datasetId, Dataset patch, UpdateMode mode) {
         Dataset existing = getDataset(projectId, datasetId);
+        Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
+        BigQueryMetadata.patch(candidate, patch.getExtra(), BigQueryMetadata.DATASET_FIELDS);
+        clearZeroDefaultExpiration(candidate);
+        BigQueryMetadata.validateDataset(candidate);
         if (mode.touchesMetadata()) {
             if (patch.getFriendlyName() != null) {
                 existing.setFriendlyName(patch.getFriendlyName());
@@ -138,10 +149,30 @@ public class BigQueryService {
         if (mode.touchesAcl() && patch.getAccess() != null) {
             existing.setAccess(patch.getAccess());
         }
+        replaceExtra(existing.getExtra(), candidate);
+        BigQueryMetadata.fillDatasetOutputs(existing);
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         datasetStore.put(datasetId, existing);
         return existing;
+    }
+
+    /** "To clear an existing default expiration with a PATCH request, set to 0." */
+    private static void clearZeroDefaultExpiration(Map<String, Object> extra) {
+        Object value = extra.get("defaultTableExpirationMs");
+        if (value != null && "0".equals(String.valueOf(value).trim())) {
+            extra.remove("defaultTableExpirationMs");
+        }
+    }
+
+    /**
+     * Writable metadata is validated on a detached copy and only then committed, so a request that
+     * fails validation leaves the stored resource untouched: the storage backends hand out the live
+     * object, so mutating it before validating would publish a rejected update.
+     */
+    private static void replaceExtra(Map<String, Object> target, Map<String, Object> candidate) {
+        target.clear();
+        target.putAll(candidate);
     }
 
     /** datasets.update (PUT): full replacement — mutable fields absent from the body are cleared. */
@@ -161,9 +192,14 @@ public class BigQueryService {
             String projectId, String datasetId, Dataset update, UpdateMode mode) {
         Dataset existing = getDataset(projectId, datasetId);
         if (mode.touchesMetadata()) {
+            Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
+            BigQueryMetadata.replace(candidate, update.getExtra(), BigQueryMetadata.DATASET_FIELDS);
+            BigQueryMetadata.validateDataset(candidate);
             existing.setFriendlyName(update.getFriendlyName());
             existing.setDescription(update.getDescription());
             existing.setLabels(update.getLabels());
+            replaceExtra(existing.getExtra(), candidate);
+            BigQueryMetadata.fillDatasetOutputs(existing);
         }
         if (mode.touchesAcl()) {
             existing.setAccess(update.getAccess());
@@ -194,7 +230,7 @@ public class BigQueryService {
     // ── Tables ───────────────────────────────────────────────────────────────────
 
     public Table createTable(String projectId, String datasetId, Table body) {
-        getDataset(projectId, datasetId);
+        Dataset dataset = getDataset(projectId, datasetId);
         String tableId = body.getTableReference() != null
                 ? body.getTableReference().getTableId() : null;
         if (tableId == null || tableId.isBlank()) {
@@ -208,6 +244,24 @@ public class BigQueryService {
         }
         String now = nowMillis();
         body.setSchema(RowCodec.normalizeSchema(body.getSchema()));
+        Map<String, Object> extra = BigQueryMetadata.writable(body.getExtra(), BigQueryMetadata.TABLE_FIELDS);
+        body.getExtra().clear();
+        body.getExtra().putAll(extra);
+        BigQueryMetadata.validateTable(extra, schemaFields(body));
+        BigQueryMetadata.applyDatasetDefaults(body, dataset, Long.parseLong(now));
+        if (body.getType() == null && extra.containsKey("view")) {
+            body.setType("VIEW");
+        } else if (body.getType() == null && extra.containsKey("materializedView")) {
+            body.setType("MATERIALIZED_VIEW");
+        } else if (body.getType() == null && extra.containsKey("externalDataConfiguration")) {
+            body.setType("EXTERNAL");
+        }
+        body.setLocation(dataset.getLocation());
+        // numRows is maintained on insert, but nothing tracks a byte size, and a table with rows
+        // reporting numBytes "0" is worse than one that omits the field. numLongTermBytes stays
+        // "0" because nothing here ever ages into long-term storage.
+        body.setNumLongTermBytes("0");
+        body.setSelfLink(selfLink(projectId, datasetId, tableId));
         body.setTableReference(new TableReference(projectId, datasetId, tableId));
         body.setId(projectId + ":" + datasetId + "." + tableId);
         body.setType(body.getType() != null ? body.getType() : "TABLE");
@@ -222,17 +276,50 @@ public class BigQueryService {
 
     public Table getTable(String projectId, String datasetId, String tableId) {
         return tableStore.get(tableKey(datasetId, tableId))
+                .filter(table -> !expire(datasetId, tableId, table))
                 .orElseThrow(() -> GcpException.notFound(
                         "Not found: Table " + projectId + ":" + datasetId + "." + tableId));
     }
 
     public List<Table> listTables(String projectId, String datasetId) {
         String prefix = datasetId + "/";
-        return tableStore.scan(k -> k.startsWith(prefix));
+        return tableStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(table -> !expire(datasetId, table.getTableReference().getTableId(), table))
+                .toList();
+    }
+
+    /** "Expired tables will be deleted": removes the table (and its rows) once past expirationTime. */
+    private boolean expire(String datasetId, String tableId, Table table) {
+        if (!BigQueryMetadata.expired(table, System.currentTimeMillis())) {
+            return false;
+        }
+        tableStore.delete(tableKey(datasetId, tableId));
+        dataStore.delete(tableKey(datasetId, tableId));
+        LOG.debugf("table expired dataset=%s table=%s", datasetId, tableId);
+        return true;
+    }
+
+    private static List<TableFieldSchema> schemaFields(Table table) {
+        return schemaFields(table.getSchema());
+    }
+
+    private static List<TableFieldSchema> schemaFields(TableSchema schema) {
+        return schema != null && schema.getFields() != null ? schema.getFields() : List.of();
+    }
+
+    private String selfLink(String projectId, String datasetId, String tableId) {
+        String base = config != null ? config.effectiveBaseUrl() : "";
+        return base + "/bigquery/v2/projects/" + projectId + "/datasets/" + datasetId
+                + (tableId != null ? "/tables/" + tableId : "");
     }
 
     public Table patchTable(String projectId, String datasetId, String tableId, Table patch) {
         Table existing = getTable(projectId, datasetId, tableId);
+        TableSchema schema = patch.getSchema() != null
+                ? RowCodec.normalizeSchema(patch.getSchema()) : existing.getSchema();
+        Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
+        BigQueryMetadata.patch(candidate, patch.getExtra(), BigQueryMetadata.TABLE_FIELDS);
+        BigQueryMetadata.validateTable(candidate, schemaFields(schema));
         if (patch.getFriendlyName() != null) {
             existing.setFriendlyName(patch.getFriendlyName());
         }
@@ -240,11 +327,12 @@ public class BigQueryService {
             existing.setDescription(patch.getDescription());
         }
         if (patch.getSchema() != null) {
-            existing.setSchema(RowCodec.normalizeSchema(patch.getSchema()));
+            existing.setSchema(schema);
         }
         if (patch.getLabels() != null) {
             existing.setLabels(patch.getLabels());
         }
+        replaceExtra(existing.getExtra(), candidate);
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         tableStore.put(tableKey(datasetId, tableId), existing);
@@ -254,10 +342,15 @@ public class BigQueryService {
     /** tables.update (PUT): full replacement — mutable fields absent from the body are cleared. */
     public Table updateTable(String projectId, String datasetId, String tableId, Table update) {
         Table existing = getTable(projectId, datasetId, tableId);
+        TableSchema schema = update.getSchema() != null ? RowCodec.normalizeSchema(update.getSchema()) : null;
+        Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
+        BigQueryMetadata.replace(candidate, update.getExtra(), BigQueryMetadata.TABLE_FIELDS);
+        BigQueryMetadata.validateTable(candidate, schemaFields(schema));
         existing.setFriendlyName(update.getFriendlyName());
         existing.setDescription(update.getDescription());
-        existing.setSchema(update.getSchema() != null ? RowCodec.normalizeSchema(update.getSchema()) : null);
+        existing.setSchema(schema);
         existing.setLabels(update.getLabels());
+        replaceExtra(existing.getExtra(), candidate);
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         tableStore.put(tableKey(datasetId, tableId), existing);

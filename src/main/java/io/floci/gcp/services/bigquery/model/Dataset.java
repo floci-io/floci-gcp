@@ -1,8 +1,12 @@
 package io.floci.gcp.services.bigquery.model;
 
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -22,6 +26,13 @@ public class Dataset {
     private String creationTime;
     private String lastModifiedTime;
     private List<DatasetAccessEntry> access;
+    private String type;
+    /**
+     * Writable {@code Dataset} fields the emulator stores verbatim but does not model (partitioning,
+     * clustering, expiration, collation, ...). Keys are filtered by {@code BigQueryMetadata}.
+     */
+    @JsonIgnore
+    private final Map<String, Object> extra = new LinkedHashMap<>();
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -58,4 +69,13 @@ public class Dataset {
 
     public List<DatasetAccessEntry> getAccess() { return access; }
     public void setAccess(List<DatasetAccessEntry> access) { this.access = access; }
+
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+
+    @JsonAnyGetter
+    public Map<String, Object> getExtra() { return extra; }
+
+    @JsonAnySetter
+    public void setExtra(String key, Object value) { extra.put(key, value); }
 }

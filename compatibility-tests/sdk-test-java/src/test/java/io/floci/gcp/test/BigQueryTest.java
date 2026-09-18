@@ -232,6 +232,45 @@ class BigQueryTest {
 
     @Test
     @Order(13)
+    void partitioningClusteringAndDefaultsRoundTrip() {
+        String dataset = DATASET + "_meta";
+        bigquery.create(DatasetInfo.newBuilder(dataset)
+                .setDefaultTableLifetime(7_200_000L)
+                .setDefaultPartitionExpirationMs(86_400_000L)
+                .setDefaultCollation("und:ci")
+                .build());
+        com.google.cloud.bigquery.Dataset fetchedDataset = bigquery.getDataset(dataset);
+        assertThat(fetchedDataset.getDefaultTableLifetime()).isEqualTo(7_200_000L);
+        assertThat(fetchedDataset.getDefaultPartitionExpirationMs()).isEqualTo(86_400_000L);
+        assertThat(fetchedDataset.getDefaultCollation()).isEqualTo("und:ci");
+
+        Schema schema = Schema.of(
+                Field.of("occurred_at", StandardSQLTypeName.TIMESTAMP),
+                Field.of("user_id", StandardSQLTypeName.STRING));
+        StandardTableDefinition definition = StandardTableDefinition.newBuilder()
+                .setSchema(schema)
+                .setTimePartitioning(com.google.cloud.bigquery.TimePartitioning
+                        .newBuilder(com.google.cloud.bigquery.TimePartitioning.Type.DAY)
+                        .setField("occurred_at").build())
+                .setClustering(com.google.cloud.bigquery.Clustering.newBuilder()
+                        .setFields(List.of("user_id")).build())
+                .build();
+        bigquery.create(TableInfo.of(TableId.of(dataset, "events"), definition));
+
+        StandardTableDefinition fetched = bigquery.getTable(TableId.of(dataset, "events")).getDefinition();
+        assertThat(fetched.getTimePartitioning().getType())
+                .isEqualTo(com.google.cloud.bigquery.TimePartitioning.Type.DAY);
+        assertThat(fetched.getTimePartitioning().getField()).isEqualTo("occurred_at");
+        // The partition expiration is inherited from the dataset default.
+        assertThat(fetched.getTimePartitioning().getExpirationMs()).isEqualTo(86_400_000L);
+        assertThat(fetched.getClustering().getFields()).containsExactly("user_id");
+
+        assertThat(bigquery.delete(DatasetId.of(PROJECT_ID, dataset),
+                BigQuery.DatasetDeleteOption.deleteContents())).isTrue();
+    }
+
+    @Test
+    @Order(14)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),
                 BigQuery.DatasetDeleteOption.deleteContents());

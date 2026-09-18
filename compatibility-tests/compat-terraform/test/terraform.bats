@@ -345,6 +345,33 @@ setup() {
     [[ "$result" == *'floci-compat-sa@'* ]]
 }
 
+# ── BigQuery Spot Checks ──────────────────────────────────────────────────────
+
+@test "Terraform: BigQuery dataset keeps its default expirations" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/bigquery/v2/projects/${FLOCI_PROJECT}/datasets/floci_compat")
+    [[ "$result" == *'"defaultTableExpirationMs":"7200000"'* ]]
+    [[ "$result" == *'"defaultPartitionExpirationMs":"86400000"'* ]]
+    [[ "$result" == *'"defaultCollation":"und:ci"'* ]]
+}
+
+@test "Terraform: BigQuery table keeps partitioning and clustering" {
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/bigquery/v2/projects/${FLOCI_PROJECT}/datasets/floci_compat/tables/events")
+    [[ "$result" == *'"timePartitioning":{'* ]]
+    [[ "$result" == *'"type":"DAY"'* ]]
+    [[ "$result" == *'"field":"occurred_at"'* ]]
+    [[ "$result" == *'"expirationMs":"86400000"'* ]]
+    [[ "$result" == *'"clustering":{"fields":["user_id","kind"]}'* ]]
+    [[ "$result" == *'"requirePartitionFilter":true'* ]]
+}
+
+@test "Terraform: BigQuery resources plan no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_bigquery_dataset.compat -target=google_bigquery_table.events \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
 # ── State Integrity ───────────────────────────────────────────────────────────
 
 @test "Terraform: all managed resources tracked in state" {

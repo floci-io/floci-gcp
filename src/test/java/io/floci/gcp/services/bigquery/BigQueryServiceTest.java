@@ -694,4 +694,118 @@ class BigQueryServiceTest {
         }
         return service.insertAll(PROJECT, DATASET, TABLE, rows, false, false);
     }
+
+    // ── Metadata round-trip ──
+
+    @Test
+    void writableDatasetFieldsRoundTripAndOutputsAreFilled() {
+        Dataset body = newDataset(DATASET);
+        body.setExtra("defaultTableExpirationMs", 7_200_000);
+        body.setExtra("defaultCollation", "und:ci");
+        body.setExtra("storageBillingModel", "PHYSICAL");
+        body.setExtra("access", List.of(Map.of("role", "READER")));
+        body.setExtra("numRows", "999");
+        Dataset created = service.createDataset(PROJECT, body);
+
+        assertEquals("7200000", created.getExtra().get("defaultTableExpirationMs"));
+        assertEquals("und:ci", created.getExtra().get("defaultCollation"));
+        assertEquals("PHYSICAL", created.getExtra().get("storageBillingModel"));
+        assertEquals("168", created.getExtra().get("maxTimeTravelHours"));
+        assertFalse(created.getExtra().containsKey("access"), "access is not stored yet (PR #208)");
+        assertFalse(created.getExtra().containsKey("numRows"));
+        assertEquals("DEFAULT", created.getType());
+        assertEquals("US", created.getLocation());
+    }
+
+    @Test
+    void datasetPatchClearsDefaultExpirationWithZeroAndValidatesRanges() {
+        Dataset body = newDataset(DATASET);
+        body.setExtra("defaultTableExpirationMs", "7200000");
+        service.createDataset(PROJECT, body);
+
+        Dataset patch = new Dataset();
+        patch.setExtra("defaultTableExpirationMs", "0");
+        assertFalse(service.patchDataset(PROJECT, DATASET, patch).getExtra().containsKey("defaultTableExpirationMs"));
+
+        Dataset tooShort = new Dataset();
+        tooShort.setExtra("defaultTableExpirationMs", "1000");
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchDataset(PROJECT, DATASET, tooShort)).getReason());
+        Dataset badTravel = new Dataset();
+        badTravel.setExtra("maxTimeTravelHours", "24");
+        assertThrows(GcpException.class, () -> service.patchDataset(PROJECT, DATASET, badTravel));
+    }
+
+    @Test
+    void newTablesInheritDatasetDefaultExpirations() {
+        Dataset body = newDataset(DATASET);
+        body.setExtra("defaultTableExpirationMs", "7200000");
+        body.setExtra("defaultPartitionExpirationMs", "86400000");
+        service.createDataset(PROJECT, body);
+
+        Table plain = service.createTable(PROJECT, DATASET, newTable(DATASET, "plain"));
+        long expiration = Long.parseLong((String) plain.getExtra().get("expirationTime"));
+        assertEquals(Long.parseLong(plain.getCreationTime()) + 7_200_000L, expiration);
+
+        Table partitioned = newTable(DATASET, "partitioned");
+        Map<String, Object> partitioning = new java.util.HashMap<>();
+        partitioning.put("type", "DAY");
+        partitioning.put("expirationMs", null); // the Java SDK sends explicit nulls
+        partitioned.setExtra("timePartitioning", partitioning);
+        Table created = service.createTable(PROJECT, DATASET, partitioned);
+        assertEquals("86400000", ((Map<?, ?>) created.getExtra().get("timePartitioning")).get("expirationMs"));
+        assertFalse(created.getExtra().containsKey("expirationTime"),
+                "a partitioned table inheriting the partition default gets no table expiration");
+
+        Table explicit = newTable(DATASET, "explicit");
+        explicit.setExtra("expirationTime", "4102444800000");
+        assertEquals("4102444800000", service.createTable(PROJECT, DATASET, explicit).getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void tableMetadataRoundTripsThroughPatchAndUpdate() {
+        seedTable();
+        Table patch = new Table();
+        patch.setExtra("clustering", Map.of("fields", List.of("name")));
+        patch.setExtra("timePartitioning", Map.of("type", "DAY", "expirationMs", 3600000));
+        patch.setExtra("requirePartitionFilter", true);
+        Table patched = service.patchTable(PROJECT, DATASET, TABLE, patch);
+        assertEquals(Map.of("fields", List.of("name")), patched.getExtra().get("clustering"));
+        assertEquals("3600000", ((Map<?, ?>) patched.getExtra().get("timePartitioning")).get("expirationMs"));
+        assertEquals("US", patched.getLocation());
+
+        Table clear = new Table();
+        clear.setExtra("clustering", null);
+        assertFalse(service.patchTable(PROJECT, DATASET, TABLE, clear).getExtra().containsKey("clustering"));
+
+        Table update = newTable(DATASET, TABLE);
+        update.setExtra("defaultCollation", "und:ci");
+        Table updated = service.updateTable(PROJECT, DATASET, TABLE, update);
+        assertEquals(Map.of("defaultCollation", "und:ci"), updated.getExtra(),
+                "PUT replaces every writable field");
+    }
+
+    @Test
+    void invalidPartitioningIsRejected() {
+        seedTable();
+        Table noType = newTable(DATASET, "p1");
+        noType.setExtra("timePartitioning", Map.of("field", "name"));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.createTable(PROJECT, DATASET, noType)).getReason());
+        Table unknownField = newTable(DATASET, "p2");
+        unknownField.setExtra("timePartitioning", Map.of("type", "DAY", "field", "missing"));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, unknownField));
+    }
+
+    @Test
+    void expiredTablesAreDeleted() {
+        seedTwoRows();
+        Table patch = new Table();
+        patch.setExtra("expirationTime", String.valueOf(System.currentTimeMillis() - 1));
+        service.patchTable(PROJECT, DATASET, TABLE, patch);
+
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, TABLE)).getGcpStatus());
+        assertTrue(service.listTables(PROJECT, DATASET).isEmpty());
+    }
 }

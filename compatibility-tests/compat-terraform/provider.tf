@@ -63,6 +63,7 @@ provider "google" {
   sql_custom_endpoint            = "${var.endpoint}/sql/v1beta4/"
   kms_custom_endpoint            = "${var.endpoint}/v1/"
   pubsub_custom_endpoint         = "${var.endpoint}/v1/"
+  big_query_custom_endpoint      = "${var.endpoint}/bigquery/v2/"
 
   # Service Usage + the Cloud Resource Manager v1 project lookup that
   # google_project_service performs on every read.

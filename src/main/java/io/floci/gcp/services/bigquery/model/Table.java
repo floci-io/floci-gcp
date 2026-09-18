@@ -1,8 +1,12 @@
 package io.floci.gcp.services.bigquery.model;
 
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RegisterForReflection
@@ -23,6 +27,14 @@ public class Table {
     private String numBytes;
     private String creationTime;
     private String lastModifiedTime;
+    private String location;
+    private String numLongTermBytes;
+    /**
+     * Writable {@code Table} fields the emulator stores verbatim but does not model (partitioning,
+     * clustering, expiration, collation, ...). Keys are filtered by {@code BigQueryMetadata}.
+     */
+    @JsonIgnore
+    private final Map<String, Object> extra = new LinkedHashMap<>();
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -65,4 +77,16 @@ public class Table {
 
     public String getLastModifiedTime() { return lastModifiedTime; }
     public void setLastModifiedTime(String lastModifiedTime) { this.lastModifiedTime = lastModifiedTime; }
+
+    public String getLocation() { return location; }
+    public void setLocation(String location) { this.location = location; }
+
+    public String getNumLongTermBytes() { return numLongTermBytes; }
+    public void setNumLongTermBytes(String numLongTermBytes) { this.numLongTermBytes = numLongTermBytes; }
+
+    @JsonAnyGetter
+    public Map<String, Object> getExtra() { return extra; }
+
+    @JsonAnySetter
+    public void setExtra(String key, Object value) { extra.put(key, value); }
 }

@@ -278,3 +278,38 @@ resource "google_project_service" "run_api" {
 output "enabled_service" {
   value = google_project_service.run_api.service
 }
+
+# BigQuery: dataset defaults and table partitioning/clustering must round-trip, or the
+# provider plans a change on every run.
+resource "google_bigquery_dataset" "compat" {
+  dataset_id                      = "floci_compat"
+  friendly_name                   = "floci compat"
+  description                     = "Terraform compat dataset"
+  location                        = "US"
+  default_table_expiration_ms     = 7200000
+  default_partition_expiration_ms = 86400000
+  default_collation               = "und:ci"
+  labels                          = { env = "compat" }
+  delete_contents_on_destroy      = true
+}
+
+resource "google_bigquery_table" "events" {
+  dataset_id               = google_bigquery_dataset.compat.dataset_id
+  table_id                 = "events"
+  deletion_protection      = false
+  description              = "partitioned and clustered"
+  labels                   = { team = "data" }
+  require_partition_filter = true
+  clustering               = ["user_id", "kind"]
+
+  time_partitioning {
+    type  = "DAY"
+    field = "occurred_at"
+  }
+
+  schema = jsonencode([
+    { name = "occurred_at", type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "user_id", type = "STRING", mode = "NULLABLE" },
+    { name = "kind", type = "STRING", mode = "NULLABLE" }
+  ])
+}

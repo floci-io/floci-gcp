@@ -486,4 +486,53 @@ class BigQueryRestIntegrationTest {
                 .statusCode(404)
                 .body("error.errors[0].reason", equalTo("notFound"));
     }
+
+    @Test
+    @Order(9)
+    void tableMetadataRoundTripsOverRest() {
+        given().contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "meta"}, "defaultTableExpirationMs": 7200000,
+                         "defaultCollation": "und:ci"}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then().statusCode(200)
+                .body("defaultTableExpirationMs", equalTo("7200000"))
+                .body("maxTimeTravelHours", equalTo("168"))
+                .body("type", equalTo("DEFAULT"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"tableReference": {"tableId": "events"},
+                         "schema": {"fields": [{"name": "day", "type": "DATE"}]},
+                         "timePartitioning": {"type": "DAY", "field": "day", "expirationMs": null},
+                         "clustering": {"fields": ["day"]}, "numRows": "999"}
+                        """)
+                .when().post(BASE + "/datasets/meta/tables")
+                .then().statusCode(200)
+                .body("timePartitioning.type", equalTo("DAY"))
+                .body("timePartitioning.expirationMs", nullValue())
+                .body("clustering.fields[0]", equalTo("day"))
+                .body("expirationTime", notNullValue())
+                .body("location", equalTo("US"))
+                .body("numRows", equalTo("0"));
+
+        // PATCH with an explicit null clears the field.
+        given().contentType("application/json")
+                .body("""
+                        {"clustering": null}
+                        """)
+                .when().patch(BASE + "/datasets/meta/tables/events")
+                .then().statusCode(200)
+                .body("clustering", nullValue())
+                .body("timePartitioning.field", equalTo("day"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"timePartitioning": {"field": "day"}}
+                        """)
+                .when().patch(BASE + "/datasets/meta/tables/events")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalid"));
+    }
 }

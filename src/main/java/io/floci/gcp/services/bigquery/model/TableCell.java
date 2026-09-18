@@ -6,10 +6,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 /**
  * A single cell in a {@link TableRow}. The {@code v} value is a scalar (rendered as a
  * string on the wire), a nested {@code {f:[...]}} for RECORD types, or an array for
- * REPEATED fields.
+ * REPEATED fields. A NULL cell is {@code {"v": null}}: the key is always present, and the Python
+ * client reads {@code cell["v"]} directly.
  */
 @RegisterForReflection
-@JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonInclude(JsonInclude.Include.ALWAYS)
 public class TableCell {
 
     private Object v;

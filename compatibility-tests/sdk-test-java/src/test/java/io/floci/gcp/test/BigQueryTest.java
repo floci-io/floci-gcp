@@ -211,6 +211,27 @@ class BigQueryTest {
 
     @Test
     @Order(12)
+    void nullCellsKeepTheirValueKey() {
+        String table = "null_cells";
+        Schema schema = Schema.of(Field.of("name", StandardSQLTypeName.STRING),
+                Field.of("score", StandardSQLTypeName.FLOAT64));
+        bigquery.create(TableInfo.of(TableId.of(DATASET, table), StandardTableDefinition.of(schema)));
+        InsertAllResponse inserted = bigquery.insertAll(InsertAllRequest.newBuilder(TableId.of(DATASET, table))
+                .addRow(Map.of("name", "carol"))
+                .build());
+        assertThat(inserted.hasErrors()).isFalse();
+
+        // A NULL cell has to keep its "v" key: FieldValue.fromPb throws "Unexpected table cell
+        // format" on a cell object carrying neither "f" nor "v", so an omitted key breaks reads
+        // for the Java client, not only for Python.
+        TableResult rows = bigquery.listTableData(TableId.of(DATASET, table), schema);
+        FieldValueList row = rows.getValues().iterator().next();
+        assertThat(row.get("name").getStringValue()).isEqualTo("carol");
+        assertThat(row.get("score").isNull()).isTrue();
+    }
+
+    @Test
+    @Order(13)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),
                 BigQuery.DatasetDeleteOption.deleteContents());

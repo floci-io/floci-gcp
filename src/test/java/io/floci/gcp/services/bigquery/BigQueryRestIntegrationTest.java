@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -242,6 +243,26 @@ class BigQueryRestIntegrationTest {
 
     @Test
     @Order(8)
+    void nullCellsKeepTheirValueKey() {
+        given().contentType("application/json")
+                .body("{\"tableReference\": {\"tableId\": \"t_null\"}, \"schema\": {\"fields\": ["
+                        + "{\"name\": \"name\", \"type\": \"STRING\"}, {\"name\": \"age\", \"type\": \"INT64\"}]}}")
+                .when().post(BASE + "/datasets/ds1/tables").then().statusCode(200);
+        given().contentType("application/json")
+                .body("{\"rows\": [{\"json\": {\"name\": \"nul\"}}]}")
+                .when().post(BASE + "/datasets/ds1/tables/t_null/insertAll").then().statusCode(200);
+
+        // A NULL cell is {"v": null}; the Python client reads cell["v"] unconditionally.
+        given()
+                .when().get(BASE + "/datasets/ds1/tables/t_null/data")
+                .then()
+                .statusCode(200)
+                .body("rows[0].f[1]", hasKey("v"))
+                .body("rows[0].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(9)
     void deleteSemantics() {
         given()
                 .when().delete(BASE + "/datasets/ds1")

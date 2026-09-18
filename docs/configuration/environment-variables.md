@@ -104,6 +104,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Cloud Functions |
 | `FLOCI_GCP_SERVICES_GKE_ENABLED` | `true` | GKE (Kubernetes Engine) |
 | `FLOCI_GCP_SERVICES_BIGQUERY_ENABLED` | `true` | BigQuery |
+| `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | Mock mode, runs queries on a built-in SQL subset instead of the DuckDB sidecar |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Service Usage |
 | `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager (minimal `projects.get`) |
 | `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
@@ -138,6 +139,14 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL80_IMAGE` | `mysql:8.0.46` | Docker image used for `MYSQL_8_0` and `MYSQL_8_0_NN` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL84_IMAGE` | `mysql:8.4.11` | Docker image used for `MYSQL_8_4` instances |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_STARTUP_TIMEOUT_SECONDS` | `90` | Max time to wait for PostgreSQL readiness after container start |
+
+### BigQuery
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | When `true`, queries run on a built-in SQL subset and no floci-duck container is started |
+| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | Image of the DuckDB sidecar that executes GoogleSQL queries |
+| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck at this URL instead of starting a container |
 
 ### GKE (Kubernetes Engine)
 

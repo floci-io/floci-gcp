@@ -208,6 +208,20 @@ public interface EmulatorConfig {
     interface BigQueryServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** When true, queries run on the built-in SQL subset instead of the DuckDB sidecar. */
+        @WithDefault("false")
+        boolean mock();
+
+        BigQueryDuckConfig duck();
+    }
+
+    interface BigQueryDuckConfig {
+        /** Pre-running floci-duck endpoint; when set, no container is started. */
+        Optional<String> url();
+
+        @WithDefault("floci/floci-duck:latest")
+        String defaultImage();
     }
 
     interface ResourceManagerServiceConfig {

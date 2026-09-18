@@ -129,6 +129,9 @@ floci-gcp:
       enabled: true
     bigquery:
       enabled: true
+      mock: false
+      duck:
+        default-image: "floci/floci-duck:latest"
     gke:
       enabled: true
       mock: false

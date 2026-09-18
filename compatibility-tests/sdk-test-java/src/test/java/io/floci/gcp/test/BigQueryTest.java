@@ -11,7 +11,9 @@ import com.google.cloud.bigquery.InsertAllRequest;
 import com.google.cloud.bigquery.InsertAllResponse;
 import com.google.cloud.bigquery.Job;
 import com.google.cloud.bigquery.JobInfo;
+import com.google.cloud.bigquery.JobStatistics;
 import com.google.cloud.bigquery.QueryJobConfiguration;
+import com.google.cloud.bigquery.QueryParameterValue;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
@@ -24,6 +26,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -32,10 +36,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Validates the Phase 1 BigQuery REST surface against the real {@code google-cloud-bigquery}
- * SDK: dataset/table metadata, {@code insertAll}, the {@code jobs.query} fast path, the
+ * Validates the BigQuery REST surface against the real {@code google-cloud-bigquery} SDK:
+ * dataset/table metadata, {@code insertAll}, the {@code jobs.query} fast path, the
  * {@code jobs.insert} + {@code Job.waitFor()} + {@code Job.getQueryResults()} path (which
- * reads rows from the job's destination table), and error surfaces. The SDK targets the
+ * reads rows from the job's destination table), GoogleSQL on the DuckDB engine (joins,
+ * aggregation, parameters, dry runs, typed columns) and error surfaces. The SDK targets the
  * emulator via {@code setHost} (see {@link TestFixtures#bigQueryClient()}).
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -164,7 +169,7 @@ class BigQueryTest {
     @Test
     @Order(8)
     void invalidSqlViaFastPathThrowsInvalidQuery() {
-        String sql = "SELECT name FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "` GROUP BY name";
+        String sql = "SELECT no_such_column FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "`";
         assertThatThrownBy(() -> bigquery.query(QueryJobConfiguration.newBuilder(sql).build()))
                 .isInstanceOfSatisfying(BigQueryException.class, e -> {
                     assertThat(e.getCode()).isEqualTo(400);
@@ -175,7 +180,7 @@ class BigQueryTest {
     @Test
     @Order(9)
     void invalidSqlViaJobReportsErrorInStatus() {
-        String sql = "SELECT name FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "` ORDER BY name";
+        String sql = "SELECT name FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "` ORDER BY no_such_column";
         Job job = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(sql).build()));
 
         // jobs.insert succeeds; the SQL failure lives in the job status (jobs.get)...
@@ -211,6 +216,75 @@ class BigQueryTest {
 
     @Test
     @Order(12)
+    void groupByOrderByAndAnonymousColumns() throws InterruptedException {
+        String sql = "SELECT active, COUNT(*), MAX(age) AS oldest FROM `" + PROJECT_ID + "." + DATASET + "."
+                + TABLE + "` GROUP BY active ORDER BY oldest DESC";
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(sql).build());
+
+        assertThat(result.getSchema().getFields().stream().map(Field::getName).toList())
+                .containsExactly("active", "f0_", "oldest");
+        List<FieldValueList> rows = new ArrayList<>();
+        result.iterateAll().forEach(rows::add);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("active").getBooleanValue()).isTrue();
+        assertThat(rows.get(0).get("oldest").getLongValue()).isEqualTo(30L);
+        assertThat(rows.get(1).get("f0_").getLongValue()).isEqualTo(1L);
+    }
+
+    @Test
+    @Order(13)
+    void namedAndArrayParameters() throws InterruptedException {
+        String sql = "SELECT name FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE
+                + "` WHERE age >= @min_age AND 'admin' IN UNNEST(tags) AND name IN UNNEST(@names)";
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(sql)
+                .addNamedParameter("min_age", QueryParameterValue.int64(18))
+                .addNamedParameter("names", QueryParameterValue.array(new String[] {"alice", "carol"}, String.class))
+                .build());
+        List<String> names = new ArrayList<>();
+        result.iterateAll().forEach(row -> names.add(row.get("name").getStringValue()));
+        assertThat(names).containsExactly("alice");
+    }
+
+    @Test
+    @Order(14)
+    void dryRunReportsSchemaWithoutRunning() {
+        String sql = "SELECT name, age FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "`";
+        Job job = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(sql).setDryRun(true).build()));
+
+        JobStatistics.QueryStatistics stats = job.getStatistics();
+        assertThat(stats.getStatementType()).isEqualTo(JobStatistics.QueryStatistics.StatementType.SELECT);
+        assertThat(stats.getSchema().getFields().stream().map(Field::getName).toList())
+                .containsExactly("name", "age");
+    }
+
+    @Test
+    @Order(15)
+    void timestampAndRecordColumnsRoundTrip() throws InterruptedException {
+        Schema schema = Schema.of(
+                Field.of("id", StandardSQLTypeName.INT64),
+                Field.of("occurred_at", StandardSQLTypeName.TIMESTAMP),
+                Field.of("amount", StandardSQLTypeName.NUMERIC),
+                Field.of("place", StandardSQLTypeName.STRUCT, Field.of("city", StandardSQLTypeName.STRING)));
+        bigquery.create(TableInfo.newBuilder(TableId.of(DATASET, "events"), StandardTableDefinition.of(schema))
+                .build());
+        InsertAllResponse inserted = bigquery.insertAll(InsertAllRequest.newBuilder(TableId.of(DATASET, "events"))
+                .addRow(Map.of("id", 1, "occurred_at", "2024-01-02T03:04:05.250Z", "amount", "12.50",
+                        "place", Map.of("city", "Lima")))
+                .build());
+        assertThat(inserted.hasErrors()).isFalse();
+
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT occurred_at, TIMESTAMP_ADD(occurred_at, INTERVAL 1 HOUR) AS later, amount * 2 AS doubled, place"
+                        + " FROM `" + PROJECT_ID + "." + DATASET + ".events`").build());
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("occurred_at").getTimestampInstant()).isEqualTo(Instant.parse("2024-01-02T03:04:05.250Z"));
+        assertThat(row.get("later").getTimestampInstant()).isEqualTo(Instant.parse("2024-01-02T04:04:05.250Z"));
+        assertThat(row.get("doubled").getNumericValue()).isEqualByComparingTo(new BigDecimal("25"));
+        assertThat(row.get("place").getRecordValue().get(0).getStringValue()).isEqualTo("Lima");
+    }
+
+    @Test
+    @Order(16)
     void nullCellsKeepTheirValueKey() {
         String table = "null_cells";
         Schema schema = Schema.of(Field.of("name", StandardSQLTypeName.STRING),
@@ -270,7 +344,7 @@ class BigQueryTest {
     }
 
     @Test
-    @Order(14)
+    @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),
                 BigQuery.DatasetDeleteOption.deleteContents());

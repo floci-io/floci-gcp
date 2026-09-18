@@ -33,9 +33,10 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * BigQuery Phase 1: datasets/tables metadata, streaming inserts ({@code insertAll}),
- * row reads, and a trivial {@code SELECT *} / {@code COUNT(*)} query path. Storage is
- * project-namespaced via {@link StorageFactory#create}.
+ * BigQuery: datasets/tables metadata, streaming inserts ({@code insertAll}), row reads and
+ * query jobs. Queries run on a {@link BigQuerySqlEngine}: GoogleSQL on the DuckDB sidecar, or
+ * the built-in SQL subset in mock mode. Storage is project-namespaced via
+ * {@link StorageFactory#create}.
  */
 @ApplicationScoped
 public class BigQueryService {
@@ -49,12 +50,14 @@ public class BigQueryService {
 
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final BigQuerySqlEngine engine;
 
     @Inject
     public BigQueryService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory) {
+            StorageFactory storageFactory, DuckSqlEngine duckEngine) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.engine = config.services().bigquery().mock() ? new InMemorySqlEngine() : duckEngine;
         this.datasetStore = storageFactory.create("bigquery-datasets", "bigquery-datasets.json",
                 new TypeReference<Map<String, Dataset>>() {});
         this.tableStore = storageFactory.create("bigquery-tables", "bigquery-tables.json",
@@ -69,6 +72,15 @@ public class BigQueryService {
             StorageBackend<String, Table> tableStore,
             StorageBackend<String, StoredTableData> dataStore,
             StorageBackend<String, StoredJob> jobStore) {
+        this(datasetStore, tableStore, dataStore, jobStore, new InMemorySqlEngine());
+    }
+
+    BigQueryService(StorageBackend<String, Dataset> datasetStore,
+            StorageBackend<String, Table> tableStore,
+            StorageBackend<String, StoredTableData> dataStore,
+            StorageBackend<String, StoredJob> jobStore,
+            BigQuerySqlEngine engine) {
+        this.engine = engine;
         this.datasetStore = datasetStore;
         this.tableStore = tableStore;
         this.dataStore = dataStore;
@@ -82,7 +94,7 @@ public class BigQueryService {
                 .enabled(config.services().bigquery().enabled())
                 .storageKey("bigquery")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(BigQueryController.class)
+                .resourceClasses(BigQueryController.class, BigQueryInternalController.class)
                 .build());
     }
 
@@ -419,9 +431,20 @@ public class BigQueryService {
     public record TableData(TableSchema schema, List<TableRow> rows) {}
 
     public TableData listTableData(String projectId, String datasetId, String tableId) {
+        return listTableData(projectId, datasetId, tableId, RowCodec.TimestampFormat.FLOAT64);
+    }
+
+    public TableData listTableData(String projectId, String datasetId, String tableId,
+            RowCodec.TimestampFormat format) {
         Table table = getTable(projectId, datasetId, tableId);
         StoredTableData data = dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new);
-        return new TableData(table.getSchema(), RowCodec.encodeRows(table.getSchema(), data.getRows()));
+        return new TableData(table.getSchema(), RowCodec.encodeRows(table.getSchema(), data.getRows(), format));
+    }
+
+    /** Stored (normalized) rows of a table, as the SQL engine stages them. */
+    public List<Map<String, Object>> storedRows(String projectId, String datasetId, String tableId) {
+        getTable(projectId, datasetId, tableId);
+        return dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new).getRows();
     }
 
     // ── Query ────────────────────────────────────────────────────────────────────
@@ -429,52 +452,75 @@ public class BigQueryService {
     /** Hidden dataset holding materialized query results; never listed, has no dataset record. */
     static final String ANON_DATASET = "_floci_anon";
 
+    /** Request-level options of {@code jobs.query} / {@code jobs.insert} that shape execution. */
+    public record QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
+                               String parameterMode, boolean dryRun, Boolean useLegacySql) {
+
+        public static QueryOptions of(String sql, String defaultDatasetId) {
+            return new QueryOptions(sql, defaultDatasetId, List.of(), null, false, null);
+        }
+    }
+
+    public StoredJob query(String projectId, String location, String jobId, String sql, String defaultDatasetId) {
+        return query(projectId, location, jobId, QueryOptions.of(sql, defaultDatasetId));
+    }
+
     /**
-     * Parses and executes the SQL subset, materializing results into a hidden anonymous
-     * table referenced as the job's {@code configuration.query.destinationTable} (the SDK's
+     * Executes the query and materializes its results into a hidden anonymous table
+     * referenced as the job's {@code configuration.query.destinationTable} (the SDK's
      * {@code Job.getQueryResults()} reads rows from there via {@code tabledata.list}).
-     * SQL errors propagate as {@link GcpException} — {@code jobs.query} maps them to HTTP
+     * SQL errors propagate as {@link GcpException}: {@code jobs.query} maps them to HTTP
      * errors while {@code jobs.insert} converts them into a DONE job with an error status.
+     * Dry runs return an unpersisted job carrying the result schema.
      */
-    public StoredJob query(String projectId, String location, String jobId,
-            String sql, String defaultDatasetId) {
+    public StoredJob query(String projectId, String location, String jobId, QueryOptions options) {
         // Reserve the ID before any parsing/lookup so a duplicate explicit jobId always
-        // 409s — even when the query would otherwise fail — matching failedJob's path.
-        String resolvedJobId = reserveJobId(projectId, jobId);
-        QueryEngine.ParsedQuery parsed = QueryEngine.parse(sql);
-
-        QueryEngine.TableRef ref = parsed.table();
-        if (ref.projectId() != null && !ref.projectId().equals(projectId)) {
-            throw QueryEngine.invalidQuery(
-                    "Cross-project queries are not supported by the Phase 1 emulator: "
-                            + ref.projectId() + "." + ref.datasetId() + "." + ref.tableId());
-        }
-        String datasetId = ref.datasetId() != null ? ref.datasetId() : defaultDatasetId;
-        if (datasetId == null || datasetId.isBlank()) {
-            throw QueryEngine.invalidQuery("Table name \"" + ref.tableId()
-                    + "\" missing dataset while no default dataset is set in the request.");
+        // 409s, even when the query would otherwise fail, matching failedJob's path.
+        String resolvedJobId = options.dryRun() ? null : reserveJobId(projectId, jobId);
+        if (Boolean.TRUE.equals(options.useLegacySql())) {
+            throw QueryEngine.invalidQuery("Legacy SQL is not supported by the floci BigQuery emulator;"
+                    + " set useLegacySql to false to run GoogleSQL.");
         }
 
-        Table table = getTable(projectId, datasetId, ref.tableId());
-        StoredTableData data = dataStore.get(tableKey(datasetId, ref.tableId()))
-                .orElseGet(StoredTableData::new);
-
-        QueryEngine.Result result = QueryEngine.evaluate(parsed, table.getSchema(), data.getRows());
+        BigQuerySqlEngine.Result result = engine.execute(new BigQuerySqlEngine.Request(projectId, options.sql(),
+                options.defaultDatasetId(), options.queryParameters(), options.parameterMode(), options.dryRun()),
+                tables(projectId));
 
         StoredJob job = new StoredJob();
         job.setJobId(resolvedJobId);
         job.setProjectId(projectId);
         job.setLocation(location != null && !location.isBlank() ? location : "US");
-        job.setQuery(sql);
+        job.setQuery(options.sql());
         job.setState("DONE");
         job.setCreationTime(nowMillis());
+        job.setStatementType(result.statementType());
+        job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
+        if (options.dryRun()) {
+            job.setDryRun(true);
+            job.setSchema(result.schema());
+            return job;
+        }
         job.setTotalRows(result.rows().size());
         job.setDestinationDatasetId(ANON_DATASET);
         job.setDestinationTableId("anon_" + job.getJobId());
 
-        materializeResult(projectId, job, result);
+        materializeResult(projectId, job, result.schema(), result.rows());
         jobStore.put(job.getJobId(), job);
         return job;
+    }
+
+    private BigQuerySqlEngine.Tables tables(String projectId) {
+        return new BigQuerySqlEngine.Tables() {
+            @Override
+            public Table table(String datasetId, String tableId) {
+                return getTable(projectId, datasetId, tableId);
+            }
+
+            @Override
+            public List<Map<String, Object>> rows(String datasetId, String tableId) {
+                return dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new).getRows();
+            }
+        };
     }
 
     /** Persists a failed query job (used by {@code jobs.insert}, which must not throw for SQL errors). */
@@ -506,21 +552,22 @@ public class BigQueryService {
         return jobId;
     }
 
-    private void materializeResult(String projectId, StoredJob job, QueryEngine.Result result) {
+    private void materializeResult(String projectId, StoredJob job, TableSchema schema,
+            List<Map<String, Object>> resultRows) {
         String key = tableKey(job.getDestinationDatasetId(), job.getDestinationTableId());
         Table anon = new Table();
         anon.setTableReference(new TableReference(projectId,
                 job.getDestinationDatasetId(), job.getDestinationTableId()));
         anon.setId(projectId + ":" + job.getDestinationDatasetId() + "." + job.getDestinationTableId());
         anon.setType("TABLE");
-        anon.setSchema(result.schema());
+        anon.setSchema(schema);
         anon.setCreationTime(job.getCreationTime());
         anon.setLastModifiedTime(job.getCreationTime());
-        anon.setNumRows(String.valueOf(result.rows().size()));
+        anon.setNumRows(String.valueOf(resultRows.size()));
         tableStore.put(key, anon);
 
         StoredTableData rows = new StoredTableData();
-        rows.setRows(new ArrayList<>(result.rows()));
+        rows.setRows(new ArrayList<>(resultRows));
         dataStore.put(key, rows);
     }
 
@@ -547,10 +594,14 @@ public class BigQueryService {
 
     /** Encoded result rows for {@code getQueryResults}, read from the job's anonymous table. */
     public TableData queryResults(String projectId, StoredJob job) {
+        return queryResults(projectId, job, RowCodec.TimestampFormat.FLOAT64);
+    }
+
+    public TableData queryResults(String projectId, StoredJob job, RowCodec.TimestampFormat format) {
         if (job.failed()) {
             throw GcpException.invalidArgument(job.getErrorMessage()).withReason(job.getErrorReason());
         }
-        return listTableData(projectId, job.getDestinationDatasetId(), job.getDestinationTableId());
+        return listTableData(projectId, job.getDestinationDatasetId(), job.getDestinationTableId(), format);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

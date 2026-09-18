@@ -28,7 +28,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 | [Resource Manager](service-usage.md#cloud-resource-manager-companion) | REST JSON | `/v1/projects/{projectId}`, IAM policy mixins |
 | [Eventarc](eventarc.md) | REST JSON | `/v1/projects/{project}/locations/{location}/triggers` |
 | [Firebase Auth](firebase-auth.md) | REST JSON | `/identitytoolkit.googleapis.com/v1/accounts:*`, `/securetoken.googleapis.com/v1/token` |
-| [BigQuery (Phase 1)](bigquery.md) | REST JSON | `/bigquery/v2/projects/{project}` |
+| [BigQuery](bigquery.md) | REST JSON | `/bigquery/v2/projects/{project}` |
 
 ## Single-Port Design
 

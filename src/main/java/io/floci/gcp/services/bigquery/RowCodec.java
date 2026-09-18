@@ -6,6 +6,12 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -190,26 +196,58 @@ final class RowCodec {
         }
     }
 
+    /**
+     * Wire format of TIMESTAMP cells: {@code FLOAT64} (epoch seconds, the default),
+     * {@code INT64} (epoch microseconds) or {@code ISO8601_STRING}, per
+     * {@code formatOptions.useInt64Timestamp} / {@code formatOptions.timestampOutputFormat}.
+     */
+    enum TimestampFormat {
+        FLOAT64, INT64, ISO8601_STRING;
+
+        static TimestampFormat of(Boolean useInt64Timestamp, String timestampOutputFormat) {
+            if (timestampOutputFormat != null) {
+                switch (timestampOutputFormat.toUpperCase()) {
+                    case "INT64" -> {
+                        return INT64;
+                    }
+                    case "ISO8601_STRING" -> {
+                        return ISO8601_STRING;
+                    }
+                    case "FLOAT64" -> {
+                        return FLOAT64;
+                    }
+                    default -> {
+                        // TIMESTAMP_OUTPUT_FORMAT_UNSPECIFIED falls back to useInt64Timestamp
+                    }
+                }
+            }
+            return Boolean.TRUE.equals(useInt64Timestamp) ? INT64 : FLOAT64;
+        }
+    }
+
     static List<TableRow> encodeRows(TableSchema schema, List<Map<String, Object>> rows) {
+        return encodeRows(schema, rows, TimestampFormat.FLOAT64);
+    }
+
+    static List<TableRow> encodeRows(TableSchema schema, List<Map<String, Object>> rows, TimestampFormat format) {
         List<TableRow> encoded = new ArrayList<>(rows.size());
         for (Map<String, Object> row : rows) {
-            encoded.add(encodeRow(schema, row));
+            encoded.add(encodeRow(schema, row, format));
         }
         return encoded;
     }
 
-    static TableRow encodeRow(TableSchema schema, Map<String, Object> row) {
+    static TableRow encodeRow(TableSchema schema, Map<String, Object> row, TimestampFormat format) {
         List<TableFieldSchema> fields = schema != null && schema.getFields() != null
                 ? schema.getFields() : List.of();
         List<TableCell> cells = new ArrayList<>(fields.size());
         for (TableFieldSchema field : fields) {
-            cells.add(new TableCell(encodeValue(field, row.get(field.getName()))));
+            cells.add(new TableCell(encodeValue(field, row.get(field.getName()), format)));
         }
         return new TableRow(cells);
     }
 
-    @SuppressWarnings("unchecked")
-    private static Object encodeValue(TableFieldSchema field, Object value) {
+    private static Object encodeValue(TableFieldSchema field, Object value, TimestampFormat format) {
         if (value == null) {
             return null;
         }
@@ -217,27 +255,65 @@ final class RowCodec {
             List<Map<String, Object>> wrapped = new ArrayList<>(list.size());
             for (Object element : list) {
                 Map<String, Object> cell = new LinkedHashMap<>();
-                cell.put("v", encodeScalar(field, element));
+                cell.put("v", encodeScalar(field, element, format));
                 wrapped.add(cell);
             }
             return wrapped;
         }
-        return encodeScalar(field, value);
+        return encodeScalar(field, value, format);
     }
 
     @SuppressWarnings("unchecked")
-    private static Object encodeScalar(TableFieldSchema field, Object value) {
+    private static Object encodeScalar(TableFieldSchema field, Object value, TimestampFormat format) {
         if (value == null) {
             return null;
         }
         if ("RECORD".equals(field.getType()) && value instanceof Map<?, ?> map) {
             TableSchema subSchema = new TableSchema(field.getFields() != null ? field.getFields() : List.of());
-            return Map.of("f", encodeRow(subSchema, (Map<String, Object>) map).getF());
+            return Map.of("f", encodeRow(subSchema, (Map<String, Object>) map, format).getF());
         }
         if (value instanceof Boolean b) {
             return b ? "true" : "false";
         }
+        if ("TIMESTAMP".equals(field.getType())) {
+            return encodeTimestamp(String.valueOf(value), format);
+        }
         return String.valueOf(value);
+    }
+
+    /**
+     * Stored TIMESTAMP values are whatever {@code insertAll} accepted (epoch seconds or an
+     * ISO-8601 / civil-time string) or epoch seconds from the SQL engine; the wire always
+     * carries the requested numeric or ISO form, which is what the SDKs parse.
+     */
+    static String encodeTimestamp(String stored, TimestampFormat format) {
+        Long micros = timestampMicros(stored);
+        if (micros == null) {
+            return stored;
+        }
+        return switch (format) {
+            case INT64 -> String.valueOf(micros);
+            case ISO8601_STRING -> ISO_MICROS.format(Instant.EPOCH.plus(micros, ChronoUnit.MICROS));
+            case FLOAT64 -> DuckTypes.microsToSeconds(micros);
+        };
+    }
+
+    private static final DateTimeFormatter ISO_MICROS =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'").withZone(ZoneOffset.UTC);
+
+    private static Long timestampMicros(String stored) {
+        String text = stored.trim();
+        try {
+            return new BigDecimal(text).movePointRight(6).setScale(0, RoundingMode.HALF_UP).longValueExact();
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // not epoch seconds; try civil forms below
+        }
+        String normalized = text.endsWith(" UTC") ? text.substring(0, text.length() - 4) + "Z" : text;
+        String seconds = DuckTypes.timestampTextToSeconds(normalized);
+        if (seconds.equals(normalized)) {
+            return null;
+        }
+        return new BigDecimal(seconds).movePointRight(6).longValueExact();
     }
 
     private static ErrorProto error(String reason, String location, String message) {

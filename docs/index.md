@@ -31,7 +31,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **Cloud Scheduler** | gRPC + REST | Cron jobs (Pub/Sub, HTTP, App Engine targets), `Pause`/`Resume`/`RunJob`, unix-cron + time zones; background dispatcher fires due jobs |
 | **Cloud Monitoring** | gRPC + REST | Metric descriptors, monitored resource descriptors, time series write (`CreateTimeSeries`) and read (`ListTimeSeries`) |
 | **GKE (Kubernetes Engine)** | REST | Cluster and operation APIs (`container.googleapis.com` v1); real k3s clusters via Docker or mock mode |
-| **BigQuery (Phase 1)** | REST | Datasets, tables, `insertAll`/`tabledata.list`, query jobs over a SQL subset |
+| **BigQuery** | REST | Datasets, tables, `insertAll`/`tabledata.list`, GoogleSQL query jobs on a DuckDB engine |
 | **Service Usage** | REST | Enable/disable/list project services; backs Terraform `google_project_service` |
 | **Firebase Auth (Identity Platform)** | REST | Identity Toolkit v1 sign-up/sign-in, emulator JWTs, admin user CRUD |
 | **Eventarc** | REST | Trigger CRUD; delivers CloudEvents from Pub/Sub and GCS events to Cloud Run and HTTP endpoints |

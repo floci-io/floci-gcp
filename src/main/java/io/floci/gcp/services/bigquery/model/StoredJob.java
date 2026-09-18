@@ -26,6 +26,11 @@ public class StoredJob {
     private String creationTime;
     private String errorReason;
     private String errorMessage;
+    private String statementType;
+    private String totalBytesProcessed;
+    /** Dry runs are never persisted; they carry the result schema instead of rows. */
+    private boolean dryRun;
+    private TableSchema schema;
 
     public String getJobId() { return jobId; }
     public void setJobId(String jobId) { this.jobId = jobId; }
@@ -59,6 +64,18 @@ public class StoredJob {
 
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    public String getStatementType() { return statementType; }
+    public void setStatementType(String statementType) { this.statementType = statementType; }
+
+    public String getTotalBytesProcessed() { return totalBytesProcessed; }
+    public void setTotalBytesProcessed(String totalBytesProcessed) { this.totalBytesProcessed = totalBytesProcessed; }
+
+    public boolean isDryRun() { return dryRun; }
+    public void setDryRun(boolean dryRun) { this.dryRun = dryRun; }
+
+    public TableSchema getSchema() { return schema; }
+    public void setSchema(TableSchema schema) { this.schema = schema; }
 
     public boolean failed() {
         return errorReason != null;

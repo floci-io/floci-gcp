@@ -159,7 +159,7 @@ GCP's official emulators are fragmented: each service ships its own binary, runs
 | Cloud Monitoring | ✅ | ❌ |
 | Service Usage | ✅ | ❌ |
 | Identity Platform / Firebase Auth | ✅ | ❌ |
-| BigQuery (Phase 1) | ✅ | ❌ |
+| BigQuery | ✅ | ❌ |
 | Eventarc | ✅ | ❌ |
 | IAM Service Account Credentials | ✅ | ❌ |
 | Security Token Service (STS) | ✅ | ❌ |
@@ -215,7 +215,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Serverless control planes | Cloud Run, Cloud Functions |
 | Task scheduling | Cloud Tasks, Cloud Scheduler |
 | Databases | Cloud SQL for PostgreSQL and MySQL |
-| Analytics | BigQuery (Phase 1) |
+| Analytics | BigQuery |
 | Observability | Cloud Logging, Cloud Monitoring |
 | API management | Service Usage, Cloud Resource Manager (`projects.get` and IAM policy mixins) |
 
@@ -246,7 +246,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries` with GCP validation rules) and read (`ListTimeSeries` with alignment/reduction subset and pagination) |
 | **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services`; includes Cloud Resource Manager v1 `projects.get` and project IAM policy mixins for provider project lookups |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
-| **BigQuery (Phase 1)** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) over a SQL subset (`SELECT *`/columns/`COUNT(*)`, `WHERE =`, `LIMIT`) |
+| **BigQuery** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) running GoogleSQL (joins, aggregation, window functions, CTEs, `UNNEST`, parameters, dry runs) on a DuckDB sidecar |
 
 </details>
 

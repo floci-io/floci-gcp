@@ -57,6 +57,7 @@ floci-gcp:
       enabled: true
     bigquery:
       enabled: true
+      mock: true
     gke:
       enabled: true
       mock: true

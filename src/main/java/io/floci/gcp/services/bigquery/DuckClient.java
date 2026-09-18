@@ -41,7 +41,18 @@ public class DuckClient {
      * {@code followup} is the result of the follow-up statement, when one was sent and the
      * image supports it.
      */
-    public record DuckResult(List<DuckColumn> columns, List<Map<String, Object>> rows, DuckResult followup) {}
+    public record DuckResult(List<DuckColumn> columns, List<Map<String, Object>> rows, DuckResult followup,
+                             ArrowIpc arrow) {
+
+        public DuckResult(List<DuckColumn> columns, List<Map<String, Object>> rows, DuckResult followup) {
+            this(columns, rows, followup, null);
+        }
+    }
+
+    /** A result as Arrow IPC messages: the encapsulated schema message and record batch messages. */
+    public record ArrowIpc(byte[] schema, List<ArrowBatch> batches) {}
+
+    public record ArrowBatch(byte[] data, long rowCount) {}
 
     private final BigQueryDuckManager duckManager;
     private final ObjectMapper mapper;
@@ -60,6 +71,12 @@ public class DuckClient {
 
     /** Runs {@code sql}, then {@code followupSql} (when not null) in the same DuckDB session. */
     public DuckResult query(String sql, String setupSql, String flociEndpoint, String followupSql) {
+        return query(sql, setupSql, flociEndpoint, followupSql, false);
+    }
+
+    /** With {@code arrowIpc}, the result comes back as Arrow IPC messages instead of JSON rows. */
+    public DuckResult query(String sql, String setupSql, String flociEndpoint, String followupSql,
+                            boolean arrowIpc) {
         String baseUrl = duckManager.ensureReady();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sql", sql);
@@ -69,6 +86,9 @@ public class DuckClient {
         body.put("typed_values", true);
         if (followupSql != null) {
             body.put("followup_sql", followupSql);
+        }
+        if (arrowIpc) {
+            body.put("arrow_ipc", true);
         }
 
         String response;
@@ -117,6 +137,16 @@ public class DuckClient {
             }
         }
         DuckResult followup = root.path("followup").isObject() ? result(root.path("followup")) : null;
-        return new DuckResult(columns, rows, followup);
+        ArrowIpc arrow = null;
+        if (root.path("arrow").isObject()) {
+            java.util.Base64.Decoder base64 = java.util.Base64.getDecoder();
+            List<ArrowBatch> batches = new ArrayList<>();
+            for (JsonNode batch : root.path("arrow").path("batches")) {
+                batches.add(new ArrowBatch(base64.decode(batch.path("data").asText()),
+                        batch.path("row_count").asLong()));
+            }
+            arrow = new ArrowIpc(base64.decode(root.path("arrow").path("schema").asText()), batches);
+        }
+        return new DuckResult(columns, rows, followup, arrow);
     }
 }

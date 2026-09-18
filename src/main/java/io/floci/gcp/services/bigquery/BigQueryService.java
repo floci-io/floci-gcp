@@ -111,7 +111,7 @@ public class BigQueryService {
                 .storageKey("bigquery")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(BigQueryController.class, BigQueryInternalController.class,
-                        BigQueryUploadController.class)
+                        BigQueryUploadController.class, BigQueryReadController.class)
                 .build());
     }
 
@@ -1239,6 +1239,20 @@ public class BigQueryService {
             }
         }
         return files;
+    }
+
+    // ── Storage Read API ─────────────────────────────────────────────────────────
+
+    /** Rows (stored representation) of a Storage Read session's snapshot query. */
+    List<Map<String, Object>> readRows(String projectId, String sql) {
+        return engine.execute(new BigQuerySqlEngine.Request(projectId, sql, null, List.of(), null, false),
+                tables(projectId)).rows();
+    }
+
+    /** Arrow IPC messages of a Storage Read session's snapshot query. */
+    DuckClient.ArrowIpc readArrow(String projectId, String sql) {
+        return engine.executeArrow(new BigQuerySqlEngine.Request(projectId, sql, null, List.of(), null, false),
+                tables(projectId));
     }
 
     /** Persists a failed query job (used by {@code jobs.insert}, which must not throw for SQL errors). */

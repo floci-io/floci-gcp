@@ -34,6 +34,12 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
     }
 
     @Override
+    public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
+        throw io.floci.gcp.core.common.GcpException.failedPrecondition("ARROW read sessions need the DuckDB SQL"
+                + " engine; set floci-gcp.services.bigquery.mock to false or read with AVRO.");
+    }
+
+    @Override
     public Result readFiles(LoadSource source) {
         throw QueryEngine.invalidQuery(source.format() + " load jobs need the DuckDB SQL engine; "
                 + "set floci-gcp.services.bigquery.mock to false.").withReason("invalid");

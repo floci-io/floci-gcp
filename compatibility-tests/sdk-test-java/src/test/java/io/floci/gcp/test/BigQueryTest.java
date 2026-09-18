@@ -471,6 +471,25 @@ class BigQueryTest {
     }
 
     @Test
+    @Order(20)
+    void informationSchemaDescribesTheDataset() throws InterruptedException {
+        TableResult columns = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT column_name, data_type FROM `" + PROJECT_ID + "." + DATASET
+                        + ".INFORMATION_SCHEMA.COLUMNS` WHERE table_name = '" + TABLE + "' ORDER BY ordinal_position")
+                .build());
+        List<String> described = new ArrayList<>();
+        columns.iterateAll().forEach(row -> described.add(
+                row.get("column_name").getStringValue() + " " + row.get("data_type").getStringValue()));
+        assertThat(described).containsExactly("name STRING", "age INT64", "score FLOAT64", "active BOOL",
+                "tags ARRAY<STRING>");
+
+        TableResult tables = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT table_name, table_type FROM `" + PROJECT_ID + "`.`region-us`.INFORMATION_SCHEMA.TABLES"
+                        + " WHERE table_schema = '" + DATASET + "' AND table_name = 'busy'").build());
+        assertThat(tables.iterateAll().iterator().next().get("table_type").getStringValue()).isEqualTo("VIEW");
+    }
+
+    @Test
     @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),

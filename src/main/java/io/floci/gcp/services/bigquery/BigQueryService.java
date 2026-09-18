@@ -990,7 +990,34 @@ public class BigQueryService {
                 // appending to the very same list.
                 return storedRows(projectId, datasetId, tableId);
             }
+
+            @Override
+            public List<Map<String, Object>> informationSchema(InformationSchema.Ref ref) {
+                return informationSchemaRows(projectId, ref.view(), ref.dataset(), ref.region());
+            }
         };
+    }
+
+    /**
+     * Rows of an INFORMATION_SCHEMA view over one dataset ({@code datasetId}) or every dataset in a
+     * region; a dataset-qualified view of a missing dataset is a 404, as in BigQuery.
+     */
+    public List<Map<String, Object>> informationSchemaRows(String projectId, String view, String datasetId,
+                                                           String region) {
+        if (!InformationSchema.isView(view)) {
+            throw GcpException.notFound("Not found: INFORMATION_SCHEMA." + view);
+        }
+        List<Dataset> datasets = datasetId != null
+                ? List.of(getDataset(projectId, datasetId))
+                : listDatasets(projectId).stream().filter(d -> InformationSchema.inRegion(d, region)).toList();
+        Map<String, List<Table>> tables = new LinkedHashMap<>();
+        if (!InformationSchema.regionOnly(view)) {
+            for (Dataset dataset : datasets) {
+                String id = dataset.getDatasetReference().getDatasetId();
+                tables.put(id, listTables(projectId, id));
+            }
+        }
+        return InformationSchema.rows(view, projectId, datasets, tables);
     }
 
     // ── Load jobs ────────────────────────────────────────────────────────────────

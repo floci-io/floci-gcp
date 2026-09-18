@@ -31,7 +31,7 @@ final class SqlDialectTranslator {
     /** A dataset-qualified table the query reads. */
     record TableRef(String datasetId, String tableId) {}
 
-    record Translation(String sql, Set<TableRef> tables) {}
+    record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema) {}
 
     private static final Set<String> CLAUSE_END_KEYWORDS = Set.of(
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET",
@@ -78,6 +78,7 @@ final class SqlDialectTranslator {
     private final QueryParameters parameters;
     private final Set<String> cteNames = new HashSet<>();
     private final Set<TableRef> tables = new LinkedHashSet<>();
+    private final Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
 
     private List<Token> tokens;
 
@@ -340,7 +341,7 @@ final class SqlDialectTranslator {
         if (first.equals("MERGE")) {
             out.append(" RETURNING merge_action");
         }
-        return new Translation(out.toString().trim(), tables);
+        return new Translation(out.toString().trim(), tables, informationSchema);
     }
 
     // ── Statement parsing helpers ───────────────────────────────────────────
@@ -627,7 +628,7 @@ final class SqlDialectTranslator {
         collectCteNames();
         nameAnonymousColumns();
         String rendered = render(0, tokens.size()).trim();
-        return new Translation(rendered, tables);
+        return new Translation(rendered, tables, informationSchema);
     }
 
     private void stripTrailingSemicolons() {
@@ -997,7 +998,18 @@ final class SqlDialectTranslator {
                     segments.add(part);
                 }
             } else if (t.kind == Kind.IDENT) {
-                segments.add(t.text);
+                StringBuilder segment = new StringBuilder(t.text);
+                if (t.text.equalsIgnoreCase("region")) {
+                    // Unquoted region qualifiers such as region-us or region-us-central1.
+                    int dash = nextSignificant(k + 1, end);
+                    while (dash >= 0 && tokens.get(dash).isPunct("-") && dash + 1 < end
+                            && (tokens.get(dash + 1).kind == Kind.IDENT || tokens.get(dash + 1).kind == Kind.NUMBER)) {
+                        segment.append('-').append(tokens.get(dash + 1).text);
+                        k = dash + 1;
+                        dash = nextSignificant(k + 1, end);
+                    }
+                }
+                segments.add(segment.toString());
             } else {
                 break;
             }
@@ -1042,6 +1054,16 @@ final class SqlDialectTranslator {
             return aliasEnd;
         }
 
+        InformationSchema.Ref schemaRef = informationSchemaRef(segments);
+        if (schemaRef != null) {
+            informationSchema.add(schemaRef);
+            out.append(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA)).append('.')
+                    .append(DuckTypes.quoteIdentifier(schemaRef.stagedName()));
+            String name = alias != null ? alias : schemaRef.view();
+            rangeVariables.add(name.toLowerCase(Locale.ROOT));
+            out.append(" AS ").append(DuckTypes.quoteIdentifier(name));
+            return aliasEnd;
+        }
         TableRef ref = resolveTable(segments);
         if (ref == null) {
             out.append(DuckTypes.quoteIdentifier(first));
@@ -1096,6 +1118,55 @@ final class SqlDialectTranslator {
             return nameIndex + 1;
         }
         return close + 1;
+    }
+
+    /**
+     * {@code [project.]dataset.INFORMATION_SCHEMA.VIEW} or {@code [project.]`region-x`.INFORMATION_SCHEMA.VIEW};
+     * SCHEMATA also accepts {@code [project.]INFORMATION_SCHEMA.SCHEMATA}, which reads the US region.
+     */
+    private InformationSchema.Ref informationSchemaRef(List<String> segments) {
+        int marker = -1;
+        for (int n = 0; n < segments.size(); n++) {
+            if (segments.get(n).equalsIgnoreCase("INFORMATION_SCHEMA")) {
+                marker = n;
+            }
+        }
+        if (marker < 0) {
+            return null;
+        }
+        if (marker != segments.size() - 2) {
+            throw invalidQuery("Invalid INFORMATION_SCHEMA reference " + String.join(".", segments));
+        }
+        String view = segments.getLast();
+        if (!InformationSchema.isView(view)) {
+            throw invalidQuery("INFORMATION_SCHEMA." + view + " is not supported by the floci BigQuery emulator"
+                    + " (view names are case-sensitive); supported views: SCHEMATA, TABLES, COLUMNS,"
+                    + " COLUMN_FIELD_PATHS, TABLE_OPTIONS, VIEWS.");
+        }
+        List<String> qualifiers = segments.subList(0, marker);
+        if (qualifiers.size() > 2) {
+            throw invalidQuery("Invalid INFORMATION_SCHEMA reference " + String.join(".", segments));
+        }
+        if (qualifiers.size() == 2 && !qualifiers.get(0).equals(projectId)) {
+            throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
+                    + String.join(".", segments));
+        }
+        String scope = qualifiers.isEmpty() ? null : qualifiers.getLast();
+        if (scope != null && scope.toLowerCase(Locale.ROOT).startsWith("region-")) {
+            return new InformationSchema.Ref(view, null, scope.substring("region-".length()));
+        }
+        if (InformationSchema.regionOnly(view)) {
+            if (qualifiers.size() == 2 || (scope != null && !scope.equals(projectId))) {
+                throw invalidQuery("INFORMATION_SCHEMA." + view + " takes a project or region qualifier, not a"
+                        + " dataset");
+            }
+            return new InformationSchema.Ref(view, null, "us");
+        }
+        String dataset = scope != null ? scope : defaultDatasetId;
+        if (dataset == null || dataset.isBlank()) {
+            throw invalidQuery("INFORMATION_SCHEMA." + view + " needs a dataset or region qualifier");
+        }
+        return new InformationSchema.Ref(view, dataset, null);
     }
 
     private TableRef resolveTable(List<String> segments) {

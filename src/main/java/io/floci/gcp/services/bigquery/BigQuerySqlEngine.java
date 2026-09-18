@@ -26,6 +26,9 @@ interface BigQuerySqlEngine {
         Table table(String datasetId, String tableId);
 
         List<Map<String, Object>> rows(String datasetId, String tableId);
+
+        /** Rows of an INFORMATION_SCHEMA view; a missing dataset qualifier throws 404. */
+        List<Map<String, Object>> informationSchema(InformationSchema.Ref ref);
     }
 
     /**

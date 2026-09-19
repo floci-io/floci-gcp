@@ -1,5 +1,6 @@
 package io.floci.gcp.services.kafka;
 
+import io.floci.gcp.services.kafka.model.StoredAcl;
 import io.floci.gcp.services.kafka.model.StoredCluster;
 import io.floci.gcp.services.kafka.model.StoredConsumerGroup;
 import io.floci.gcp.services.kafka.model.StoredTopic;
@@ -204,6 +205,98 @@ public class KafkaController {
                 project, location, clusterId, groupId);
         service.deleteConsumerGroup(project, location, clusterId, groupId);
         return Response.ok(Map.of()).build();
+    }
+
+    // ── ACLs ──────────────────────────────────────────────────────────────────
+
+    @POST
+    @Path("/clusters/{clusterId}/acls")
+    public Response createAcl(@PathParam("project") String project,
+                              @PathParam("location") String location,
+                              @PathParam("clusterId") String clusterId,
+                              @QueryParam("aclId") String aclId,
+                              Map<String, Object> body) {
+        LOG.debugf("Kafka createAcl project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        String effectiveAclId = aclId;
+        if (effectiveAclId == null || effectiveAclId.isBlank()) {
+            if (body != null && body.containsKey("aclId")) {
+                effectiveAclId = (String) body.get("aclId");
+            }
+        }
+        if (effectiveAclId == null || effectiveAclId.isBlank()) {
+            return gcpError(400, "aclId query parameter is required", "INVALID_ARGUMENT");
+        }
+        StoredAcl acl = service.createAcl(project, location, clusterId, effectiveAclId, body);
+        return Response.ok(acl).build();
+    }
+
+    @GET
+    @Path("/clusters/{clusterId}/acls")
+    public Response listAcls(@PathParam("project") String project,
+                             @PathParam("location") String location,
+                             @PathParam("clusterId") String clusterId) {
+        LOG.debugf("Kafka listAcls project=%s location=%s clusterId=%s", project, location, clusterId);
+        List<StoredAcl> acls = service.listAcls(project, location, clusterId);
+        return Response.ok(Map.of("acls", acls)).build();
+    }
+
+    @GET
+    @Path("/clusters/{clusterId}/acls/{aclId: .+}")
+    public Response getAcl(@PathParam("project") String project,
+                           @PathParam("location") String location,
+                           @PathParam("clusterId") String clusterId,
+                           @PathParam("aclId") String aclId) {
+        LOG.debugf("Kafka getAcl project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        StoredAcl acl = service.getAcl(project, location, clusterId, aclId);
+        return Response.ok(acl).build();
+    }
+
+    @PATCH
+    @Path("/clusters/{clusterId}/acls/{aclId: .+}")
+    public Response updateAcl(@PathParam("project") String project,
+                              @PathParam("location") String location,
+                              @PathParam("clusterId") String clusterId,
+                              @PathParam("aclId") String aclId,
+                              @HeaderParam("If-Match") String ifMatch,
+                              Map<String, Object> body) {
+        LOG.debugf("Kafka updateAcl project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        StoredAcl acl = service.updateAcl(project, location, clusterId, aclId, body, ifMatch);
+        return Response.ok(acl).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{clusterId}/acls/{aclId: .+}")
+    public Response deleteAcl(@PathParam("project") String project,
+                              @PathParam("location") String location,
+                              @PathParam("clusterId") String clusterId,
+                              @PathParam("aclId") String aclId) {
+        LOG.debugf("Kafka deleteAcl project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        service.deleteAcl(project, location, clusterId, aclId);
+        return Response.ok(Map.of()).build();
+    }
+
+    @POST
+    @Path("/clusters/{clusterId}/acls/{aclId: .+}:addAclEntry")
+    public Response addAclEntry(@PathParam("project") String project,
+                                @PathParam("location") String location,
+                                @PathParam("clusterId") String clusterId,
+                                @PathParam("aclId") String aclId,
+                                Map<String, Object> body) {
+        LOG.debugf("Kafka addAclEntry project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        StoredAcl acl = service.addAclEntry(project, location, clusterId, aclId, body);
+        return Response.ok(acl).build();
+    }
+
+    @POST
+    @Path("/clusters/{clusterId}/acls/{aclId: .+}:removeAclEntry")
+    public Response removeAclEntry(@PathParam("project") String project,
+                                   @PathParam("location") String location,
+                                   @PathParam("clusterId") String clusterId,
+                                   @PathParam("aclId") String aclId,
+                                   Map<String, Object> body) {
+        LOG.debugf("Kafka removeAclEntry project=%s location=%s clusterId=%s aclId=%s", project, location, clusterId, aclId);
+        Map<String, Object> result = service.removeAclEntry(project, location, clusterId, aclId, body);
+        return Response.ok(result).build();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

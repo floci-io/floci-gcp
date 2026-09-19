@@ -57,6 +57,39 @@ curl -X DELETE \
   "http://localhost:4588/v1/projects/floci-local/locations/us-central1/clusters/my-cluster/consumerGroups/my-group"
 ```
 
+## ACLs
+
+```bash
+# Create an ACL
+curl -X POST \
+  "http://localhost:4588/v1/projects/floci-local/locations/us-central1/clusters/my-cluster/acls?aclId=topic/my-topic" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "aclEntries": [
+      { "principal": "User:alice", "permissionType": "ALLOW", "operation": "READ", "host": "*" }
+    ]
+  }'
+
+# List ACLs
+curl "http://localhost:4588/v1/projects/floci-local/locations/us-central1/clusters/my-cluster/acls"
+
+# Add an ACL entry
+curl -X POST \
+  "http://localhost:4588/v1/projects/floci-local/locations/us-central1/clusters/my-cluster/acls/topic/my-topic:addAclEntry" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "aclEntry": { "principal": "User:bob", "permissionType": "ALLOW", "operation": "WRITE", "host": "*" }
+  }'
+
+# Remove an ACL entry
+curl -X POST \
+  "http://localhost:4588/v1/projects/floci-local/locations/us-central1/clusters/my-cluster/acls/topic/my-topic:removeAclEntry" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "aclEntry": { "principal": "User:alice", "permissionType": "ALLOW", "operation": "READ", "host": "*" }
+  }'
+```
+
 ## Supported Operations
 
 **Clusters:**
@@ -79,4 +112,16 @@ curl -X DELETE \
 
 - `GetConsumerGroup`
 - `ListConsumerGroups`
+- `UpdateConsumerGroup`
 - `DeleteConsumerGroup`
+
+**ACLs:**
+
+- `CreateAcl`
+- `GetAcl`
+- `ListAcls`
+- `UpdateAcl`
+- `DeleteAcl`
+- `AddAclEntry`
+- `RemoveAclEntry`
+

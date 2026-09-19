@@ -147,6 +147,60 @@ class KafkaTest {
 
     @Test
     @Order(10)
+    void aclOperations() throws Exception {
+        String baseAclPath = "/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/" + CLUSTER_ID + "/acls";
+
+        // 1. Create ACL (topic/java-topic)
+        String body = json.writeValueAsString(Map.of(
+                "aclEntries", List.of(Map.of("principal", "User:alice", "permissionType", "ALLOW", "operation", "READ", "host", "*"))
+        ));
+        JsonNode created = post(baseAclPath + "?aclId=topic/" + TOPIC_ID, body);
+        assertThat(created.path("name").asText()).contains("acls/topic/" + TOPIC_ID);
+        assertThat(created.path("resourceType").asText()).isEqualTo("TOPIC");
+        assertThat(created.path("resourceName").asText()).isEqualTo(TOPIC_ID);
+        assertThat(created.path("patternType").asText()).isEqualTo("LITERAL");
+        assertThat(created.path("aclEntries").size()).isEqualTo(1);
+        String etag = created.path("etag").asText();
+        assertThat(etag).isNotBlank();
+
+        // 2. Get ACL
+        JsonNode retrieved = get(baseAclPath + "/topic/" + TOPIC_ID);
+        assertThat(retrieved.path("name").asText()).isEqualTo(created.path("name").asText());
+
+        // 3. List ACLs
+        JsonNode listResp = get(baseAclPath);
+        assertThat(listResp.path("acls").size()).isGreaterThanOrEqualTo(1);
+
+        // 4. Update ACL with etag
+        String updateBody = json.writeValueAsString(Map.of(
+                "etag", etag,
+                "aclEntries", List.of(Map.of("principal", "User:bob", "permissionType", "ALLOW", "operation", "WRITE", "host", "*"))
+        ));
+        JsonNode updated = patch(baseAclPath + "/topic/" + TOPIC_ID, updateBody);
+        assertThat(updated.path("aclEntries").get(0).path("principal").asText()).isEqualTo("User:bob");
+        assertThat(updated.path("etag").asText()).isNotEqualTo(etag);
+
+        // 5. Add ACL Entry
+        String addBody = json.writeValueAsString(Map.of("aclEntry", Map.of(
+                "principal", "User:charlie", "permissionType", "ALLOW", "operation", "ALL", "host", "*"
+        )));
+        JsonNode afterAdd = post(baseAclPath + "/topic/" + TOPIC_ID + ":addAclEntry", addBody);
+        assertThat(afterAdd.path("aclEntries").size()).isEqualTo(2);
+
+        // 6. Remove ACL Entry
+        String removeBody = json.writeValueAsString(Map.of("aclEntry", Map.of(
+                "principal", "User:bob", "permissionType", "ALLOW", "operation", "WRITE", "host", "*"
+        )));
+        JsonNode afterRemove = post(baseAclPath + "/topic/" + TOPIC_ID + ":removeAclEntry", removeBody);
+        assertThat(afterRemove.path("aclDeleted").asBoolean()).isFalse();
+
+        // 7. Delete ACL
+        delete(baseAclPath + "/topic/" + TOPIC_ID);
+    }
+
+    @Test
+    @Order(20)
     void deleteTopic() throws Exception {
         delete("/v1/projects/" + PROJECT + "/locations/" + LOCATION
                 + "/clusters/" + CLUSTER_ID + "/topics/" + TOPIC_ID);
@@ -159,7 +213,7 @@ class KafkaTest {
     }
 
     @Test
-    @Order(11)
+    @Order(21)
     void deleteCluster() throws Exception {
         delete("/v1/projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/" + CLUSTER_ID);
 

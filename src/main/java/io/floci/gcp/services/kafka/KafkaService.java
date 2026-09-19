@@ -1,6 +1,7 @@
 package io.floci.gcp.services.kafka;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -9,7 +10,10 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.kafka.model.AclEntry;
+import io.floci.gcp.services.kafka.model.AclIdParser;
 import io.floci.gcp.services.kafka.model.ClusterState;
+import io.floci.gcp.services.kafka.model.StoredAcl;
 import io.floci.gcp.services.kafka.model.StoredCluster;
 import io.floci.gcp.services.kafka.model.StoredConsumerGroup;
 import io.floci.gcp.services.kafka.model.StoredTopic;
@@ -35,6 +39,8 @@ public class KafkaService {
     private final StorageBackend<String, StoredCluster> clusterStore;
     private final StorageBackend<String, StoredTopic> topicStore;
     private final StorageBackend<String, StoredConsumerGroup> consumerGroupStore;
+    private final StorageBackend<String, StoredAcl> aclStore;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final EmulatorConfig config;
     private final ServiceRegistry serviceRegistry;
     private final RedpandaManager redpandaManager;
@@ -51,6 +57,8 @@ public class KafkaService {
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.consumerGroupStore = storageFactory.createGlobal("kafka", "kafka-consumer-groups.json",
                 new TypeReference<Map<String, StoredConsumerGroup>>() {});
+        this.aclStore = storageFactory.createGlobal("kafka", "kafka-acls.json",
+                new TypeReference<Map<String, StoredAcl>>() {});
         this.config = config;
         this.serviceRegistry = serviceRegistry;
         this.redpandaManager = redpandaManager;
@@ -129,7 +137,7 @@ public class KafkaService {
             redpandaManager.removeClusterStorage(cluster);
         }
 
-        // Remove all topics and consumer groups for this cluster
+        // Remove all topics, consumer groups, and ACLs for this cluster
         String topicPrefix = name + "/topics/";
         topicStore.scan(k -> k.startsWith(topicPrefix))
                 .forEach(t -> topicStore.delete(t.getName()));
@@ -137,6 +145,10 @@ public class KafkaService {
         String groupPrefix = name + "/consumerGroups/";
         consumerGroupStore.scan(k -> k.startsWith(groupPrefix))
                 .forEach(g -> consumerGroupStore.delete(g.getName()));
+
+        String aclPrefix = name + "/acls/";
+        aclStore.scan(k -> k.startsWith(aclPrefix))
+                .forEach(a -> aclStore.delete(a.getName()));
 
         clusterStore.delete(name);
     }
@@ -271,6 +283,181 @@ public class KafkaService {
         consumerGroupStore.get(groupName)
                 .orElseThrow(() -> GcpException.notFound("Consumer group not found: " + groupName));
         consumerGroupStore.delete(groupName);
+    }
+
+    // ── ACLs ──────────────────────────────────────────────────────────────────
+
+    public StoredAcl createAcl(String project, String location, String clusterId, String aclId, Map<String, Object> body) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+
+        AclIdParser.ParsedAclId parsed = AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+
+        if (aclStore.get(name).isPresent()) {
+            throw GcpException.alreadyExists("ACL already exists: " + name);
+        }
+
+        StoredAcl acl = new StoredAcl(name, parsed.resourceType(), parsed.resourceName(), parsed.patternType());
+        if (body != null) {
+            List<AclEntry> entries = extractAclEntries(body);
+            if (entries.size() > 100) {
+                throw GcpException.invalidArgument("ACL cannot have more than 100 entries");
+            }
+            acl.setAclEntries(entries);
+        }
+        aclStore.put(name, acl);
+        return acl;
+    }
+
+    public StoredAcl getAcl(String project, String location, String clusterId, String aclId) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+        return aclStore.get(name)
+                .orElseThrow(() -> GcpException.notFound("ACL not found: " + name));
+    }
+
+    public List<StoredAcl> listAcls(String project, String location, String clusterId) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        String prefix = clusterName + "/acls/";
+        return aclStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public StoredAcl updateAcl(String project, String location, String clusterId, String aclId, Map<String, Object> body, String headerEtag) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+        StoredAcl acl = aclStore.get(name)
+                .orElseThrow(() -> GcpException.notFound("ACL not found: " + name));
+
+        String reqEtag = null;
+        if (body != null && body.containsKey("etag")) {
+            reqEtag = (String) body.get("etag");
+        } else if (headerEtag != null && !headerEtag.isBlank()) {
+            reqEtag = headerEtag;
+        }
+
+        if (reqEtag != null && !reqEtag.equals(acl.getEtag())) {
+            throw GcpException.aborted("Etag mismatch for ACL: " + name);
+        }
+
+        if (body != null) {
+            if (body.containsKey("aclEntries") || body.containsKey("acl_entries")) {
+                List<AclEntry> entries = extractAclEntries(body);
+                if (entries.size() > 100) {
+                    throw GcpException.invalidArgument("ACL cannot have more than 100 entries");
+                }
+                acl.setAclEntries(entries);
+            }
+        }
+        acl.setEtag(acl.generateEtag());
+        aclStore.put(name, acl);
+        return acl;
+    }
+
+    public void deleteAcl(String project, String location, String clusterId, String aclId) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+        if (aclStore.get(name).isEmpty()) {
+            throw GcpException.notFound("ACL not found: " + name);
+        }
+        aclStore.delete(name);
+    }
+
+    public StoredAcl addAclEntry(String project, String location, String clusterId, String aclId, Map<String, Object> body) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        AclIdParser.ParsedAclId parsed = AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+
+        StoredAcl acl = aclStore.get(name)
+                .orElseGet(() -> new StoredAcl(name, parsed.resourceType(), parsed.resourceName(), parsed.patternType()));
+
+        AclEntry entry = extractSingleAclEntry(body);
+        if (entry != null) {
+            acl.getAclEntries().add(entry);
+        }
+        if (acl.getAclEntries().size() > 100) {
+            throw GcpException.invalidArgument("ACL cannot have more than 100 entries");
+        }
+        acl.setEtag(acl.generateEtag());
+        aclStore.put(name, acl);
+        return acl;
+    }
+
+    public Map<String, Object> removeAclEntry(String project, String location, String clusterId, String aclId, Map<String, Object> body) {
+        String clusterName = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
+        if (clusterStore.get(clusterName).isEmpty()) {
+            throw GcpException.notFound("Cluster not found: " + clusterName);
+        }
+        AclIdParser.parse(aclId);
+        String name = clusterName + "/acls/" + aclId;
+        StoredAcl acl = aclStore.get(name)
+                .orElseThrow(() -> GcpException.notFound("ACL not found: " + name));
+
+        AclEntry target = extractSingleAclEntry(body);
+        if (target != null) {
+            acl.getAclEntries().removeIf(e -> matchesEntry(e, target));
+        }
+
+        if (acl.getAclEntries().isEmpty()) {
+            aclStore.delete(name);
+            return Map.of("aclDeleted", true, "acl_deleted", true);
+        }
+
+        acl.setEtag(acl.generateEtag());
+        aclStore.put(name, acl);
+        return Map.of("acl", acl, "aclDeleted", false, "acl_deleted", false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<AclEntry> extractAclEntries(Map<String, Object> body) {
+        Object raw = body.containsKey("aclEntries") ? body.get("aclEntries") : body.get("acl_entries");
+        if (raw instanceof List<?> list) {
+            return list.stream()
+                    .map(item -> objectMapper.convertValue(item, AclEntry.class))
+                    .toList();
+        }
+        return List.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    private AclEntry extractSingleAclEntry(Map<String, Object> body) {
+        if (body == null) return null;
+        Object raw = body.containsKey("aclEntry") ? body.get("aclEntry") : body.get("acl_entry");
+        if (raw == null && (body.containsKey("principal") || body.containsKey("permissionType") || body.containsKey("permission_type"))) {
+            raw = body;
+        }
+        if (raw != null) {
+            return objectMapper.convertValue(raw, AclEntry.class);
+        }
+        return null;
+    }
+
+    private boolean matchesEntry(AclEntry existing, AclEntry target) {
+        if (target.getPrincipal() != null && !target.getPrincipal().equals(existing.getPrincipal())) return false;
+        if (target.getPermissionType() != null && !target.getPermissionType().equalsIgnoreCase(existing.getPermissionType())) return false;
+        if (target.getOperation() != null && !target.getOperation().equalsIgnoreCase(existing.getOperation())) return false;
+        if (target.getHost() != null && !target.getHost().equals(existing.getHost())) return false;
+        return true;
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────

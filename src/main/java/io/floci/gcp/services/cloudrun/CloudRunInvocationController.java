@@ -20,9 +20,11 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -189,7 +191,7 @@ public class CloudRunInvocationController {
         String target = instance.endpointUri(pathAndQueryFromRequest(project, location, serviceId, uriInfo));
         HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis());
         try {
-            HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
             return toResponse(response);
         } catch (HttpTimeoutException e) {
             throw GcpException.deadlineExceeded("Cloud Run runtime request timed out: " + serviceName);
@@ -221,9 +223,19 @@ public class CloudRunInvocationController {
         return builder.build();
     }
 
-    private Response toResponse(HttpResponse<byte[]> upstream) {
+    private Response toResponse(HttpResponse<InputStream> upstream) {
+        StreamingOutput body = output -> {
+            try (InputStream input = upstream.body()) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                    output.flush();
+                }
+            }
+        };
         Response.ResponseBuilder builder = Response.status(upstream.statusCode())
-                .entity(upstream.body());
+                .entity(body);
         upstream.headers().map().forEach((name, values) -> {
             if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
                 values.forEach(value -> builder.header(name, value));

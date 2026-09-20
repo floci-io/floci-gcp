@@ -9,16 +9,16 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * <p>Exactly one principal field is set alongside {@code role}: one of
  * {@code userByEmail}, {@code groupByEmail}, {@code domain},
  * {@code specialGroup}, {@code iamMember}, {@code view}, {@code dataset} or
- * {@code routine}. The API does not reject entries that set more than one, so
- * neither does this. The emulator stores what it is given and returns it
- * unchanged.
+ * {@code routine}, optionally with a {@code condition}. The API does not reject
+ * entries that set more than one principal, so neither does this. The emulator
+ * stores what it is given and returns it unchanged.
  *
  * <p><b>Scope.</b> This is storage fidelity, not authorization. Access entries
  * round-trip so that clients and the {@code hashicorp/google} Terraform
- * provider see a stable resource; nothing here evaluates them, and an
- * unauthenticated read of a dataset is still allowed. That matches the rest of
- * the BigQuery emulator today, and callers should not read a successful query
- * as evidence that a grant permitted it.
+ * provider see a stable resource; nothing here evaluates them, not even a
+ * {@code condition}, and an unauthenticated read of a dataset is still allowed.
+ * That matches the rest of the BigQuery emulator today, and callers should not
+ * read a successful query as evidence that a grant permitted it.
  *
  * @see <a href="https://cloud.google.com/bigquery/docs/reference/rest/v2/datasets">
  *      datasets resource</a>
@@ -36,6 +36,7 @@ public class DatasetAccessEntry {
     private TableReference view;
     private RoutineReference routine;
     private DatasetAccessEntryTarget dataset;
+    private Expr condition;
 
     public String getRole() { return role; }
     public void setRole(String role) { this.role = role; }
@@ -63,4 +64,7 @@ public class DatasetAccessEntry {
 
     public DatasetAccessEntryTarget getDataset() { return dataset; }
     public void setDataset(DatasetAccessEntryTarget dataset) { this.dataset = dataset; }
+
+    public Expr getCondition() { return condition; }
+    public void setCondition(Expr condition) { this.condition = condition; }
 }

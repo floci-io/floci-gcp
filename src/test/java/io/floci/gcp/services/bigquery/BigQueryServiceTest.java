@@ -8,6 +8,7 @@ import io.floci.gcp.services.bigquery.model.DatasetAccessEntryTarget;
 import io.floci.gcp.services.bigquery.model.RoutineReference;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
+import io.floci.gcp.services.bigquery.model.Expr;
 import io.floci.gcp.services.bigquery.model.StoredJob;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
@@ -289,6 +290,38 @@ class BigQueryServiceTest {
         assertEquals("auth_routine", stored.get(1).getRoutine().getRoutineId());
         assertEquals("linked_ds", stored.get(2).getDataset().getDataset().getDatasetId());
         assertEquals(List.of("VIEWS"), stored.get(2).getDataset().getTargetTypes());
+    }
+
+    @Test
+    void accessEntryConditionRoundTrips() {
+        // The provider sends condition and reads it back, so dropping it is
+        // another permanent diff, on a resource whose ACL looks correct.
+        DatasetAccessEntry conditional = accessEntry("READER", "analyst@example.com");
+        conditional.setCondition(new Expr(
+                "request.time < timestamp('2030-01-01T00:00:00Z')",
+                "expires_2030",
+                "temporary access for the analyst",
+                "dataset.tf:12"));
+
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(conditional));
+        service.createDataset(PROJECT, d);
+
+        Expr stored = service.getDataset(PROJECT, DATASET).getAccess().get(0).getCondition();
+        assertNotNull(stored, "condition must survive the write");
+        assertEquals("request.time < timestamp('2030-01-01T00:00:00Z')", stored.getExpression());
+        assertEquals("expires_2030", stored.getTitle());
+        assertEquals("temporary access for the analyst", stored.getDescription());
+        assertEquals("dataset.tf:12", stored.getLocation());
+    }
+
+    @Test
+    void accessEntryWithoutAConditionStaysUnconditional() {
+        Dataset d = newDataset(DATASET);
+        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
+        service.createDataset(PROJECT, d);
+
+        assertNull(service.getDataset(PROJECT, DATASET).getAccess().get(0).getCondition());
     }
 
     private static DatasetAccessEntry accessEntry(String role, String userByEmail) {

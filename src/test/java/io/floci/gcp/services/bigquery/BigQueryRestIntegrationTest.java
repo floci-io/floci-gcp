@@ -168,6 +168,64 @@ class BigQueryRestIntegrationTest {
     }
 
     @Test
+    @Order(0)
+    void accessConditionRoundTripsOverTheWire() {
+        // A conditional binding is what google_bigquery_dataset emits for an
+        // access block with a condition {}. The provider sends all four Expr
+        // fields and reads them back, so dropping any of them is a permanent
+        // diff on an ACL that otherwise looks right.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "ds_condition"},
+                         "access": [
+                           {"role": "READER",
+                            "userByEmail": "analyst@example.com",
+                            "condition": {
+                              "expression": "request.time < timestamp('2030-01-01T00:00:00Z')",
+                              "title": "expires_2030",
+                              "description": "temporary access for the analyst",
+                              "location": "dataset.tf:12"}},
+                           {"role": "OWNER", "userByEmail": "owner@example.com"}]}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(2));
+
+        given()
+                .when().get(BASE + "/datasets/ds_condition")
+                .then()
+                .statusCode(200)
+                .body("access[0].condition.expression",
+                        equalTo("request.time < timestamp('2030-01-01T00:00:00Z')"))
+                .body("access[0].condition.title", equalTo("expires_2030"))
+                .body("access[0].condition.description",
+                        equalTo("temporary access for the analyst"))
+                .body("access[0].condition.location", equalTo("dataset.tf:12"))
+                // an unconditional entry stays unconditional rather than
+                // growing an empty condition object
+                .body("access[1].condition", nullValue());
+
+        // The provider also sends condition on update, not only on create.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"access": [
+                           {"role": "WRITER",
+                            "userByEmail": "analyst@example.com",
+                            "condition": {"expression": "request.time < timestamp('2031-01-01T00:00:00Z')",
+                                          "title": "expires_2031"}}]}
+                        """)
+                .when().patch(BASE + "/datasets/ds_condition")
+                .then()
+                .statusCode(200)
+                .body("access", hasSize(1))
+                .body("access[0].condition.title", equalTo("expires_2031"))
+                .body("access[0].condition.description", nullValue());
+    }
+
+    @Test
     @Order(1)
     void createDatasetAndTableWireShapes() {
         given()

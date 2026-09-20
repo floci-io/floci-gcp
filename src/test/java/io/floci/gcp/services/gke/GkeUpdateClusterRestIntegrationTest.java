@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.startsWith;
 
 /**
  * {@code ClusterManager.UpdateCluster} over REST ({@code PUT .../clusters/{id}}), with the
@@ -111,10 +110,7 @@ class GkeUpdateClusterRestIntegrationTest {
                     .body("{\"update\":{\"" + field + "\":\"\"}}")
                     .when().put(clusterPath)
                     .then()
-                    .statusCode(400)
-                    .body("error.code", equalTo(400))
-                    .body("error.status", equalTo("INVALID_ARGUMENT"))
-                    .body("error.message", startsWith("Invalid " + field + " \"\""));
+                    .statusCode(200);
         }
 
         given()

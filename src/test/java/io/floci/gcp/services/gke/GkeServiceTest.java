@@ -897,13 +897,6 @@ class GkeServiceTest {
                         "desiredMasterVersion", 123)));
         assertEquals("desiredMasterVersion must be a string", combined.getMessage());
 
-        for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
-            GcpException blank = assertThrows(GcpException.class,
-                    () -> service.updateCluster(PROJECT, LOCATION, "version-shape", Map.of(field, "")));
-            assertEquals(400, blank.getHttpStatus());
-            assertTrue(blank.getMessage().startsWith("Invalid " + field + " \"\""), blank.getMessage());
-        }
-
         StoredCluster after = service.getCluster(PROJECT, LOCATION, "version-shape");
         StoredNodePool poolAfter = service.getNodePool(PROJECT, LOCATION, "version-shape", "default-pool");
         assertEquals(nodeVersionBefore, after.getCurrentNodeVersion());
@@ -911,6 +904,22 @@ class GkeServiceTest {
         assertEquals(clusterEtagBefore, after.getEtag());
         assertEquals(poolVersionBefore, poolAfter.getVersion());
         assertEquals(poolEtagBefore, poolAfter.getEtag());
+    }
+
+    @Test
+    void updateClusterTreatsBlankVersionsAsUnset() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "blank-version",
+                "initialClusterVersion", "1.29.0-gke.1"));
+
+        for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
+            service.updateCluster(PROJECT, LOCATION, "blank-version", Map.of(field, ""));
+        }
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "blank-version");
+        assertEquals("1.29.0-gke.1", cluster.getCurrentMasterVersion());
+        assertEquals("1.29.0-gke.1", cluster.getCurrentNodeVersion());
+        assertEquals("1.29.0-gke.1",
+                service.getNodePool(PROJECT, LOCATION, "blank-version", "default-pool").getVersion());
     }
 
     @Test

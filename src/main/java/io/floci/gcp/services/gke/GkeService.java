@@ -337,8 +337,8 @@ public class GkeService {
             if (desiredMasterVersionValue != null && !(desiredMasterVersionValue instanceof String)) {
                 throw GcpException.invalidArgument("desiredMasterVersion must be a string");
             }
-            String desiredNodeVersion = (String) desiredNodeVersionValue;
-            String desiredMasterVersion = (String) desiredMasterVersionValue;
+            String desiredNodeVersion = stringField(updateMap, "desiredNodeVersion", null);
+            String desiredMasterVersion = stringField(updateMap, "desiredMasterVersion", null);
             if (desiredNodeVersion != null) {
                 // Resolve the target before mutating anything. Both rejection paths in
                 // nodeVersionUpdateTargets throw, and `cluster` is the live stored object, so

@@ -62,6 +62,7 @@ public class CloudRunInvocationController {
     public CloudRunInvocationController(CloudRunService cloudRunService) {
         this.cloudRunService = cloudRunService;
         this.httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
     }

@@ -5,17 +5,25 @@ import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -157,12 +165,87 @@ class CloudRunInvocationControllerTest {
         assertEquals("/api/database?x=1", forwardedUri.get());
     }
 
+    @Test
+    void streamsResponseBeforeUpstreamCompletes() throws Exception {
+        CountDownLatch upstreamStarted = new CountDownLatch(1);
+        CountDownLatch releaseUpstream = new CountDownLatch(1);
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write(": connected\n\n".getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            upstreamStarted.countDown();
+            try {
+                releaseUpstream.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+
+        CloudRunService service = mock(CloudRunService.class);
+        when(service.readyRuntime("projects/p1/locations/us-central1/services/svc"))
+                .thenReturn(Optional.of(instance(server.getAddress().getPort())));
+        CloudRunInvocationController controller = new CloudRunInvocationController(service);
+
+        CompletableFuture<Response> responseFuture = CompletableFuture.supplyAsync(() ->
+                controller.get("p1", "us-central1", "svc", headers(), uriInfo("/events")));
+        assertTrue(upstreamStarted.await(2, TimeUnit.SECONDS));
+        Response response = responseFuture.get(2, TimeUnit.SECONDS);
+        assertEquals(200, response.getStatus());
+        assertEquals("text/event-stream", response.getHeaderString("Content-Type"));
+
+        StreamingOutput stream = (StreamingOutput) response.getEntity();
+        ByteArrayOutputStream received = new ByteArrayOutputStream();
+        CountDownLatch firstChunk = new CountDownLatch(1);
+        OutputStream downstream = new OutputStream() {
+            @Override
+            public void write(int value) {
+                received.write(value);
+                firstChunk.countDown();
+            }
+
+            @Override
+            public void write(byte[] values, int offset, int length) {
+                received.write(values, offset, length);
+                firstChunk.countDown();
+            }
+        };
+        CompletableFuture<Void> bodyFuture = CompletableFuture.runAsync(() -> {
+            try {
+                stream.write(downstream);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        });
+
+        assertTrue(firstChunk.await(2, TimeUnit.SECONDS));
+        assertFalse(bodyFuture.isDone());
+        assertEquals(": connected\n\n", received.toString(StandardCharsets.UTF_8));
+
+        releaseUpstream.countDown();
+        bodyFuture.get(2, TimeUnit.SECONDS);
+    }
+
     private static ResponseData invokePost(CloudRunInvocationController controller) {
-        jakarta.ws.rs.core.Response response = controller.post("p1", "us-central1", "svc",
+        Response response = controller.post("p1", "us-central1", "svc",
                 "payload".getBytes(StandardCharsets.UTF_8), headers(), uriInfo("/extra/path?x=1"));
         return new ResponseData(response.getStatus(),
-                new String((byte[]) response.getEntity(), StandardCharsets.UTF_8),
+                readBody(response),
                 response.getHeaderString("X-Upstream"));
+    }
+
+    private static String readBody(Response response) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try {
+            ((StreamingOutput) response.getEntity()).write(output);
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+        return output.toString(StandardCharsets.UTF_8);
     }
 
     private static CloudRunRuntimeInstance instance(int port) {

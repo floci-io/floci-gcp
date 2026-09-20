@@ -873,10 +873,16 @@ class GkeServiceTest {
     }
 
     @Test
-    void updateClusterRejectsNonStringVersionsWithoutTouchingTheCluster() {
+    void updateClusterRejectsMalformedVersionsWithoutTouchingTheCluster() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "version-shape",
                 "initialClusterVersion", "1.29.0-gke.1"));
         StoredCluster before = service.getCluster(PROJECT, LOCATION, "version-shape");
+        StoredNodePool poolBefore = service.getNodePool(PROJECT, LOCATION, "version-shape", "default-pool");
+        String nodeVersionBefore = before.getCurrentNodeVersion();
+        String masterVersionBefore = before.getCurrentMasterVersion();
+        String clusterEtagBefore = before.getEtag();
+        String poolVersionBefore = poolBefore.getVersion();
+        String poolEtagBefore = poolBefore.getEtag();
 
         for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
             GcpException thrown = assertThrows(GcpException.class,
@@ -885,10 +891,26 @@ class GkeServiceTest {
             assertEquals(field + " must be a string", thrown.getMessage());
         }
 
+        GcpException combined = assertThrows(GcpException.class,
+                () -> service.updateCluster(PROJECT, LOCATION, "version-shape", Map.of(
+                        "desiredNodeVersion", "1.30.0-gke.1",
+                        "desiredMasterVersion", 123)));
+        assertEquals("desiredMasterVersion must be a string", combined.getMessage());
+
+        for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
+            GcpException blank = assertThrows(GcpException.class,
+                    () -> service.updateCluster(PROJECT, LOCATION, "version-shape", Map.of(field, "")));
+            assertEquals(400, blank.getHttpStatus());
+            assertTrue(blank.getMessage().startsWith("Invalid " + field + " \"\""), blank.getMessage());
+        }
+
         StoredCluster after = service.getCluster(PROJECT, LOCATION, "version-shape");
-        assertEquals(before.getCurrentNodeVersion(), after.getCurrentNodeVersion());
-        assertEquals(before.getCurrentMasterVersion(), after.getCurrentMasterVersion());
-        assertEquals(before.getEtag(), after.getEtag());
+        StoredNodePool poolAfter = service.getNodePool(PROJECT, LOCATION, "version-shape", "default-pool");
+        assertEquals(nodeVersionBefore, after.getCurrentNodeVersion());
+        assertEquals(masterVersionBefore, after.getCurrentMasterVersion());
+        assertEquals(clusterEtagBefore, after.getEtag());
+        assertEquals(poolVersionBefore, poolAfter.getVersion());
+        assertEquals(poolEtagBefore, poolAfter.getEtag());
     }
 
     @Test

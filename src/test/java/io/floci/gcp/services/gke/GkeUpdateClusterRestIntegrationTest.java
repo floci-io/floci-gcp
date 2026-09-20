@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * {@code ClusterManager.UpdateCluster} over REST ({@code PUT .../clusters/{id}}), with the
@@ -94,6 +95,26 @@ class GkeUpdateClusterRestIntegrationTest {
                     .body("error.code", equalTo(400))
                     .body("error.status", equalTo("INVALID_ARGUMENT"))
                     .body("error.message", equalTo(field + " must be a string"));
+        }
+
+        given()
+                .contentType("application/json")
+                .body("{\"update\":{\"desiredNodeVersion\":\"1.30.0-gke.1\",\"desiredMasterVersion\":123}}")
+                .when().put(clusterPath)
+                .then()
+                .statusCode(400)
+                .body("error.message", equalTo("desiredMasterVersion must be a string"));
+
+        for (String field : new String[] {"desiredNodeVersion", "desiredMasterVersion"}) {
+            given()
+                    .contentType("application/json")
+                    .body("{\"update\":{\"" + field + "\":\"\"}}")
+                    .when().put(clusterPath)
+                    .then()
+                    .statusCode(400)
+                    .body("error.code", equalTo(400))
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", startsWith("Invalid " + field + " \"\""));
         }
 
         given()

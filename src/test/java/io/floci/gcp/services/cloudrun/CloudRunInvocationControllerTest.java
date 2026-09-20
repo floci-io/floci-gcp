@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -155,6 +156,16 @@ class CloudRunInvocationControllerTest {
         assertEquals("/api/database?x=1", pathAndQuery.get());
         assertEquals("svc-f64551fcd6f0.us-central1.run.localhost.floci.io:4588", forwardedHost.get());
         assertEquals("/api/database?x=1", forwardedUri.get());
+    }
+
+    @Test
+    void selectsRuntimeProtocolFromIngressConfiguration() {
+        CloudRunInvocationController controller = new CloudRunInvocationController(mock(CloudRunService.class));
+
+        assertEquals(HttpClient.Version.HTTP_1_1, controller.buildRequest("GET", "http://127.0.0.1:8080/",
+                new byte[0], headers(), uriInfo("/"), 300_000, false).version().orElseThrow());
+        assertEquals(HttpClient.Version.HTTP_2, controller.buildRequest("GET", "http://127.0.0.1:8080/",
+                new byte[0], headers(), uriInfo("/"), 300_000, true).version().orElseThrow());
     }
 
     private static ResponseData invokePost(CloudRunInvocationController controller) {

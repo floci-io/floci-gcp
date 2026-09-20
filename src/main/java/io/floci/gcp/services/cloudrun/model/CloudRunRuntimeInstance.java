@@ -13,6 +13,7 @@ public record CloudRunRuntimeInstance(
         String image,
         String containerId,
         int ingressContainerPort,
+        boolean ingressH2c,
         String dockerNetwork,
         String endpointHost,
         int endpointPort,
@@ -45,6 +46,28 @@ public record CloudRunRuntimeInstance(
                 requestTimeoutMillis, List.of());
     }
 
+    public CloudRunRuntimeInstance(String project,
+                                   String location,
+                                   String serviceName,
+                                   String revisionName,
+                                   String image,
+                                   String containerId,
+                                   int ingressContainerPort,
+                                   String dockerNetwork,
+                                   String endpointHost,
+                                   int endpointPort,
+                                   String publicUrl,
+                                   String status,
+                                   long createTimeMillis,
+                                   long updateTimeMillis,
+                                   String lastError,
+                                   long requestTimeoutMillis,
+                                   List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
+        this(project, location, serviceName, revisionName, image, containerId, ingressContainerPort, false,
+                dockerNetwork, endpointHost, endpointPort, publicUrl, status, createTimeMillis, updateTimeMillis,
+                lastError, requestTimeoutMillis, gcsVolumeMounts);
+    }
+
     public CloudRunRuntimeInstance {
         gcsVolumeMounts = gcsVolumeMounts == null ? List.of() : List.copyOf(gcsVolumeMounts);
     }
@@ -63,13 +86,13 @@ public record CloudRunRuntimeInstance(
 
     public CloudRunRuntimeInstance withStatus(String status, String lastError) {
         return new CloudRunRuntimeInstance(project, location, serviceName, revisionName, image,
-                containerId, ingressContainerPort, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
+                containerId, ingressContainerPort, ingressH2c, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
                 createTimeMillis, System.currentTimeMillis(), lastError, requestTimeoutMillis, gcsVolumeMounts);
     }
 
     public CloudRunRuntimeInstance withEndpoint(String endpointHost, int endpointPort) {
         return new CloudRunRuntimeInstance(project, location, serviceName, revisionName, image,
-                containerId, ingressContainerPort, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
+                containerId, ingressContainerPort, ingressH2c, dockerNetwork, endpointHost, endpointPort, publicUrl, status,
                 createTimeMillis, System.currentTimeMillis(), lastError, requestTimeoutMillis, gcsVolumeMounts);
     }
 }

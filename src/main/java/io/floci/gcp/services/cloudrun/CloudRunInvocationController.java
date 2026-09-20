@@ -187,7 +187,8 @@ public class CloudRunInvocationController {
         CloudRunRuntimeInstance instance = cloudRunService.readyRuntime(serviceName)
                 .orElseThrow(() -> GcpException.unavailable("Cloud Run service has no ready runtime: " + serviceName));
         String target = instance.endpointUri(pathAndQueryFromRequest(project, location, serviceId, uriInfo));
-        HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis());
+        HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis(),
+                instance.ingressH2c());
         try {
             HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
             return toResponse(response);
@@ -201,10 +202,11 @@ public class CloudRunInvocationController {
         }
     }
 
-    private HttpRequest buildRequest(String method, String target, byte[] body, HttpHeaders headers,
-                                     UriInfo uriInfo, long timeoutMillis) {
+    HttpRequest buildRequest(String method, String target, byte[] body, HttpHeaders headers,
+                             UriInfo uriInfo, long timeoutMillis, boolean h2c) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(target))
+                .version(h2c ? HttpClient.Version.HTTP_2 : HttpClient.Version.HTTP_1_1)
                 .timeout(Duration.ofMillis(timeoutMillis));
         headers.getRequestHeaders().forEach((name, values) -> {
             if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {

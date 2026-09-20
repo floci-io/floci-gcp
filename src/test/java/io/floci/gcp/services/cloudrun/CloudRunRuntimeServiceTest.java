@@ -103,6 +103,19 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void ingressUsesHttp11ByDefaultAndH2cWhenExplicitlyConfigured() {
+        Container defaultContainer = Container.newBuilder()
+                .addPorts(ContainerPort.newBuilder().setContainerPort(8080))
+                .build();
+        Container h2cContainer = Container.newBuilder()
+                .addPorts(ContainerPort.newBuilder().setName("h2c").setContainerPort(8080))
+                .build();
+
+        assertFalse(CloudRunRuntimeService.ingressH2c(defaultContainer));
+        assertTrue(CloudRunRuntimeService.ingressH2c(h2cContainer));
+    }
+
+    @Test
     void buildSpecMountsReadOnlyGcsVolumeSnapshot() {
         CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
                 lifecycleManager, config);

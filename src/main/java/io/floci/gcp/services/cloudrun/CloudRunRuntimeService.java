@@ -352,8 +352,12 @@ public class CloudRunRuntimeService {
         long now = System.currentTimeMillis();
         long requestTimeoutMillis = requestTimeout(revision).toMillis();
         return new CloudRunRuntimeInstance(project, location, service.getName(), revision.getName(),
-                container.getImage(), containerId, containerPort, dockerNetwork, endpoint.host(), endpoint.port(),
-                service.getUri(), status, now, now, lastError, requestTimeoutMillis, gcsVolumeMounts);
+                container.getImage(), containerId, containerPort, ingressH2c(container), dockerNetwork, endpoint.host(),
+                endpoint.port(), service.getUri(), status, now, now, lastError, requestTimeoutMillis, gcsVolumeMounts);
+    }
+
+    static boolean ingressH2c(com.google.cloud.run.v2.Container container) {
+        return container.getPortsCount() > 0 && "h2c".equals(container.getPorts(0).getName());
     }
 
     List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(Revision revision,

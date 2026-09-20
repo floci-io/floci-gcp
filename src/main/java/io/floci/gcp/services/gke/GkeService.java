@@ -329,7 +329,11 @@ public class GkeService {
                                          Map<String, Object> updateMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         if (updateMap != null) {
-            String desiredNodeVersion = (String) updateMap.get("desiredNodeVersion");
+            if (updateMap.get("desiredNodeVersion") != null
+                    && !(updateMap.get("desiredNodeVersion") instanceof String)) {
+                throw GcpException.invalidArgument("desiredNodeVersion must be a string");
+            }
+            String desiredNodeVersion = stringField(updateMap, "desiredNodeVersion", null);
             if (desiredNodeVersion != null) {
                 // Resolve the target before mutating anything. Both rejection paths in
                 // nodeVersionUpdateTargets throw, and `cluster` is the live stored object, so
@@ -350,7 +354,11 @@ public class GkeService {
                 cluster.setCurrentNodeVersion(
                         GkeVersions.minimum(poolVersions(project, location, clusterId)).orElse(nodeVersion));
             }
-            String desiredMasterVersion = (String) updateMap.get("desiredMasterVersion");
+            if (updateMap.get("desiredMasterVersion") != null
+                    && !(updateMap.get("desiredMasterVersion") instanceof String)) {
+                throw GcpException.invalidArgument("desiredMasterVersion must be a string");
+            }
+            String desiredMasterVersion = stringField(updateMap, "desiredMasterVersion", null);
             if (desiredMasterVersion != null) {
                 // Same aliases as UpdateMaster; gcloud sends "-" here for `clusters upgrade
                 // --master` without --cluster-version, which stored verbatim left the cluster

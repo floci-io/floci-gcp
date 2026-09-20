@@ -70,4 +70,38 @@ class GkeUpdateClusterRestIntegrationTest {
                 .body("currentNodeVersion", equalTo(advertised))
                 .body("nodePools[0].version", equalTo(advertised));
     }
+
+    @Test
+    void nonStringVersionsAreBadRequestsAndLeaveTheClusterUntouched() {
+        String cluster = "version-shape";
+        String clusterPath = BASE + "/clusters/" + cluster;
+
+        given()
+                .contentType("application/json")
+                .body("{\"cluster\":{\"name\":\"" + cluster
+                        + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                .when().post(BASE + "/clusters")
+                .then()
+                .statusCode(200);
+
+        for (String field : new String[] {"desiredNodeVersion", "desiredMasterVersion"}) {
+            given()
+                    .contentType("application/json")
+                    .body("{\"update\":{\"" + field + "\":123}}")
+                    .when().put(clusterPath)
+                    .then()
+                    .statusCode(400)
+                    .body("error.code", equalTo(400))
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", equalTo(field + " must be a string"));
+        }
+
+        given()
+                .when().get(clusterPath)
+                .then()
+                .statusCode(200)
+                .body("currentMasterVersion", equalTo("1.29.0-gke.1"))
+                .body("currentNodeVersion", equalTo("1.29.0-gke.1"))
+                .body("nodePools[0].version", equalTo("1.29.0-gke.1"));
+    }
 }

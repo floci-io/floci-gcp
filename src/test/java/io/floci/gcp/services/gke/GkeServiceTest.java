@@ -873,6 +873,25 @@ class GkeServiceTest {
     }
 
     @Test
+    void updateClusterRejectsNonStringVersionsWithoutTouchingTheCluster() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "version-shape",
+                "initialClusterVersion", "1.29.0-gke.1"));
+        StoredCluster before = service.getCluster(PROJECT, LOCATION, "version-shape");
+
+        for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
+            GcpException thrown = assertThrows(GcpException.class,
+                    () -> service.updateCluster(PROJECT, LOCATION, "version-shape", Map.of(field, 123)));
+            assertEquals(400, thrown.getHttpStatus());
+            assertEquals(field + " must be a string", thrown.getMessage());
+        }
+
+        StoredCluster after = service.getCluster(PROJECT, LOCATION, "version-shape");
+        assertEquals(before.getCurrentNodeVersion(), after.getCurrentNodeVersion());
+        assertEquals(before.getCurrentMasterVersion(), after.getCurrentMasterVersion());
+        assertEquals(before.getEtag(), after.getEtag());
+    }
+
+    @Test
     void updateNodePoolResolvesNodeVersionAliasesAgainstTheMaster() {
         // UpdateNodePoolRequest.node_version documents the same aliases as desired_node_version
         // (#229): stored verbatim, GetNodePool reported "latest" or "-" as the pool's version.

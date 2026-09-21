@@ -7,11 +7,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -467,6 +469,18 @@ class BigQueryRestIntegrationTest {
 
     @Test
     @Order(9)
+    void internalNdjsonRouteAnswersGetAndHead() {
+        String path = "/_floci-gcp/bigquery/projects/" + PROJECT + "/datasets/ds1/tables/t1/rows.ndjson";
+        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        assertTrue(body.contains("\"name\":\"ana\""), body);
+
+        // DuckDB's httpfs probes with HEAD before reading. Deriving HEAD from the streaming GET
+        // left that probe hanging until httpfs timed out, so the route answers HEAD itself.
+        given().when().head(path).then().statusCode(200).body(emptyOrNullString());
+    }
+
+    @Test
+    @Order(10)
     void deleteSemantics() {
         given()
                 .when().delete(BASE + "/datasets/ds1")

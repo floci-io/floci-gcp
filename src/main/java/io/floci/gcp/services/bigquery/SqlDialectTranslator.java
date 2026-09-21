@@ -1250,6 +1250,9 @@ final class SqlDialectTranslator {
                     int start = ++pos;
                     if (pos < s.length() && s.charAt(pos) == '`') {
                         int close = s.indexOf('`', pos + 1);
+                        if (close < 0) {
+                            throw invalidQuery("Syntax error: Unclosed identifier literal");
+                        }
                         String name = s.substring(pos + 1, close);
                         pos = close + 1;
                         out.add(new Token(Kind.NAMED_PARAM, "@" + name, name));

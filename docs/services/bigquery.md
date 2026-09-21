@@ -148,7 +148,9 @@ built-in subset, useful where Docker is not available:
 ```
 query     := SELECT selection FROM table_ref [WHERE predicate {AND predicate}] [LIMIT int] [;]
 selection := * | COUNT ( * ) | column {, column}
+table_ref := [project .] dataset . table | table        (backtick-quoted forms accepted)
 predicate := column = literal
+literal   := 'string' | "string" | integer | float | TRUE | FALSE
 ```
 
 - An unqualified `table` requires the request's `defaultDataset`.

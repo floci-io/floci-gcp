@@ -444,7 +444,11 @@ public class BigQueryService {
     /** Stored (normalized) rows of a table, as the SQL engine stages them. */
     public List<Map<String, Object>> storedRows(String projectId, String datasetId, String tableId) {
         getTable(projectId, datasetId, tableId);
-        return dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new).getRows();
+        // A snapshot, not the stored list. Callers stream these rows to the SQL engine from a
+        // StreamingOutput, so the list would otherwise be iterated after the request method has
+        // returned, while insertAll appends to that same list.
+        return List.copyOf(dataStore.get(tableKey(datasetId, tableId))
+                .orElseGet(StoredTableData::new).getRows());
     }
 
     // ── Query ────────────────────────────────────────────────────────────────────

@@ -403,7 +403,11 @@ public class BigQueryController {
 
     private static Job buildJob(StoredJob sj) {
         Job job = new Job();
-        job.setId(sj.getProjectId() + ":" + sj.getLocation() + "." + sj.getJobId());
+        // A dry run reserves no job id, and real BigQuery creates no job for one, so there is
+        // nothing to name here. Concatenating a null id would emit the literal string "null".
+        if (sj.getJobId() != null) {
+            job.setId(sj.getProjectId() + ":" + sj.getLocation() + "." + sj.getJobId());
+        }
         job.setJobReference(new JobReference(sj.getProjectId(), sj.getJobId(), sj.getLocation()));
 
         Map<String, Object> queryConfig = new LinkedHashMap<>();

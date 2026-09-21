@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -29,6 +30,24 @@ public class BigQueryInternalController {
     public BigQueryInternalController(BigQueryService service, ObjectMapper mapper) {
         this.service = service;
         this.mapper = mapper;
+    }
+
+    /**
+     * DuckDB's httpfs probes a URL with HEAD before reading it. Without this method JAX-RS
+     * derives HEAD from the GET below, which answers with a StreamingOutput whose entity is then
+     * discarded; that combination left the probe waiting until httpfs timed out, which showed up
+     * as an intermittent "IO Error: Timeout was reached error for HTTP HEAD" in the native
+     * compatibility run. Answering headers only, with no content length, keeps the probe cheap
+     * and tells httpfs to fetch the whole body rather than attempt ranged reads.
+     */
+    @HEAD
+    @Path("/projects/{projectId}/datasets/{datasetId}/tables/{tableId}/rows.ndjson")
+    @Produces("application/x-ndjson")
+    public Response rowsHead(@PathParam("projectId") String projectId,
+                             @PathParam("datasetId") String datasetId,
+                             @PathParam("tableId") String tableId) {
+        service.storedRows(projectId, datasetId, tableId);
+        return Response.ok().type("application/x-ndjson").header("Accept-Ranges", "none").build();
     }
 
     @GET

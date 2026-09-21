@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
@@ -485,8 +486,8 @@ public class ContainerLifecycleManager {
 
     private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort, String preferredNetwork) {
         if (!containerDetector.isRunningInContainer()) {
-            var bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            var binding = bindings.get(ExposedPort.tcp(containerPort));
+            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
+            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(containerPort));
 
             if (binding != null && binding.length > 0) {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
@@ -500,7 +501,7 @@ public class ContainerLifecycleManager {
     }
 
     private String resolveContainerIp(InspectContainerResponse inspect, String preferredNetwork) {
-        var networks = inspect.getNetworkSettings().getNetworks();
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
         if (networks != null) {
             if (preferredNetwork != null && networks.containsKey(preferredNetwork)) {
                 String ip = networks.get(preferredNetwork).getIpAddress();
@@ -525,7 +526,7 @@ public class ContainerLifecycleManager {
      */
     public ExecResult exec(String containerId, List<String> env, List<String> command) {
         return dockerApi("exec in container " + containerId, () -> {
-            var createCmd = dockerClient().execCreateCmd(containerId)
+            ExecCreateCmd createCmd = dockerClient().execCreateCmd(containerId)
                     .withAttachStdout(true)
                     .withAttachStderr(true)
                     .withCmd(command.toArray(new String[0]));

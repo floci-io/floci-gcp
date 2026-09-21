@@ -1,6 +1,14 @@
 package io.floci.gcp.core.common;
 
-import com.google.datastore.v1.*;
+import com.google.datastore.v1.CompositeFilter;
+import com.google.datastore.v1.Filter;
+import com.google.datastore.v1.GqlQuery;
+import com.google.datastore.v1.GqlQueryParameter;
+import com.google.datastore.v1.KindExpression;
+import com.google.datastore.v1.PropertyFilter;
+import com.google.datastore.v1.PropertyReference;
+import com.google.datastore.v1.Query;
+import com.google.datastore.v1.Value;
 import com.google.protobuf.Int32Value;
 
 import java.util.ArrayList;

@@ -60,7 +60,7 @@ public class CertificateGenerator {
             X500Name name = new X500Name("CN=floci-gcp");
             BigInteger serial = new BigInteger(128, SECURE_RANDOM);
 
-            var certBuilder = new JcaX509v3CertificateBuilder(
+            JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
                     name, serial,
                     Date.from(now), Date.from(now.plus(365, ChronoUnit.DAYS)),
                     name, keyPair.getPublic());

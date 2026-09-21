@@ -10,6 +10,24 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 class ComputeIntegrationTest extends ComputeTestSupport {
+    @Test void diskTypeZonesAreUrlsWhileOtherCatalogsUseZoneNames() {
+        for (String zone : java.util.List.of("us-central1-a", "europe-west1-b")) {
+            String root = root(), catalog = root + "/zones/" + zone;
+            String zoneUrl = "https://www.googleapis.com" + catalog;
+            var disk = given().get(catalog + "/diskTypes/pd-standard").then().statusCode(200).extract().jsonPath();
+            assertEquals(zoneUrl, disk.getString("zone"));
+            assertEquals(zoneUrl + "/diskTypes/pd-standard", disk.getString("selfLink"));
+            var zones = given().get(catalog + "/diskTypes").then().statusCode(200).extract().jsonPath()
+                    .getList("items.zone", String.class);
+            assertFalse(zones.isEmpty());
+            assertTrue(zones.stream().allMatch(zoneUrl::equals));
+            assertEquals(zone, given().get(catalog + "/machineTypes/n2-standard-4").then().statusCode(200)
+                    .extract().jsonPath().getString("zone"));
+            assertEquals(zone, given().get(catalog + "/acceleratorTypes/nvidia-l4").then().statusCode(200)
+                    .extract().jsonPath().getString("zone"));
+        }
+    }
+
     @Test void deletingAnOperationDoesNotCancelItsResource() throws Exception {
         String root = root();
         var created = post(root + "/zones/us-central1-a/disks", Map.of("name", "retained", "sizeGb", "20"));

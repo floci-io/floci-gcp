@@ -38,7 +38,7 @@ final class ComputeCatalog {
                 }
             }
             case "diskTypes" -> List.of("pd-standard", "pd-balanced", "pd-ssd", "hyperdisk-balanced", "hyperdisk-throughput", "hyperdisk-extreme")
-                    .forEach(name -> result.add(c.object().put("name", name).put("zone", c.scope().substring(6))));
+                    .forEach(name -> result.add(c.object().put("name", name).put("zone", c.link(c.scope()))));
             case "acceleratorTypes" -> List.of("nvidia-tesla-t4", "nvidia-l4")
                     .forEach(name -> result.add(c.object().put("name", name).put("maximumCardsPerInstance", 4).put("zone", c.scope().substring(6))));
             default -> throw new IllegalArgumentException(c.collection());

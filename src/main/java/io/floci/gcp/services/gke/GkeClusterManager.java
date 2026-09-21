@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gke;
 
+import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
@@ -311,7 +312,7 @@ public class GkeClusterManager {
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
-        var dockerClient = lifecycleManager.getDockerClient();
+        DockerClient dockerClient = lifecycleManager.getDockerClient();
         ExecCreateCmdResponse exec = dockerClient
                 .execCreateCmd(containerId)
                 .withCmd(cmd)

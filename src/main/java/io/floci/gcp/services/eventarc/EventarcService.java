@@ -2,16 +2,17 @@ package io.floci.gcp.services.eventarc;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.cloud.eventarc.v1.Trigger;
-import com.google.cloud.eventarc.v1.ListTriggersResponse;
 import com.google.cloud.eventarc.v1.Channel;
-import com.google.cloud.eventarc.v1.ListChannelsResponse;
-import com.google.cloud.eventarc.v1.Provider;
-import com.google.cloud.eventarc.v1.ListProvidersResponse;
-import com.google.cloud.eventarc.v1.EventFilter;
+import com.google.cloud.eventarc.v1.CloudRun;
 import com.google.cloud.eventarc.v1.Destination;
-import com.google.cloud.eventarc.v1.Transport;
+import com.google.cloud.eventarc.v1.EventFilter;
+import com.google.cloud.eventarc.v1.ListChannelsResponse;
+import com.google.cloud.eventarc.v1.ListProvidersResponse;
+import com.google.cloud.eventarc.v1.ListTriggersResponse;
 import com.google.cloud.eventarc.v1.OperationMetadata;
+import com.google.cloud.eventarc.v1.Provider;
+import com.google.cloud.eventarc.v1.Transport;
+import com.google.cloud.eventarc.v1.Trigger;
 import com.google.longrunning.Operation;
 import com.google.protobuf.Timestamp;
 import com.google.rpc.Code;
@@ -27,9 +28,9 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudrun.CloudRunUrlService;
+import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
 import io.floci.gcp.services.pubsub.model.StoredMessage;
-import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -42,7 +43,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 @ApplicationScoped
 public class EventarcService {
@@ -368,7 +374,7 @@ public class EventarcService {
         Destination dest = trigger.getDestination();
         String targetUrl = null;
         if (dest.hasCloudRun()) {
-            var run = dest.getCloudRun();
+            CloudRun run = dest.getCloudRun();
             String project = GcpResourceNames.parseProject(trigger.getName());
             targetUrl = cloudRunUrlService.invocationUri(project, run.getRegion(), run.getService());
             if (!run.getPath().isEmpty()) {

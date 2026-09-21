@@ -365,12 +365,98 @@ in `src/test/resources/application.yml` so the suite never starts containers.
 
 ## Code Style
 
+### General
+
 - Use constructor injection
 - Prefer self-explanatory code over comments
 - Avoid unnecessary comments
 - Always use braces in conditionals
+- Never leave a `catch` block empty. Four `catch (... ignored) {}` blocks predate this rule
+  (`ProjectAwareStorageBackend`, `GcsUploadController`, and two in `CloudTasksController`); they
+  name the variable correctly but carry no comment, and are stragglers rather than the pattern.
+  If an exception is intentionally tolerated, log it with
+  enough context to diagnose it later. When swallowing really is correct and logging would be
+  noise, name the variable `ignored` or `expected` and say in a comment why it is safe. A bare
+  `catch (Exception e) {}` is never acceptable.
 - Follow existing project patterns
 - Use modern Java features only when they improve clarity
+
+### Types and names
+
+- **Do not use `var`. Write the explicit type.** floci-gcp reproduces GCP wire contracts, so the
+  concrete type at a call site is usually the thing under review: whether a value is a
+  `LinkedHashMap` or a `Map`, a generated protobuf type or floci's own model, is exactly what a
+  reviewer needs to see. This covers local declarations, enhanced-for
+  (`for (TableFieldSchema field : fields)`), classic for-init, and try-with-resources. The one
+  exception is a record deconstruction pattern (`case Node(var left, var right) ->`), where
+  naming the component types is pure noise.
+- **Import the classes you use. Do not write fully-qualified names inline.**
+  `new ArrayList<>()`, never `new java.util.ArrayList<>()`. The only reason to qualify inline is
+  a genuine name collision inside one file: import the type used more often, qualify the other,
+  and leave a short comment naming the clash. The real example in this repo is `io.grpc.Status`
+  qualified inline in `FirestoreController` and `EventarcService`, both of which import
+  `com.google.rpc.Status`. Generated protobuf types collide with floci's own models often enough
+  that this comes up whenever a service grows a gRPC surface beside its REST one.
+
+### Imports
+
+- No wildcard imports in `src/main`. Static wildcards stay fine in tests, where
+  `Assertions.*`, `Mockito.*` and `Matchers.*` are the established idiom.
+- Import order: non-`java`/`javax` imports alphabetically, then `java.*` and `javax.*` last.
+  This is the IntelliJ default layout and what most of the tree already uses.
+
+### Conventions the codebase already follows
+
+Written down so they stay true. New code should match them without thinking. A violation you
+find in the tree is a straggler, not a precedent.
+
+Counts below are measured on `src/main` at 206719d, with the command that produced them, so they
+can be re-run rather than trusted:
+
+```bash
+git grep -hoE '(^|[^A-Za-z_."])var[[:space:]]+[A-Za-z_]' 206719d -- 'src/main/*.java' | wc -l   # 56, in 17 files
+git grep -c '^import .*\.\*;' 206719d -- 'src/main/*.java' | wc -l                              # 31 wildcard imports
+git grep -lP '^\t' 206719d -- 'src/main/*.java' | wc -l                                         # 19 tab-indented files
+git grep -nE '(^|[^a-zA-Z0-9_."])java(x)?\.[a-z]+\.[A-Z]' 206719d -- 'src/main/*.java' \
+  | grep -v ':import ' | wc -l                                                                  # 76 lines, 21 files
+```
+
+The `var` and wildcard counts are being taken to zero file by file. `src/test` is out of scope
+for now, at 127 uses of `var` and 41 wildcard imports. Of the 76 inline fully-qualified names, 29
+are `java.lang.Object` in `GcsGrpcMapper`.
+
+- 4-space indentation, K&R braces. Do not indent with a tab. This one is aspirational rather than
+  already true: 19 files still use tab indentation, `CredentialAccessBoundaryParser` (196 lines)
+  and `GcsAuthorizationService` (94) worst among them.
+- JBoss Logging, in a field named `LOG` (79 of the 80 files that log; `CloudSqlContainerDataPlane`
+  injects an instance `log` so a test can capture it). Both parameterized forms are in use: 459
+  `...f()` calls and 155 `...v()`. Prefer `...f()` in new code, and never concatenate strings in a
+  log call: there are none, keep it that way.
+- No `printStackTrace`, anywhere, and no `System.out` or `System.err` in `src/main`. There are
+  none today. A test may print a failure repro just before failing, which is the only good
+  reason to print from a test: an assertion message usually says it better.
+- `java.time` for everything floci owns. `Calendar` and `SimpleDateFormat` appear nowhere and
+  must not be introduced. A `Date` survives only at a third-party boundary that forces one;
+  convert there with `Date.from(instant)` and keep `java.time` on floci's side of it.
+- Constructor injection in `src/main`. Field injection is fine in tests.
+- `Optional` as a return type, and rarely as a field: two exist, a cache in
+  `CurrentContainerNetworkResolver` and the injected `appVersion` in `EmulatorLifecycle`. Do not
+  add more, and prefer not to take one as a parameter, which `ContainerBuilder.resolveImage` and
+  `normalizeImageRegistryBase` still do.
+- Switch expressions over switch statements. Pattern-matching `instanceof` over
+  cast-after-check.
+- `GcpException` for domain errors, mapped by `GcpExceptionMapper` (REST) and
+  `GcpGrpcController.grpcError` (gRPC).
+- `final` on service fields, but not on locals or parameters.
+
+### Tests
+
+These describe `src/test`. `compatibility-tests` is a separate module with the opposite idiom,
+AssertJ rather than JUnit assertions. Follow the module you are in.
+
+- Unit tests are `*ServiceTest`, integration tests `*IntegrationTest` (see Testing Rules).
+- Name test methods as a camelCase sentence (`publishMessageRoundTripsThroughPull`) or as
+  `method_scenario_expectation`. `testX` names are not the pattern to copy.
 
 ---
 

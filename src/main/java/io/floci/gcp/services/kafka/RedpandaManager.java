@@ -2,6 +2,9 @@ package io.floci.gcp.services.kafka;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Ports;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerDetector;
@@ -21,6 +24,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @ApplicationScoped
@@ -187,12 +191,12 @@ public class RedpandaManager {
 
     private String getAdminBaseUrl(StoredCluster cluster) {
         if (!containerDetector.isRunningInContainer()) {
-            var inspect = lifecycleManager.runDockerApi("inspect Redpanda container " + cluster.getContainerId(),
+            InspectContainerResponse inspect = lifecycleManager.runDockerApi("inspect Redpanda container " + cluster.getContainerId(),
                     () -> lifecycleManager.getDockerClient()
                             .inspectContainerCmd(cluster.getContainerId())
                             .exec());
-            var bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            var binding = bindings.get(com.github.dockerjava.api.model.ExposedPort.tcp(ADMIN_PORT));
+            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
+            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(ADMIN_PORT));
             if (binding != null && binding.length > 0) {
                 return "http://localhost:" + binding[0].getHostPortSpec();
             }

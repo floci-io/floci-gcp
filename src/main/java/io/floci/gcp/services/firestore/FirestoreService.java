@@ -3,6 +3,7 @@ package io.floci.gcp.services.firestore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.firestore.v1.Cursor;
 import com.google.firestore.v1.Document;
+import com.google.firestore.v1.DocumentTransform;
 import com.google.firestore.v1.DocumentMask;
 import com.google.firestore.v1.Precondition;
 import com.google.firestore.v1.StructuredQuery;
@@ -40,6 +41,7 @@ import java.util.OptionalInt;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class FirestoreService {
@@ -224,7 +226,7 @@ public class FirestoreService {
         Optional<StoredDocument> existing = documentStore.get(name);
         existing.ifPresent(doc -> {
             Map<String, StoredValue> fields = new LinkedHashMap<>(doc.getFields());
-            for (var transform : write.getUpdateTransformsList()) {
+            for (DocumentTransform.FieldTransform transform : write.getUpdateTransformsList()) {
                 applyFieldTransform(fields, transform, now);
             }
             documentStore.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
@@ -236,7 +238,7 @@ public class FirestoreService {
         if (existing.isEmpty()) return;
         StoredDocument doc = existing.get();
         Map<String, StoredValue> fields = new LinkedHashMap<>(doc.getFields());
-        for (var transform : transforms) {
+        for (DocumentTransform.FieldTransform transform : transforms) {
             applyFieldTransform(fields, transform, now);
         }
         documentStore.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
@@ -381,7 +383,7 @@ public class FirestoreService {
             return docs;
         }
         List<StructuredQuery.Order> orders = query.getOrderByList();
-        var stream = docs.stream();
+        Stream<StoredDocument> stream = docs.stream();
         if (query.hasStartAt()) {
             Cursor start = query.getStartAt();
             boolean inclusive = start.getBefore();

@@ -1,7 +1,16 @@
 package io.floci.gcp.services.datastore;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.google.datastore.v1.*;
+import com.google.datastore.v1.CompositeFilter;
+import com.google.datastore.v1.Entity;
+import com.google.datastore.v1.Filter;
+import com.google.datastore.v1.Key;
+import com.google.datastore.v1.Mutation;
+import com.google.datastore.v1.MutationResult;
+import com.google.datastore.v1.PartitionId;
+import com.google.datastore.v1.PropertyFilter;
+import com.google.datastore.v1.Query;
+import com.google.datastore.v1.Value;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;

@@ -2,7 +2,17 @@ package io.floci.gcp.services.cloudlogging;
 
 import com.google.api.MonitoredResource;
 import com.google.logging.type.LogSeverity;
-import com.google.logging.v2.*;
+import com.google.logging.v2.DeleteLogRequest;
+import com.google.logging.v2.ListLogEntriesRequest;
+import com.google.logging.v2.ListLogEntriesResponse;
+import com.google.logging.v2.ListLogsRequest;
+import com.google.logging.v2.ListLogsResponse;
+import com.google.logging.v2.ListMonitoredResourceDescriptorsRequest;
+import com.google.logging.v2.ListMonitoredResourceDescriptorsResponse;
+import com.google.logging.v2.LogEntry;
+import com.google.logging.v2.LoggingServiceV2Grpc;
+import com.google.logging.v2.WriteLogEntriesRequest;
+import com.google.logging.v2.WriteLogEntriesResponse;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.common.GcpGrpcController;

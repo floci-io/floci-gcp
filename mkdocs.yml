@@ -70,6 +70,7 @@ nav:
       - TLS / HTTPS: configuration/advanced/tls.md
   - Services:
     - Overview: services/index.md
+    - Compute Engine: services/compute.md
     - Cloud Storage (GCS): services/gcs.md
     - Pub/Sub: services/pubsub.md
     - Firestore: services/firestore.md

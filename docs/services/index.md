@@ -6,6 +6,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 
 | Service | Protocol | Endpoint |
 |---|---|---|
+| [Compute Engine](compute.md) | REST JSON | `/compute/v1/projects/{project}/...` |
 | [Cloud Storage (GCS)](gcs.md) | gRPC v2 + REST XML + REST JSON | `google.storage.v2.Storage`, `/{bucket}/{object}`, `/storage/v1/b/{bucket}` |
 | [Pub/Sub](pubsub.md) | gRPC + REST JSON | `google.pubsub.v1.Publisher`, `google.pubsub.v1.Subscriber`, `/v1/projects/{project}/topics` |
 | [Firestore](firestore.md) | gRPC | `google.firestore.v1.Firestore` |

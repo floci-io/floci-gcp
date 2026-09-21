@@ -441,8 +441,6 @@ public class CloudMonitoringService {
     public PageToken.Page<TimeSeries> listTimeSeries(String parentProject, String filter,
                                                      TimeInterval requestInterval, Aggregation aggregation,
                                                      String view, int pageSize, String pageToken) {
-        var descriptorStore = scoped(this.descriptorStore, parentProject);
-        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         if (filter == null || filter.isBlank()) {
             throw GcpException.invalidArgument("filter is required");
         }
@@ -463,8 +461,12 @@ public class CloudMonitoringService {
 
         TimeSeriesAggregator.validate(aggregation);
 
+        // Hierarchy membership is not modeled, so hierarchy reads have no visible projects.
+        List<StoredTimeSeriesPoint> scopedPoints = parentProject.matches("(organizations|folders)/[0-9]+")
+                ? List.of() : scoped(this.timeSeriesStore, parentProject).scan(k -> true);
+
         // Reads are half-open: (startTime, endTime]
-        List<StoredTimeSeriesPoint> matchedPoints = timeSeriesStore.scan(k -> true).stream()
+        List<StoredTimeSeriesPoint> matchedPoints = scopedPoints.stream()
                 .filter(parsedFilter.predicate())
                 .filter(pt -> {
                     Instant ptEnd = Instant.parse(pt.getEndTime());

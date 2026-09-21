@@ -122,3 +122,11 @@ Write-path rules matching the documented API behavior:
   held in the configured storage backend, namespaced by project ID.
 - `ListTimeSeries` reads back data over the requested time interval; combine with the metric/resource
   filter to scope results.
+
+### Organization and folder time-series reads
+
+The gRPC `ListTimeSeries` method accepts `organizations/{organizationId}` and
+`folders/{folderId}` as well as project names. The emulator does not model
+hierarchy membership, so organization and folder reads return an empty result
+without a next-page token. Project reads remain isolated by their request
+project. Descriptor operations and time-series writes still require a project.

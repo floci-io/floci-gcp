@@ -87,6 +87,41 @@ class CloudMonitoringServiceTest {
         assertTrue(points.scanAllProjects(k -> true).isEmpty());
     }
 
+    @Test
+    void hierarchyTimeSeriesReadsAreEmptyWithoutExposingProjectData() {
+        var descriptors = new ProjectAwareStorageBackend<String>(new InMemoryStorage<>(), null, "ambient");
+        var points = new ProjectAwareStorageBackend<StoredTimeSeriesPoint>(new InMemoryStorage<>(), null, "ambient");
+        service = new CloudMonitoringService(descriptors, points, Clock.fixed(NOW, ZoneOffset.UTC));
+        service.createTimeSeries(PROJECT, List.of(gaugePoint(METRIC, Map.of(), 11, NOW.minusSeconds(60))));
+        service.createTimeSeries("projects/p2", List.of(gaugePoint(METRIC, Map.of(), 22, NOW.minusSeconds(60))));
+        for (String parent : List.of("organizations/123", "folders/456")) {
+            for (String view : List.of("FULL", "HEADERS")) {
+                var page = service.listTimeSeries(parent, typeFilter(), interval(NOW.minusSeconds(120), NOW),
+                        Aggregation.getDefaultInstance(), view, 1, null);
+                assertTrue(page.items().isEmpty());
+                assertNull(page.nextPageToken());
+            }
+            assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                    () -> service.listTimeSeries(parent, "", interval(NOW.minusSeconds(120), NOW),
+                            Aggregation.getDefaultInstance(), "FULL", 0, null)).getGcpStatus());
+            assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                    () -> service.listTimeSeries(parent, typeFilter(), TimeInterval.getDefaultInstance(),
+                            Aggregation.getDefaultInstance(), "FULL", 0, null)).getGcpStatus());
+            assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                    () -> service.createMetricDescriptor(parent, descriptor(METRIC).build())).getGcpStatus());
+            assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                    () -> service.createTimeSeries(parent, List.of(gaugePoint(METRIC, Map.of(), 1, NOW.minusSeconds(30)))))
+                    .getGcpStatus());
+        }
+        for (String invalid : List.of("organizations/", "folders/", "folders/456/extra", "billingAccounts/123")) {
+            assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                    () -> service.listTimeSeries(invalid, typeFilter(), interval(NOW.minusSeconds(120), NOW),
+                            Aggregation.getDefaultInstance(), "FULL", 0, null)).getGcpStatus());
+        }
+        assertEquals(1, list(typeFilter(), interval(NOW.minusSeconds(120), NOW)).items().size());
+        assertEquals(2, points.scanAllProjects(k -> true).size());
+    }
+
     // ── Metric descriptors ───────────────────────────────────────────────────
 
     @Test

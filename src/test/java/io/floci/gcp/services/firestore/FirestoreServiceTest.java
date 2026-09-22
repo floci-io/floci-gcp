@@ -242,6 +242,19 @@ class FirestoreServiceTest {
     }
 
     @Test
+    void equalFilterOnOutOfRangeTimestampDoesNotThrow() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "at",
+                Value.newBuilder().setTimestampValue(at).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("at", StructuredQuery.FieldFilter.Operator.EQUAL,
+                Value.newBuilder().setTimestampValue(
+                        Timestamp.newBuilder().setSeconds(Long.MAX_VALUE)).build());
+
+        assertEquals(List.of(), results);
+    }
+
+    @Test
     void inFilterMatchesTimestampReadBackFromDocument() {
         Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
         service.applyWrite(topLevelValueDocument("matching", "at",

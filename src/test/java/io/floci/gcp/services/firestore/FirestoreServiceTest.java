@@ -1,15 +1,19 @@
 package io.floci.gcp.services.firestore;
 
+import com.google.firestore.v1.ArrayValue;
 import com.google.firestore.v1.Document;
+import com.google.firestore.v1.DocumentTransform;
 import com.google.firestore.v1.MapValue;
 import com.google.firestore.v1.Precondition;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.firestore.model.StoredDocument;
+import io.floci.gcp.services.firestore.model.StoredValue;
 import io.grpc.Status;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -188,6 +192,191 @@ class FirestoreServiceTest {
                         DB + "/documents/customers/alpha",
                         DB + "/documents/customers/beta"),
                 results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void equalFilterMatchesTimestampReadBackFromDocument() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "at",
+                Value.newBuilder().setTimestampValue(at).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "at",
+                Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1)).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.EQUAL, Value.newBuilder().setTimestampValue(at).build());
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void notEqualFilterExcludesMatchingTimestampInsteadOfMatchingEverything() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "at",
+                Value.newBuilder().setTimestampValue(at).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "at",
+                Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1)).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.NOT_EQUAL, Value.newBuilder().setTimestampValue(at).build());
+
+        assertEquals(List.of(DB + "/documents/customers/different"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void equalFilterMatchesBytesReadBackFromDocument() {
+        ByteString payload = ByteString.copyFromUtf8("secret");
+        service.applyWrite(topLevelValueDocument("matching", "blob",
+                Value.newBuilder().setBytesValue(payload).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "blob",
+                Value.newBuilder().setBytesValue(ByteString.copyFromUtf8("other")).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("blob",
+                StructuredQuery.FieldFilter.Operator.EQUAL, Value.newBuilder().setBytesValue(payload).build());
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void inFilterMatchesTimestampReadBackFromDocument() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "at",
+                Value.newBuilder().setTimestampValue(at).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "at",
+                Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1)).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("at", StructuredQuery.FieldFilter.Operator.IN,
+                Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                        .addValues(Value.newBuilder().setTimestampValue(at))).build());
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void notInFilterExcludesMatchingTimestampInsteadOfMatchingEverything() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "at",
+                Value.newBuilder().setTimestampValue(at).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "at",
+                Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1)).build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("at", StructuredQuery.FieldFilter.Operator.NOT_IN,
+                Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                        .addValues(Value.newBuilder().setTimestampValue(at))).build());
+
+        assertEquals(List.of(DB + "/documents/customers/different"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void arrayContainsFilterMatchesTimestampElement() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "history", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setTimestampValue(at)))
+                .build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "history", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1))))
+                .build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("history",
+                StructuredQuery.FieldFilter.Operator.ARRAY_CONTAINS, Value.newBuilder().setTimestampValue(at).build());
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void arrayContainsAnyFilterMatchesTimestampElement() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        service.applyWrite(topLevelValueDocument("matching", "history", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setTimestampValue(at)))
+                .build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "history", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setTimestampValue(
+                        at.toBuilder().setSeconds(at.getSeconds() + 1))))
+                .build()), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("history",
+                StructuredQuery.FieldFilter.Operator.ARRAY_CONTAINS_ANY,
+                Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                        .addValues(Value.newBuilder().setTimestampValue(at))).build());
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void arrayUnionDoesNotDuplicateMatchingTimestampElement() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).build();
+        String name = DB + "/documents/customers/union-target";
+        service.applyWrite(topLevelValueDocument("union-target", "history", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setTimestampValue(at)))
+                .build()), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setTransform(DocumentTransform.newBuilder()
+                        .setDocument(name)
+                        .addFieldTransforms(DocumentTransform.FieldTransform.newBuilder()
+                                .setFieldPath("history")
+                                .setAppendMissingElements(ArrayValue.newBuilder()
+                                        .addValues(Value.newBuilder().setTimestampValue(at)))))
+                .build(), Instant.now());
+
+        StoredValue history = service.getDocument(name).orElseThrow().getFields().get("history");
+        assertEquals(1, history.getArrayValue().size());
+    }
+
+    @Test
+    void arrayRemoveRemovesMatchingBytesElement() {
+        ByteString payload = ByteString.copyFromUtf8("secret");
+        String name = DB + "/documents/customers/remove-target";
+        service.applyWrite(topLevelValueDocument("remove-target", "blobs", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setBytesValue(payload)))
+                .build()), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setTransform(DocumentTransform.newBuilder()
+                        .setDocument(name)
+                        .addFieldTransforms(DocumentTransform.FieldTransform.newBuilder()
+                                .setFieldPath("blobs")
+                                .setRemoveAllFromArray(ArrayValue.newBuilder()
+                                        .addValues(Value.newBuilder().setBytesValue(payload)))))
+                .build(), Instant.now());
+
+        StoredValue blobs = service.getDocument(name).orElseThrow().getFields().get("blobs");
+        assertEquals(0, blobs.getArrayValue().size());
+    }
+
+    private List<StoredDocument> runTopLevelFilter(String fieldPath,
+            StructuredQuery.FieldFilter.Operator operator, Value value) {
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .setWhere(StructuredQuery.Filter.newBuilder()
+                        .setFieldFilter(StructuredQuery.FieldFilter.newBuilder()
+                                .setField(StructuredQuery.FieldReference.newBuilder()
+                                        .setFieldPath(fieldPath))
+                                .setOp(operator)
+                                .setValue(value)))
+                .build();
+        return service.runQuery(DB + "/documents", query);
+    }
+
+    private Write topLevelValueDocument(String id, String field, Value value) {
+        return Write.newBuilder()
+                .setUpdate(Document.newBuilder()
+                        .setName(DB + "/documents/customers/" + id)
+                        .putFields(field, value)
+                        .build())
+                .build();
     }
 
     private List<StoredDocument> runNestedFilter(String fieldPath,

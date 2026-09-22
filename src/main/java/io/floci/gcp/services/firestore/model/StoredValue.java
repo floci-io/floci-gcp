@@ -9,6 +9,7 @@ import com.google.protobuf.NullValue;
 import com.google.protobuf.Timestamp;
 
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,6 +128,19 @@ public class StoredValue {
             case STRING_VALUE -> { return "string".equals(type) && proto.getStringValue().equals(stringValue); }
             case NULL_VALUE -> { return "null".equals(type); }
             case REFERENCE_VALUE -> { return "reference".equals(type) && proto.getReferenceValue().equals(stringValue); }
+            case TIMESTAMP_VALUE -> {
+                if (!"timestamp".equals(type) || stringValue == null) return false;
+                try {
+                    Instant a = Instant.parse(stringValue);
+                    Timestamp ts = proto.getTimestampValue();
+                    Instant b = Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+                    return a.equals(b);
+                } catch (DateTimeParseException e) {
+                    return false;
+                }
+            }
+            case BYTES_VALUE -> { return "bytes".equals(type) && stringValue != null
+                    && stringValue.equals(Base64.getEncoder().encodeToString(proto.getBytesValue().toByteArray())); }
             default -> { return false; }
         }
     }

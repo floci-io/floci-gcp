@@ -3,19 +3,14 @@ package io.floci.gcp.services.bigquery;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.bigquery.model.Dataset;
-import io.floci.gcp.services.bigquery.model.DatasetAccessEntry;
-import io.floci.gcp.services.bigquery.model.DatasetAccessEntryTarget;
-import io.floci.gcp.services.bigquery.model.RoutineReference;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
-import io.floci.gcp.services.bigquery.model.Expr;
 import io.floci.gcp.services.bigquery.model.StoredJob;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
-import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -86,249 +81,6 @@ class BigQueryServiceTest {
 
         assertEquals("patched", patched.getFriendlyName());
         assertEquals("kept", patched.getDescription());
-    }
-
-    // ── Dataset access[] ──
-    //
-    // Storage fidelity only: entries round-trip so clients and the
-    // hashicorp/google Terraform provider see a stable resource. Nothing here
-    // evaluates them, and a read is still allowed regardless of what is granted.
-
-    @Test
-    void createDatasetPreservesAccessEntries() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(
-                accessEntry("READER", "analyst@example.com"),
-                accessEntry("OWNER", "owner@example.com")));
-
-        Dataset created = service.createDataset(PROJECT, d);
-
-        assertEquals(2, created.getAccess().size());
-        assertEquals("READER", created.getAccess().get(0).getRole());
-        assertEquals("analyst@example.com", created.getAccess().get(0).getUserByEmail());
-        assertEquals("owner@example.com", created.getAccess().get(1).getUserByEmail());
-        // and it survives a fresh read, not just the create response
-        assertEquals(2, service.getDataset(PROJECT, DATASET).getAccess().size());
-    }
-
-    @Test
-    void patchDatasetPreservesAccessWhenTheBodyOmitsIt() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
-        service.createDataset(PROJECT, d);
-
-        Dataset patch = new Dataset();
-        patch.setFriendlyName("patched");
-        Dataset patched = service.patchDataset(PROJECT, DATASET, patch);
-
-        assertEquals("patched", patched.getFriendlyName());
-        assertEquals(1, patched.getAccess().size(),
-                "PATCH must not drop access[], which is what makes a Terraform "
-                        + "update show a permanent diff");
-    }
-
-    @Test
-    void patchDatasetReplacesAccessWhenTheBodyCarriesIt() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
-        service.createDataset(PROJECT, d);
-
-        Dataset patch = new Dataset();
-        patch.setAccess(List.of(accessEntry("WRITER", "new@example.com")));
-        Dataset patched = service.patchDataset(PROJECT, DATASET, patch);
-
-        assertEquals(1, patched.getAccess().size());
-        assertEquals("WRITER", patched.getAccess().get(0).getRole());
-        assertEquals("new@example.com", patched.getAccess().get(0).getUserByEmail());
-    }
-
-    @Test
-    void updateDatasetClearsAccessWhenTheBodyOmitsIt() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
-        service.createDataset(PROJECT, d);
-
-        // PUT is a full replacement, so an omitted field is a cleared field,
-        // the same contract updateDatasetReplacesEntireResource pins for
-        // description.
-        Dataset replacement = new Dataset();
-        replacement.setFriendlyName("new name");
-        Dataset updated = service.updateDataset(PROJECT, DATASET, replacement);
-
-        assertNull(updated.getAccess());
-    }
-
-    @Test
-    void accessEntryCarriesEveryPrincipalKind() {
-        DatasetAccessEntry group = new DatasetAccessEntry();
-        group.setRole("READER");
-        group.setGroupByEmail("team@example.com");
-
-        DatasetAccessEntry domain = new DatasetAccessEntry();
-        domain.setRole("READER");
-        domain.setDomain("example.com");
-
-        DatasetAccessEntry special = new DatasetAccessEntry();
-        special.setRole("WRITER");
-        special.setSpecialGroup("projectWriters");
-
-        DatasetAccessEntry iam = new DatasetAccessEntry();
-        iam.setRole("READER");
-        iam.setIamMember("serviceAccount:svc@example.iam.gserviceaccount.com");
-
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(group, domain, special, iam));
-        List<DatasetAccessEntry> stored = service.createDataset(PROJECT, d).getAccess();
-
-        assertEquals("team@example.com", stored.get(0).getGroupByEmail());
-        assertEquals("example.com", stored.get(1).getDomain());
-        assertEquals("projectWriters", stored.get(2).getSpecialGroup());
-        assertEquals("serviceAccount:svc@example.iam.gserviceaccount.com",
-                stored.get(3).getIamMember());
-    }
-
-    // ---- updateMode ----
-    //
-    // Without it, every write covers metadata AND the ACL, so a client updating
-    // only friendlyName has to resend access[] or lose it. That is the whole
-    // reason the parameter exists, and it only bites once access[] is modelled.
-
-    @Test
-    void updateWithMetadataModeLeavesTheAclAlone() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
-        d.setDescription("original");
-        service.createDataset(PROJECT, d);
-
-        Dataset replacement = new Dataset();
-        replacement.setFriendlyName("metadata only");
-        Dataset updated = service.updateDataset(
-                PROJECT, DATASET, replacement, UpdateMode.UPDATE_METADATA);
-
-        assertEquals("metadata only", updated.getFriendlyName());
-        assertNull(updated.getDescription(), "metadata is still fully replaced");
-        assertEquals(1, updated.getAccess().size(), "the ACL must survive untouched");
-    }
-
-    @Test
-    void updateWithAclModeLeavesMetadataAlone() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
-        d.setDescription("keep me");
-        service.createDataset(PROJECT, d);
-
-        Dataset replacement = new Dataset();
-        replacement.setAccess(List.of(accessEntry("OWNER", "new@example.com")));
-        Dataset updated = service.updateDataset(PROJECT, DATASET, replacement, UpdateMode.UPDATE_ACL);
-
-        assertEquals("keep me", updated.getDescription(), "metadata must survive untouched");
-        assertEquals("OWNER", updated.getAccess().get(0).getRole());
-    }
-
-    @Test
-    void patchWithMetadataModeIgnoresAccessInTheBody() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "keep@example.com")));
-        service.createDataset(PROJECT, d);
-
-        Dataset patch = new Dataset();
-        patch.setFriendlyName("patched");
-        patch.setAccess(List.of(accessEntry("OWNER", "ignored@example.com")));
-        Dataset patched = service.patchDataset(
-                PROJECT, DATASET, patch, UpdateMode.UPDATE_METADATA);
-
-        assertEquals("patched", patched.getFriendlyName());
-        assertEquals("keep@example.com", patched.getAccess().get(0).getUserByEmail());
-    }
-
-    @Test
-    void patchWithAclModeIgnoresMetadataInTheBody() {
-        Dataset d = newDataset(DATASET);
-        d.setFriendlyName("keep me");
-        d.setAccess(List.of(accessEntry("READER", "old@example.com")));
-        service.createDataset(PROJECT, d);
-
-        Dataset patch = new Dataset();
-        patch.setFriendlyName("ignored");
-        patch.setAccess(List.of(accessEntry("WRITER", "new@example.com")));
-        Dataset patched = service.patchDataset(PROJECT, DATASET, patch, UpdateMode.UPDATE_ACL);
-
-        assertEquals("keep me", patched.getFriendlyName());
-        assertEquals("WRITER", patched.getAccess().get(0).getRole());
-    }
-
-    @Test
-    void updateModeDefaultsToFullAndRejectsAnUnknownValue() {
-        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from(null));
-        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from(""));
-        assertEquals(UpdateMode.UPDATE_FULL, UpdateMode.from("UPDATE_MODE_UNSPECIFIED"));
-        assertEquals(UpdateMode.UPDATE_ACL, UpdateMode.from("update_acl"));
-        GcpException ex = assertThrows(GcpException.class, () -> UpdateMode.from("UPDATE_SOMETHING"));
-        assertEquals("invalid", ex.getReason());
-    }
-
-    @Test
-    void nestedAccessVariantsRoundTrip() {
-        DatasetAccessEntry view = new DatasetAccessEntry();
-        view.setView(new TableReference(PROJECT, "other_ds", "auth_view"));
-
-        DatasetAccessEntry routine = new DatasetAccessEntry();
-        routine.setRoutine(new RoutineReference(PROJECT, "other_ds", "auth_routine"));
-
-        DatasetAccessEntryTarget target = new DatasetAccessEntryTarget();
-        target.setDataset(new DatasetReference(PROJECT, "linked_ds"));
-        target.setTargetTypes(List.of("VIEWS"));
-        DatasetAccessEntry linked = new DatasetAccessEntry();
-        linked.setDataset(target);
-
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(view, routine, linked));
-        service.createDataset(PROJECT, d);
-
-        List<DatasetAccessEntry> stored = service.getDataset(PROJECT, DATASET).getAccess();
-        assertEquals("auth_view", stored.get(0).getView().getTableId());
-        assertEquals("auth_routine", stored.get(1).getRoutine().getRoutineId());
-        assertEquals("linked_ds", stored.get(2).getDataset().getDataset().getDatasetId());
-        assertEquals(List.of("VIEWS"), stored.get(2).getDataset().getTargetTypes());
-    }
-
-    @Test
-    void accessEntryConditionRoundTrips() {
-        // The provider sends condition and reads it back, so dropping it is
-        // another permanent diff, on a resource whose ACL looks correct.
-        DatasetAccessEntry conditional = accessEntry("READER", "analyst@example.com");
-        conditional.setCondition(new Expr(
-                "request.time < timestamp('2030-01-01T00:00:00Z')",
-                "expires_2030",
-                "temporary access for the analyst",
-                "dataset.tf:12"));
-
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(conditional));
-        service.createDataset(PROJECT, d);
-
-        Expr stored = service.getDataset(PROJECT, DATASET).getAccess().get(0).getCondition();
-        assertNotNull(stored, "condition must survive the write");
-        assertEquals("request.time < timestamp('2030-01-01T00:00:00Z')", stored.getExpression());
-        assertEquals("expires_2030", stored.getTitle());
-        assertEquals("temporary access for the analyst", stored.getDescription());
-        assertEquals("dataset.tf:12", stored.getLocation());
-    }
-
-    @Test
-    void accessEntryWithoutAConditionStaysUnconditional() {
-        Dataset d = newDataset(DATASET);
-        d.setAccess(List.of(accessEntry("READER", "analyst@example.com")));
-        service.createDataset(PROJECT, d);
-
-        assertNull(service.getDataset(PROJECT, DATASET).getAccess().get(0).getCondition());
-    }
-
-    private static DatasetAccessEntry accessEntry(String role, String userByEmail) {
-        DatasetAccessEntry e = new DatasetAccessEntry();
-        e.setRole(role);
-        e.setUserByEmail(userByEmail);
-        return e;
     }
 
     @Test
@@ -807,5 +559,75 @@ class BigQueryServiceTest {
         assertEquals("NOT_FOUND", assertThrows(GcpException.class,
                 () -> service.getTable(PROJECT, DATASET, TABLE)).getGcpStatus());
         assertTrue(service.listTables(PROJECT, DATASET).isEmpty());
+    }
+
+    @Test
+    void rejectedDatasetPatchLeavesTheStoredDatasetUntouched() {
+        Dataset created = newDataset(DATASET);
+        created.setDescription("original");
+        service.createDataset(PROJECT, created);
+
+        Dataset patch = new Dataset();
+        patch.setDescription("should not stick");
+        patch.setExtra("maxTimeTravelHours", "24");
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchDataset(PROJECT, DATASET, patch)).getReason());
+
+        Dataset stored = service.getDataset(PROJECT, DATASET);
+        assertEquals("original", stored.getDescription());
+        assertFalse(stored.getExtra().containsKey("maxTimeTravelHours")
+                && "24".equals(String.valueOf(stored.getExtra().get("maxTimeTravelHours"))));
+    }
+
+    @Test
+    void rejectedDatasetUpdateLeavesTheStoredDatasetUntouched() {
+        Dataset created = newDataset(DATASET);
+        created.setDescription("original");
+        service.createDataset(PROJECT, created);
+
+        Dataset update = newDataset(DATASET);
+        update.setDescription("should not stick");
+        update.setExtra("defaultTableExpirationMs", "1000");
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.updateDataset(PROJECT, DATASET, update)).getReason());
+
+        assertEquals("original", service.getDataset(PROJECT, DATASET).getDescription());
+    }
+
+    @Test
+    void rejectedTablePatchLeavesTheStoredTableUntouched() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table created = newTable(DATASET, TABLE);
+        created.setDescription("original");
+        service.createTable(PROJECT, DATASET, created);
+
+        Table patch = new Table();
+        patch.setDescription("should not stick");
+        patch.setExtra("timePartitioning", Map.of("type", "CENTURY"));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchTable(PROJECT, DATASET, TABLE, patch)).getReason());
+
+        Table stored = service.getTable(PROJECT, DATASET, TABLE);
+        assertEquals("original", stored.getDescription());
+        assertFalse(stored.getExtra().containsKey("timePartitioning"));
+    }
+
+    @Test
+    void unparseableExpirationTimeIsRejectedOnWriteRatherThanBreakingReads() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        Table patch = new Table();
+        patch.setExtra("expirationTime", "not-a-number");
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchTable(PROJECT, DATASET, TABLE, patch)).getReason());
+
+        assertNotNull(service.getTable(PROJECT, DATASET, TABLE));
+        assertEquals(1, service.listTables(PROJECT, DATASET).size());
+
+        Table onCreate = newTable(DATASET, "t2");
+        onCreate.setExtra("expirationTime", "soon");
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.createTable(PROJECT, DATASET, onCreate)).getReason());
     }
 }

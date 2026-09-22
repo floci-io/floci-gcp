@@ -63,13 +63,14 @@ Server-side behavior driven by these fields:
   wins. `defaultTableExpirationMs: 0` in a dataset `PATCH` clears the default.
 - A table past its `expirationTime` is deleted when it is next read or listed.
 - Output fields are filled in: dataset `type` (`DEFAULT`), `location` (`US` when not given) and
-  `maxTimeTravelHours` (`168` when not set); table `location` (the dataset's), `numBytes`,
+  `maxTimeTravelHours` (`168` when not set); table `location` (the dataset's),
   `numLongTermBytes` and `selfLink`. Tables created with `view`, `materializedView` or
   `externalDataConfiguration` get the matching `type`.
 - Validation: `defaultTableExpirationMs` of at least one hour, `maxTimeTravelHours` from 48 to
-  168, `timePartitioning.type` one of `DAY`/`HOUR`/`MONTH`/`YEAR` with a positive `expirationMs`
-  and a `field` that exists in the schema, and not both time and range partitioning. Violations
-  return 400 with reason `invalid`.
+  168, an `expirationTime` that parses as an int64, `timePartitioning.type` one of
+  `DAY`/`HOUR`/`MONTH`/`YEAR` with a positive `expirationMs` and a `field` that exists in the
+  schema, and not both time and range partitioning. Violations return 400 with reason `invalid`,
+  and a rejected update leaves the stored resource unchanged.
 
 Partitioning and clustering are metadata only: queries do not prune partitions and
 `requirePartitionFilter` is not enforced.

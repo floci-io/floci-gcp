@@ -158,9 +158,16 @@ final class BigQueryMetadata {
         }
     }
 
-    /** {@code timePartitioning.type} is required and one of DAY/HOUR/MONTH/YEAR; its field must exist. */
+    /**
+     * {@code expirationTime} must parse as an int64; {@code timePartitioning.type} is required and one
+     * of DAY/HOUR/MONTH/YEAR; its field must exist.
+     */
     @SuppressWarnings("unchecked")
     static void validateTable(Map<String, Object> extra, List<TableFieldSchema> fields) {
+        // expirationTime is an int64 on the wire, and every later read parses it to decide whether
+        // the table has expired. Rejecting an unparseable value here keeps a bad write from turning
+        // every subsequent get and list of that table into an error.
+        longValue(extra, "expirationTime");
         if (extra.get("timePartitioning") instanceof Map<?, ?> tp) {
             Map<String, Object> partitioning = (Map<String, Object>) tp;
             Object type = partitioning.get("type");

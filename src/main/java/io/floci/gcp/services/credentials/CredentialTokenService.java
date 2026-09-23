@@ -58,6 +58,13 @@ public class CredentialTokenService {
 		return token;
 	}
 
+	/**
+	 * Mints a token constrained by the requested Credential Access Boundary.
+	 *
+	 * <p>Floci-issued downscoped tokens cannot be exchanged again because this
+	 * service does not intersect the existing and requested boundaries. Replacing
+	 * the existing boundary could broaden the token's authority.</p>
+	 */
 	public MintedDownscopedToken mintDownscopedToken(String sourceToken,
 			List<CredentialAccessBoundaryRule> gcsRules) {
 		if (sourceToken == null || sourceToken.isBlank()) {

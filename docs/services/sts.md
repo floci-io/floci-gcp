@@ -48,9 +48,9 @@ prefix.
 ## Token lifetime
 
 Tokens exchanged from arbitrary external source credentials have a one-hour
-lifetime. When the source is an unexpired impersonated or downscoped token
-issued by floci-gcp, the new token inherits that source token's expiration time.
-Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
+lifetime. When the source is an unexpired impersonated token issued by
+floci-gcp, the new token inherits that source token's expiration time. Unknown
+or expired floci-gcp source tokens are rejected with `invalid_grant`.
 
 ## Scope and deviations
 
@@ -59,6 +59,12 @@ Unknown or expired floci-gcp source tokens are rejected with `invalid_grant`.
   subset is accepted.
 - Non-floci source credentials are not validated, matching the emulator's
   general credential-bypass behavior.
+- Recursive downscoping is not supported. A downscoped token issued by
+  floci-gcp cannot be used as the source for another exchange and is rejected
+  with `invalid_grant`. The emulator does not intersect the existing and
+  requested boundaries, so replacing the existing boundary could broaden the
+  token's authority. The exact Google STS behavior and error for this request
+  have not been verified.
 - A downscoped token minted by floci-gcp is enforced only for GCS requests:
   the request must match one of the token's CAB rules. Other credentials,
   including Floci-issued OAuth and impersonated tokens, remain accepted without

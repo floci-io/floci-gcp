@@ -427,7 +427,10 @@ public class BigQueryService {
         if (!accepted.isEmpty()) {
             synchronized (writeLock) {
                 StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
-                data.getRows().addAll(accepted);
+                List<Map<String, Object>> stored = data.getRows();
+                synchronized (stored) {
+                    stored.addAll(accepted);
+                }
                 dataStore.put(key, data);
                 table.setNumRows(String.valueOf(data.getRows().size()));
                 table.setLastModifiedTime(nowMillis());
@@ -461,9 +464,14 @@ public class BigQueryService {
         // returned, while insertAll appends to that same list.
         // Deliberately not under writeLock: DML holds that lock across the sidecar round trip,
         // and the sidecar fetches this route over HTTP to stage the table, so taking it here
-        // deadlocks until the read times out.
-        return List.copyOf(dataStore.get(tableKey(datasetId, tableId))
-                .orElseGet(StoredTableData::new).getRows());
+        // deadlocks until the read times out. The row list has its own monitor instead, which
+        // insertAll also takes to append, so copying cannot see a half-written ArrayList. Nothing
+        // holds that monitor across the sidecar call, so it cannot deadlock the way writeLock does.
+        List<Map<String, Object>> stored = dataStore.get(tableKey(datasetId, tableId))
+                .orElseGet(StoredTableData::new).getRows();
+        synchronized (stored) {
+            return List.copyOf(stored);
+        }
     }
 
     // ── Query ────────────────────────────────────────────────────────────────────
@@ -527,6 +535,9 @@ public class BigQueryService {
 
         if (statement.kind() != SqlDialectTranslator.StatementKind.QUERY) {
             if (options.dryRun()) {
+                // "an invalid query will return the same error it would if it wasn't a dry run", so
+                // a dry run has to resolve what the statement touches rather than only classify it.
+                validateStatement(projectId, statement, options);
                 job.setDryRun(true);
                 return job;
             }
@@ -570,6 +581,51 @@ public class BigQueryService {
     // ── DML / DDL ────────────────────────────────────────────────────────────────
 
     private final Object writeLock = new Object();
+
+    /**
+     * The resource checks {@link #executeStatement} makes, without any of its writes. A dry run
+     * reports the same error a real run would, so a DML statement against a missing table or a
+     * CREATE VIEW over a missing one fails here instead of reporting success.
+     */
+    private void validateStatement(String projectId, SqlDialectTranslator.Statement statement,
+                                   QueryOptions options) {
+        SqlDialectTranslator.TableRef target = statement.target();
+        switch (statement.kind()) {
+            case INSERT, UPDATE, DELETE, MERGE, TRUNCATE ->
+                    getTable(projectId, target.datasetId(), target.tableId());
+            case DROP_TABLE, DROP_VIEW -> {
+                if (tableStore.get(tableKey(target.datasetId(), target.tableId())).isEmpty()
+                        && !statement.ifExists()) {
+                    throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
+                }
+            }
+            case CREATE_TABLE, CREATE_VIEW -> {
+                boolean exists = tableStore.get(tableKey(target.datasetId(), target.tableId())).isPresent();
+                if (exists && !statement.orReplace() && !statement.ifNotExists()) {
+                    throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
+                            .withReason("duplicate");
+                }
+                getDataset(projectId, target.datasetId());
+                if (statement.querySql() != null) {
+                    engine.execute(request(projectId, statement.querySql(), options, true), tables(projectId));
+                }
+            }
+            case CREATE_SCHEMA -> {
+                if (datasetStore.get(statement.datasetTarget()).isPresent() && !statement.ifNotExists()) {
+                    throw GcpException.alreadyExists(
+                            "Already Exists: Dataset " + projectId + ":" + statement.datasetTarget())
+                            .withReason("duplicate");
+                }
+            }
+            case DROP_SCHEMA -> {
+                if (datasetStore.get(statement.datasetTarget()).isEmpty() && !statement.ifExists()) {
+                    throw GcpException.notFound(
+                            "Not found: Dataset " + projectId + ":" + statement.datasetTarget());
+                }
+            }
+            default -> { }
+        }
+    }
 
     private void executeStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
                                   StoredJob job) {
@@ -821,7 +877,6 @@ public class BigQueryService {
         return projectId + ":" + ref.datasetId() + "." + ref.tableId();
     }
 
-    private BigQuerySqlEngine.Tables tables(String projectId) {
     BigQuerySqlEngine.Tables tables(String projectId) {
         return new BigQuerySqlEngine.Tables() {
             @Override
@@ -904,7 +959,10 @@ public class BigQueryService {
 
     public void deleteJob(String projectId, String jobId) {
         StoredJob job = getJob(projectId, jobId);
-        if (job.getDestinationTableId() != null) {
+        // "Requests the deletion of the metadata of a job", so only the anonymous result table this
+        // emulator created goes with it. A destination table the caller named is their resource and
+        // outlives the job.
+        if (job.getDestinationTableId() != null && ANON_DATASET.equals(job.getDestinationDatasetId())) {
             String key = tableKey(job.getDestinationDatasetId(), job.getDestinationTableId());
             tableStore.delete(key);
             dataStore.delete(key);

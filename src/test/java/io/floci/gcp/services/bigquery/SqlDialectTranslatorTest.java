@@ -220,6 +220,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void dropWithTrailingGarbageIsASyntaxErrorRatherThanADrop() {
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                "DROP TABLE ds.t GARBAGE", "test-project", null)).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                "DROP VIEW ds.v EXTRA TOKENS", "test-project", null)).getReason());
+
+        // The shapes that are real syntax still parse.
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE,
+                SqlDialectTranslator.parseStatement("DROP TABLE ds.t", "test-project", null).kind());
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE,
+                SqlDialectTranslator.parseStatement("DROP TABLE IF EXISTS ds.t", "test-project", null).kind());
+        assertTrue(SqlDialectTranslator.parseStatement("DROP SCHEMA ds CASCADE", "test-project", null).cascade());
+    }
+
+    @Test
     void missingOrMalformedParametersAreRejected() {
         assertThrows(GcpException.class, () -> translate("SELECT @missing AS x"));
         GcpException e = assertThrows(GcpException.class, () -> SqlDialectTranslator.translate("SELECT @n AS x",

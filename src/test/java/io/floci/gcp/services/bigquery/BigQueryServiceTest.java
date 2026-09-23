@@ -398,6 +398,43 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void deleteJobKeepsACallerSuppliedDestinationTable() {
+        seedTwoRows();
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "kept"), "WRITE_TRUNCATE", null);
+        StoredJob job = service.query(PROJECT, "US", null, options);
+        assertEquals("kept", job.getDestinationTableId());
+
+        // jobs.delete "requests the deletion of the metadata of a job", so a table the caller
+        // named has to survive it, unlike the emulator's own anonymous result table.
+        service.deleteJob(PROJECT, job.getJobId());
+        assertThrows(GcpException.class, () -> service.getJob(PROJECT, job.getJobId()));
+        assertNotNull(service.getTable(PROJECT, DATASET, "kept"));
+        assertEquals(2, service.storedRows(PROJECT, DATASET, "kept").size());
+    }
+
+    @Test
+    void dryRunDmlAndDdlReportTheErrorARealRunWould() {
+        seedTwoRows();
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("DELETE FROM ds1.missing WHERE TRUE", null, List.of(),
+                        null, true, false))).getGcpStatus());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("DROP TABLE ds1.missing", null, List.of(),
+                        null, true, false))).getGcpStatus());
+        assertEquals("duplicate", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("CREATE TABLE ds1.t1 (id INT64)", null, List.of(),
+                        null, true, false))).getReason());
+
+        // A dry run that is valid still reports success and writes nothing.
+        StoredJob ok = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "DROP TABLE IF EXISTS ds1.missing", null, List.of(), null, true, false));
+        assertTrue(ok.isDryRun());
+        assertNotNull(service.getTable(PROJECT, DATASET, TABLE));
+    }
+
+    @Test
     void anonymousDatasetNeverAppearsInListings() {
         seedTwoRows();
         service.query(PROJECT, "US", null, "SELECT * FROM ds1.t1", null);
@@ -680,6 +717,7 @@ class BigQueryServiceTest {
             }
         });
         assertEquals(3, service.storedRows(PROJECT, DATASET, TABLE).size());
+    }
 
     // ── DDL without the SQL engine ──
 

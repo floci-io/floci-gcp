@@ -341,6 +341,7 @@ class BigQueryTest {
 
         assertThat(bigquery.delete(DatasetId.of(PROJECT_ID, dataset),
                 BigQuery.DatasetDeleteOption.deleteContents())).isTrue();
+    }
 
     @Test
     @Order(18)

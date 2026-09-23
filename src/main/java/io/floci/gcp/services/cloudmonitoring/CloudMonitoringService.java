@@ -138,8 +138,8 @@ public class CloudMonitoringService {
     // ── Metric Descriptors ───────────────────────────────────────────────────
 
     public MetricDescriptor createMetricDescriptor(String parentProject, MetricDescriptor descriptor) {
-        var descriptorStore = scoped(this.descriptorStore, parentProject);
-        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
+        StorageBackend<String, String> descriptorStore = scoped(this.descriptorStore, parentProject);
+        StorageBackend<String, StoredTimeSeriesPoint> timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         String type = descriptor.getType();
         if (type == null || type.isBlank()) {
             throw GcpException.invalidArgument("MetricDescriptor must have a non-empty type");
@@ -183,8 +183,8 @@ public class CloudMonitoringService {
     }
 
     public MetricDescriptor getMetricDescriptor(String name) {
-        var descriptorStore = scoped(this.descriptorStore, name);
-        var timeSeriesStore = scoped(this.timeSeriesStore, name);
+        StorageBackend<String, String> descriptorStore = scoped(this.descriptorStore, name);
+        StorageBackend<String, StoredTimeSeriesPoint> timeSeriesStore = scoped(this.timeSeriesStore, name);
         String type = parseMetricType(name);
         return descriptorStore.get(type)
                 .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
@@ -193,8 +193,8 @@ public class CloudMonitoringService {
 
     public PageToken.Page<MetricDescriptor> listMetricDescriptors(String parentProject, String filter,
                                                                   int pageSize, String pageToken) {
-        var descriptorStore = scoped(this.descriptorStore, parentProject);
-        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
+        StorageBackend<String, String> descriptorStore = scoped(this.descriptorStore, parentProject);
+        StorageBackend<String, StoredTimeSeriesPoint> timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         List<MetricDescriptor> all = descriptorStore.scan(k -> true).stream()
                 .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
                 .sorted(Comparator.comparing(MetricDescriptor::getType))
@@ -213,8 +213,8 @@ public class CloudMonitoringService {
     }
 
     public void deleteMetricDescriptor(String name) {
-        var descriptorStore = scoped(this.descriptorStore, name);
-        var timeSeriesStore = scoped(this.timeSeriesStore, name);
+        StorageBackend<String, String> descriptorStore = scoped(this.descriptorStore, name);
+        StorageBackend<String, StoredTimeSeriesPoint> timeSeriesStore = scoped(this.timeSeriesStore, name);
         String type = parseMetricType(name);
         if (!type.startsWith("custom.googleapis.com/") && !type.startsWith("external.googleapis.com/")) {
             throw GcpException.invalidArgument("Only user-created custom metrics can be deleted: " + name);
@@ -253,8 +253,8 @@ public class CloudMonitoringService {
     // ── Time Series ──────────────────────────────────────────────────────────
 
     public void createTimeSeries(String parentProject, List<TimeSeries> timeSeriesList) {
-        var descriptorStore = scoped(this.descriptorStore, parentProject);
-        var timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
+        StorageBackend<String, String> descriptorStore = scoped(this.descriptorStore, parentProject);
+        StorageBackend<String, StoredTimeSeriesPoint> timeSeriesStore = scoped(this.timeSeriesStore, parentProject);
         if (timeSeriesList.isEmpty()) {
             throw GcpException.invalidArgument("CreateTimeSeriesRequest must contain at least one time series");
         }

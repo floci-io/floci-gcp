@@ -18,114 +18,114 @@ import java.util.UUID;
 @ApplicationScoped
 public class CredentialTokenService {
 
-	public static final String FLOCI_TOKEN_PREFIX = "floci-gcp-";
-	public static final String IMPERSONATED_TOKEN_PREFIX = "floci-gcp-impersonated-";
-	public static final String DOWNSCOPED_TOKEN_PREFIX = "floci-gcp-downscoped-";
-	public static final long DEFAULT_LIFETIME_SECONDS = 3600;
+    public static final String FLOCI_TOKEN_PREFIX = "floci-gcp-";
+    public static final String IMPERSONATED_TOKEN_PREFIX = "floci-gcp-impersonated-";
+    public static final String DOWNSCOPED_TOKEN_PREFIX = "floci-gcp-downscoped-";
+    public static final long DEFAULT_LIFETIME_SECONDS = 3600;
 
-	private final StorageBackend<String, StoredCredentialToken> tokenStore;
-	private final Clock clock;
+    private final StorageBackend<String, StoredCredentialToken> tokenStore;
+    private final Clock clock;
 
-	@Inject
-	public CredentialTokenService(StorageFactory storageFactory) {
-		this(storageFactory.createGlobal("credential-tokens", "credential-tokens.json",
-				new TypeReference<Map<String, StoredCredentialToken>>() {}),
-				Clock.systemUTC());
-	}
+    @Inject
+    public CredentialTokenService(StorageFactory storageFactory) {
+        this(storageFactory.createGlobal("credential-tokens", "credential-tokens.json",
+                new TypeReference<Map<String, StoredCredentialToken>>() {}),
+                Clock.systemUTC());
+    }
 
-	public CredentialTokenService(StorageBackend<String, StoredCredentialToken> tokenStore, Clock clock) {
-		this.tokenStore = tokenStore;
-		this.clock = clock;
-	}
+    public CredentialTokenService(StorageBackend<String, StoredCredentialToken> tokenStore, Clock clock) {
+        this.tokenStore = tokenStore;
+        this.clock = clock;
+    }
 
-	public StoredCredentialToken mintImpersonatedToken(String principal, Instant expireTime) {
-		if (principal == null || principal.isBlank()) {
-			throw GcpException.invalidArgument("service account is required");
-		}
-		if (expireTime == null || !expireTime.isAfter(clock.instant())) {
-			throw GcpException.invalidArgument("expireTime must be in the future");
-		}
+    public StoredCredentialToken mintImpersonatedToken(String principal, Instant expireTime) {
+        if (principal == null || principal.isBlank()) {
+            throw GcpException.invalidArgument("service account is required");
+        }
+        if (expireTime == null || !expireTime.isAfter(clock.instant())) {
+            throw GcpException.invalidArgument("expireTime must be in the future");
+        }
 
-		String tokenValue = IMPERSONATED_TOKEN_PREFIX + UUID.randomUUID();
-		StoredCredentialToken token = new StoredCredentialToken(
-				tokenValue,
-				StoredCredentialToken.TokenKind.IMPERSONATED,
-				expireTime,
-				null,
-				principal,
-				List.of());
-		tokenStore.put(tokenValue, token);
-		return token;
-	}
+        String tokenValue = IMPERSONATED_TOKEN_PREFIX + UUID.randomUUID();
+        StoredCredentialToken token = new StoredCredentialToken(
+                tokenValue,
+                StoredCredentialToken.TokenKind.IMPERSONATED,
+                expireTime,
+                null,
+                principal,
+                List.of());
+        tokenStore.put(tokenValue, token);
+        return token;
+    }
 
-	/**
-	 * Mints a token constrained by the requested Credential Access Boundary.
-	 *
-	 * <p>Floci-issued downscoped tokens cannot be exchanged again because this
-	 * service does not intersect the existing and requested boundaries. Replacing
-	 * the existing boundary could broaden the token's authority.</p>
-	 */
-	public MintedDownscopedToken mintDownscopedToken(String sourceToken,
-			List<CredentialAccessBoundaryRule> gcsRules) {
-		if (sourceToken == null || sourceToken.isBlank()) {
-			throw GcpException.invalidArgument("subject_token is required");
-		}
-		if (gcsRules == null || gcsRules.isEmpty()) {
-			throw GcpException.invalidArgument("credential access boundary rules are required");
-		}
+    /**
+     * Mints a token constrained by the requested Credential Access Boundary.
+     *
+     * <p>Floci-issued downscoped tokens cannot be exchanged again because this
+     * service does not intersect the existing and requested boundaries. Replacing
+     * the existing boundary could broaden the token's authority.</p>
+     */
+    public MintedDownscopedToken mintDownscopedToken(String sourceToken,
+            List<CredentialAccessBoundaryRule> gcsRules) {
+        if (sourceToken == null || sourceToken.isBlank()) {
+            throw GcpException.invalidArgument("subject_token is required");
+        }
+        if (gcsRules == null || gcsRules.isEmpty()) {
+            throw GcpException.invalidArgument("credential access boundary rules are required");
+        }
 
-		Instant now = clock.instant();
-		Optional<StoredCredentialToken> storedSource = lookupBearerToken(sourceToken, now);
-		if (storedSource.isPresent()
-				&& storedSource.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
-			throw GcpException.invalidArgument("A downscoped token cannot be used as a subject token");
-		}
-		Instant expireTime = storedSource
-				.map(StoredCredentialToken::getExpireTime)
-				.orElseGet(() -> now.plusSeconds(DEFAULT_LIFETIME_SECONDS));
-		String principal = storedSource
-				.map(StoredCredentialToken::getPrincipal)
-				.orElse(null);
-		if (storedSource.isPresent() && (principal == null || principal.isBlank())) {
-			throw GcpException.invalidArgument("Floci impersonated subject token has no principal");
-		}
+        Instant now = clock.instant();
+        Optional<StoredCredentialToken> storedSource = lookupBearerToken(sourceToken, now);
+        if (storedSource.isPresent()
+                && storedSource.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
+            throw GcpException.invalidArgument("A downscoped token cannot be used as a subject token");
+        }
+        Instant expireTime = storedSource
+                .map(StoredCredentialToken::getExpireTime)
+                .orElseGet(() -> now.plusSeconds(DEFAULT_LIFETIME_SECONDS));
+        String principal = storedSource
+                .map(StoredCredentialToken::getPrincipal)
+                .orElse(null);
+        if (storedSource.isPresent() && (principal == null || principal.isBlank())) {
+            throw GcpException.invalidArgument("Floci impersonated subject token has no principal");
+        }
 
-		String tokenValue = DOWNSCOPED_TOKEN_PREFIX + UUID.randomUUID();
-		StoredCredentialToken token = new StoredCredentialToken(
-				tokenValue,
-				StoredCredentialToken.TokenKind.DOWNSCOPED,
-				expireTime,
-				null,
-				principal,
-				gcsRules);
-		tokenStore.put(tokenValue, token);
-		return new MintedDownscopedToken(token, Duration.between(now, expireTime).toSeconds());
-	}
+        String tokenValue = DOWNSCOPED_TOKEN_PREFIX + UUID.randomUUID();
+        StoredCredentialToken token = new StoredCredentialToken(
+                tokenValue,
+                StoredCredentialToken.TokenKind.DOWNSCOPED,
+                expireTime,
+                null,
+                principal,
+                gcsRules);
+        tokenStore.put(tokenValue, token);
+        return new MintedDownscopedToken(token, Duration.between(now, expireTime).toSeconds());
+    }
 
-	public Optional<StoredCredentialToken> lookupBearerToken(String bearerToken) {
-		return lookupBearerToken(bearerToken, clock.instant());
-	}
+    public Optional<StoredCredentialToken> lookupBearerToken(String bearerToken) {
+        return lookupBearerToken(bearerToken, clock.instant());
+    }
 
-	private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
-		if (bearerToken == null || bearerToken.isBlank()
-				|| (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
-						&& !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
-			return Optional.empty();
-		}
+    private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
+        if (bearerToken == null || bearerToken.isBlank()
+                || (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
+                        && !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
+            return Optional.empty();
+        }
 
-		StoredCredentialToken token = tokenStore.get(bearerToken)
-				.orElseThrow(() -> GcpException.unauthenticated("Unknown Floci credential token"));
-		if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
-			tokenStore.delete(bearerToken);
-			throw GcpException.unauthenticated("Expired Floci credential token");
-		}
-		return Optional.of(token);
-	}
+        StoredCredentialToken token = tokenStore.get(bearerToken)
+                .orElseThrow(() -> GcpException.unauthenticated("Unknown Floci credential token"));
+        if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
+            tokenStore.delete(bearerToken);
+            throw GcpException.unauthenticated("Expired Floci credential token");
+        }
+        return Optional.of(token);
+    }
 
-	public void clear() {
-		tokenStore.clear();
-	}
+    public void clear() {
+        tokenStore.clear();
+    }
 
-	public record MintedDownscopedToken(StoredCredentialToken token, long expiresInSeconds) {
-	}
+    public record MintedDownscopedToken(StoredCredentialToken token, long expiresInSeconds) {
+    }
 }

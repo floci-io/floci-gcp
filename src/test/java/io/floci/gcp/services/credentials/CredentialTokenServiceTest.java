@@ -18,117 +18,117 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CredentialTokenServiceTest {
 
-	private static final Instant NOW = Instant.parse("2026-07-15T12:00:00Z");
-	private final InMemoryStorage<String, StoredCredentialToken> store = new InMemoryStorage<>();
-	private final CredentialTokenService service =
-			new CredentialTokenService(store, Clock.fixed(NOW, ZoneOffset.UTC));
+    private static final Instant NOW = Instant.parse("2026-07-15T12:00:00Z");
+    private final InMemoryStorage<String, StoredCredentialToken> store = new InMemoryStorage<>();
+    private final CredentialTokenService service =
+            new CredentialTokenService(store, Clock.fixed(NOW, ZoneOffset.UTC));
 
-	@Test
-	void storesAndRetrievesDownscopedToken() {
-		CredentialTokenService.MintedDownscopedToken minted =
-				service.mintDownscopedToken("source-token", rules());
-		StoredCredentialToken token = minted.token();
+    @Test
+    void storesAndRetrievesDownscopedToken() {
+        CredentialTokenService.MintedDownscopedToken minted =
+                service.mintDownscopedToken("source-token", rules());
+        StoredCredentialToken token = minted.token();
 
-		Optional<StoredCredentialToken> resolved = service.lookupBearerToken(token.getTokenValue());
+        Optional<StoredCredentialToken> resolved = service.lookupBearerToken(token.getTokenValue());
 
-		assertEquals(CredentialTokenService.DEFAULT_LIFETIME_SECONDS, minted.expiresInSeconds());
-		assertTrue(resolved.isPresent());
-		assertEquals(StoredCredentialToken.TokenKind.DOWNSCOPED, resolved.get().getTokenKind());
-		assertEquals(NOW.plusSeconds(CredentialTokenService.DEFAULT_LIFETIME_SECONDS),
-				resolved.get().getExpireTime());
-		assertNull(resolved.get().getSourceToken());
-		assertNull(resolved.get().getPrincipal());
-		assertEquals("bucket", resolved.get().getGcsRules().getFirst().getBucket());
-	}
+        assertEquals(CredentialTokenService.DEFAULT_LIFETIME_SECONDS, minted.expiresInSeconds());
+        assertTrue(resolved.isPresent());
+        assertEquals(StoredCredentialToken.TokenKind.DOWNSCOPED, resolved.get().getTokenKind());
+        assertEquals(NOW.plusSeconds(CredentialTokenService.DEFAULT_LIFETIME_SECONDS),
+                resolved.get().getExpireTime());
+        assertNull(resolved.get().getSourceToken());
+        assertNull(resolved.get().getPrincipal());
+        assertEquals("bucket", resolved.get().getGcsRules().getFirst().getBucket());
+    }
 
-	@Test
-	void inheritsStoredSourceExpiration() {
-		StoredCredentialToken source = service.mintImpersonatedToken(
-				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
+    @Test
+    void inheritsStoredSourceExpiration() {
+        StoredCredentialToken source = service.mintImpersonatedToken(
+                "test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
 
-		CredentialTokenService.MintedDownscopedToken minted =
-				service.mintDownscopedToken(source.getTokenValue(), rules());
+        CredentialTokenService.MintedDownscopedToken minted =
+                service.mintDownscopedToken(source.getTokenValue(), rules());
 
-		assertEquals(1200, minted.expiresInSeconds());
-		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
-		assertNull(minted.token().getSourceToken());
-		assertEquals(source.getPrincipal(), minted.token().getPrincipal());
-	}
+        assertEquals(1200, minted.expiresInSeconds());
+        assertEquals(source.getExpireTime(), minted.token().getExpireTime());
+        assertNull(minted.token().getSourceToken());
+        assertEquals(source.getPrincipal(), minted.token().getPrincipal());
+    }
 
-	@Test
-	void inheritsStoredSourceExpirationBeyondDefaultLifetime() {
-		StoredCredentialToken source = service.mintImpersonatedToken(
-				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(7200));
+    @Test
+    void inheritsStoredSourceExpirationBeyondDefaultLifetime() {
+        StoredCredentialToken source = service.mintImpersonatedToken(
+                "test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(7200));
 
-		CredentialTokenService.MintedDownscopedToken minted =
-				service.mintDownscopedToken(source.getTokenValue(), rules());
+        CredentialTokenService.MintedDownscopedToken minted =
+                service.mintDownscopedToken(source.getTokenValue(), rules());
 
-		assertEquals(7200, minted.expiresInSeconds());
-		assertEquals(source.getExpireTime(), minted.token().getExpireTime());
-	}
+        assertEquals(7200, minted.expiresInSeconds());
+        assertEquals(source.getExpireTime(), minted.token().getExpireTime());
+    }
 
-	@Test
-	void rejectsDownscopedTokenAsSource() {
-		String sourceToken = service.mintDownscopedToken("external-token", rules()).token().getTokenValue();
+    @Test
+    void rejectsDownscopedTokenAsSource() {
+        String sourceToken = service.mintDownscopedToken("external-token", rules()).token().getTokenValue();
 
-		GcpException ex = assertThrows(GcpException.class,
-				() -> service.mintDownscopedToken(sourceToken, rules()));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.mintDownscopedToken(sourceToken, rules()));
 
-		assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
-	}
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
 
-	@Test
-	void storesAndRetrievesImpersonatedTokenWithoutAccessRules() {
-		StoredCredentialToken token = service.mintImpersonatedToken(
-				"test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
+    @Test
+    void storesAndRetrievesImpersonatedTokenWithoutAccessRules() {
+        StoredCredentialToken token = service.mintImpersonatedToken(
+                "test@test-project.iam.gserviceaccount.com", NOW.plusSeconds(1200));
 
-		Optional<StoredCredentialToken> resolved = service.lookupBearerToken(token.getTokenValue());
+        Optional<StoredCredentialToken> resolved = service.lookupBearerToken(token.getTokenValue());
 
-		assertTrue(resolved.isPresent());
-		assertEquals(StoredCredentialToken.TokenKind.IMPERSONATED, resolved.get().getTokenKind());
-		assertEquals(NOW.plusSeconds(1200), resolved.get().getExpireTime());
-		assertEquals("test@test-project.iam.gserviceaccount.com", resolved.get().getPrincipal());
-		assertTrue(resolved.get().getGcsRules().isEmpty());
-	}
+        assertTrue(resolved.isPresent());
+        assertEquals(StoredCredentialToken.TokenKind.IMPERSONATED, resolved.get().getTokenKind());
+        assertEquals(NOW.plusSeconds(1200), resolved.get().getExpireTime());
+        assertEquals("test@test-project.iam.gserviceaccount.com", resolved.get().getPrincipal());
+        assertTrue(resolved.get().getGcsRules().isEmpty());
+    }
 
-	@Test
-	void expiredTokenIsRejectedAndRemoved() {
-		StoredCredentialToken expired = new StoredCredentialToken(
-				CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "expired",
-				StoredCredentialToken.TokenKind.DOWNSCOPED,
-				NOW.minusSeconds(1),
-				"source-token",
-				null,
-				rules());
-		store.put(expired.getTokenValue(), expired);
+    @Test
+    void expiredTokenIsRejectedAndRemoved() {
+        StoredCredentialToken expired = new StoredCredentialToken(
+                CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "expired",
+                StoredCredentialToken.TokenKind.DOWNSCOPED,
+                NOW.minusSeconds(1),
+                "source-token",
+                null,
+                rules());
+        store.put(expired.getTokenValue(), expired);
 
-		GcpException ex = assertThrows(GcpException.class,
-				() -> service.lookupBearerToken(expired.getTokenValue()));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.lookupBearerToken(expired.getTokenValue()));
 
-		assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
-		assertFalse(store.get(expired.getTokenValue()).isPresent());
-	}
+        assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+        assertFalse(store.get(expired.getTokenValue()).isPresent());
+    }
 
-	@Test
-	void unknownFlociTokenIsRejected() {
-		GcpException ex = assertThrows(GcpException.class,
-				() -> service.lookupBearerToken(CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "missing"));
+    @Test
+    void unknownFlociTokenIsRejected() {
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.lookupBearerToken(CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "missing"));
 
-		assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
-	}
+        assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+    }
 
-	@Test
-	void unmanagedTokenReturnsEmptyLookupForLaterBypassContract() {
-		assertTrue(service.lookupBearerToken("external-token").isEmpty());
-		assertTrue(service.lookupBearerToken(
-				CredentialTokenService.FLOCI_TOKEN_PREFIX + "oauth-token").isEmpty());
-		assertTrue(service.lookupBearerToken(null).isEmpty());
-	}
+    @Test
+    void unmanagedTokenReturnsEmptyLookupForLaterBypassContract() {
+        assertTrue(service.lookupBearerToken("external-token").isEmpty());
+        assertTrue(service.lookupBearerToken(
+                CredentialTokenService.FLOCI_TOKEN_PREFIX + "oauth-token").isEmpty());
+        assertTrue(service.lookupBearerToken(null).isEmpty());
+    }
 
-	private static List<CredentialAccessBoundaryRule> rules() {
-		return List.of(new CredentialAccessBoundaryRule(
-				"bucket",
-				"data/",
-				List.of(CredentialAccessBoundaryParser.LEGACY_OBJECT_READER)));
-	}
+    private static List<CredentialAccessBoundaryRule> rules() {
+        return List.of(new CredentialAccessBoundaryRule(
+                "bucket",
+                "data/",
+                List.of(CredentialAccessBoundaryParser.LEGACY_OBJECT_READER)));
+    }
 }

@@ -355,15 +355,42 @@ public class BigQueryController {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    @SuppressWarnings("unchecked")
     private static BigQueryService.QueryOptions queryOptions(Map<String, Object> config, boolean dryRun) {
         Map<String, Object> defaultDataset = asMap(config.get("defaultDataset"));
-        String defaultDatasetId = defaultDataset != null ? (String) defaultDataset.get("datasetId") : null;
-        List<Map<String, Object>> parameters = config.get("queryParameters") instanceof List<?> list
-                ? (List<Map<String, Object>>) list : List.of();
+        String defaultDatasetId = defaultDataset != null ? string(defaultDataset.get("datasetId"),
+                "defaultDataset.datasetId") : null;
         Boolean useLegacySql = config.get("useLegacySql") instanceof Boolean b ? b : null;
-        return new BigQueryService.QueryOptions((String) config.get("query"), defaultDatasetId, parameters,
-                (String) config.get("parameterMode"), dryRun, useLegacySql);
+        return new BigQueryService.QueryOptions(string(config.get("query"), "query"), defaultDatasetId,
+                queryParameters(config.get("queryParameters")), string(config.get("parameterMode"),
+                        "parameterMode"), dryRun, useLegacySql);
+    }
+
+    /**
+     * Checks the element type rather than casting the list: erasure makes the cast succeed and the
+     * failure surface later as a ClassCastException, which has no exception mapper and so reaches
+     * the client as a 500 with no GCP error body at all.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> queryParameters(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (!(raw instanceof List<?> list)) {
+            throw QueryEngine.invalidQuery("queryParameters must be an array");
+        }
+        for (Object entry : list) {
+            if (!(entry instanceof Map<?, ?>)) {
+                throw QueryEngine.invalidQuery("Each entry of queryParameters must be an object");
+            }
+        }
+        return (List<Map<String, Object>>) list;
+    }
+
+    private static String string(Object raw, String field) {
+        if (raw == null || raw instanceof String) {
+            return (String) raw;
+        }
+        throw QueryEngine.invalidQuery(field + " must be a string");
     }
 
     private static QueryResponse buildDryRunResponse(StoredJob job) {

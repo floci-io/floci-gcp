@@ -132,6 +132,8 @@ floci-gcp:
       mock: false
       duck:
         default-image: "floci/floci-duck:latest"
+        # Point at an already running floci-duck; empty starts one per emulator.
+        url:
         # Only needed when `url` points at a sidecar that cannot reach floci-gcp through the
         # resolved docker host. Empty means "derive it".
         callback-url:

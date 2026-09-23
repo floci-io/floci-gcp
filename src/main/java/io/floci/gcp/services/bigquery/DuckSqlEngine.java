@@ -166,8 +166,26 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         try {
             return client.query(sql, setup, flociEndpoint);
         } catch (DuckClient.DuckSqlException e) {
-            throw SqlDialectTranslator.invalidQuery(e.getMessage());
+            throw engineFailure(e.getMessage());
         }
+    }
+
+    /**
+     * Not every failure the sidecar reports is a problem with the caller's SQL. Staging fetches the
+     * rows over HTTP, so an unreachable callback URL or an out-of-memory arrives on the same channel
+     * as a syntax error. Reporting those as invalidQuery tells the caller their query is wrong and
+     * stops SDKs retrying something that is really an infrastructure fault.
+     */
+    private static GcpException engineFailure(String message) {
+        String text = message == null ? "" : message;
+        if (text.startsWith("IO Error") || text.contains("HTTP Error") || text.contains("Connection Error")) {
+            return GcpException.unavailable("The BigQuery SQL engine could not read the staged table data: "
+                    + text);
+        }
+        if (text.contains("Out of Memory Error")) {
+            return GcpException.internal("The BigQuery SQL engine ran out of memory: " + text);
+        }
+        return SqlDialectTranslator.invalidQuery(text);
     }
 
     /**
@@ -232,7 +250,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      * sidecar this process started, but a pre-configured one may sit somewhere that alias does not
      * reach, so an explicit callback URL wins when it is set.
      */
-    private String flociEndpoint() {
+    String flociEndpoint() {
         String configured = config.services().bigquery().duck().callbackUrl().orElse("");
         if (!configured.isBlank()) {
             return configured.endsWith("/") ? configured.substring(0, configured.length() - 1) : configured;

@@ -260,6 +260,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 | Cloud SQL for PostgreSQL and MySQL | `postgres:15.18-alpine` (15-18), `mysql:8.0.46` / `mysql:8.4.11` | PostgreSQL or MySQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
 | GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
+| BigQuery | `floci/floci-duck:latest` | GoogleSQL queries executed on a DuckDB engine | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` |
 
 Docker-backed services require the Docker socket:
 
@@ -282,6 +283,7 @@ docker run -d --name floci-gcp \
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL80_IMAGE` | `mysql:8.0.46` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL84_IMAGE` | `mysql:8.4.11` |
 | `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` |
+| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` |
 
 ## Persistence and Storage Modes
 

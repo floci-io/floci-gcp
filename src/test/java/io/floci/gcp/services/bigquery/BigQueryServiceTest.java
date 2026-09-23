@@ -657,4 +657,28 @@ class BigQueryServiceTest {
         assertEquals("original", patched.getDescription());
         assertEquals("96", String.valueOf(patched.getExtra().get("maxTimeTravelHours")));
     }
+
+    @Test
+    void storedRowsAndEngineRowsAreSnapshotsNotTheLiveList() {
+        seedTwoRows();
+
+        // Deterministic interleaving, no threads: hold the list an engine would be iterating,
+        // let insertAll append to the backing list, then keep iterating. A live list throws
+        // ConcurrentModificationException here; a snapshot does not.
+        List<Map<String, Object>> streaming = service.storedRows(PROJECT, DATASET, TABLE);
+        List<Map<String, Object>> engineRows = service.tables(PROJECT).rows(DATASET, TABLE);
+        insertRows(Map.of("name", "carol", "age", 41));
+
+        assertEquals(2, streaming.size());
+        assertEquals(2, engineRows.size());
+        assertDoesNotThrow(() -> {
+            for (Map<String, Object> row : streaming) {
+                assertNotNull(row);
+            }
+            for (Map<String, Object> row : engineRows) {
+                assertNotNull(row);
+            }
+        });
+        assertEquals(3, service.storedRows(PROJECT, DATASET, TABLE).size());
+    }
 }

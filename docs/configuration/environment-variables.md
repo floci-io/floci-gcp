@@ -147,6 +147,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | When `true`, queries run on a built-in SQL subset and no floci-duck container is started |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | Image of the DuckDB sidecar that executes GoogleSQL queries |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck at this URL instead of starting a container |
+| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_CALLBACK_URL` | _(derived)_ | Base URL the sidecar reads staged rows back from. Only needed when `DUCK_URL` points at a sidecar that cannot reach floci-gcp through the resolved docker host |
 
 ### GKE (Kubernetes Engine)
 

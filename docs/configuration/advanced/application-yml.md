@@ -112,6 +112,11 @@ floci-gcp:
       enabled: true
     bigquery:
       enabled: true
+      mock: false                     # true runs a built-in SQL subset, no container
+      duck:
+        default-image: "floci/floci-duck:latest"
+        url:                          # point at an already running floci-duck
+        callback-url:                 # only when that sidecar cannot reach the docker host
     gke:
       enabled: true
       mock: false                     # false starts real rancher/k3s clusters

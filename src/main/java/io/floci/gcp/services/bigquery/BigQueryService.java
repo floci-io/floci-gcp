@@ -513,7 +513,7 @@ public class BigQueryService {
         return job;
     }
 
-    private BigQuerySqlEngine.Tables tables(String projectId) {
+    BigQuerySqlEngine.Tables tables(String projectId) {
         return new BigQuerySqlEngine.Tables() {
             @Override
             public Table table(String datasetId, String tableId) {
@@ -522,7 +522,10 @@ public class BigQueryService {
 
             @Override
             public List<Map<String, Object>> rows(String datasetId, String tableId) {
-                return dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new).getRows();
+                // A snapshot for the same reason storedRows takes one: the engines iterate these
+                // rows (to estimate bytes, and to evaluate in mock mode) while insertAll can be
+                // appending to the very same list.
+                return storedRows(projectId, datasetId, tableId);
             }
         };
     }

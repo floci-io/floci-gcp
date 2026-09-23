@@ -549,4 +549,42 @@ class BigQueryRestIntegrationTest {
                 .then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalid"));
     }
+
+    @Test
+    @Order(11)
+    void malformedQueryRequestFieldsReturnAGcpErrorNotA500() {
+        // Erasure makes the queryParameters cast succeed, so a bad element used to surface as a
+        // ClassCastException. Nothing maps that, so the client got a 500 with no error body.
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT @p", "useLegacySql": false, "queryParameters": ["oops"]}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT 1", "useLegacySql": false, "queryParameters": {"name": "p"}}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": 5, "useLegacySql": false}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT 1", "useLegacySql": false, "parameterMode": 7}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
 }

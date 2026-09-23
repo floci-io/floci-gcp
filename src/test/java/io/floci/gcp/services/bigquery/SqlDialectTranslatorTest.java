@@ -194,6 +194,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void malformedBoolParameterIsRejectedRatherThanCoercedToFalse() {
+        String out = SqlDialectTranslator.translate("SELECT * FROM ds.t WHERE active = @flag",
+                "test-project", null, new SqlDialectTranslator.QueryParameters(
+                        List.of(param("flag", "BOOL", "TRUE")), "NAMED")).sql();
+        assertEquals("SELECT * FROM \"ds\".\"t\" WHERE active = TRUE", out);
+
+        // "yes" is not a BOOL literal. Coercing it to FALSE would silently invert the predicate,
+        // so it fails the query the way a malformed INT64 already does.
+        GcpException e = assertThrows(GcpException.class, () -> SqlDialectTranslator.translate(
+                "SELECT * FROM ds.t WHERE active = @flag", "test-project", null,
+                new SqlDialectTranslator.QueryParameters(List.of(param("flag", "BOOL", "yes")), "NAMED")));
+        assertEquals("invalidQuery", e.getReason());
+    }
+
+    @Test
     void missingOrMalformedParametersAreRejected() {
         assertThrows(GcpException.class, () -> translate("SELECT @missing AS x"));
         GcpException e = assertThrows(GcpException.class, () -> SqlDialectTranslator.translate("SELECT @n AS x",

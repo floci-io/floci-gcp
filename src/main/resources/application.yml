@@ -132,6 +132,9 @@ floci-gcp:
       mock: false
       duck:
         default-image: "floci/floci-duck:latest"
+        # Only needed when `url` points at a sidecar that cannot reach floci-gcp through the
+        # resolved docker host. Empty means "derive it".
+        callback-url:
     gke:
       enabled: true
       mock: false

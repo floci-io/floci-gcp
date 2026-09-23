@@ -1094,7 +1094,7 @@ final class SqlDialectTranslator {
                 return switch (typeName) {
                     case "INT64", "INTEGER" -> "CAST(" + Long.parseLong(text.trim()) + " AS BIGINT)";
                     case "FLOAT64", "FLOAT" -> floatLiteral(text.trim());
-                    case "BOOL", "BOOLEAN" -> Boolean.parseBoolean(text.trim()) ? "TRUE" : "FALSE";
+                    case "BOOL", "BOOLEAN" -> boolLiteral(text.trim(), typeName);
                     case "NUMERIC", "BIGNUMERIC" -> "CAST(" + DuckTypes.quoteLiteral(
                             new BigDecimal(text.trim()).toPlainString()) + " AS DECIMAL(38,9))";
                     case "BYTES" -> "from_base64(" + DuckTypes.quoteLiteral(text) + ")";
@@ -1103,6 +1103,21 @@ final class SqlDialectTranslator {
             } catch (NumberFormatException e) {
                 throw invalidQuery("Invalid " + typeName + " query parameter value: " + text);
             }
+        }
+
+        /**
+         * Boolean.parseBoolean turns anything that is not "true" into false, so a malformed value
+         * would quietly flip a predicate instead of failing the query, unlike the numeric types in
+         * the same switch.
+         */
+        private static String boolLiteral(String text, String typeName) {
+            if (text.equalsIgnoreCase("true")) {
+                return "TRUE";
+            }
+            if (text.equalsIgnoreCase("false")) {
+                return "FALSE";
+            }
+            throw invalidQuery("Invalid " + typeName + " query parameter value: " + text);
         }
 
         private static String floatLiteral(String text) {

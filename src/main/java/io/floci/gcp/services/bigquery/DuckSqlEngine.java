@@ -227,8 +227,16 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return total;
     }
 
-    /** floci-gcp's base URL as reachable from inside the floci-duck container. */
+    /**
+     * floci-gcp's base URL as reachable from the sidecar. The resolved docker host is right for a
+     * sidecar this process started, but a pre-configured one may sit somewhere that alias does not
+     * reach, so an explicit callback URL wins when it is set.
+     */
     private String flociEndpoint() {
+        String configured = config.services().bigquery().duck().callbackUrl().orElse("");
+        if (!configured.isBlank()) {
+            return configured.endsWith("/") ? configured.substring(0, configured.length() - 1) : configured;
+        }
         return "http://" + dockerHostResolver.resolve() + ":" + config.port();
     }
 

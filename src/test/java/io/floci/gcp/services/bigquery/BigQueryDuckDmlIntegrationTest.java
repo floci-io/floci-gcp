@@ -224,4 +224,54 @@ class BigQueryDuckDmlIntegrationTest {
                 .when().post(BASE + "/queries").then().statusCode(200);
         query("SELECT COUNT(*) AS n FROM dry.t").then().body("rows", hasSize(1)).body("rows[0].f[0].v", equalTo("0"));
     }
+
+    @Test
+    @Order(9)
+    void destinationWritesRespectTheDeclaredSchema() {
+        query("CREATE SCHEMA typed_ds").then().statusCode(200);
+        given().contentType("application/json")
+                .body("""
+                        {"tableReference": {"tableId": "typed"}, "schema": {"fields": [
+                          {"name": "id", "type": "INTEGER", "mode": "REQUIRED"},
+                          {"name": "total", "type": "INTEGER"}]}}
+                        """)
+                .when().post(BASE + "/datasets/typed_ds/tables").then().statusCode(200);
+        Map<String, Object> destination = Map.of("datasetId", "typed_ds", "tableId", "typed");
+
+        // A value the declared column cannot hold is rejected, rather than stored and breaking
+        // every later read of the table.
+        insertJob(Map.of("query", "SELECT 1 AS id, 'abc' AS total", "useLegacySql", false,
+                "destinationTable", destination, "writeDisposition", "WRITE_APPEND")).then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalidQuery"));
+
+        // A REQUIRED column the query does not produce is rejected too.
+        insertJob(Map.of("query", "SELECT 5 AS total", "useLegacySql", false,
+                "destinationTable", destination, "writeDisposition", "WRITE_APPEND")).then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalidQuery"));
+
+        // ALLOW_FIELD_RELAXATION is the documented escape hatch, and it relaxes the mode.
+        insertJob(Map.of("query", "SELECT 5 AS total", "useLegacySql", false,
+                "destinationTable", destination, "writeDisposition", "WRITE_APPEND",
+                "schemaUpdateOptions", List.of("ALLOW_FIELD_RELAXATION"))).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+        given().when().get(BASE + "/datasets/typed_ds/tables/typed").then()
+                .body("schema.fields[0].mode", equalTo("NULLABLE"));
+
+        // A well-typed write still works.
+        insertJob(Map.of("query", "SELECT 2 AS id, 20 AS total", "useLegacySql", false,
+                "destinationTable", destination, "writeDisposition", "WRITE_APPEND")).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+    }
+
+    @Test
+    @Order(10)
+    void destinationTableWithoutATableIdIsRejected() {
+        // This used to return a DONE job and persist a table under the key "shop/null".
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false,
+                "destinationTable", Map.of("datasetId", "typed_ds"))).then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalid"));
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false,
+                "destinationTable", Map.of("tableId", "orphan"))).then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalid"));
+    }
 }

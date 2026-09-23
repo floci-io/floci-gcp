@@ -483,7 +483,18 @@ public class BigQueryService {
     public record QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                                String parameterMode, boolean dryRun, Boolean useLegacySql,
                                TableReference destinationTable, String writeDisposition,
-                               String createDisposition) {
+                               String createDisposition, List<String> schemaUpdateOptions) {
+
+        public QueryOptions {
+            schemaUpdateOptions = schemaUpdateOptions != null ? schemaUpdateOptions : List.of();
+        }
+
+        public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
+                            String parameterMode, boolean dryRun, Boolean useLegacySql,
+                            TableReference destinationTable, String writeDisposition, String createDisposition) {
+            this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
+                    writeDisposition, createDisposition, List.of());
+        }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql) {
@@ -772,6 +783,12 @@ public class BigQueryService {
             throw QueryEngine.invalidQuery("Cross-project destination tables are not supported by the floci"
                     + " BigQuery emulator");
         }
+        if (destination.getDatasetId() == null || destination.getDatasetId().isBlank()) {
+            throw GcpException.invalidArgument("destinationTable.datasetId is required").withReason("invalid");
+        }
+        if (destination.getTableId() == null || destination.getTableId().isBlank()) {
+            throw GcpException.invalidArgument("destinationTable.tableId is required").withReason("invalid");
+        }
         SqlDialectTranslator.TableRef target = new SqlDialectTranslator.TableRef(destination.getDatasetId(),
                 destination.getTableId());
         getDataset(projectId, target.datasetId());
@@ -793,17 +810,23 @@ public class BigQueryService {
             throw QueryEngine.invalidQuery("Cannot write query results to view " + qualified(projectId, target));
         }
         List<Map<String, Object>> current = storedRows(projectId, target.datasetId(), target.tableId());
+        boolean relaxed = options.schemaUpdateOptions().stream()
+                .anyMatch(option -> "ALLOW_FIELD_RELAXATION".equalsIgnoreCase(option));
         switch (write) {
             case "WRITE_TRUNCATE" -> {
                 table.setSchema(result.schema());
                 tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
                 replaceRows(projectId, target, result.rows());
             }
-            case "WRITE_TRUNCATE_DATA" -> replaceRows(projectId, target, alignRows(projectId, target, table,
-                    result));
+            case "WRITE_TRUNCATE_DATA" -> {
+                List<Map<String, Object>> rows = alignRows(projectId, target, table, result, relaxed);
+                relaxSchemaIfRequested(projectId, target, table, relaxed);
+                replaceRows(projectId, target, rows);
+            }
             case "WRITE_APPEND" -> {
                 List<Map<String, Object>> rows = new ArrayList<>(current);
-                rows.addAll(alignRows(projectId, target, table, result));
+                rows.addAll(alignRows(projectId, target, table, result, relaxed));
+                relaxSchemaIfRequested(projectId, target, table, relaxed);
                 replaceRows(projectId, target, rows);
             }
             default -> {
@@ -820,7 +843,8 @@ public class BigQueryService {
 
     /** Result rows keyed by the existing table's field names; every result column must exist there. */
     private static List<Map<String, Object>> alignRows(String projectId, SqlDialectTranslator.TableRef target,
-                                                       Table table, BigQuerySqlEngine.Result result) {
+                                                       Table table, BigQuerySqlEngine.Result result,
+                                                       boolean relaxed) {
         List<TableFieldSchema> fields = table.getSchema() != null && table.getSchema().getFields() != null
                 ? table.getSchema().getFields() : List.of();
         Map<String, String> byLower = new LinkedHashMap<>();
@@ -838,9 +862,60 @@ public class BigQueryService {
                 out.put(field.getName(), null);
             }
             row.forEach((k, v) -> out.put(byLower.get(k.toLowerCase(Locale.ROOT)), v));
-            aligned.add(out);
+            aligned.add(enforceSchema(projectId, target, fields, out, relaxed));
         }
         return aligned;
+    }
+
+    /**
+     * WRITE_APPEND and WRITE_TRUNCATE_DATA keep "the constraints and schema of the existing table",
+     * so the declared schema decides what may be stored, exactly as it does for insertAll. Matching
+     * only column names let a value of the wrong type land in a column: the write reported success,
+     * tabledata.list then returned a cell the SDK cannot parse, and the next query over the table
+     * failed while staging it. Relaxing a REQUIRED field needs ALLOW_FIELD_RELAXATION.
+     */
+    private static Map<String, Object> enforceSchema(String projectId, SqlDialectTranslator.TableRef target,
+                                                     List<TableFieldSchema> fields, Map<String, Object> row,
+                                                     boolean relaxed) {
+        for (TableFieldSchema field : fields) {
+            Object value = row.get(field.getName());
+            if (value == null) {
+                if ("REQUIRED".equals(field.getMode()) && !relaxed) {
+                    throw QueryEngine.invalidQuery("Missing required field: " + field.getName()
+                            + " in table " + qualified(projectId, target)
+                            + ". Use schemaUpdateOptions ALLOW_FIELD_RELAXATION to write null into it.");
+                }
+                continue;
+            }
+            try {
+                row.put(field.getName(), RowCodec.coerceValue(field, value));
+            } catch (IllegalArgumentException e) {
+                throw QueryEngine.invalidQuery("Provided Schema does not match Table "
+                        + qualified(projectId, target) + ". Field " + field.getName() + ": " + e.getMessage());
+            }
+        }
+        return row;
+    }
+
+    private void relaxSchemaIfRequested(String projectId, SqlDialectTranslator.TableRef target,
+                                        Table table, boolean relaxed) {
+        if (!relaxed) {
+            return;
+        }
+        relaxRequiredFields(table);
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+    }
+
+    /** "ALLOW_FIELD_RELAXATION: allow relaxing a required field in the original schema to nullable." */
+    private static void relaxRequiredFields(Table table) {
+        if (table.getSchema() == null || table.getSchema().getFields() == null) {
+            return;
+        }
+        table.getSchema().getFields().forEach(field -> {
+            if ("REQUIRED".equals(field.getMode())) {
+                field.setMode("NULLABLE");
+            }
+        });
     }
 
     private void putTable(String projectId, SqlDialectTranslator.TableRef target, Table table,

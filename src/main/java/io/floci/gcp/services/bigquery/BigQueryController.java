@@ -371,7 +371,8 @@ public class BigQueryController {
                 queryParameters(config.get("queryParameters")),
                 string(config.get("parameterMode"), "parameterMode"), dryRun, useLegacySql, destinationTable,
                 string(config.get("writeDisposition"), "writeDisposition"),
-                string(config.get("createDisposition"), "createDisposition"));
+                string(config.get("createDisposition"), "createDisposition"),
+                schemaUpdateOptions(config.get("schemaUpdateOptions")));
     }
 
     /**
@@ -393,6 +394,20 @@ public class BigQueryController {
             }
         }
         return (List<Map<String, Object>>) list;
+    }
+
+    private static List<String> schemaUpdateOptions(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (!(raw instanceof List<?> list)) {
+            throw QueryEngine.invalidQuery("schemaUpdateOptions must be an array");
+        }
+        List<String> options = new ArrayList<>(list.size());
+        for (Object entry : list) {
+            options.add(string(entry, "schemaUpdateOptions entry"));
+        }
+        return options;
     }
 
     private static String string(Object raw, String field) {

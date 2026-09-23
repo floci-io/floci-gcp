@@ -3,6 +3,7 @@ package io.floci.gcp.services.bigquery;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.bigquery.model.Dataset;
+import io.floci.gcp.services.bigquery.model.DatasetAccessEntry;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.StoredJob;
@@ -11,6 +12,7 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
+import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -629,5 +631,30 @@ class BigQueryServiceTest {
         onCreate.setExtra("expirationTime", "soon");
         assertEquals("invalid", assertThrows(GcpException.class,
                 () -> service.createTable(PROJECT, DATASET, onCreate)).getReason());
+    }
+
+    @Test
+    void aclOnlyPatchIgnoresMetadataEntirely() {
+        Dataset created = newDataset(DATASET);
+        created.setDescription("original");
+        created.setExtra("maxTimeTravelHours", "96");
+        service.createDataset(PROJECT, created);
+
+        DatasetAccessEntry entry = new DatasetAccessEntry();
+        entry.setRole("READER");
+        entry.setUserByEmail("reader@example.com");
+        Dataset patch = new Dataset();
+        patch.setAccess(List.of(entry));
+        patch.setDescription("should be ignored");
+        // Invalid metadata on an ACL-only write is ignored rather than rejected: UPDATE_ACL
+        // "leaves metadata alone", so nothing here reaches validation.
+        patch.setExtra("maxTimeTravelHours", "24");
+
+        Dataset patched = service.patchDataset(PROJECT, DATASET, patch, UpdateMode.UPDATE_ACL);
+
+        assertEquals(1, patched.getAccess().size());
+        assertEquals("reader@example.com", patched.getAccess().get(0).getUserByEmail());
+        assertEquals("original", patched.getDescription());
+        assertEquals("96", String.valueOf(patched.getExtra().get("maxTimeTravelHours")));
     }
 }

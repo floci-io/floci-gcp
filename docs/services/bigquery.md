@@ -52,8 +52,10 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
 Every client-writable Table and Dataset property of the BigQuery v2 API is stored and returned
 as sent, so SDK and Terraform round-trips keep partitioning, clustering, expiration, collation,
 rounding mode, encryption configuration, constraints, resource tags and view definitions.
-`PATCH` merges the fields in the request (an explicit `null` clears one); `PUT` replaces them all.
-Dataset `access` entries are not stored yet.
+`PATCH` merges the fields in the request (an explicit `null` clears one); `PUT` replaces them all,
+except `linkedDatasetSource`: the reference says it "cannot be updated once it is set", so an
+attempt to change it on either verb is ignored rather than rejected. With `updateMode=UPDATE_ACL`
+neither verb touches these fields at all.
 
 Server-side behavior driven by these fields:
 
@@ -62,7 +64,8 @@ Server-side behavior driven by these fields:
   `timePartitioning.expirationMs` (and then no table expiration). An explicit value on the table
   wins. `defaultTableExpirationMs: 0` in a dataset `PATCH` clears the default.
 - A table past its `expirationTime` is deleted when it is next read or listed.
-- Output fields are filled in: dataset `type` (`DEFAULT`), `location` (`US` when not given) and
+- Output fields are filled in: dataset `type` (`LINKED` with a `linkedDatasetSource`, `EXTERNAL`
+  with an `externalDatasetReference`, otherwise `DEFAULT`), `location` (`US` when not given) and
   `maxTimeTravelHours` (`168` when not set); table `location` (the dataset's),
   `numLongTermBytes` and `selfLink`. Tables created with `view`, `materializedView` or
   `externalDataConfiguration` get the matching `type`.

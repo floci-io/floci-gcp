@@ -131,11 +131,11 @@ public class BigQueryService {
     /** datasets.patch, honouring {@code updateMode}. */
     public Dataset patchDataset(String projectId, String datasetId, Dataset patch, UpdateMode mode) {
         Dataset existing = getDataset(projectId, datasetId);
-        Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
-        BigQueryMetadata.patch(candidate, patch.getExtra(), BigQueryMetadata.DATASET_FIELDS);
-        clearZeroDefaultExpiration(candidate);
-        BigQueryMetadata.validateDataset(candidate);
         if (mode.touchesMetadata()) {
+            Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
+            BigQueryMetadata.patch(candidate, patch.getExtra(), BigQueryMetadata.DATASET_FIELDS);
+            clearZeroDefaultExpiration(candidate);
+            BigQueryMetadata.validateDataset(candidate);
             if (patch.getFriendlyName() != null) {
                 existing.setFriendlyName(patch.getFriendlyName());
             }
@@ -145,12 +145,12 @@ public class BigQueryService {
             if (patch.getLabels() != null) {
                 existing.setLabels(patch.getLabels());
             }
+            replaceExtra(existing.getExtra(), candidate);
+            BigQueryMetadata.fillDatasetOutputs(existing);
         }
         if (mode.touchesAcl() && patch.getAccess() != null) {
             existing.setAccess(patch.getAccess());
         }
-        replaceExtra(existing.getExtra(), candidate);
-        BigQueryMetadata.fillDatasetOutputs(existing);
         existing.setLastModifiedTime(nowMillis());
         existing.setEtag(etag());
         datasetStore.put(datasetId, existing);

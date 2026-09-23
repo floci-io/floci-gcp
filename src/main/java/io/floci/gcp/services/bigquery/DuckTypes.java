@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -479,7 +480,7 @@ final class DuckTypes {
             offset = offset.charAt(0) + hh + ":" + mm;
         }
         OffsetDateTime parsed = OffsetDateTime.parse(m.group(1) + "T" + m.group(2) + offset);
-        java.time.Instant instant = parsed.withOffsetSameInstant(ZoneOffset.UTC).toInstant();
+        Instant instant = parsed.withOffsetSameInstant(ZoneOffset.UTC).toInstant();
         long micros = Math.addExact(Math.multiplyExact(instant.getEpochSecond(), 1_000_000L),
                 instant.getNano() / 1_000);
         return microsToSeconds(micros);

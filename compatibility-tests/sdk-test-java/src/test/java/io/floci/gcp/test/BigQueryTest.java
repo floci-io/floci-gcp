@@ -305,7 +305,7 @@ class BigQueryTest {
     }
 
     @Test
-    @Order(13)
+    @Order(17)
     void partitioningClusteringAndDefaultsRoundTrip() {
         String dataset = DATASET + "_meta";
         bigquery.create(DatasetInfo.newBuilder(dataset)

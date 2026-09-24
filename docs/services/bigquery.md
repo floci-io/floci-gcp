@@ -72,7 +72,17 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is
-  an HTTP 400.
+  an HTTP 400. DML and DDL dry runs resolve every table the statement reads or writes, and DML is
+  bound against those tables, so a dry run fails wherever the real run would.
+- **Destination tables**: `jobs.insert` honors `configuration.query.destinationTable` with
+  `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
+  (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
+  reported in the job status (`duplicate`, `notFound`); any other disposition value is an
+  HTTP 400 (`invalid`).
+- **Views**: logical and materialized views, created with `tables.insert` (`view.query`) or
+  DDL. The view query is validated and its schema derived on creation; views are expanded at
+  query time, including views over views. A materialized view is evaluated on read, like a
+  logical view.
 - **Timestamp output**: `formatOptions.useInt64Timestamp` and
   `formatOptions.timestampOutputFormat` (`FLOAT64`, `INT64`, `ISO8601_STRING`) are honored on
   `jobs.query`, `getQueryResults` and `tabledata.list`. The default is epoch seconds, which is
@@ -136,6 +146,29 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `JSON`, `RECORD` (with nested fields) and `REPEATED`
   arrays.
 
+## DML and DDL
+
+| Statement | Notes |
+|---|---|
+| `INSERT [INTO] t [(cols)] VALUES ... / SELECT ...` | `numDmlAffectedRows`, `dmlStats.insertedRowCount` |
+| `UPDATE t SET ... [FROM ...] WHERE ...` | `WHERE` is required, as in BigQuery |
+| `DELETE [FROM] t WHERE ...` | `WHERE` is required |
+| `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
+| `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); `PARTITION BY`, `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query |
+| `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
+| `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
+| `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE \| RESTRICT]` | Datasets; a non-empty dataset needs `CASCADE`. `CASCADE`/`RESTRICT` are rejected on `DROP TABLE`/`VIEW` |
+
+DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREATE`, `REPLACE`,
+`SKIP`, `DROP`) and `ddlTargetTable` / `ddlTargetDataset`. DML and DDL results have no rows, so
+`getQueryResults` returns `totalRows: "0"` and the SDKs return an empty result.
+
+DML needs a floci-duck image that supports `followup_sql` (see
+[floci-duck](https://github.com/floci-io/floci-duck)). Table, dataset and plain `CREATE TABLE` /
+`DROP` / `TRUNCATE` statements run without the SQL engine, so they also work in mock mode.
+
 Errors: invalid SQL via `jobs.query` returns HTTP 400 with reason `invalidQuery`; via
 `jobs.insert` it returns an HTTP 200 `DONE` job carrying `status.errorResult` (and
 `getQueryResults` on that job returns HTTP 400), matching real job semantics. Error messages
@@ -176,11 +209,15 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
-- DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`), DDL (`CREATE TABLE`, ...), multi-statement
-  scripts, user `destinationTable` and write dispositions are not supported yet; they fail with
-  `invalidQuery`.
+- Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW`, `CREATE FUNCTION` /
+  `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported yet; they fail with `invalidQuery`.
+- DML statements are applied atomically per statement by reading and rewriting the whole target
+  table; there is no fine-grained DML or streaming-buffer interaction.
+- Table-level `PARTITION BY`, `CLUSTER BY` and `OPTIONS` in DDL are not stored.
 - Legacy SQL (`useLegacySql: true`) is rejected. A request that omits `useLegacySql` runs as
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
+- `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias
+  (`UNNEST(array) AS x`) the element is one column `x`.
 - `UNNEST ... WITH OFFSET`, `INFORMATION_SCHEMA`, wildcard tables, `FOR SYSTEM_TIME AS OF`,
   `GEOGRAPHY` functions, BigQuery ML and remote functions are not emulated.
 - `ARRAY_AGG(... IGNORE NULLS)`, `SAFE.`-prefixed functions and GoogleSQL `WEEK` boundaries

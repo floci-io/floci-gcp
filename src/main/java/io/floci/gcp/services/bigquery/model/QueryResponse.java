@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
+import java.util.Map;
 
 /** Response shape for {@code jobs.query} (POST /queries) and {@code getQueryResults}. */
 @RegisterForReflection
@@ -20,6 +21,8 @@ public class QueryResponse {
     private Boolean cacheHit;
     private String totalBytesProcessed;
     private List<ErrorProto> errors;
+    private String numDmlAffectedRows;
+    private Map<String, String> dmlStats;
 
     public String getKind() { return kind; }
     public void setKind(String kind) { this.kind = kind; }
@@ -50,4 +53,10 @@ public class QueryResponse {
 
     public List<ErrorProto> getErrors() { return errors; }
     public void setErrors(List<ErrorProto> errors) { this.errors = errors; }
+
+    public String getNumDmlAffectedRows() { return numDmlAffectedRows; }
+    public void setNumDmlAffectedRows(String numDmlAffectedRows) { this.numDmlAffectedRows = numDmlAffectedRows; }
+
+    public Map<String, String> getDmlStats() { return dmlStats; }
+    public void setDmlStats(Map<String, String> dmlStats) { this.dmlStats = dmlStats; }
 }

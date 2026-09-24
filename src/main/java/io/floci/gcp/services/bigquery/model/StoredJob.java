@@ -3,6 +3,8 @@ package io.floci.gcp.services.bigquery.model;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Map;
+
 /**
  * Internal persisted representation of a query job, keyed by {@code jobId}. Result rows
  * are materialized into a hidden anonymous table ({@code destinationDatasetId} /
@@ -31,6 +33,12 @@ public class StoredJob {
     /** Dry runs are never persisted; they carry the result schema instead of rows. */
     private boolean dryRun;
     private TableSchema schema;
+    private String numDmlAffectedRows;
+    /** {@code DmlStatistics}: insertedRowCount, updatedRowCount, deletedRowCount. */
+    private Map<String, String> dmlStats;
+    private String ddlOperationPerformed;
+    private TableReference ddlTargetTable;
+    private DatasetReference ddlTargetDataset;
 
     public String getJobId() { return jobId; }
     public void setJobId(String jobId) { this.jobId = jobId; }
@@ -76,6 +84,21 @@ public class StoredJob {
 
     public TableSchema getSchema() { return schema; }
     public void setSchema(TableSchema schema) { this.schema = schema; }
+
+    public String getNumDmlAffectedRows() { return numDmlAffectedRows; }
+    public void setNumDmlAffectedRows(String numDmlAffectedRows) { this.numDmlAffectedRows = numDmlAffectedRows; }
+
+    public Map<String, String> getDmlStats() { return dmlStats; }
+    public void setDmlStats(Map<String, String> dmlStats) { this.dmlStats = dmlStats; }
+
+    public String getDdlOperationPerformed() { return ddlOperationPerformed; }
+    public void setDdlOperationPerformed(String ddlOperationPerformed) { this.ddlOperationPerformed = ddlOperationPerformed; }
+
+    public TableReference getDdlTargetTable() { return ddlTargetTable; }
+    public void setDdlTargetTable(TableReference ddlTargetTable) { this.ddlTargetTable = ddlTargetTable; }
+
+    public DatasetReference getDdlTargetDataset() { return ddlTargetDataset; }
+    public void setDdlTargetDataset(DatasetReference ddlTargetDataset) { this.ddlTargetDataset = ddlTargetDataset; }
 
     public boolean failed() {
         return errorReason != null;

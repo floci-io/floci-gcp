@@ -117,6 +117,15 @@ final class RowCodec {
                 .findFirst().orElse(null);
     }
 
+    /**
+     * Coerces one value to a declared field, the way {@code insertAll} does. Query jobs writing into
+     * a destination table need the same check, because the declared schema is authoritative there
+     * too. Throws {@link IllegalArgumentException} with the caller-facing message.
+     */
+    static Object coerceValue(TableFieldSchema field, Object raw) {
+        return coerce(field, raw, false);
+    }
+
     private static Object coerce(TableFieldSchema field, Object raw, boolean ignoreUnknownValues) {
         if ("REPEATED".equals(field.getMode())) {
             if (!(raw instanceof List<?> list)) {

@@ -86,6 +86,11 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void unaliasedUnnestExpandsStructFields() {
+        assertEquals("SELECT * FROM (SELECT UNNEST([1, 2], max_depth := 2))", sql("SELECT * FROM UNNEST([1, 2])"));
+    }
+
+    @Test
     void implicitArrayPathBecomesUnnest() {
         assertEquals("SELECT tag FROM \"ds\".\"t\" AS \"x\", UNNEST(\"x\".\"tags\") AS \"_unnest_tag\"(\"tag\")",
                 sql("SELECT tag FROM ds.t AS x, x.tags AS tag"));
@@ -124,6 +129,12 @@ class SqlDialectTranslatorTest {
     void columnsNamedLikeDuckDbKeywordsAreQuoted() {
         assertEquals("SELECT \"table\", t.\"primary\", \"check\" AS c, LEFT(s, 1) AS l FROM \"ds\".\"t\" AS \"t\"",
                 sql("SELECT table, t.primary, check AS c, LEFT(s, 1) AS l FROM ds.t AS t"));
+    }
+
+    @Test
+    void nestedGenericCastTypes() {
+        assertEquals("SELECT CAST(x AS STRUCT(\"a\" BIGINT[])[]) AS c",
+                sql("SELECT CAST(x AS ARRAY<STRUCT<a ARRAY<INT64>>>) AS c"));
     }
 
     // ── Column naming ────────────────────────────────────────────────────────
@@ -209,6 +220,33 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void dropWithTrailingGarbageIsASyntaxErrorRatherThanADrop() {
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                "DROP TABLE ds.t GARBAGE", "test-project", null)).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                "DROP VIEW ds.v EXTRA TOKENS", "test-project", null)).getReason());
+
+        // The shapes that are real syntax still parse.
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE,
+                SqlDialectTranslator.parseStatement("DROP TABLE ds.t", "test-project", null).kind());
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE,
+                SqlDialectTranslator.parseStatement("DROP TABLE IF EXISTS ds.t", "test-project", null).kind());
+        assertTrue(SqlDialectTranslator.parseStatement("DROP SCHEMA ds CASCADE", "test-project", null).cascade());
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_SCHEMA,
+                SqlDialectTranslator.parseStatement("DROP SCHEMA ds RESTRICT", "test-project", null).kind());
+    }
+
+    @Test
+    void cascadeAndRestrictAreOnlyValidOnDropSchema() {
+        for (String sql : List.of("DROP TABLE ds.t CASCADE", "DROP TABLE ds.t RESTRICT", "DROP VIEW ds.v CASCADE",
+                "DROP MATERIALIZED VIEW ds.v RESTRICT")) {
+            GcpException e = assertThrows(GcpException.class,
+                    () -> SqlDialectTranslator.parseStatement(sql, "test-project", null), sql);
+            assertEquals("invalidQuery", e.getReason(), sql);
+        }
+    }
+
+    @Test
     void missingOrMalformedParametersAreRejected() {
         assertThrows(GcpException.class, () -> translate("SELECT @missing AS x"));
         GcpException e = assertThrows(GcpException.class, () -> SqlDialectTranslator.translate("SELECT @n AS x",
@@ -220,9 +258,103 @@ class SqlDialectTranslatorTest {
     // ── Unsupported statements ───────────────────────────────────────────────
 
     @Test
-    void dmlAndScriptsAreRejected() {
+    void selectTranslationRejectsDmlAndScripts() {
         assertTrue(invalid("INSERT INTO ds.t (a) VALUES (1)").getMessage().contains("INSERT"));
         assertTrue(invalid("SELECT 1; SELECT 2").getMessage().contains("scripts"));
+    }
+
+    // ── DML / DDL statements ─────────────────────────────────────────────────
+
+    private static SqlDialectTranslator.Statement statement(String sql) {
+        return SqlDialectTranslator.parseStatement(sql, "test-project", "ds");
+    }
+
+    private static String dml(String sql) {
+        return SqlDialectTranslator.translateDml(sql, "test-project", "ds",
+                SqlDialectTranslator.QueryParameters.none()).sql();
+    }
+
+    @Test
+    void classifiesDmlWithOptionalIntoAndFrom() {
+        SqlDialectTranslator.Statement insert = statement("INSERT ds.t (a) VALUES (1)");
+        assertEquals(SqlDialectTranslator.StatementKind.INSERT, insert.kind());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "t"), insert.target());
+        assertEquals("DELETE", statement("DELETE `test-project.ds.t` WHERE a = 1").statementType());
+        assertEquals("MERGE", statement("MERGE t USING s ON t.id = s.id WHEN MATCHED THEN DELETE").statementType());
+        assertEquals("TRUNCATE_TABLE", statement("TRUNCATE TABLE ds.t").statementType());
+    }
+
+    @Test
+    void updateAndDeleteNeedAWhereClause() {
+        GcpException e = assertThrows(GcpException.class, () -> statement("DELETE FROM ds.t"));
+        assertEquals("invalidQuery", e.getReason());
+        assertThrows(GcpException.class, () -> statement("UPDATE ds.t SET a = 1"));
+    }
+
+    @Test
+    void dmlIsTranslatedWithExplicitIntoFromAndAliases() {
+        assertEquals("INSERT INTO \"ds\".\"t\" (a, b) VALUES (1, 'x')", dml("INSERT ds.t (a, b) VALUES (1, \"x\")"));
+        assertEquals("DELETE FROM \"ds\".\"t\" WHERE a = 1", dml("DELETE ds.t WHERE a = 1"));
+        assertEquals("UPDATE \"ds\".\"t\" AS \"x\" SET a = 2 WHERE x.a = 1", dml("UPDATE ds.t x SET a = 2 WHERE x.a = 1"));
+        assertEquals("MERGE INTO \"ds\".\"t\" AS \"t\" USING \"ds\".\"s\" AS \"s\" ON t.id = s.id"
+                        + " WHEN MATCHED THEN DELETE RETURNING merge_action",
+                dml("MERGE ds.t t USING ds.s s ON t.id = s.id WHEN MATCHED THEN DELETE"));
+    }
+
+    @Test
+    void insertSelectStagesTheSourceTable() {
+        SqlDialectTranslator.Translation t = SqlDialectTranslator.translateDml(
+                "INSERT INTO ds.t SELECT * FROM ds.src WHERE x > 1", "test-project", "ds",
+                SqlDialectTranslator.QueryParameters.none());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t"), new SqlDialectTranslator.TableRef("ds", "src")),
+                t.tables());
+    }
+
+    @Test
+    void createTableColumnsBecomeABigQuerySchema() {
+        SqlDialectTranslator.Statement create = statement("CREATE TABLE IF NOT EXISTS ds.t ("
+                + "id INT64 NOT NULL OPTIONS(description = 'key'), amount BIGNUMERIC(40, 2), tags ARRAY<STRING>, "
+                + "place STRUCT<city STRING, geo STRUCT<lat FLOAT64, lng FLOAT64>>, PRIMARY KEY (id) NOT ENFORCED)"
+                + " PARTITION BY DATE(_PARTITIONTIME) OPTIONS(description = 'orders')");
+        assertEquals("CREATE_TABLE", create.statementType());
+        assertTrue(create.ifNotExists());
+        List<io.floci.gcp.services.bigquery.model.TableFieldSchema> cols = create.columns();
+        assertEquals(List.of("id", "amount", "tags", "place"), cols.stream().map(c -> c.getName()).toList());
+        assertEquals("INTEGER", cols.get(0).getType());
+        assertEquals("REQUIRED", cols.get(0).getMode());
+        assertEquals("key", cols.get(0).getDescription());
+        assertEquals("BIGNUMERIC", cols.get(1).getType());
+        assertEquals("REPEATED", cols.get(2).getMode());
+        assertEquals("RECORD", cols.get(3).getType());
+        assertEquals("RECORD", cols.get(3).getFields().get(1).getType());
+        assertEquals("FLOAT", cols.get(3).getFields().get(1).getFields().get(0).getType());
+    }
+
+    @Test
+    void createTableAsSelectAndViewsKeepTheirQuery() {
+        SqlDialectTranslator.Statement ctas = statement("CREATE OR REPLACE TABLE ds.t AS SELECT a FROM ds.src");
+        assertEquals("CREATE_TABLE_AS_SELECT", ctas.statementType());
+        assertTrue(ctas.orReplace());
+        assertEquals("SELECT a FROM ds.src", ctas.querySql().trim());
+
+        SqlDialectTranslator.Statement view = statement("CREATE VIEW ds.v OPTIONS(description='x') AS SELECT 1 AS a");
+        assertEquals("CREATE_VIEW", view.statementType());
+        assertEquals("SELECT 1 AS a", view.querySql());
+        assertEquals("CREATE_MATERIALIZED_VIEW",
+                statement("CREATE MATERIALIZED VIEW ds.mv AS SELECT 1 AS a").statementType());
+    }
+
+    @Test
+    void dropAndSchemaStatements() {
+        SqlDialectTranslator.Statement drop = statement("DROP TABLE IF EXISTS ds.t");
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE, drop.kind());
+        assertTrue(drop.ifExists());
+        assertEquals("DROP_VIEW", statement("DROP VIEW ds.v").statementType());
+        SqlDialectTranslator.Statement schema = statement("DROP SCHEMA `test-project.old` CASCADE");
+        assertEquals("old", schema.datasetTarget());
+        assertTrue(schema.cascade());
+        assertEquals("CREATE_SCHEMA", statement("CREATE SCHEMA IF NOT EXISTS fresh").statementType());
+        assertThrows(GcpException.class, () -> statement("ALTER TABLE ds.t ADD COLUMN x INT64"));
     }
 
     @Test

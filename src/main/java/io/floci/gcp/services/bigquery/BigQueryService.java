@@ -28,6 +28,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -38,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * BigQuery: datasets/tables metadata, streaming inserts ({@code insertAll}), row reads and
@@ -1109,7 +1111,7 @@ public class BigQueryService {
                             badRecords++;
                             continue;
                         }
-                    } catch (java.io.IOException e) {
+                    } catch (IOException e) {
                         badRecords++;
                         continue;
                     }
@@ -1142,7 +1144,7 @@ public class BigQueryService {
         for (Map<String, Object> row : result.rows()) {
             try {
                 outputBytes += JSON.writeValueAsBytes(row).length;
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 throw GcpException.internal("Could not size loaded rows: " + e.getMessage());
             }
         }
@@ -1175,8 +1177,8 @@ public class BigQueryService {
             }
             List<String> names;
             if (object.contains("*")) {
-                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                        java.util.regex.Pattern.quote(object).replace("*", "\\E.*\\Q"));
+                Pattern pattern = Pattern.compile(
+                        Pattern.quote(object).replace("*", "\\E.*\\Q"));
                 names = gcsService.listObjects(bucket).stream().map(GcsObjectMeta::getName)
                         .filter(name -> pattern.matcher(name).matches()).sorted().toList();
             } else {

@@ -24,10 +24,15 @@ import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Media uploads for load jobs ({@code jobs.insert} with {@code supportsMediaUpload}): the
@@ -43,8 +48,24 @@ import java.util.concurrent.ConcurrentHashMap;
 public class BigQueryUploadController {
 
     private static final int RESUME_INCOMPLETE = 308;
+    private static final Pattern CONTENT_RANGE = Pattern.compile("bytes (?:(\\*)|(\\d+)-(\\d+))/(\\*|\\d+)");
 
-    private record Session(String projectId, Map<String, Object> job, ByteArrayOutputStream data) {}
+    /** An open resumable upload. Mutated only while holding its own monitor. */
+    private static final class Session {
+        private final String projectId;
+        private final Map<String, Object> job;
+        private final ByteArrayOutputStream data = new ByteArrayOutputStream();
+        private long total = -1;
+        private volatile long lastWriteMillis = System.currentTimeMillis();
+
+        private Session(String projectId, Map<String, Object> job) {
+            this.projectId = projectId;
+            this.job = job;
+        }
+    }
+
+    /** A parsed {@code Content-Range}: {@code start}/{@code end} are -1 for a {@code bytes *} status query. */
+    private record ContentRange(long start, long end, long total) {}
 
     private static Response incomplete(long received) {
         Response.ResponseBuilder builder = Response.status(RESUME_INCOMPLETE);
@@ -98,7 +119,7 @@ public class BigQueryUploadController {
         }
         if ("resumable".equalsIgnoreCase(uploadType)) {
             String id = UUID.randomUUID().toString().replace("-", "");
-            sessions.put(id, new Session(projectId, readJob(body), new ByteArrayOutputStream()));
+            sessions.put(id, new Session(projectId, readJob(body)));
             String location = RequestBaseUrl.resolve(uriInfo, headers, config.baseUrl(), config.port())
                     + "/upload/bigquery/v2/projects/" + projectId + "/jobs"
                     + "?uploadType=resumable&upload_id=" + id;
@@ -114,39 +135,120 @@ public class BigQueryUploadController {
             throw GcpException.notFound("Not found: upload session " + uploadId);
         }
         byte[] data = body != null ? body : new byte[0];
-        long total = -1;
         synchronized (session) {
-            if (contentRange != null && contentRange.startsWith("bytes ")) {
-                String[] rangeAndTotal = contentRange.substring("bytes ".length()).trim().split("/", 2);
-                if (rangeAndTotal.length == 2 && !rangeAndTotal[1].equals("*")) {
-                    total = Long.parseLong(rangeAndTotal[1].trim());
-                }
-                if (!rangeAndTotal[0].equals("*")) {
-                    long start = Long.parseLong(rangeAndTotal[0].split("-", 2)[0].trim());
-                    if (start > session.data().size()) {
-                        // A gap: the client resumed from an offset we never received. Appending
-                        // here would corrupt the payload, so report what we actually hold.
-                        return incomplete(session.data().size());
-                    }
-                    if (start < session.data().size()) {
-                        // Retransmission after a lost response: keep only the bytes before start.
-                        byte[] kept = Arrays.copyOf(session.data().toByteArray(), (int) start);
-                        session.data().reset();
-                        session.data().writeBytes(kept);
-                    }
-                    session.data().writeBytes(data);
-                }
-            } else {
-                session.data().writeBytes(data);
-                total = session.data().size();
+            if (sessions.get(uploadId) != session) {
+                throw GcpException.notFound("Not found: upload session " + uploadId);
             }
-            long received = session.data().size();
-            if (total < 0 || received < total) {
+            session.lastWriteMillis = System.currentTimeMillis();
+            if (contentRange == null) {
+                session.data.writeBytes(data);
+                session.total = session.data.size();
+            } else {
+                // Everything is validated before the session changes, so a rejected chunk leaves
+                // the bytes already held untouched.
+                ContentRange range = parseContentRange(contentRange, data.length);
+                long held = session.data.size();
+                if (range.total() >= 0) {
+                    if (session.total >= 0 && session.total != range.total()) {
+                        throw GcpException.invalidArgument("Content-Range total " + range.total()
+                                + " does not match the declared total " + session.total).withReason("invalid");
+                    }
+                    if (range.start() < 0 && range.total() < held) {
+                        throw GcpException.invalidArgument("Content-Range total " + range.total()
+                                + " is smaller than the " + held + " bytes already received").withReason("invalid");
+                    }
+                }
+                if (range.start() > held) {
+                    // A gap: the client resumed from an offset we never received. Appending
+                    // here would corrupt the payload, so report what we actually hold.
+                    return incomplete(held);
+                }
+                if (range.total() >= 0) {
+                    session.total = range.total();
+                }
+                if (range.start() >= 0) {
+                    if (range.start() < held) {
+                        // Retransmission after a lost response: keep only the bytes before start.
+                        byte[] kept = Arrays.copyOf(session.data.toByteArray(), (int) range.start());
+                        session.data.reset();
+                        session.data.writeBytes(kept);
+                    }
+                    session.data.writeBytes(data);
+                }
+            }
+            long received = session.data.size();
+            if (session.total < 0 || received < session.total) {
                 return incomplete(received);
             }
+            if (received > session.total) {
+                throw GcpException.invalidArgument("Received " + received + " bytes, more than the declared total "
+                        + session.total).withReason("invalid");
+            }
             sessions.remove(uploadId);
-            return Response.ok(runJob(session.projectId(), session.job(), session.data().toByteArray())).build();
+            return Response.ok(runJob(session.projectId, session.job, session.data.toByteArray())).build();
         }
+    }
+
+    /**
+     * {@code bytes <first>-<last>/<total|*>} for a chunk, or {@code bytes *}{@code /<total|*>} for a
+     * status query. A malformed header is a 400 rather than a NumberFormatException, and a chunk's
+     * range has to describe exactly the bytes in the request body.
+     */
+    private static ContentRange parseContentRange(String header, int bodyLength) {
+        Matcher m = CONTENT_RANGE.matcher(header.trim());
+        if (!m.matches()) {
+            throw GcpException.invalidArgument("Malformed Content-Range: " + header).withReason("invalid");
+        }
+        long total;
+        long start;
+        long end;
+        try {
+            total = m.group(4).equals("*") ? -1 : Long.parseLong(m.group(4));
+            start = m.group(1) != null ? -1 : Long.parseLong(m.group(2));
+            end = m.group(1) != null ? -1 : Long.parseLong(m.group(3));
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("Malformed Content-Range: " + header).withReason("invalid");
+        }
+        if (start < 0) {
+            if (bodyLength > 0) {
+                throw GcpException.invalidArgument("A Content-Range of bytes */" + m.group(4)
+                        + " cannot carry data").withReason("invalid");
+            }
+            return new ContentRange(-1, -1, total);
+        }
+        if (end < start || end - start + 1 != bodyLength) {
+            throw GcpException.invalidArgument("Content-Range " + header + " does not match the " + bodyLength
+                    + " bytes in the request").withReason("invalid");
+        }
+        if (total >= 0 && end >= total) {
+            throw GcpException.invalidArgument("Content-Range " + header + " ends past the declared total")
+                    .withReason("invalid");
+        }
+        return new ContentRange(start, end, total);
+    }
+
+    /**
+     * Drops resumable sessions whose last write is older than {@code idleMillis}, with the bytes
+     * they buffered. The sweep takes each session's monitor, so a chunk being written is never
+     * evicted mid-write. Returns the number of sessions dropped.
+     */
+    int evictExpiredSessions(long nowMillis, long idleMillis) {
+        int evicted = 0;
+        Iterator<Map.Entry<String, Session>> it = sessions.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, Session> entry = it.next();
+            Session session = entry.getValue();
+            synchronized (session) {
+                if (nowMillis - session.lastWriteMillis > idleMillis && sessions.remove(entry.getKey(), session)) {
+                    evicted++;
+                }
+            }
+        }
+        return evicted;
+    }
+
+    int openSessions() {
+        return sessions.size();
     }
 
     @SuppressWarnings("unchecked")
@@ -180,14 +282,14 @@ public class BigQueryUploadController {
         static Multipart parse(String contentType, byte[] body) {
             String boundary = boundary(contentType);
             byte[] delimiter = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
-            java.util.List<byte[]> parts = new java.util.ArrayList<>();
-            int position = indexOf(body, delimiter, 0);
+            List<byte[]> parts = new ArrayList<>();
+            int position = delimiterAt(body, delimiter, 0);
             while (position >= 0) {
                 int start = position + delimiter.length;
                 if (start + 1 < body.length && body[start] == '-' && body[start + 1] == '-') {
                     break; // closing delimiter
                 }
-                int next = indexOf(body, delimiter, start);
+                int next = delimiterAt(body, delimiter, start);
                 if (next < 0) {
                     break;
                 }
@@ -226,6 +328,27 @@ public class BigQueryUploadController {
                 end -= 1;
             }
             return Arrays.copyOfRange(part, start, end);
+        }
+
+        /**
+         * The next boundary delimiter, per RFC 2046 section 5.1.1: at the very start of the body or
+         * right after a line break, and followed by a line break, the closing {@code --}, or
+         * transport padding. The same bytes inside the media (a Parquet string, say) are data.
+         */
+        private static int delimiterAt(byte[] body, byte[] delimiter, int from) {
+            int candidate = indexOf(body, delimiter, from);
+            while (candidate >= 0) {
+                boolean lineStart = candidate == 0 || body[candidate - 1] == '\n';
+                int after = candidate + delimiter.length;
+                boolean lineEnd = after >= body.length || body[after] == '\r' || body[after] == '\n'
+                        || body[after] == ' ' || body[after] == '\t'
+                        || (body[after] == '-' && after + 1 < body.length && body[after + 1] == '-');
+                if (lineStart && lineEnd) {
+                    return candidate;
+                }
+                candidate = indexOf(body, delimiter, candidate + 1);
+            }
+            return -1;
         }
 
         private static int indexOf(byte[] data, byte[] pattern, int from) {

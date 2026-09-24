@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Runs GoogleSQL on the floci-duck sidecar. Each query:
@@ -164,7 +165,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     // ── Load jobs ─────────────────────────────────────────────────────────────
 
-    private static final java.util.regex.Pattern GENERIC_CSV_COLUMN = java.util.regex.Pattern.compile("column\\d+");
+    private static final Pattern GENERIC_CSV_COLUMN = Pattern.compile("column\\d+");
 
     @Override
     public Result readFiles(LoadSource source) {

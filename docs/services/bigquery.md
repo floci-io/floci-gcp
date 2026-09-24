@@ -14,6 +14,8 @@ Storage Read/Write gRPC API is not implemented yet.
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | Image of the SQL engine sidecar |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck instead of starting one |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_CALLBACK_URL` | _(derived)_ | Base URL the sidecar reads staged rows from. Only needed when `DUCK_URL` points somewhere the resolved docker host cannot reach, such as another machine |
+| `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable load-job upload is dropped with its buffered bytes. Lower it on long-lived instances |
+| `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | Interval between sweeps for expired upload sessions; `0` disables the sweeper |
 
 The SQL engine is the [floci-duck](https://github.com/floci-io/floci-duck) sidecar, the same one
 floci (AWS) uses for Athena. floci-gcp starts it through the host Docker daemon on the first

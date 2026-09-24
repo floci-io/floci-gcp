@@ -130,6 +130,8 @@ floci-gcp:
     bigquery:
       enabled: true
       mock: false
+      upload-session-idle-timeout-seconds: 604800
+      upload-session-sweep-interval-seconds: 3600
       duck:
         default-image: "floci/floci-duck:latest"
         # Point at an already running floci-duck; empty starts one per emulator.

@@ -1,18 +1,21 @@
 package io.floci.gcp.services.bigquery;
 
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -623,7 +626,7 @@ class BigQueryRestIntegrationTest {
                 .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
                 .then().statusCode(200)
                 .extract().header("Location");
-        org.junit.jupiter.api.Assertions.assertTrue(location.contains("upload_id="), location);
+        assertTrue(location.contains("upload_id="), location);
         String path = location.substring(location.indexOf("/upload/"));
 
         byte[] first = "{\"name\": \"a\", \"n\": 1}\n".getBytes();
@@ -653,5 +656,100 @@ class BigQueryRestIntegrationTest {
                 .then().statusCode(200)
                 .body("configuration.jobType", equalTo("LOAD"))
                 .body("status.errorResult.reason", notNullValue());
+    }
+
+    @Inject
+    BigQueryUploadController uploads;
+
+    private static String openResumable(String table) {
+        String location = given().contentType("application/json").body(LOAD_JOB.formatted(table))
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200)
+                .extract().header("Location");
+        return location.substring(location.indexOf("/upload/"));
+    }
+
+    @Test
+    @Order(15)
+    void resumableChunksWithABadContentRangeAreRejectedWithoutTouchingTheSession() {
+        String path = openResumable("ranges");
+        byte[] first = "{\"name\": \"a\", \"n\": 1}\n".getBytes();
+        byte[] last = "{\"name\": \"b\", \"n\": 2}\n".getBytes();
+        int total = first.length + last.length;
+        given().header("Content-Range", "bytes 0-" + (first.length - 1) + "/*").body(first)
+                .contentType("application/octet-stream").when().put(path)
+                .then().statusCode(308).header("Range", equalTo("bytes=0-" + (first.length - 1)));
+
+        String tail = "bytes " + first.length + "-";
+        for (String range : new String[] {
+                "bytes x-y/*",                                    // not numeric: a 400, not a 500
+                tail + (total - 2) + "/" + total,                 // one byte short of the body
+                tail + (total - 1) + "/" + (total - 1)}) {        // ends past its own total
+            given().header("Content-Range", range).body(last)
+                    .contentType("application/octet-stream").when().put(path)
+                    .then().statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"));
+        }
+
+        // A status query declares the total; a chunk naming another total is a conflict.
+        given().header("Content-Range", "bytes */" + total).contentType("application/octet-stream").when().put(path)
+                .then().statusCode(308);
+        given().header("Content-Range", tail + (total - 1) + "/" + (total + 1)).body(last)
+                .contentType("application/octet-stream").when().put(path)
+                .then().statusCode(400)
+                .body("error.message", containsString("does not match the declared total"));
+
+        // None of the rejected chunks touched the session: the real last chunk completes it.
+        given().header("Content-Range", tail + (total - 1) + "/" + total).body(last)
+                .contentType("application/octet-stream").when().put(path)
+                .then().statusCode(200)
+                .body("statistics.load.outputRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(16)
+    void aGapInResumableChunksReportsWhatIsHeld() {
+        String path = openResumable("gap");
+        byte[] first = "{\"name\": \"a\", \"n\": 1}\n".getBytes();
+        given().header("Content-Range", "bytes 0-" + (first.length - 1) + "/*").body(first)
+                .contentType("application/octet-stream").when().put(path).then().statusCode(308);
+        byte[] later = "{\"name\": \"c\", \"n\": 3}\n".getBytes();
+        int start = first.length + 10;
+        given().header("Content-Range", "bytes " + start + "-" + (start + later.length - 1) + "/*").body(later)
+                .contentType("application/octet-stream").when().put(path)
+                .then().statusCode(308).header("Range", equalTo("bytes=0-" + (first.length - 1)));
+        // Status query: what does the server hold?
+        given().header("Content-Range", "bytes */*").contentType("application/octet-stream").when().put(path)
+                .then().statusCode(308).header("Range", equalTo("bytes=0-" + (first.length - 1)));
+    }
+
+    @Test
+    @Order(17)
+    void multipartMediaContainingTheBoundaryTextIsNotTruncated() {
+        String boundary = "floci_boundary";
+        // The media carries "--floci_boundary" in the middle of a line: RFC 2046 only treats it as
+        // a delimiter at the start of a line.
+        String body = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+                + LOAD_JOB.formatted("boundary_in_media") + "\r\n--" + boundary
+                + "\r\nContent-Type: application/octet-stream\r\n\r\n"
+                + "{\"name\": \"x--" + boundary + "y\", \"n\": 1}\n{\"name\": \"b\", \"n\": 2}\r\n--" + boundary + "--\r\n";
+        given().contentType("multipart/related; boundary=" + boundary).body(body.getBytes())
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=multipart")
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("2"));
+        given().when().get(BASE + "/datasets/loads/tables/boundary_in_media/data").then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("x--" + boundary + "y"));
+    }
+
+    @Test
+    @Order(18)
+    void idleResumableSessionsAreEvictedAndActiveOnesKept() {
+        String idle = openResumable("idle");
+        long now = System.currentTimeMillis();
+        assertEquals(0, uploads.evictExpiredSessions(now, 60_000));
+        assertTrue(uploads.evictExpiredSessions(now + 120_000, 60_000) >= 1);
+        given().header("Content-Range", "bytes */*").contentType("application/octet-stream").when().put(idle)
+                .then().statusCode(404);
     }
 }

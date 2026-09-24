@@ -1,9 +1,9 @@
 package io.floci.gcp.services.bigquery;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.gcp.core.common.GcpException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import io.floci.gcp.core.common.GcpException;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.HeaderParam;

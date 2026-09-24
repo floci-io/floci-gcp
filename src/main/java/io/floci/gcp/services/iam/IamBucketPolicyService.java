@@ -6,6 +6,7 @@ import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -14,19 +15,24 @@ import java.util.Map;
 @ApplicationScoped
 public class IamBucketPolicyService {
 
+    private static final Logger LOG = Logger.getLogger(IamBucketPolicyService.class);
+
     private final IamService iamService;
     private final GcsService gcsService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
     private final EmulatorConfig config;
     private final IamConditionEvaluator conditionEvaluator;
     private final IamPrincipalResolver principalResolver;
     private final IamPolicyEvaluator policyEvaluator;
 
     @Inject
-    public IamBucketPolicyService(IamService iamService, GcsService gcsService, EmulatorConfig config,
+    public IamBucketPolicyService(IamService iamService, GcsService gcsService,
+            GcsIamAuthorizationService iamAuthorizationService, EmulatorConfig config,
             IamConditionEvaluator conditionEvaluator, IamPrincipalResolver principalResolver,
             IamPolicyEvaluator policyEvaluator) {
         this.iamService = iamService;
         this.gcsService = gcsService;
+        this.iamAuthorizationService = iamAuthorizationService;
         this.config = config;
         this.conditionEvaluator = conditionEvaluator;
         this.principalResolver = principalResolver;
@@ -37,9 +43,11 @@ public class IamBucketPolicyService {
         return iamService.getPolicy(IamResource.gcsBucket(bucket).policyResource());
     }
 
-    public StoredPolicy setPolicy(String bucket, StoredPolicy storedPolicy) {
+    public StoredPolicy setPolicy(String bucket, String authorization, StoredPolicy storedPolicy) {
         String policyResource = IamResource.gcsBucket(bucket).policyResource();
         return iamService.withPolicyLock(policyResource, () -> {
+            iamAuthorizationService.requireBucketPermission(
+                    authorization, bucket, "storage.buckets.setIamPolicy");
             gcsService.getBucket(bucket);
             IamPolicy policy = IamPolicyNormalizer.normalize(storedPolicy);
             validateConditions(bucket, policy);
@@ -61,6 +69,7 @@ public class IamBucketPolicyService {
         try {
             policy = IamPolicyNormalizer.normalize(getPolicy(bucket));
         } catch (RuntimeException e) {
+            LOG.warnf(e, "IAM testPermissions failed closed for bucket=%s", bucket);
             return List.of();
         }
         IamResource resource = IamResource.gcsBucket(bucket);

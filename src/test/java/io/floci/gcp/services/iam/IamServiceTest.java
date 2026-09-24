@@ -1,13 +1,17 @@
 package io.floci.gcp.services.iam;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -279,6 +283,36 @@ class IamServiceTest {
 
         assertEquals("created", created);
         assertTrue(service.getPolicy(resource).getBindings().isEmpty());
+    }
+
+    @Test
+    void createCheckpointsInitialPolicyInHybridStorage(@TempDir Path tempDir) {
+        Path policyPath = tempDir.resolve("iam-policies.json");
+        TypeReference<Map<String, StoredPolicy>> policyType = new TypeReference<>() {};
+        HybridStorage<String, StoredPolicy> policyStore = new HybridStorage<>(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, StoredPolicy> restoredStore = new HybridStorage<>(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        try {
+            IamService durableService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);
+            StoredPolicy initialPolicy = new StoredPolicy();
+            initialPolicy.setBindings(List.of(Map.of(
+                    "role", "roles/storage.admin",
+                    "members", List.of("serviceAccount:creator@example.test"))));
+
+            durableService.createResourceAndPolicy(
+                    "buckets/durable-bucket", initialPolicy, () -> "created");
+
+            restoredStore.load();
+            IamService restoredService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), restoredStore);
+            assertEquals("roles/storage.admin",
+                    restoredService.getPolicy("buckets/durable-bucket").getBindings().get(0).get("role"));
+        } finally {
+            restoredStore.shutdown();
+            policyStore.shutdown();
+        }
     }
 
     private static void await(CountDownLatch latch) {

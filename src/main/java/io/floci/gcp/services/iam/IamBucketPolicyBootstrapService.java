@@ -48,7 +48,7 @@ public class IamBucketPolicyBootstrapService {
             if (!creator.downscoped() && creator.principal().member() != null) {
                 members.add(creator.principal().member());
             }
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
             // Existing credential-bypass behavior is preserved when no usable Floci identity exists.
         }
 

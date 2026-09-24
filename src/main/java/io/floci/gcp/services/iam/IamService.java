@@ -217,6 +217,7 @@ public class IamService {
             if (initialPolicy != null) {
                 setPolicy(resource, initialPolicy);
             }
+            policyStore.checkpoint();
             return created;
         }
     }

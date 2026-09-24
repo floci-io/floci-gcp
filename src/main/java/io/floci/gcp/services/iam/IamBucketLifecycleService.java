@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.Map;
 import java.util.function.BooleanSupplier;
@@ -17,12 +18,14 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class IamBucketLifecycleService {
 
+    private static final Logger LOG = Logger.getLogger(IamBucketLifecycleService.class);
+
     private final IamService iamService;
     private final IamBucketPolicyBootstrapService bootstrapService;
 
     @Inject
     public IamBucketLifecycleService(IamService iamService,
-                                     IamBucketPolicyBootstrapService bootstrapService) {
+            IamBucketPolicyBootstrapService bootstrapService) {
         this.iamService = iamService;
         this.bootstrapService = bootstrapService;
     }
@@ -47,7 +50,7 @@ public class IamBucketLifecycleService {
 
     public void validateIamConfiguration(String bucket, Map<String, Object> iamConfiguration) {
         if (!uniformBucketLevelAccessEnabled(iamConfiguration)
-                && hasConditionalBindings(iamService.getPolicy(policyResource(bucket)))) {
+                && hasConditionalBindings(bucket, iamService.getPolicy(policyResource(bucket)))) {
             throw GcpException.invalidArgument(
                     "Cannot disable uniform bucket-level access while IAM Conditions are configured");
         }
@@ -64,11 +67,12 @@ public class IamBucketLifecycleService {
         return Boolean.TRUE.equals(uniformBucketLevelAccessMap.get("enabled"));
     }
 
-    private static boolean hasConditionalBindings(StoredPolicy policy) {
+    private static boolean hasConditionalBindings(String bucket, StoredPolicy policy) {
         try {
             return IamPolicyNormalizer.normalize(policy).bindings().stream()
                     .anyMatch(binding -> binding.condition() != null);
         } catch (RuntimeException e) {
+            LOG.warnf(e, "IAM policy validation failed closed for bucket=%s", bucket);
             return true;
         }
     }

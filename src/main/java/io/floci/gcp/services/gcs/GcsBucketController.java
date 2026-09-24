@@ -201,11 +201,9 @@ public class GcsBucketController {
     @Consumes(MediaType.APPLICATION_JSON)
 	public Response setBucketIamPolicy(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization, Map<String, Object> body) {
-        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.setIamPolicy");
-        service.getBucket(bucket);
         StoredPolicy policy = parsePolicy(body);
-        bucketPolicyService.setPolicy(bucket, policy);
-        return Response.ok(bucketIamResponse(bucket, policy)).build();
+        StoredPolicy storedPolicy = bucketPolicyService.setPolicy(bucket, authorization, policy);
+        return Response.ok(bucketIamResponse(bucket, storedPolicy)).build();
     }
 
     // GCS spells this GET /b/{bucket}/iam/testPermissions?permissions=..., note

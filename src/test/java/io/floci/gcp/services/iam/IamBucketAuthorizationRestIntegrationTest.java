@@ -67,6 +67,17 @@ class IamBucketAuthorizationRestIntegrationTest {
     }
 
     @Test
+    void missingBucketRemainsNotFoundWhenAuthorizationIsEnforced() {
+        String bucket = "missing-iam-bucket-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given().when().get("/storage/v1/b/" + bucket).then().statusCode(404);
+        given().contentType("application/json").body(Map.of("location", "EU"))
+                .when().patch("/storage/v1/b/" + bucket).then().statusCode(404);
+        given().contentType("application/json").body(policyBody())
+                .when().put("/storage/v1/b/" + bucket + "/iam").then().statusCode(404);
+    }
+
+    @Test
     void deletingBucketRemovesPolicyBeforeNameIsReused() {
         String bucket = createBucket();
         iamService.setPolicy("buckets/" + bucket, storageAdminPolicy());

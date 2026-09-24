@@ -5,6 +5,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.Map;
 
@@ -12,6 +13,7 @@ import java.util.Map;
 @ApplicationScoped
 public class GcsIamAuthorizationService {
 
+    private static final Logger LOG = Logger.getLogger(GcsIamAuthorizationService.class);
     private static final String DENIED_MESSAGE = "IAM policy does not allow this GCS operation";
 
     private final GcsAuthorizationService cabAuthorization;
@@ -44,8 +46,15 @@ public class GcsIamAuthorizationService {
                     Map.of(resource.policyResource(), policy))) {
                 return;
             }
+        } catch (GcpException e) {
+            if (e.getHttpStatus() == 401 || e.getHttpStatus() == 404) {
+                throw e;
+            }
+            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
+                    resource.policyResource(), permission);
         } catch (RuntimeException e) {
-            // A malformed persisted policy or unusable principal must never become a grant.
+            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
+                    resource.policyResource(), permission);
         }
         throw GcpException.permissionDenied(DENIED_MESSAGE);
     }

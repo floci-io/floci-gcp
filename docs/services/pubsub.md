@@ -3,6 +3,18 @@
 floci-gcp emulates Google Cloud Pub/Sub over gRPC using the real `google.pubsub.v1` protocol.
 It also exposes the Pub/Sub REST v1 JSON surface used by tools such as Terraform.
 
+## IAM enforcement
+
+Set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` to enforce implemented
+Pub/Sub v1 operations over REST JSON and gRPC for Floci-issued service-account
+tokens. Topic, subscription, snapshot, project-inherited, and conditional policies
+apply. IAM policy reads/writes are protected and `testIamPermissions` evaluates the
+caller. StreamingPull checks incoming messages; asynchronous deliveries are not
+proactively reauthorized on policy changes. Dependent service-agent, push `actAs`,
+export, and CMEK permissions are not checked. Anonymous/external credentials still
+bypass evaluation. Default `disabled` mode stores policies without enforcing them.
+See [IAM enforcement and limitations](iam.md#opt-in-enforcement).
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -274,11 +286,11 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
 
 ## IAM Policies
 
-IAM policies on topics, subscriptions, and snapshots are **stored and returned,
-never enforced**. `setIamPolicy` followed by `getIamPolicy` returns exactly the
-bindings that were set, including `condition` blocks, which are stored verbatim
-and never evaluated, but no request is ever denied because of a policy. Do not
-build authorization tests on top of the emulator.
+IAM policies on topics, subscriptions, and snapshots are stored and returned.
+They restrict Floci-issued service-account callers only when
+`FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`. Version 3 conditions are then
+evaluated within the supported CEL profile. Default-off and anonymous/external
+credential requests remain permissive. See [IAM enforcement](#iam-enforcement).
 
 Policy semantics:
 
@@ -291,10 +303,9 @@ Policy semantics:
   `google_pubsub_topic_iam_member` behave as they do against real GCP. Omitting
   the etag performs a blind write.
 - Deleting a resource deletes its policy; recreating the same name starts empty.
-- `testIamPermissions` echoes the requested permissions for an existing
-  resource, never consulting stored bindings. For a resource that does not
-  exist it fails open with an empty permission set, not `NOT_FOUND`, matching
-  the service config.
+- `testIamPermissions` evaluates stored bindings for recognized callers in
+  enforce mode. Disabled mode and bypass callers retain the permission echo.
+  Missing resources return an empty permission set, not `NOT_FOUND`.
 - Schemas are not implemented, so schema IAM paths are not served.
 
 Over gRPC these methods are served by the standalone `google.iam.v1.IAMPolicy`
@@ -347,8 +358,8 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `DeleteSnapshot`
 - `Seek`
 
-**IAM (`google.iam.v1.IAMPolicy` mixin: stored, never enforced):**
+**IAM (`google.iam.v1.IAMPolicy` mixin, opt-in enforcement):**
 
 - `GetIamPolicy`
 - `SetIamPolicy`
-- `TestIamPermissions` (echoes requested permissions; empty set for missing resources)
+- `TestIamPermissions` (evaluates recognized callers in enforce mode; empty set for missing resources)

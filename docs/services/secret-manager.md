@@ -2,6 +2,17 @@
 
 floci-gcp emulates Google Cloud Secret Manager over gRPC and REST using the real `google.cloud.secretmanager.v1` protocol.
 
+## IAM enforcement
+
+Set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` to enforce implemented
+Secret Manager v1 secret, version, and IAM operations over REST JSON and gRPC for
+Floci-issued service-account tokens. Secret policies and project grants inherit to
+versions, whose names are exposed to conditions. `testIamPermissions` evaluates the
+caller. Anonymous/external credentials still bypass evaluation. Regional resources,
+CMEK/service-agent permissions, and numeric project/version alias canonicalization
+are not implemented by this enforcement slice. Default `disabled` mode stores
+policies without enforcing them. See [IAM enforcement and limitations](iam.md#opt-in-enforcement).
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -176,9 +187,9 @@ Secret-level IAM policies persist across `GetIamPolicy` / `SetIamPolicy` calls,
 including etag-based read-modify-write flows used by Terraform and OpenTofu.
 Deleting a secret clears its versions and policy. Cleanup intent is persisted
 before deletion, so interrupted cleanup is resumed before the emulator serves
-requests after restart or recreates the same secret name. Policies are stored
-but not enforced: a caller that would be denied by IAM in GCP can still access
-emulator resources.
+requests after restart or recreates the same secret name. Policies restrict
+recognized callers only with opt-in [IAM enforcement](#iam-enforcement).
+Default-off and anonymous/external credential requests remain permissive.
 
 ## Supported Operations
 

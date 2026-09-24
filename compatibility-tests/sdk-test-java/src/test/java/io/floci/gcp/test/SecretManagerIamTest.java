@@ -93,7 +93,7 @@ class SecretManagerIamTest {
         assertThat(policy.getBindings(0).getMembersList()).containsExactly(MEMBER);
     }
 
-    /** The emulator has no caller identity, so an existing resource grants every requested permission. */
+    /** This anonymous client retains the permission echo in both authorization modes. */
     @Test
     @Order(4)
     void testIamPermissionsGrantsAllRequestedPermissions() {

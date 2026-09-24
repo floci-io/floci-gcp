@@ -127,7 +127,12 @@ Source of truth: `src/main/resources/application.yml`. Update this section when 
 
 ### Auth bypass
 
-GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. The exception is an emulator-issued downscoped token, whose GCS requests are evaluated against its Credential Access Boundary (CAB).
+GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. An emulator-issued downscoped token's GCS requests are evaluated against its Credential Access Boundary (CAB).
+Opt-in `floci-gcp.services.iam.authorization-mode=enforce` also evaluates Floci-issued service-account
+credentials for project metadata/policies, Pub/Sub, and Secret Manager over their implemented transports.
+Anonymous/external credentials still bypass IAM; GCS IAM and other services remain unenforced.
+See [IAM enforcement](docs/services/iam.md#opt-in-enforcement) and the
+[service extension contract](docs/iam-enforcement.md).
 
 ### Project ID as multi-tenancy key
 
@@ -261,6 +266,11 @@ Sources of truth: the `compatibility-tests/` subdirectories and `matrix.test` in
 4. Each suite writes JUnit XML to `/results`, consumed by the test-summary step; emulator logs are dumped on failure.
 
 Every suite receives the same endpoint variables: `FLOCI_GCP_ENDPOINT`, `FLOCI_ENDPOINT`, `FLOCI_HOST` and `FLOCI_PROJECT`. The SDK suites and `sdk-test-gcloud` read `FLOCI_GCP_ENDPOINT`; only `compat-terraform` and `compat-opentofu` read the other three.
+
+The Java job additionally starts an isolated native emulator with IAM enforcement on and runs
+`IamEnforcementTest` with `FLOCI_GCP_IAM_TEST_ENFORCEMENT=true`. Its JUnit XML is stored
+under `/results` in a separate `test-results/iam` host directory. The ordinary Java suite
+still runs with enforcement disabled.
 
 Source of truth: `.github/workflows/compatibility.yml`. Update this section when you change the network, the results mount, or the endpoint variables.
 

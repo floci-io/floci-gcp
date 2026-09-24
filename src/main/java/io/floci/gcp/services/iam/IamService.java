@@ -10,12 +10,14 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -48,15 +50,17 @@ public class IamService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final Instance<IamAuthorizationService> authorization;
     private final AtomicLong uniqueIdSeq = new AtomicLong(100000000000000000L);
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
-            GrpcServerManager grpcServerManager) {
+            GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
+        this.authorization = authorization;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -74,6 +78,7 @@ public class IamService {
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.authorization = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -229,12 +234,7 @@ public class IamService {
         }
     }
 
-    /**
-     * Echoes the requested permissions for an existing resource. For a resource
-     * a registered resolver reports missing, fails open with an empty set — the
-     * real API returns "an empty set of permissions, not a NOT_FOUND error"
-     * (pubsub_v1.yaml). Stored bindings are never consulted.
-     */
+    /** Evaluates supported resources in enforce mode; missing resources always return an empty set. */
     public List<String> testPermissions(String resource, List<String> permissions) {
         try {
             requireResourceExists(resource);
@@ -244,7 +244,15 @@ public class IamService {
             }
             throw e;
         }
-        return permissions;
+        return authorization == null ? permissions : authorization.get().testPermissions(resource, permissions);
+    }
+
+    /** Reads an allow policy without authorizing the policy read itself or requiring resource existence. */
+    public StoredPolicy policyForEvaluation(String resource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            return policyStore.get(key).orElseGet(IamService::emptyPolicy);
+        }
     }
 
     private void requireResourceExists(String resource) {

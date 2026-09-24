@@ -12,8 +12,7 @@ import java.util.Map;
 
 /**
  * Converts between {@code google.iam.v1.Policy} protos and {@link StoredPolicy}.
- * Bindings round-trip losslessly, including {@code condition} blocks — the
- * emulator stores and returns conditions but never evaluates them.
+ * Bindings round-trip losslessly, including {@code condition} blocks. Evaluation is handled by the shared IAM authorization service.
  */
 public final class IamPolicyCodec {
 

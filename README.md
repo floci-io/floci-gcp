@@ -670,6 +670,14 @@ Versions are derived from Conventional Commits by [semantic-release](https://git
 
 ## Configuration
 
+IAM policies are stored without enforcement by default. For local permission tests,
+set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
+service-account tokens. This enforces project metadata/policies, Pub/Sub, and Secret
+Manager over their implemented transports. GCS IAM and other services remain
+unenforced; anonymous/external credentials still bypass IAM. Read the
+[coverage and limitations](docs/services/iam.md#opt-in-enforcement) before treating a
+green test as evidence of least privilege.
+
 All settings are overridable via environment variables (`FLOCI_GCP_` prefix).
 
 | Variable | Default | Description |

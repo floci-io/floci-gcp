@@ -329,23 +329,25 @@ public class GkeService {
                                          Map<String, Object> updateMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         if (updateMap != null) {
-            Object desiredNodeVersionValue = updateMap.get("desiredNodeVersion");
-            Object desiredMasterVersionValue = updateMap.get("desiredMasterVersion");
-            if (desiredNodeVersionValue != null && !(desiredNodeVersionValue instanceof String)) {
-                throw GcpException.invalidArgument("desiredNodeVersion must be a string");
-            }
-            if (desiredMasterVersionValue != null && !(desiredMasterVersionValue instanceof String)) {
-                throw GcpException.invalidArgument("desiredMasterVersion must be a string");
-            }
-            String desiredNodeVersion = stringField(updateMap, "desiredNodeVersion", null);
-            String desiredMasterVersion = stringField(updateMap, "desiredMasterVersion", null);
-            if (desiredNodeVersion != null) {
-                // Resolve the target before mutating anything. Both rejection paths in
-                // nodeVersionUpdateTargets throw, and `cluster` is the live stored object, so
-                // assigning first would leave a rejected request's version behind on it.
-                List<StoredNodePool> targets =
-                        nodeVersionUpdateTargets(project, location, clusterId, updateMap);
-                String nodeVersion = resolveNodeVersion("desiredNodeVersion", desiredNodeVersion, cluster);
+            // Both version fields are read through optionalStringField, not a cast: Terraform sends
+            // desiredMasterVersion on cluster updates, and {"update": {"desiredMasterVersion": 123}}
+            // must be a 400 in the GCP error shape, not an unmapped ClassCastException (a 500).
+            // Every rejection path for both fields runs before the first mutation: `cluster` and
+            // the pools are the live stored objects, so a body carrying a valid desiredNodeVersion
+            // and a bad desiredMasterVersion must not leave the node version behind on a 400.
+            String desiredNodeVersion = optionalStringField(updateMap, "desiredNodeVersion");
+            String desiredMasterVersion = optionalStringField(updateMap, "desiredMasterVersion");
+            String desiredLoggingService = optionalStringField(updateMap, "desiredLoggingService");
+            String desiredMonitoringService = optionalStringField(updateMap, "desiredMonitoringService");
+            List<StoredNodePool> targets = desiredNodeVersion == null ? List.of()
+                    : nodeVersionUpdateTargets(project, location, clusterId, updateMap);
+            String nodeVersion = desiredNodeVersion == null ? null
+                    : resolveNodeVersion("desiredNodeVersion", desiredNodeVersion, cluster);
+            // Same aliases as UpdateMaster; gcloud sends "-" here for `clusters upgrade --master`
+            // without --cluster-version, which stored verbatim left the cluster reporting "-".
+            String masterVersion = desiredMasterVersion == null ? null
+                    : resolveMasterVersion("desiredMasterVersion", desiredMasterVersion);
+            if (nodeVersion != null) {
                 // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
                 // the pool store, so moving only the cluster aggregate would report the new
                 // version on the cluster while the pool still reported the old one.
@@ -359,20 +361,15 @@ public class GkeService {
                 cluster.setCurrentNodeVersion(
                         GkeVersions.minimum(poolVersions(project, location, clusterId)).orElse(nodeVersion));
             }
-            if (desiredMasterVersion != null) {
-                // Same aliases as UpdateMaster; gcloud sends "-" here for `clusters upgrade
-                // --master` without --cluster-version, which stored verbatim left the cluster
-                // reporting version "-".
-                cluster.setCurrentMasterVersion(resolveMasterVersion("desiredMasterVersion", desiredMasterVersion));
+            if (masterVersion != null) {
+                cluster.setCurrentMasterVersion(masterVersion);
             }
             if (updateMap.get("desiredLocations") != null) {
                 cluster.setLocations(stringListField(updateMap, "desiredLocations", cluster.getLocations()));
             }
-            String desiredLoggingService = (String) updateMap.get("desiredLoggingService");
             if (desiredLoggingService != null) {
                 cluster.setLoggingService(desiredLoggingService);
             }
-            String desiredMonitoringService = (String) updateMap.get("desiredMonitoringService");
             if (desiredMonitoringService != null) {
                 cluster.setMonitoringService(desiredMonitoringService);
             }
@@ -670,12 +667,7 @@ public class GkeService {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
         if (body != null) {
-            // A non-string value is a 400, not an unmapped ClassCastException (a 500); the field
-            // is optional here, so absence is the no-op it always was.
-            if (body.get("nodeVersion") != null && !(body.get("nodeVersion") instanceof String)) {
-                throw GcpException.invalidArgument("nodeVersion must be a string");
-            }
-            String nodeVersion = stringField(body, "nodeVersion", null);
+            String nodeVersion = optionalStringField(body, "nodeVersion");
             if (nodeVersion != null) {
                 pool.setVersion(resolveNodeVersion("nodeVersion", nodeVersion, cluster));
             }
@@ -941,8 +933,8 @@ public class GkeService {
      * the request is rejected rather than guessed at. */
     private List<StoredNodePool> nodeVersionUpdateTargets(String project, String location, String clusterId,
             Map<String, Object> updateMap) {
-        String desiredNodePoolId = (String) updateMap.get("desiredNodePoolId");
-        if (desiredNodePoolId != null && !desiredNodePoolId.isBlank()) {
+        String desiredNodePoolId = optionalStringField(updateMap, "desiredNodePoolId");
+        if (desiredNodePoolId != null) {
             return List.of(requireNodePool(project, location, clusterId, desiredNodePoolId));
         }
         List<StoredNodePool> pools = listNodePools(project, location, clusterId);
@@ -1064,6 +1056,17 @@ public class GkeService {
     private static String stringField(Map<String, Object> map, String field, String fallback) {
         Object v = map.get(field);
         return v instanceof String s && !s.isBlank() ? s : fallback;
+    }
+
+    /** An optional string field: absent or blank is {@code null} (proto3 JSON treats {@code ""}
+     * as unset), and a value of another type is a 400 naming the field, where a raw cast escaped
+     * as an unmapped {@code ClassCastException} and a 500. */
+    private static String optionalStringField(Map<String, Object> map, String field) {
+        Object v = map.get(field);
+        if (v != null && !(v instanceof String)) {
+            throw GcpException.invalidArgument(field + " must be a string");
+        }
+        return stringField(map, field, null);
     }
 
     /** Everything in {@code map} not in {@code typedFields}, stored verbatim for read-back fidelity. */

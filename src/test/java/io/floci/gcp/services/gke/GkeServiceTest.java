@@ -783,6 +783,53 @@ class GkeServiceTest {
     }
 
     @Test
+    void updateClusterRejectsNonStringVersionFieldsWithoutTouchingTheCluster() {
+        // #232: both fields were read with a raw cast, so a well-formed body carrying the wrong
+        // type escaped as an unmapped ClassCastException (a 500) instead of the 400 every other
+        // malformed request gets. Terraform sends desiredMasterVersion on cluster updates.
+        // An older explicit version, so "latest" would visibly move the node version if applied.
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "typed-update", "initialClusterVersion", "1.29.0-gke.1"));
+        StoredCluster before = service.getCluster(PROJECT, LOCATION, "typed-update");
+        String masterBefore = before.getCurrentMasterVersion();
+        String nodeBefore = before.getCurrentNodeVersion();
+        String etagBefore = before.getEtag();
+        String poolEtagBefore = service.getNodePool(PROJECT, LOCATION, "typed-update", "default-pool").getEtag();
+
+        for (Map<String, Object> update : List.<Map<String, Object>>of(
+                Map.of("desiredMasterVersion", 123),
+                Map.of("desiredNodeVersion", 123),
+                Map.of("desiredNodeVersion", Map.of("v", "1")),
+                Map.of("desiredNodeVersion", "latest", "desiredNodePoolId", 7),
+                // A valid node version beside a bad master field: nothing may be applied.
+                Map.of("desiredNodeVersion", "latest", "desiredMasterVersion", 123),
+                // Same when the master value is a string the resolver rejects.
+                Map.of("desiredNodeVersion", "latest", "desiredMasterVersion", "1"),
+                // The two service fields in the same method, read before anything is applied.
+                Map.of("desiredLoggingService", 7),
+                Map.of("desiredNodeVersion", "latest", "desiredMonitoringService", Map.of("x", 1)))) {
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.updateCluster(PROJECT, LOCATION, "typed-update", update), update.toString());
+            assertEquals(400, error.getHttpStatus(), update.toString());
+            String field = update.keySet().stream().filter(k -> !(update.get(k) instanceof String)).findFirst().orElse(null);
+            if (field != null) {
+                assertEquals(field + " must be a string", error.getMessage());
+            }
+        }
+
+        StoredCluster after = service.getCluster(PROJECT, LOCATION, "typed-update");
+        assertEquals(masterBefore, after.getCurrentMasterVersion());
+        assertEquals(nodeBefore, after.getCurrentNodeVersion());
+        assertEquals(etagBefore, after.getEtag());
+        StoredNodePool pool = service.getNodePool(PROJECT, LOCATION, "typed-update", "default-pool");
+        assertEquals(nodeBefore, pool.getVersion());
+        assertEquals(poolEtagBefore, pool.getEtag());
+
+        // Blank is unset in proto3 JSON: a no-op, not a version to resolve.
+        service.updateCluster(PROJECT, LOCATION, "typed-update", Map.of("desiredMasterVersion", ""));
+        assertEquals(masterBefore, service.getCluster(PROJECT, LOCATION, "typed-update").getCurrentMasterVersion());
+    }
+
+    @Test
     void updateClusterResolvesDesiredNodeVersionAliasesAgainstTheMaster() {
         // desired_node_version documents the same aliases as the master field, except that "-"
         // "picks the Kubernetes master version": the cluster's control plane, not the server default.

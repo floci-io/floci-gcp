@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
@@ -120,5 +121,51 @@ class GkeUpdateClusterRestIntegrationTest {
                 .body("currentMasterVersion", equalTo("1.29.0-gke.1"))
                 .body("currentNodeVersion", equalTo("1.29.0-gke.1"))
                 .body("nodePools[0].version", equalTo("1.29.0-gke.1"));
+    }
+
+    @Test
+    void aNonStringVersionFieldIsABadRequestNotAServerError() {
+        String cluster = "typed-update";
+        String clusterPath = BASE + "/clusters/" + cluster;
+
+        given()
+                .contentType("application/json")
+                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                .when().post(BASE + "/clusters")
+                .then()
+                .statusCode(200);
+
+        String masterBefore = given()
+                .when().get(clusterPath)
+                .then()
+                .statusCode(200)
+                .extract().path("currentMasterVersion");
+
+        // Well-formed JSON of the wrong type must map to the GCP error shape (#232), not to an
+        // unmapped ClassCastException (a 500 with a stack trace).
+        for (String update : new String[] {
+                "{\"desiredMasterVersion\":123}",
+                "{\"desiredNodeVersion\":123}",
+                "{\"desiredNodeVersion\":{\"v\":\"1\"}}",
+                "{\"desiredNodeVersion\":\"latest\",\"desiredMasterVersion\":123}",
+                "{\"desiredLoggingService\":123}",
+                "{\"desiredMonitoringService\":[\"x\"]}"}) {
+            given()
+                    .contentType("application/json")
+                    .body("{\"update\":" + update + "}")
+                    .when().put(clusterPath)
+                    .then()
+                    .statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", endsWith(" must be a string"));
+        }
+
+        given()
+                .when().get(clusterPath)
+                .then()
+                .statusCode(200)
+                .body("currentMasterVersion", equalTo(masterBefore))
+                .body("currentNodeVersion", equalTo(masterBefore))
+                .body("nodePools[0].version", equalTo(masterBefore));
     }
 }

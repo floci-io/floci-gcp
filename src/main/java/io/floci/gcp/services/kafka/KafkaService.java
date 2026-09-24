@@ -29,6 +29,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -47,13 +48,15 @@ public class KafkaService {
     private final EmulatorConfig config;
     private final ServiceRegistry serviceRegistry;
     private final RedpandaManager redpandaManager;
+    private final KafkaConnectDataPlane connectDataPlane;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public KafkaService(StorageFactory storageFactory,
                         EmulatorConfig config,
                         ServiceRegistry serviceRegistry,
-                        RedpandaManager redpandaManager) {
+                        RedpandaManager redpandaManager,
+                        KafkaConnectContainerDataPlane connectDataPlane) {
         this.clusterStore = storageFactory.createGlobal("kafka", "kafka-clusters.json",
                 new TypeReference<Map<String, StoredCluster>>() {});
         this.topicStore = storageFactory.createGlobal("kafka", "kafka-topics.json",
@@ -65,6 +68,7 @@ public class KafkaService {
         this.config = config;
         this.serviceRegistry = serviceRegistry;
         this.redpandaManager = redpandaManager;
+        this.connectDataPlane = connectDataPlane;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -124,9 +128,9 @@ public class KafkaService {
                 .orElseThrow(() -> GcpException.notFound("Cluster not found: " + name));
     }
 
-    /** Whether a Kafka cluster exists under its full resource name; used by the Connect control plane. */
-    boolean clusterExists(String name) {
-        return clusterStore.get(name).isPresent();
+    /** The Kafka cluster under its full resource name; used by the Connect service to attach workers to it. */
+    Optional<StoredCluster> findCluster(String name) {
+        return clusterStore.get(name);
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
@@ -141,6 +145,9 @@ public class KafkaService {
 
         cluster.setState(ClusterState.DELETING);
         if (!config.services().kafka().mock()) {
+            // Connect workers attached to this broker cannot outlive it; the Connect clusters that
+            // reference it stay, and report their connectors FAILED until reconfigured or deleted.
+            connectDataPlane.stopWorkersOn(cluster);
             redpandaManager.stopContainer(cluster);
             redpandaManager.removeClusterStorage(cluster);
         }

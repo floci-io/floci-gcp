@@ -200,7 +200,7 @@ public class KafkaConnectController {
                                      @PathParam("connectClusterId") String connectClusterId,
                                      @PathParam("connectorId") String connectorId,
                                       Map<String, Object> body) {
-        service.transitionConnector(project, location, connectClusterId, connectorId, ConnectorState.RUNNING);
+        service.restartConnector(project, location, connectClusterId, connectorId);
         return Response.ok(Map.of()).build();
     }
 

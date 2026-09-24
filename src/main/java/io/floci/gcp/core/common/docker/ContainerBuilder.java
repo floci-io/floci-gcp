@@ -98,6 +98,7 @@ public class ContainerBuilder {
         private String workingDir;
         private Long memoryBytes;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
+        private final List<Integer> loopbackPorts = new ArrayList<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
@@ -173,6 +174,15 @@ public class ContainerBuilder {
         }
 
         public Builder withDynamicPort(int containerPort) {
+            return withPortBinding(containerPort, 0);
+        }
+
+        /**
+         * A dynamic host port bound on {@code 127.0.0.1} only: for an unauthenticated management API
+         * the emulator reaches through {@code localhost}, which nothing else on the network should.
+         */
+        public Builder withLoopbackDynamicPort(int containerPort) {
+            this.loopbackPorts.add(containerPort);
             return withPortBinding(containerPort, 0);
         }
 
@@ -349,7 +359,8 @@ public class ContainerBuilder {
                     List.copyOf(dnsServers),
                     workingDir,
                     user,
-                    List.copyOf(groupAdd)
+                    List.copyOf(groupAdd),
+                    List.copyOf(loopbackPorts)
             );
         }
     }

@@ -5,16 +5,21 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.kafka.model.ClusterState;
 import io.floci.gcp.services.kafka.model.ConnectorState;
+import io.floci.gcp.services.kafka.model.StoredCluster;
 import io.floci.gcp.services.kafka.model.StoredConnectCluster;
 import io.floci.gcp.services.kafka.model.StoredConnector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -371,5 +376,281 @@ class KafkaConnectServiceTest {
         service.deleteConnector(PROJECT, LOCATION, "cc", "sink");
         assertEquals("NOT_FOUND", assertThrows(GcpException.class,
                 () -> service.transitionConnector(PROJECT, LOCATION, "cc", "sink", ConnectorState.PAUSED)).getGcpStatus());
+    }
+
+    // ── With the data plane on ────────────────────────────────────────────────
+
+    private final RecordingDataPlane dataPlane = new RecordingDataPlane();
+
+    private KafkaConnectService withDataPlane() {
+        return new KafkaConnectService(new InMemoryStorage<String, StoredConnectCluster>(),
+                new InMemoryStorage<String, StoredConnector>(),
+                name -> kafkaClusters.contains(name) ? Optional.of(new StoredCluster(name)) : Optional.empty(),
+                dataPlane, true);
+    }
+
+    @Test
+    void createStartsAWorkerOnTheReferencedKafkaClusterWithTheWorkerConfig() {
+        KafkaConnectService tested = withDataPlane();
+        Map<String, Object> body = validBody();
+        body.put("config", Map.of("exactly.once.source.support", "enabled"));
+
+        StoredConnectCluster cluster = tested.createConnectCluster(PROJECT, LOCATION, "cc", body);
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals(List.of("start " + CC + " on " + KAFKA + " with {exactly.once.source.support=enabled}"),
+                dataPlane.calls);
+    }
+
+    @Test
+    void aWorkerThatCannotStartLeavesNoConnectClusterBehind() {
+        KafkaConnectService tested = withDataPlane();
+        dataPlane.failStart = GcpException.unavailable("worker did not become ready");
+
+        assertEquals("UNAVAILABLE", assertThrows(GcpException.class,
+                () -> tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody())).getGcpStatus());
+
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> tested.getConnectCluster(PROJECT, LOCATION, "cc")).getGcpStatus());
+        assertEquals("stop " + CC + " erase=true", dataPlane.calls.get(dataPlane.calls.size() - 1));
+        dataPlane.failStart = null;
+        assertEquals(ClusterState.ACTIVE, tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody()).getState());
+    }
+
+    @Test
+    void aConnectorTheWorkerRefusesIsNotStored() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        dataPlane.failConnectorWrite = GcpException.invalidArgument("Kafka Connect: no connector type");
+
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class, () -> tested.createConnector(
+                PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")))).getGcpStatus());
+
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> tested.getConnector(PROJECT, LOCATION, "cc", "sink")).getGcpStatus());
+    }
+
+    @Test
+    void aConfigUpdateTheWorkerRefusesLeavesTheStoredConfigs() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        dataPlane.failConnectorWrite = GcpException.invalidArgument("Kafka Connect: bad config");
+
+        assertThrows(GcpException.class, () -> tested.updateConnector(PROJECT, LOCATION, "cc", "sink", "configs",
+                Map.of("configs", Map.of("topics", "returns"))));
+
+        assertEquals(Map.of("topics", "orders"), tested.getConnector(PROJECT, LOCATION, "cc", "sink").getConfigs());
+    }
+
+    @Test
+    void connectorWritesAndLifecycleMethodsReachTheWorker() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        dataPlane.calls.clear();
+
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        tested.updateConnector(PROJECT, LOCATION, "cc", "sink", "configs", Map.of("configs", Map.of("topics", "returns")));
+        // taskRestartPolicy has no Kafka Connect counterpart, so it stays control-plane metadata.
+        tested.updateConnector(PROJECT, LOCATION, "cc", "sink", "taskRestartPolicy",
+                Map.of("taskRestartPolicy", Map.of("minimumBackoff", "5s")));
+        tested.transitionConnector(PROJECT, LOCATION, "cc", "sink", ConnectorState.PAUSED);
+        tested.transitionConnector(PROJECT, LOCATION, "cc", "sink", ConnectorState.RUNNING);
+        tested.transitionConnector(PROJECT, LOCATION, "cc", "sink", ConnectorState.STOPPED);
+        tested.restartConnector(PROJECT, LOCATION, "cc", "sink");
+        tested.deleteConnector(PROJECT, LOCATION, "cc", "sink");
+
+        assertEquals(List.of("create sink {topics=orders}", "update sink {topics=returns}",
+                "transition sink PAUSED", "transition sink RUNNING", "transition sink STOPPED",
+                "restart sink", "delete sink"), dataPlane.calls);
+    }
+
+    @Test
+    void connectorStateIsReadBackFromTheWorker() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        tested.createConnector(PROJECT, LOCATION, "cc", "source", Map.of("configs", Map.of("topics", "orders")));
+
+        dataPlane.states.put("sink", ConnectorState.FAILED);
+        assertEquals(ConnectorState.FAILED, tested.getConnector(PROJECT, LOCATION, "cc", "sink").getState());
+
+        // A stored connector the worker does not list yet has not been assigned.
+        PageToken.Page<StoredConnector> page = tested.listConnectors(PROJECT, LOCATION, "cc", null, null);
+        assertEquals(List.of(ConnectorState.FAILED, ConnectorState.UNASSIGNED),
+                page.items().stream().map(StoredConnector::getState).toList());
+
+        // An unreachable worker leaves the last known state rather than failing the read.
+        dataPlane.reachable = false;
+        assertEquals(ConnectorState.FAILED, tested.getConnector(PROJECT, LOCATION, "cc", "sink").getState());
+    }
+
+    @Test
+    void connectorsOnAWorkerThatIsNotRunningReportFailed() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        tested.createConnector(PROJECT, LOCATION, "cc", "source", Map.of("configs", Map.of("topics", "orders")));
+
+        // The worker was stopped because its Kafka cluster was deleted, or the emulator restarted:
+        // nothing is processing records, so the last state the worker reported no longer holds.
+        dataPlane.running = false;
+
+        assertEquals(ConnectorState.FAILED, tested.getConnector(PROJECT, LOCATION, "cc", "sink").getState());
+        assertEquals(List.of(ConnectorState.FAILED, ConnectorState.FAILED),
+                tested.listConnectors(PROJECT, LOCATION, "cc", null, null).items().stream()
+                        .map(StoredConnector::getState).toList());
+    }
+
+    @Test
+    void onlyAChangedWorkerConfigRestartsTheWorker() {
+        KafkaConnectService tested = withDataPlane();
+        Map<String, Object> body = validBody();
+        body.put("config", Map.of("offset.flush.interval.ms", "10000"));
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", body);
+        dataPlane.calls.clear();
+
+        tested.updateConnectCluster(PROJECT, LOCATION, "cc", "labels", Map.of("labels", Map.of("env", "dev")));
+        tested.updateConnectCluster(PROJECT, LOCATION, "cc", "config",
+                Map.of("config", Map.of("offset.flush.interval.ms", "10000")));
+        assertEquals(List.of(), dataPlane.calls);
+
+        tested.updateConnectCluster(PROJECT, LOCATION, "cc", "config",
+                Map.of("config", Map.of("offset.flush.interval.ms", "5000")));
+        assertEquals(List.of("stop " + CC + " erase=false",
+                "start " + CC + " on " + KAFKA + " with {offset.flush.interval.ms=5000}"), dataPlane.calls);
+    }
+
+    @Test
+    void aWorkerConfigThatDoesNotStartIsRolledBack() {
+        KafkaConnectService tested = withDataPlane();
+        Map<String, Object> body = validBody();
+        body.put("config", Map.of("offset.flush.interval.ms", "10000"));
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", body);
+        dataPlane.calls.clear();
+        dataPlane.failStartWith = "offset.flush.interval.ms=-1";
+
+        assertThrows(GcpException.class, () -> tested.updateConnectCluster(PROJECT, LOCATION, "cc", "config",
+                Map.of("config", Map.of("offset.flush.interval.ms", "-1"))));
+
+        assertEquals("start " + CC + " on " + KAFKA + " with {offset.flush.interval.ms=10000}",
+                dataPlane.calls.get(dataPlane.calls.size() - 1));
+        assertEquals(Map.of("offset.flush.interval.ms", "10000"),
+                tested.getConnectCluster(PROJECT, LOCATION, "cc").getConfig());
+    }
+
+    @Test
+    void deletingAConnectClusterStopsItsWorkerAndErasesItsState() {
+        KafkaConnectService tested = withDataPlane();
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        dataPlane.calls.clear();
+
+        tested.deleteConnectCluster(PROJECT, LOCATION, "cc");
+
+        assertEquals(List.of("stop " + CC + " erase=true"), dataPlane.calls);
+    }
+
+    @Test
+    void mockModeNeverReachesTheDataPlane() {
+        KafkaConnectService tested = new KafkaConnectService(new InMemoryStorage<String, StoredConnectCluster>(),
+                new InMemoryStorage<String, StoredConnector>(),
+                name -> kafkaClusters.contains(name) ? Optional.of(new StoredCluster(name)) : Optional.empty(),
+                dataPlane, false);
+
+        tested.createConnectCluster(PROJECT, LOCATION, "cc", validBody());
+        tested.updateConnectCluster(PROJECT, LOCATION, "cc", "config", Map.of("config", Map.of("a", "b")));
+        tested.createConnector(PROJECT, LOCATION, "cc", "sink", Map.of("configs", Map.of("topics", "orders")));
+        tested.getConnector(PROJECT, LOCATION, "cc", "sink");
+        tested.listConnectors(PROJECT, LOCATION, "cc", null, null);
+        tested.restartConnector(PROJECT, LOCATION, "cc", "sink");
+        tested.deleteConnectCluster(PROJECT, LOCATION, "cc");
+        tested.shutdown();
+
+        assertEquals(List.of(), dataPlane.calls);
+    }
+
+    private static final String CC = "projects/p/locations/us-central1/connectClusters/cc";
+
+    /** Records each call as a line; states and failures are set by the test. */
+    private static final class RecordingDataPlane implements KafkaConnectDataPlane {
+        final List<String> calls = new ArrayList<>();
+        final Map<String, ConnectorState> states = new LinkedHashMap<>();
+        GcpException failStart;
+        String failStartWith;
+        GcpException failConnectorWrite;
+        boolean reachable = true;
+        boolean running = true;
+
+        @Override
+        public void startWorker(String connectCluster, StoredCluster kafkaCluster, Map<String, String> workerConfig) {
+            calls.add("start " + connectCluster + " on " + kafkaCluster.getName() + " with "
+                    + (workerConfig == null ? "{}" : new TreeMap<>(workerConfig)));
+            if (failStart != null) {
+                throw failStart;
+            }
+            if (failStartWith != null && workerConfig != null
+                    && workerConfig.entrySet().stream().anyMatch(e -> failStartWith.equals(e.getKey() + "=" + e.getValue()))) {
+                throw GcpException.unavailable("worker did not become ready");
+            }
+        }
+
+        @Override
+        public void stopWorker(String connectCluster, StoredCluster kafkaCluster, boolean eraseState) {
+            calls.add("stop " + connectCluster + " erase=" + eraseState);
+        }
+
+        @Override
+        public void createConnector(String connectCluster, String connectorId, Map<String, String> configs) {
+            calls.add("create " + connectorId + " " + configs);
+            if (failConnectorWrite != null) {
+                throw failConnectorWrite;
+            }
+            states.put(connectorId, ConnectorState.RUNNING);
+        }
+
+        @Override
+        public void updateConnector(String connectCluster, String connectorId, Map<String, String> configs) {
+            calls.add("update " + connectorId + " " + configs);
+            if (failConnectorWrite != null) {
+                throw failConnectorWrite;
+            }
+        }
+
+        @Override
+        public void deleteConnector(String connectCluster, String connectorId) {
+            calls.add("delete " + connectorId);
+        }
+
+        @Override
+        public void transitionConnector(String connectCluster, String connectorId, ConnectorState target) {
+            calls.add("transition " + connectorId + " " + target);
+        }
+
+        @Override
+        public void restartConnector(String connectCluster, String connectorId) {
+            calls.add("restart " + connectorId);
+        }
+
+        @Override
+        public Optional<ConnectorState> connectorState(String connectCluster, String connectorId) {
+            return reachable ? Optional.ofNullable(states.get(connectorId)) : Optional.empty();
+        }
+
+        @Override
+        public Optional<Map<String, ConnectorState>> connectorStates(String connectCluster) {
+            return reachable ? Optional.of(Map.of("sink", states.getOrDefault("sink", ConnectorState.RUNNING)))
+                    : Optional.empty();
+        }
+
+        @Override
+        public boolean isRunning(String connectCluster) {
+            return running;
+        }
+
+        @Override
+        public void stopWorkersOn(StoredCluster kafkaCluster) {
+            calls.add("stop workers on " + kafkaCluster.getName());
+        }
     }
 }

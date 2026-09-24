@@ -1,14 +1,17 @@
 package io.floci.gcp.services.kafka;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.kafka.model.ClusterState;
 import io.floci.gcp.services.kafka.model.ConnectorState;
+import io.floci.gcp.services.kafka.model.StoredCluster;
 import io.floci.gcp.services.kafka.model.StoredConnectCluster;
 import io.floci.gcp.services.kafka.model.StoredConnector;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -19,27 +22,31 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Control plane for {@code google.cloud.managedkafka.v1.ManagedKafkaConnect}: Connect clusters
- * and their connectors as metadata, with the connector lifecycle methods flipping {@code state}.
+ * {@code google.cloud.managedkafka.v1.ManagedKafkaConnect}: Connect clusters and their connectors.
  *
- * <p>No Connect runtime is started: a Connect cluster is {@code ACTIVE} as soon as it is created,
- * and connectors report {@code RUNNING}, {@code PAUSED} or {@code STOPPED} as the API moved them,
- * in mock and Docker mode alike. Attaching a Kafka Connect sidecar to the referenced cluster's
- * Redpanda container is a follow-up that changes none of this surface.
+ * <p>With the Kafka data plane on ({@code kafka.mock=false}), each Connect cluster runs a Kafka
+ * Connect worker attached to the Kafka cluster it references ({@link KafkaConnectDataPlane}):
+ * connector writes go to the worker first and are stored only once it accepts them, and a
+ * connector's {@code state} is read back from the worker. A Connect cluster whose worker is not
+ * running (its Kafka cluster was deleted, or the emulator restarted) reports its connectors
+ * {@code FAILED}, since nothing is processing their records. In mock mode nothing is started, a
+ * Connect cluster is {@code ACTIVE} as soon as it is created, and connectors report the state the
+ * lifecycle methods moved them to.
  *
- * <p>Invariant: a connector exists only under a Connect cluster that exists. Every operation on a
- * Connect cluster or one of its connectors runs under that cluster's lock (striped on the cluster
- * name), so a delete cannot interleave with a connector mutation and leave an orphan, and two
- * mutations of one connector cannot lose each other's write. The Kafka cluster a Connect cluster
- * references is checked at create only; a later {@code DeleteCluster} on the Kafka side is not
- * blocked in this phase, which is safe because nothing here dereferences that cluster afterwards
- * (see the class notes in the PR for the follow-up).
+ * <p>Invariant: a connector exists only under a Connect cluster that exists, and a running worker
+ * exists only for a stored Connect cluster. Every operation on a Connect cluster or one of its
+ * connectors, worker calls included, runs under that cluster's lock (striped on the cluster name),
+ * so a delete cannot interleave with a connector mutation or a worker start and leave an orphan,
+ * and two mutations of one connector cannot lose each other's write.
  */
 @ApplicationScoped
 public class KafkaConnectService {
@@ -60,23 +67,51 @@ public class KafkaConnectService {
     private final Object[] clusterLocks = createLocks();
     private final StorageBackend<String, StoredConnectCluster> connectClusterStore;
     private final StorageBackend<String, StoredConnector> connectorStore;
-    private final Predicate<String> kafkaClusterExists;
+    private final Function<String, Optional<StoredCluster>> kafkaClusters;
+    private final KafkaConnectDataPlane dataPlane;
+    private final boolean dataPlaneEnabled;
 
     @Inject
-    public KafkaConnectService(StorageFactory storageFactory, KafkaService kafkaService) {
+    public KafkaConnectService(StorageFactory storageFactory, KafkaService kafkaService,
+                               KafkaConnectContainerDataPlane dataPlane, EmulatorConfig config) {
         this(storageFactory.createGlobal("kafka", "kafka-connect-clusters.json",
                         new TypeReference<Map<String, StoredConnectCluster>>() {}),
                 storageFactory.createGlobal("kafka", "kafka-connectors.json",
                         new TypeReference<Map<String, StoredConnector>>() {}),
-                kafkaService::clusterExists);
+                kafkaService::findCluster, dataPlane, !config.services().kafka().mock());
     }
 
     KafkaConnectService(StorageBackend<String, StoredConnectCluster> connectClusterStore,
                         StorageBackend<String, StoredConnector> connectorStore,
                         Predicate<String> kafkaClusterExists) {
+        this(connectClusterStore, connectorStore,
+                name -> kafkaClusterExists.test(name) ? Optional.of(new StoredCluster(name)) : Optional.empty(),
+                KafkaConnectDataPlane.noop(), false);
+    }
+
+    KafkaConnectService(StorageBackend<String, StoredConnectCluster> connectClusterStore,
+                        StorageBackend<String, StoredConnector> connectorStore,
+                        Function<String, Optional<StoredCluster>> kafkaClusters,
+                        KafkaConnectDataPlane dataPlane,
+                        boolean dataPlaneEnabled) {
         this.connectClusterStore = connectClusterStore;
         this.connectorStore = connectorStore;
-        this.kafkaClusterExists = kafkaClusterExists;
+        this.kafkaClusters = kafkaClusters;
+        this.dataPlane = dataPlane;
+        this.dataPlaneEnabled = dataPlaneEnabled;
+    }
+
+    /** Workers do not outlive the process; their state stays in the Kafka cluster's internal topics. */
+    @PreDestroy
+    void shutdown() {
+        if (!dataPlaneEnabled) {
+            return;
+        }
+        for (StoredConnectCluster cluster : connectClusterStore.scan(k -> true)) {
+            synchronized (clusterLock(cluster.getName())) {
+                dataPlane.stopWorker(cluster.getName(), null, false);
+            }
+        }
     }
 
     // ── Connect clusters ──────────────────────────────────────────────────────
@@ -92,16 +127,31 @@ public class KafkaConnectService {
             if (connectClusterStore.get(name).isPresent()) {
                 throw GcpException.alreadyExists("ConnectCluster already exists: " + name);
             }
-            String kafkaCluster = requireKafkaCluster(project, location, body.get("kafkaCluster"));
-            StoredConnectCluster cluster = new StoredConnectCluster(name, kafkaCluster);
+            StoredCluster kafkaCluster = requireKafkaCluster(project, location, body.get("kafkaCluster"));
+            StoredConnectCluster cluster = new StoredConnectCluster(name, kafkaCluster.getName());
             cluster.setCapacityConfig(requireCapacityConfig(body.get("capacityConfig")));
             cluster.setGcpConfig(requireGcpConfig(body.get("gcpConfig")));
             cluster.setLabels(stringMap(body.get("labels"), "labels"));
             cluster.setConfig(stringMap(body.get("config"), "config"));
-            // Nothing is provisioned in this phase, so there is no CREATING window to report.
+            connectClusterStore.put(name, cluster);
+            if (dataPlaneEnabled) {
+                // CREATING stays visible to ListConnectClusters, which does not take the lock,
+                // until the worker serves its REST API. A worker that cannot start leaves nothing.
+                try {
+                    dataPlane.startWorker(name, kafkaCluster, cluster.getConfig());
+                } catch (RuntimeException e) {
+                    connectClusterStore.delete(name);
+                    try {
+                        dataPlane.stopWorker(name, kafkaCluster, true);
+                    } catch (RuntimeException cleanup) {
+                        e.addSuppressed(cleanup);
+                    }
+                    throw e;
+                }
+            }
             cluster.setState(ClusterState.ACTIVE);
             connectClusterStore.put(name, cluster);
-            LOG.infov("Created Kafka Connect cluster {0} on {1}", name, kafkaCluster);
+            LOG.infov("Created Kafka Connect cluster {0} on {1}", name, kafkaCluster.getName());
             return cluster;
         }
     }
@@ -143,6 +193,9 @@ public class KafkaConnectService {
                     ? requireGcpConfig(mask.apply("gcpConfig", cluster.getGcpConfig())) : null;
             Map<String, String> config = mask.touches("config")
                     ? stringMap(mask.apply("config", cluster.getConfig()), "config") : null;
+            if (dataPlaneEnabled && mask.touches("config") && !Objects.equals(config, cluster.getConfig())) {
+                restartWorker(cluster, config);
+            }
             if (mask.touches("labels")) {
                 cluster.setLabels(labels);
             }
@@ -168,6 +221,11 @@ public class KafkaConnectService {
         synchronized (clusterLock(name)) {
             StoredConnectCluster cluster = requireConnectCluster(name);
             cluster.setState(ClusterState.DELETING);
+            if (dataPlaneEnabled) {
+                // Deleting a Connect cluster erases the connector configs it keeps in its primary
+                // Kafka cluster, so the worker's internal topics go with it.
+                dataPlane.stopWorker(name, kafkaClusters.apply(cluster.getKafkaCluster()).orElse(null), true);
+            }
             String connectorPrefix = name + "/connectors/";
             connectorStore.scan(k -> k.startsWith(connectorPrefix))
                     .forEach(c -> connectorStore.delete(c.getName()));
@@ -192,6 +250,9 @@ public class KafkaConnectService {
             if (connectorStore.get(name).isPresent()) {
                 throw GcpException.alreadyExists("Connector already exists: " + name);
             }
+            if (dataPlaneEnabled) {
+                dataPlane.createConnector(clusterName, connectorId, connector.getConfigs());
+            }
             connectorStore.put(name, connector);
             return connector;
         }
@@ -200,7 +261,15 @@ public class KafkaConnectService {
     public StoredConnector getConnector(String project, String location, String connectClusterId, String connectorId) {
         String clusterName = connectClusterName(project, location, connectClusterId);
         synchronized (clusterLock(clusterName)) {
-            return requireConnector(clusterName + "/connectors/" + connectorId);
+            StoredConnector connector = requireConnector(clusterName + "/connectors/" + connectorId);
+            if (dataPlaneEnabled) {
+                if (!dataPlane.isRunning(clusterName)) {
+                    refreshState(connector, ConnectorState.FAILED);
+                } else {
+                    dataPlane.connectorState(clusterName, connectorId).ifPresent(state -> refreshState(connector, state));
+                }
+            }
+            return connector;
         }
     }
 
@@ -213,6 +282,15 @@ public class KafkaConnectService {
             List<StoredConnector> all = connectorStore.scan(k -> k.startsWith(prefix)).stream()
                     .sorted(Comparator.comparing(StoredConnector::getName))
                     .toList();
+            if (dataPlaneEnabled && !dataPlane.isRunning(clusterName)) {
+                all.forEach(connector -> refreshState(connector, ConnectorState.FAILED));
+            } else if (dataPlaneEnabled) {
+                dataPlane.connectorStates(clusterName).ifPresent(states -> all.forEach(connector -> {
+                    ConnectorState state = states.get(connector.getName().substring(prefix.length()));
+                    // A stored connector the worker does not list has not been assigned yet.
+                    refreshState(connector, state == null ? ConnectorState.UNASSIGNED : state);
+                }));
+            }
             return PageToken.paginate(all, pageSize(pageSize), pageToken);
         }
     }
@@ -229,6 +307,9 @@ public class KafkaConnectService {
                     ? stringMap(mask.apply("configs", connector.getConfigs()), "configs") : null;
             Map<String, Object> policy = mask.touches("taskRestartPolicy")
                     ? taskRestartPolicy(mask.apply("taskRestartPolicy", connector.getTaskRestartPolicy())) : null;
+            if (dataPlaneEnabled && mask.touches("configs")) {
+                dataPlane.updateConnector(clusterName, connectorId, configs);
+            }
             if (mask.touches("configs")) {
                 connector.setConfigs(configs);
             }
@@ -245,24 +326,54 @@ public class KafkaConnectService {
         String name = clusterName + "/connectors/" + connectorId;
         synchronized (clusterLock(clusterName)) {
             requireConnector(name);
+            if (dataPlaneEnabled) {
+                dataPlane.deleteConnector(clusterName, connectorId);
+            }
             connectorStore.delete(name);
         }
     }
 
-    /**
-     * {@code PauseConnector}, {@code ResumeConnector}, {@code RestartConnector}, {@code StopConnector}.
-     * A restart on a real runtime passes through {@code RESTARTING}; with nothing to restart here
-     * the connector is {@code RUNNING} again by the time the response is written.
-     */
+    /** {@code PauseConnector}, {@code ResumeConnector} and {@code StopConnector}, named by the state each moves to. */
     public StoredConnector transitionConnector(String project, String location, String connectClusterId,
                                                String connectorId, ConnectorState target) {
         String clusterName = connectClusterName(project, location, connectClusterId);
         String name = clusterName + "/connectors/" + connectorId;
         synchronized (clusterLock(clusterName)) {
             StoredConnector connector = requireConnector(name);
+            if (dataPlaneEnabled) {
+                dataPlane.transitionConnector(clusterName, connectorId, target);
+            }
             connector.setState(target);
             connectorStore.put(name, connector);
             return connector;
+        }
+    }
+
+    /**
+     * {@code RestartConnector}. The worker passes the connector through {@code RESTARTING}, which a
+     * later read reports; in mock mode there is nothing to restart, so it is {@code RUNNING} again
+     * by the time the response is written.
+     */
+    public StoredConnector restartConnector(String project, String location, String connectClusterId,
+                                            String connectorId) {
+        String clusterName = connectClusterName(project, location, connectClusterId);
+        String name = clusterName + "/connectors/" + connectorId;
+        synchronized (clusterLock(clusterName)) {
+            StoredConnector connector = requireConnector(name);
+            if (dataPlaneEnabled) {
+                dataPlane.restartConnector(clusterName, connectorId);
+            }
+            connector.setState(ConnectorState.RUNNING);
+            connectorStore.put(name, connector);
+            return connector;
+        }
+    }
+
+    /** Callers hold {@link #clusterLock} for the connector's cluster. */
+    private void refreshState(StoredConnector connector, ConnectorState state) {
+        if (connector.getState() != state) {
+            connector.setState(state);
+            connectorStore.put(connector.getName(), connector);
         }
     }
 
@@ -299,7 +410,7 @@ public class KafkaConnectService {
      * {@code kafka_cluster} is REQUIRED and must name a Kafka cluster in the same project and
      * location; the real service pins a Connect cluster to a Kafka cluster in its own region.
      */
-    private String requireKafkaCluster(String project, String location, Object value) {
+    private StoredCluster requireKafkaCluster(String project, String location, Object value) {
         if (!(value instanceof String kafkaCluster) || kafkaCluster.isBlank()) {
             throw GcpException.invalidArgument("kafkaCluster is required");
         }
@@ -312,10 +423,33 @@ public class KafkaConnectService {
             throw GcpException.invalidArgument("kafkaCluster must be in the same project and location "
                     + "as the ConnectCluster: " + kafkaCluster);
         }
-        if (!kafkaClusterExists.test(kafkaCluster)) {
-            throw GcpException.notFound("Cluster not found: " + kafkaCluster);
+        return kafkaClusters.apply(kafkaCluster)
+                .orElseThrow(() -> GcpException.notFound("Cluster not found: " + kafkaCluster));
+    }
+
+    /**
+     * Worker properties are read once, at start, so a changed {@code config} restarts the worker.
+     * Connectors survive: their configs and offsets live in the Kafka cluster's internal topics. If
+     * the new config does not come up, the previous one is restored before the error is returned.
+     * Callers hold {@link #clusterLock} for the cluster.
+     */
+    private void restartWorker(StoredConnectCluster cluster, Map<String, String> config) {
+        StoredCluster kafkaCluster = kafkaClusters.apply(cluster.getKafkaCluster())
+                .orElseThrow(() -> GcpException.failedPrecondition("Kafka cluster " + cluster.getKafkaCluster()
+                        + " no longer exists, so the Connect cluster's worker cannot be restarted"));
+        dataPlane.stopWorker(cluster.getName(), kafkaCluster, false);
+        try {
+            dataPlane.startWorker(cluster.getName(), kafkaCluster, config);
+        } catch (RuntimeException e) {
+            LOG.warnf("Worker for %s did not start with the new config, restoring the previous one: %s",
+                    cluster.getName(), e.getMessage());
+            try {
+                dataPlane.startWorker(cluster.getName(), kafkaCluster, cluster.getConfig());
+            } catch (RuntimeException restore) {
+                e.addSuppressed(restore);
+            }
+            throw e;
         }
-        return kafkaCluster;
     }
 
     /** {@code capacity_config} is REQUIRED with both {@code vcpu_count} and {@code memory_bytes}. */

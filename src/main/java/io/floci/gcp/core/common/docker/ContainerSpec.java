@@ -31,6 +31,8 @@ import java.util.Map;
  * @param workingDir Working directory inside the container (overrides image WORKDIR)
  * @param user User the container process runs as, formatted "uid[:gid]" (null = image USER)
  * @param groupAdd Supplementary group IDs added to the container process
+ * @param loopbackPorts Container ports from {@code portBindings} whose host binding is restricted
+ *                      to {@code 127.0.0.1}, for management APIs only the emulator should reach
  */
 public record ContainerSpec(
         String image,
@@ -52,10 +54,22 @@ public record ContainerSpec(
         List<String> dnsServers,
         String workingDir,
         String user,
-        List<String> groupAdd
+        List<String> groupAdd,
+        List<Integer> loopbackPorts
 ) {
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+    }
+
+    /** Every published port bound on all host interfaces, as before {@code loopbackPorts} existed. */
+    public ContainerSpec(String image, String name, List<String> env, List<String> cmd, List<String> entrypoint,
+                         Long memoryBytes, Map<Integer, Integer> portBindings, List<Integer> exposedPorts,
+                         String networkMode, List<Mount> mounts, List<Bind> binds, List<String> extraHosts,
+                         Map<String, String> labels, LogConfig logConfig, boolean privileged, String cgroupnsMode,
+                         List<String> dnsServers, String workingDir, String user, List<String> groupAdd) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, exposedPorts, networkMode, mounts, binds,
+                extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd,
+                List.of());
     }
 
     public boolean hasPortBindings() {

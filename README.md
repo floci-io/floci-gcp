@@ -256,7 +256,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 
 | Service | Default image | What is real | Mock flag |
 |---|---|---|---|
-| Managed Kafka | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
+| Managed Kafka | `redpandadata/redpanda:latest`, `apache/kafka:4.3.1` (Connect) | Kafka-compatible broker via Redpanda; a Kafka Connect worker per Connect cluster | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
 | Cloud SQL for PostgreSQL and MySQL | `postgres:15.18-alpine` (15-18), `mysql:8.0.46` / `mysql:8.4.11` | PostgreSQL or MySQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
 | GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
@@ -276,6 +276,7 @@ docker run -d --name floci-gcp \
 | Variable | Default |
 |---|---|
 | `FLOCI_GCP_SERVICES_KAFKA_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
+| `FLOCI_GCP_SERVICES_KAFKA_CONNECT_IMAGE` | `apache/kafka:4.3.1` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES15_IMAGE` | `postgres:15.18-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES16_IMAGE` | `postgres:16.14-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES17_IMAGE` | `postgres:17.10-alpine` |

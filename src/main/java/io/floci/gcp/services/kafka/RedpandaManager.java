@@ -3,6 +3,7 @@ package io.floci.gcp.services.kafka;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.Ports;
 import io.floci.gcp.config.EmulatorConfig;
@@ -11,6 +12,7 @@ import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager.EndpointInfo;
+import io.floci.gcp.core.common.docker.ContainerLifecycleManager.ExecResult;
 import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.kafka.model.StoredCluster;
@@ -33,6 +35,14 @@ public class RedpandaManager {
     private static final Logger LOG = Logger.getLogger(RedpandaManager.class);
     private static final int KAFKA_PORT = 9092;
     private static final int ADMIN_PORT = 9644;
+    /**
+     * A second Kafka listener for sidecars on the Docker network (the Kafka Connect runtime). The
+     * client listener advertises {@code 127.0.0.1:9092}, which a client in another container
+     * resolves to itself after the bootstrap round trip; this one advertises {@link #BROKER_ALIAS},
+     * which each sidecar maps to this container's address.
+     */
+    static final int SIDECAR_KAFKA_PORT = 29092;
+    static final String BROKER_ALIAS = "floci-kafka-broker";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
@@ -67,7 +77,10 @@ public class RedpandaManager {
 
         List<String> cmd = new ArrayList<>(List.of(
                 "redpanda", "start", "--overprovisioned", "--smp", "1",
-                "--memory", "512M", "--reserve-memory", "0M"));
+                "--memory", "512M", "--reserve-memory", "0M",
+                "--kafka-addr", "internal://0.0.0.0:" + KAFKA_PORT + ",sidecar://0.0.0.0:" + SIDECAR_KAFKA_PORT,
+                "--advertise-kafka-addr", "internal://127.0.0.1:" + KAFKA_PORT
+                        + ",sidecar://" + BROKER_ALIAS + ":" + SIDECAR_KAFKA_PORT));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -204,6 +217,47 @@ public class RedpandaManager {
         } else {
             String host = cluster.getBootstrapAddress().split(":")[0];
             return "http://" + host + ":" + ADMIN_PORT;
+        }
+    }
+
+    /**
+     * The broker container's address on its Docker network, for sidecars to map
+     * {@link #BROKER_ALIAS} to. Sidecars join the same network ({@code kafka.docker-network}), so
+     * that network's address is preferred; any other address the container has is the fallback.
+     */
+    public String brokerAddress(StoredCluster cluster) {
+        InspectContainerResponse inspect = lifecycleManager.runDockerApi(
+                "inspect Redpanda container " + cluster.getContainerId(),
+                () -> lifecycleManager.getDockerClient().inspectContainerCmd(cluster.getContainerId()).exec());
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
+        Optional<String> preferred = config.services().kafka().dockerNetwork()
+                .or(() -> config.services().dockerNetwork())
+                .filter(n -> networks != null && networks.containsKey(n))
+                .map(n -> networks.get(n).getIpAddress());
+        if (preferred.isPresent() && !preferred.get().isBlank()) {
+            return preferred.get();
+        }
+        if (networks != null) {
+            for (ContainerNetwork network : networks.values()) {
+                if (network.getIpAddress() != null && !network.getIpAddress().isBlank()) {
+                    return network.getIpAddress();
+                }
+            }
+        }
+        throw new IllegalStateException("Redpanda container " + cluster.getContainerId() + " has no network address");
+    }
+
+    /** Deletes topics on the broker; a topic that does not exist is not an error. */
+    public void deleteTopics(StoredCluster cluster, List<String> topics) {
+        if (cluster.getContainerId() == null || topics.isEmpty()) {
+            return;
+        }
+        List<String> cmd = new ArrayList<>(List.of("rpk", "topic", "delete"));
+        cmd.addAll(topics);
+        ExecResult result = lifecycleManager.exec(cluster.getContainerId(), List.of(), cmd);
+        if (result.exitCode() != 0) {
+            LOG.warnf("Deleting topics %s on %s exited %d: %s", topics, cluster.getName(),
+                    result.exitCode(), result.stderr());
         }
     }
 

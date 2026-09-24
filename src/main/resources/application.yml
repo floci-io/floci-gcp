@@ -95,6 +95,7 @@ floci-gcp:
       enabled: true
       mock: false
       default-image: "redpandadata/redpanda:latest"
+      connect-image: "apache/kafka:4.3.1"
     cloudsql:
       enabled: true
       mock: false

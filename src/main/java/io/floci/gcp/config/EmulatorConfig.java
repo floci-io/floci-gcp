@@ -341,6 +341,10 @@ public interface EmulatorConfig {
         @WithDefault("redpandadata/redpanda:latest")
         String defaultImage();
 
+        /** Kafka Connect worker image; the Apache Kafka distribution layout under {@code /opt/kafka}. */
+        @WithDefault("apache/kafka:4.3.1")
+        String connectImage();
+
         Optional<String> dockerNetwork();
     }
 

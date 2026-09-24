@@ -17,6 +17,7 @@ import com.google.cloud.bigquery.QueryParameterValue;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.TableDefinition;
 import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigquery.TableInfo;
 import com.google.cloud.bigquery.TableResult;
@@ -382,7 +383,7 @@ class BigQueryTest {
         JobStatistics.QueryStatistics viewStats = view.getStatistics();
         assertThat(viewStats.getDdlOperationPerformed()).isEqualTo("CREATE");
         assertThat(bigquery.getTable(TableId.of(DATASET, "busy")).getDefinition().getType())
-                .isEqualTo(com.google.cloud.bigquery.TableDefinition.Type.VIEW);
+                .isEqualTo(TableDefinition.Type.VIEW);
 
         TableResult busy = bigquery.query(QueryJobConfiguration.newBuilder(
                 "SELECT name FROM `" + PROJECT_ID + "." + DATASET + ".busy`").build());

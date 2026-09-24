@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * BigQuery REST (Discovery) control plane, served under {@code /bigquery/v2/projects}.
@@ -370,8 +371,8 @@ public class BigQueryController {
         return new BigQueryService.QueryOptions(string(config.get("query"), "query"), defaultDatasetId,
                 queryParameters(config.get("queryParameters")),
                 string(config.get("parameterMode"), "parameterMode"), dryRun, useLegacySql, destinationTable,
-                string(config.get("writeDisposition"), "writeDisposition"),
-                string(config.get("createDisposition"), "createDisposition"),
+                disposition(config.get("writeDisposition"), "writeDisposition", WRITE_DISPOSITIONS),
+                disposition(config.get("createDisposition"), "createDisposition", CREATE_DISPOSITIONS),
                 schemaUpdateOptions(config.get("schemaUpdateOptions")));
     }
 
@@ -408,6 +409,19 @@ public class BigQueryController {
             options.add(string(entry, "schemaUpdateOptions entry"));
         }
         return options;
+    }
+
+    private static final Set<String> WRITE_DISPOSITIONS =
+            Set.of("WRITE_TRUNCATE", "WRITE_TRUNCATE_DATA", "WRITE_APPEND", "WRITE_EMPTY");
+    private static final Set<String> CREATE_DISPOSITIONS = Set.of("CREATE_IF_NEEDED", "CREATE_NEVER");
+
+    /** An unknown disposition is a bad request, not a silent fallback to the default. */
+    private static String disposition(Object raw, String field, Set<String> allowed) {
+        String value = string(raw, field);
+        if (value != null && !allowed.contains(value)) {
+            throw GcpException.invalidArgument("Invalid value for " + field + ": " + value).withReason("invalid");
+        }
+        return value;
     }
 
     private static String string(Object raw, String field) {

@@ -232,6 +232,18 @@ class SqlDialectTranslatorTest {
         assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE,
                 SqlDialectTranslator.parseStatement("DROP TABLE IF EXISTS ds.t", "test-project", null).kind());
         assertTrue(SqlDialectTranslator.parseStatement("DROP SCHEMA ds CASCADE", "test-project", null).cascade());
+        assertEquals(SqlDialectTranslator.StatementKind.DROP_SCHEMA,
+                SqlDialectTranslator.parseStatement("DROP SCHEMA ds RESTRICT", "test-project", null).kind());
+    }
+
+    @Test
+    void cascadeAndRestrictAreOnlyValidOnDropSchema() {
+        for (String sql : List.of("DROP TABLE ds.t CASCADE", "DROP TABLE ds.t RESTRICT", "DROP VIEW ds.v CASCADE",
+                "DROP MATERIALIZED VIEW ds.v RESTRICT")) {
+            GcpException e = assertThrows(GcpException.class,
+                    () -> SqlDialectTranslator.parseStatement(sql, "test-project", null), sql);
+            assertEquals("invalidQuery", e.getReason(), sql);
+        }
     }
 
     @Test

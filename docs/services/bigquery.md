@@ -72,11 +72,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is
-  an HTTP 400.
+  an HTTP 400. DML and DDL dry runs resolve every table the statement reads or writes, and DML is
+  bound against those tables, so a dry run fails wherever the real run would.
 - **Destination tables**: `jobs.insert` honors `configuration.query.destinationTable` with
   `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
   (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
-  reported in the job status (`duplicate`, `notFound`).
+  reported in the job status (`duplicate`, `notFound`); any other disposition value is an
+  HTTP 400 (`invalid`).
 - **Views**: logical and materialized views, created with `tables.insert` (`view.query`) or
   DDL. The view query is validated and its schema derived on creation; views are expanded at
   query time, including views over views. A materialized view is evaluated on read, like a
@@ -157,7 +159,7 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
-| `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE]` | Datasets; a non-empty dataset needs `CASCADE` |
+| `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE \| RESTRICT]` | Datasets; a non-empty dataset needs `CASCADE`. `CASCADE`/`RESTRICT` are rejected on `DROP TABLE`/`VIEW` |
 
 DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREATE`, `REPLACE`,
 `SKIP`, `DROP`) and `ddlTargetTable` / `ddlTargetDataset`. DML and DDL results have no rows, so

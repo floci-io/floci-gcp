@@ -98,6 +98,12 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), tables, flociEndpoint);
+        if (request.dryRun()) {
+            // EXPLAIN binds the statement against the staged tables without running it, so a missing
+            // column or a malformed clause fails the dry run just as it would fail the real one.
+            run("EXPLAIN " + translation.sql(), staging.setup(), flociEndpoint, null);
+            return new DmlResult(0, 0, 0, 0, List.of(), staging.bytesProcessed());
+        }
         String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(target.datasetId()) + "."
                 + DuckTypes.quoteIdentifier(target.tableId());
         DuckClient.DuckResult result = run(translation.sql(), staging.setup(), flociEndpoint, followup);

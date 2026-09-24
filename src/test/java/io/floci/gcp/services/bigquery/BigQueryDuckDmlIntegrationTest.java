@@ -18,6 +18,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * DML, DDL, views and destination tables end to end on the real floci-duck sidecar. DML needs
@@ -227,6 +228,38 @@ class BigQueryDuckDmlIntegrationTest {
 
     @Test
     @Order(9)
+    void dryRunOfDmlReportsTheErrorARealRunWould() {
+        query("CREATE SCHEMA dry_err").then().statusCode(200);
+        query("CREATE TABLE dry_err.t (a INT64)").then().statusCode(200);
+        for (String sql : List.of(
+                "INSERT INTO dry_err.t (a) SELECT a FROM dry_err.missing",
+                "MERGE dry_err.t T USING dry_err.missing S ON T.a = S.a WHEN MATCHED THEN DELETE",
+                "UPDATE dry_err.t SET nope = 1 WHERE TRUE")) {
+            Response dry = given().contentType("application/json")
+                    .body(Map.of("query", sql, "useLegacySql", false, "dryRun", true))
+                    .when().post(BASE + "/queries");
+            Response real = query(sql);
+            dry.then().statusCode(real.statusCode());
+            assertTrue(real.statusCode() >= 400, sql);
+        }
+    }
+
+    @Test
+    @Order(10)
+    void unknownDispositionsAreRejected() {
+        query("CREATE SCHEMA disp").then().statusCode(200);
+        Map<String, Object> destination = Map.of("datasetId", "disp", "tableId", "t");
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable", destination,
+                "writeDisposition", "WRITE_SOMETIMES")).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalid"));
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable", destination,
+                "createDisposition", "CREATE_MAYBE")).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalid"));
+        given().when().get(BASE + "/datasets/disp/tables/t").then().statusCode(404);
+    }
+
+    @Test
+    @Order(11)
     void destinationWritesRespectTheDeclaredSchema() {
         query("CREATE SCHEMA typed_ds").then().statusCode(200);
         given().contentType("application/json")
@@ -264,7 +297,7 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void destinationTableWithoutATableIdIsRejected() {
         // This used to return a DONE job and persist a table under the key "shop/null".
         insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false,

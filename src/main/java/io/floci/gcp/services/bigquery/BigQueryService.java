@@ -595,15 +595,18 @@ public class BigQueryService {
 
     /**
      * The resource checks {@link #executeStatement} makes, without any of its writes. A dry run
-     * reports the same error a real run would, so a DML statement against a missing table or a
-     * CREATE VIEW over a missing one fails here instead of reporting success.
+     * reports the same error a real run would, so a DML statement against a missing target or
+     * source table, or a CREATE VIEW over a missing one, fails here instead of reporting success.
      */
     private void validateStatement(String projectId, SqlDialectTranslator.Statement statement,
                                    QueryOptions options) {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
-            case INSERT, UPDATE, DELETE, MERGE, TRUNCATE ->
-                    getTable(projectId, target.datasetId(), target.tableId());
+            case INSERT, UPDATE, DELETE, MERGE -> {
+                getTable(projectId, target.datasetId(), target.tableId());
+                engine.executeDml(request(projectId, options.sql(), options, true), tables(projectId));
+            }
+            case TRUNCATE -> getTable(projectId, target.datasetId(), target.tableId());
             case DROP_TABLE, DROP_VIEW -> {
                 if (tableStore.get(tableKey(target.datasetId(), target.tableId())).isEmpty()
                         && !statement.ifExists()) {

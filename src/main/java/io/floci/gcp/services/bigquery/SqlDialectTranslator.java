@@ -258,10 +258,12 @@ final class SqlDialectTranslator {
         }
         Path path = pathAt(sig, at);
         int after = nextSignificant(path.end(), tokens.size());
-        boolean cascade = after >= 0 && tokens.get(after).isKeyword("CASCADE");
-        // Anything else trailing the target is a syntax error. Ignoring it would let a typo such as
-        // "DROP TABLE ds.t GARBAGE" through, and DROP runs before anyone sees the mistake.
-        int trailing = cascade || (after >= 0 && tokens.get(after).isKeyword("RESTRICT"))
+        // CASCADE and RESTRICT belong to DROP SCHEMA only. Anything else trailing the target is a
+        // syntax error. Ignoring it would let a typo such as "DROP TABLE ds.t GARBAGE" through,
+        // and DROP runs before anyone sees the mistake.
+        boolean schema = object.equals("SCHEMA");
+        boolean cascade = schema && after >= 0 && tokens.get(after).isKeyword("CASCADE");
+        int trailing = cascade || (schema && after >= 0 && tokens.get(after).isKeyword("RESTRICT"))
                 ? nextSignificant(after + 1, tokens.size()) : after;
         if (trailing >= 0) {
             throw invalidQuery("Syntax error: Unexpected \"" + tokens.get(trailing).text + "\"");

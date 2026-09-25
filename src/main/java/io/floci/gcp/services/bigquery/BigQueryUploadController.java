@@ -87,11 +87,22 @@ public class BigQueryUploadController {
         this.config = config;
     }
 
-    /** Cancelling a resumable session, which is how the SDK aborts an upload. */
+    /**
+     * Cancelling a resumable session, which is how the SDK aborts an upload. It takes the session's
+     * monitor, like the chunk that completes an upload, so a 204 here means the load job will not
+     * run: either the cancel wins and the final chunk finds no session, or the final chunk already
+     * completed the upload and the cancel reports the session gone.
+     */
     @DELETE
     public Response cancel(@QueryParam("upload_id") String uploadId) {
-        if (uploadId == null || sessions.remove(uploadId) == null) {
+        Session session = uploadId != null ? sessions.get(uploadId) : null;
+        if (session == null) {
             throw GcpException.notFound("Not found: upload session " + uploadId);
+        }
+        synchronized (session) {
+            if (!sessions.remove(uploadId, session)) {
+                throw GcpException.notFound("Not found: upload session " + uploadId);
+            }
         }
         return Response.noContent().build();
     }
@@ -184,7 +195,9 @@ public class BigQueryUploadController {
                 throw GcpException.invalidArgument("Received " + received + " bytes, more than the declared total "
                         + session.total).withReason("invalid");
             }
-            sessions.remove(uploadId);
+            if (!sessions.remove(uploadId, session)) {
+                throw GcpException.notFound("Not found: upload session " + uploadId);
+            }
             return Response.ok(runJob(session.projectId, session.job, session.data.toByteArray())).build();
         }
     }

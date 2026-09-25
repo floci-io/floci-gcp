@@ -7,27 +7,38 @@ import com.google.cloud.bigquery.DatasetInfo;
 import com.google.cloud.bigquery.Field;
 import com.google.cloud.bigquery.FieldValue;
 import com.google.cloud.bigquery.FieldValueList;
+import com.google.cloud.bigquery.FormatOptions;
 import com.google.cloud.bigquery.InsertAllRequest;
 import com.google.cloud.bigquery.InsertAllResponse;
 import com.google.cloud.bigquery.Job;
+import com.google.cloud.bigquery.JobId;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.JobStatistics;
+import com.google.cloud.bigquery.LoadJobConfiguration;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.TableDataWriteChannel;
 import com.google.cloud.bigquery.TableDefinition;
 import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigquery.TableInfo;
 import com.google.cloud.bigquery.TableResult;
+import com.google.cloud.bigquery.WriteChannelConfiguration;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.BucketInfo;
+import com.google.cloud.storage.Storage;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -409,18 +420,18 @@ class BigQueryTest {
     @Test
     @Order(18)
     void loadCsvFromCloudStorage() throws InterruptedException {
-        com.google.cloud.storage.Storage storage = TestFixtures.storageClient();
+        Storage storage = TestFixtures.storageClient();
         String bucket = TestFixtures.uniqueName("bq-load");
-        storage.create(com.google.cloud.storage.BucketInfo.of(bucket));
-        storage.create(com.google.cloud.storage.BlobInfo.newBuilder(bucket, "cities/part-0.csv").build(),
-                "city,population\nLima,10000000\nQuito,2800000\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        storage.create(com.google.cloud.storage.BlobInfo.newBuilder(bucket, "cities/part-1.csv").build(),
-                "city,population\nBogota,7900000\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        storage.create(BucketInfo.of(bucket));
+        storage.create(BlobInfo.newBuilder(bucket, "cities/part-0.csv").build(),
+                "city,population\nLima,10000000\nQuito,2800000\n".getBytes(StandardCharsets.UTF_8));
+        storage.create(BlobInfo.newBuilder(bucket, "cities/part-1.csv").build(),
+                "city,population\nBogota,7900000\n".getBytes(StandardCharsets.UTF_8));
 
         TableId cities = TableId.of(DATASET, "cities");
-        Job job = bigquery.create(JobInfo.of(com.google.cloud.bigquery.LoadJobConfiguration
+        Job job = bigquery.create(JobInfo.of(LoadJobConfiguration
                 .newBuilder(cities, "gs://" + bucket + "/cities/part-*.csv",
-                        com.google.cloud.bigquery.FormatOptions.csv())
+                        FormatOptions.csv())
                 .setAutodetect(true)
                 .build())).waitFor();
         assertThat(job.getStatus().getError()).isNull();
@@ -441,17 +452,17 @@ class BigQueryTest {
     @Order(19)
     void loadThroughAResumableUpload() throws Exception {
         TableId target = TableId.of(DATASET, "uploaded");
-        com.google.cloud.bigquery.WriteChannelConfiguration config = com.google.cloud.bigquery.WriteChannelConfiguration
+        WriteChannelConfiguration config = WriteChannelConfiguration
                 .newBuilder(target)
-                .setFormatOptions(com.google.cloud.bigquery.FormatOptions.json())
+                .setFormatOptions(FormatOptions.json())
                 .setSchema(Schema.of(Field.of("name", StandardSQLTypeName.STRING),
                         Field.of("score", StandardSQLTypeName.FLOAT64)))
                 .build();
-        com.google.cloud.bigquery.JobId jobId = com.google.cloud.bigquery.JobId.of(TestFixtures.uniqueName("upload"));
-        com.google.cloud.bigquery.TableDataWriteChannel writer = bigquery.writer(jobId, config);
-        try (java.io.OutputStream out = java.nio.channels.Channels.newOutputStream(writer)) {
+        JobId jobId = JobId.of(TestFixtures.uniqueName("upload"));
+        TableDataWriteChannel writer = bigquery.writer(jobId, config);
+        try (OutputStream out = Channels.newOutputStream(writer)) {
             out.write("{\"name\": \"ana\", \"score\": 9.5}\n{\"name\": \"bo\", \"score\": 7}\n"
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    .getBytes(StandardCharsets.UTF_8));
         }
         Job job = writer.getJob().waitFor();
         assertThat(job.getStatus().getError()).isNull();

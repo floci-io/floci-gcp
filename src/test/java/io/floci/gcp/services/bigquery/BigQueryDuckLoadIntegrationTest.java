@@ -203,4 +203,33 @@ class BigQueryDuckLoadIntegrationTest {
                 .then().statusCode(200)
                 .body("status.errorResult.reason", equalTo("notFound"));
     }
+
+    @Test
+    @Order(8)
+    void autodetectAppendCannotChangeAnExistingColumnType() {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "typed"}, "schema": {"fields": [
+                  {"name": "id", "type": "INTEGER"}, {"name": "city", "type": "STRING"}]}}
+                """)
+                .when().post(BASE + "/datasets/raw/tables").then().statusCode(200);
+
+        // Autodetect infers `id` as STRING from this file. Appending it must not store text in the
+        // INTEGER column the table already declares.
+        putObject("typed-text.csv", "text/csv", "id,city\nabc,Lima\n".getBytes(StandardCharsets.UTF_8));
+        load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/typed-text.csv"), "autodetect", true,
+                "writeDisposition", "WRITE_APPEND", "destinationTable", destination("typed")))
+                .then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalid"));
+        assertEquals(0, rows("typed") == null ? 0 : rows("typed").size());
+        given().when().get(BASE + "/datasets/raw/tables/typed").then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("INTEGER"));
+
+        // Numeric text is coerced to the declared type, as the destination schema requires.
+        putObject("typed-number.csv", "text/csv", "id,city\n7,Quito\n".getBytes(StandardCharsets.UTF_8));
+        load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/typed-number.csv"), "autodetect", true,
+                "writeDisposition", "WRITE_APPEND", "destinationTable", destination("typed")))
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue());
+        assertEquals(List.of(List.of("7", "Quito")), rows("typed"));
+    }
 }

@@ -752,4 +752,25 @@ class BigQueryRestIntegrationTest {
         given().header("Content-Range", "bytes */*").contentType("application/octet-stream").when().put(idle)
                 .then().statusCode(404);
     }
+
+    @Test
+    @Order(19)
+    void aCancelledUploadNeverRunsItsLoadJob() {
+        byte[] data = "{\"name\": \"a\", \"n\": 1}\n".getBytes();
+        String range = "bytes 0-" + (data.length - 1) + "/" + data.length;
+
+        // Cancel first: the final chunk finds no session, so no job runs and no table appears.
+        String cancelled = openResumable("cancelled");
+        given().when().delete(cancelled).then().statusCode(204);
+        given().header("Content-Range", range).body(data).contentType("application/octet-stream")
+                .when().put(cancelled).then().statusCode(404);
+        given().when().get(BASE + "/datasets/loads/tables/cancelled").then().statusCode(404);
+
+        // Complete first: the job ran, so a late cancel reports the session gone rather than a 204.
+        String completed = openResumable("completed");
+        given().header("Content-Range", range).body(data).contentType("application/octet-stream")
+                .when().put(completed).then().statusCode(200)
+                .body("statistics.load.outputRows", equalTo("1"));
+        given().when().delete(completed).then().statusCode(404);
+    }
 }

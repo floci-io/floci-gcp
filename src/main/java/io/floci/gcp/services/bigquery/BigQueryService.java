@@ -1034,7 +1034,7 @@ public class BigQueryService {
                 runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job);
             }
         } catch (GcpException e) {
-            job.setErrorReason(e.getReason() != null ? e.getReason() : errorReason(e));
+            job.setErrorReason(loadErrorReason(e));
             job.setErrorMessage(e.getMessage());
         } catch (RuntimeException e) {
             // The job id is already reserved, so the job has to be stored whatever went wrong.
@@ -1047,6 +1047,19 @@ public class BigQueryService {
         }
         jobStore.put(job.getJobId(), job);
         return job;
+    }
+
+    /**
+     * A load job never reports {@code invalidQuery}: that reason is for "an invalid query", while
+     * {@code invalid} covers "any type of invalid input other than an invalid query, such as ...
+     * an invalid table schema". The destination checks the load path shares with query
+     * destination tables raise {@code invalidQuery}, so it is mapped here.
+     */
+    private static String loadErrorReason(GcpException e) {
+        if (e.getReason() == null) {
+            return errorReason(e);
+        }
+        return "invalidQuery".equals(e.getReason()) ? "invalid" : e.getReason();
     }
 
     private static String errorReason(GcpException e) {

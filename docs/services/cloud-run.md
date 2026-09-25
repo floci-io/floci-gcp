@@ -109,7 +109,7 @@ Create accepts `jobId` and `validateOnly`. Update replaces the job with the requ
 
 ### Defaults and Naming
 
-A created job gets `launchStage: GA`, `template.taskCount: 1`, `template.template.maxRetries: 3`, `template.template.timeout: 600s`, `template.template.executionEnvironment: EXECUTION_ENVIRONMENT_GEN2`, and container resource limits `cpu: 1000m` and `memory: 512Mi`. `client` and `clientVersion` are preserved. The job reports `generation`, `observedGeneration`, `executionCount`, `latestCreatedExecution` (name, create and completion time, completion status, delete time) and a `Ready` terminal condition with an empty `conditions` list. A duplicate `jobId` fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`
+A created job gets `launchStage: GA`, `template.taskCount: 1`, `template.template.maxRetries: 3`, `template.template.timeout: 600s`, `template.template.executionEnvironment: EXECUTION_ENVIRONMENT_GEN2`, and container resource limits `cpu: 1000m` and `memory: 512Mi`. `client` and `clientVersion` are preserved. The job reports `generation`, `observedGeneration`, `executionCount`, `latestCreatedExecution` (name, create and completion time, completion status, delete time) and a `Ready` terminal condition with an empty `conditions` list. A duplicate `jobId` fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`, also with `validateOnly=true`. A missing job, execution or task fails with `404 NOT_FOUND` and `Resource '{id}' of kind 'JOB' in region '{location}' in project '{project}' does not exist.` (kind `EXECUTION` or `TASK` respectively).
 
 Executions are named `{job}-{5 lowercase alphanumerics}` and tasks `{execution}-task{index}`. `parallelism` defaults to the task count; a larger value is accepted as given. `startExecutionToken` and `runExecutionToken` on create or update start an execution named `{job}-{token}` when the token differs from the stored one; the operation completes when the execution is created (start token) or finished (run token), and re-sending the same token starts nothing.
 
@@ -124,11 +124,12 @@ Executions are named `{job}-{5 lowercase alphanumerics}` and tasks `{execution}-
 | Every task succeeded | `response` is the Execution |
 | A task exited non-zero on its last attempt | `error {code: 10, message: "Task {task} failed with exit code: {n} and message: The container exited with an error."}` |
 | A task timed out on its last attempt | `error {code: 4, message: "Task {task} failed with exit code: 0 and message: The configured timeout was reached."}` |
+| A task container disappeared on its last attempt without a stop request | `error {code: 13, message: "Task {task} failed with message: The task container stopped unexpectedly."}` |
 | The execution was cancelled, deleted or its job deleted | `response` is the Execution, whose `Completed` condition is `CONDITION_FAILED` with `Cancelled by user.` |
 
-Executions carry the `Started`, `Completed`, `ContainerReady` and `ResourcesAvailable` conditions with the GCP messages and measured durations, and `runningCount`, `succeededCount`, `failedCount`, `cancelledCount` and `retriedCount`. An execution is failed only after every task is terminal. Each task reports `retried` and `lastAttemptResult`: `status: {}` on success, `{code: 10, message: "The container exited with an error."}` with `exitCode` for a non-zero exit, `{code: 4, message: "The configured timeout was reached."}` for a timeout and `{code: 1, message: "Cancelled by user."}` for a cancelled task.
+Executions carry the `Started`, `Completed`, `ContainerReady` and `ResourcesAvailable` conditions with the GCP messages and measured durations, and `runningCount`, `succeededCount`, `failedCount`, `cancelledCount` and `retriedCount`. An execution is failed only after every task is terminal. Each task reports `retried` and `lastAttemptResult`: `status: {}` on success, `{code: 10, message: "The container exited with an error."}` with `exitCode` for a non-zero exit, `{code: 4, message: "The configured timeout was reached."}` for a timeout, `{code: 13, message: "The task container stopped unexpectedly."}` for a container that was removed or lost outside the emulator's control, and `{code: 1, message: "Cancelled by user."}` for a cancelled task. An unexpectedly stopped container is a failed attempt and is retried like a non-zero exit.
 
-Cancelling a running execution stops its containers and never starts its pending tasks; the cancel operation completes with the Execution. Cancelling an execution that is not running fails with `400 FAILED_PRECONDITION` and `Execution '{id}' cannot be cancelled because it is not running.` Deleting a running execution cancels it first. Deleting a job cancels its running executions and removes the job, its executions and its tasks. Several executions of one job may run at the same time.
+Cancelling a running execution stops its containers and never starts its pending tasks; the cancel operation completes with the Execution. Cancelling an execution that is not running fails with `400 FAILED_PRECONDITION` and `Execution '{id}' cannot be cancelled because it is not running.` Deleting a running execution cancels it first. A cancel or delete that arrives while the run bound is already stopping the execution does not replace that failure. Deleting a job cancels its running executions and removes the job, its executions and its tasks. Several executions of one job may run at the same time.
 
 In mock mode (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true`) `jobs:run` creates the execution and its tasks already succeeded, with exit code 0 and timestamps set, and the operation is done with the Execution.
 
@@ -146,7 +147,7 @@ Each task container receives:
 
 `PORT` and the `K_*` variables are not set for job tasks.
 
-Every change to an execution and its tasks is applied by a single per-execution coordinator, so task exits, cancel, execution delete, job delete and startup reconciliation cannot interleave. When the emulator stops, running task containers are removed. On the next start with persistent storage, executions and tasks that were still running are marked failed with `The emulator restarted before the execution completed.` (tasks: `The emulator restarted before the task completed.`), and their pending run operations fail with code 10.
+Every change to an execution and its tasks is applied by a single per-execution coordinator, so task exits, cancel, execution delete, job delete and startup reconciliation cannot interleave. When the emulator stops, running task containers are removed. On the next start with persistent storage, executions and tasks that were still running are marked failed with `The emulator restarted before the execution completed.` (tasks: `The emulator restarted before the task completed.`), and their pending run operations fail with code 10. The run, delete and job operations of an execution that was deleted while its containers were still stopping complete with the cancelled Execution, as the delete path does. Job task containers left behind by an emulator process that did not stop cleanly (same `floci_emulator` and `floci_namespace` labels) are removed at startup.
 
 ### Deviations from GCP
 
@@ -156,6 +157,8 @@ Every change to an execution and its tasks is applied by a single per-execution 
 - `serviceAccount` is not defaulted, as for services; GCP fills in the project's default compute service account.
 - Container images are stored as given, and unnamed job containers stay unnamed; GCP resolves the execution image to a digest.
 - Executions do not emit the GCP `Retry` condition or `logUri`.
+- The `TASK` kind in the task `404` message was not observed on GCP; the job and execution messages were.
+- A task container that stops without a stop request (removed outside the emulator) fails its attempt with code 13; GCP has no equivalent observable case.
 - IAM policies use the same codec as services, so the initial `ACAB` etag is returned as the base64 of its UTF-8 bytes.
 - gcloud is not supported.
 

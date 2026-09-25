@@ -97,7 +97,7 @@ The `./compatibility-tests/` directory contains SDK-based integration tests. Run
 cd compatibility-tests
 cp env.example .env
 just setup
-just test-all          # SDK suites (Java, Python, Node, Go, Rust)
+just test-all          # SDK suites (Java, Ruby, Python, Node, Go, Rust)
 just test-gcloud       # gcloud CLI suite
 just test-all-iac      # Terraform / OpenTofu
 ```

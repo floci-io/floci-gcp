@@ -123,7 +123,7 @@ setup-opentofu:
 
 # ── Combined setup ───────────────────────────────────────────────────────────
 
-setup: setup-java setup-python setup-node setup-go setup-rust
+setup: setup-java setup-ruby setup-python setup-node setup-go setup-rust
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 

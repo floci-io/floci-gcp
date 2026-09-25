@@ -10,7 +10,7 @@ require "json"
 require "rexml/document"
 
 Minitest::Reporters.use! [Minitest::Reporters::DefaultReporter.new,
-  Minitest::Reporters::JUnitReporter.new(ENV.fetch("RESULTS_DIR", "/results"), false)]
+  Minitest::Reporters::JUnitReporter.new(ENV.fetch("RESULTS_DIR", "/results"))]
 
 module Fixtures
   ENDPOINT = ENV.fetch("FLOCI_GCP_ENDPOINT", "http://localhost:4588").delete_suffix("/")

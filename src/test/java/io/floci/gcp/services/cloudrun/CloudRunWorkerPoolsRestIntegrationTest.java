@@ -283,6 +283,30 @@ class CloudRunWorkerPoolsRestIntegrationTest {
                         + "\" cannot be directly deleted because it is actively serving."));
 
         given()
+                .when().delete("/v2/" + second)
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Revision \"" + secondId
+                        + "\" cannot be directly deleted because it is actively serving."));
+
+        String third = given()
+                .contentType("application/json")
+                .queryParam("updateMask", "template")
+                .body("{\"template\":{\"containers\":[{\"image\":\"busybox:1.37\"}]}}")
+                .when().patch(pool)
+                .then()
+                .statusCode(200)
+                .body("response.instanceSplitStatuses[0].revision", equalTo(firstId))
+                .extract().path("response.latestCreatedRevision");
+        String thirdId = third.substring(third.lastIndexOf('/') + 1);
+        given()
+                .when().delete("/v2/" + third)
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("FAILED_PRECONDITION"));
+
+        given()
                 .queryParam("validateOnly", true)
                 .when().delete("/v2/" + second)
                 .then()
@@ -306,7 +330,7 @@ class CloudRunWorkerPoolsRestIntegrationTest {
         given()
                 .when().get(pool + "/revisions")
                 .then()
-                .body("revisions.name", contains(first));
+                .body("revisions.name", contains(third, first));
 
         given()
                 .contentType("application/json")
@@ -317,6 +341,201 @@ class CloudRunWorkerPoolsRestIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "instanceSplits")
+                .body("{\"instanceSplits\":[{\"type\":\"INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST\",\"percent\":100}]}")
+                .when().patch(pool)
+                .then()
+                .statusCode(200)
+                .body("response.instanceSplitStatuses[0].type", equalTo("INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST"))
+                .body("response.instanceSplitStatuses[0].revision", equalTo(thirdId))
+                .body("response.latestReadyRevision", equalTo(third));
+        given()
+                .when().get("/v2/" + third)
+                .then()
+                .body("conditions.find { it.type == 'Active' }.state", equalTo("CONDITION_SUCCEEDED"));
+    }
+
+    @Test
+    void latestCreatedRevisionCannotBeDeletedWhileSplitsPinAnOlderOne() {
+        String project = "wp-it-latest-rev";
+        String pool = poolPath(project, "wp");
+        String first = createPool(project, "wp");
+        String firstId = first.substring(first.lastIndexOf('/') + 1);
+        String second = given()
+                .contentType("application/json")
+                .queryParam("updateMask", "template")
+                .body("{\"template\":{\"containers\":[{\"image\":\"busybox:1.36\"}]}}")
+                .when().patch(pool)
+                .then()
+                .statusCode(200)
+                .extract().path("response.latestCreatedRevision");
+        String secondId = second.substring(second.lastIndexOf('/') + 1);
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "instanceSplits")
+                .body("{\"instanceSplits\":[{\"type\":\"INSTANCE_SPLIT_ALLOCATION_TYPE_REVISION\","
+                        + "\"revision\":\"" + firstId + "\",\"percent\":100}]}")
+                .when().patch(pool)
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().delete("/v2/" + second)
+                .then()
+                .statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Revision \"" + secondId
+                        + "\" cannot be directly deleted because it is actively serving."));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "instanceSplits")
+                .body("{\"instanceSplits\":[{\"type\":\"INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST\",\"percent\":100}]}")
+                .when().patch(pool)
+                .then()
+                .statusCode(200)
+                .body("response.instanceSplitStatuses[0].revision", equalTo(secondId));
+        given().when().get("/v2/" + second).then().statusCode(200);
+    }
+
+    @Test
+    void missingPoolAndRevisionUseGcpNotFoundMessage() {
+        String project = "wp-it-notfound";
+        given()
+                .when().get(poolPath(project, "absent"))
+                .then()
+                .statusCode(404)
+                .body("error.code", equalTo(404))
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo("Resource 'absent' of kind 'WORKER_POOL' in region '" + LOCATION
+                        + "' in project '" + project + "' does not exist."));
+        given()
+                .contentType("application/json")
+                .body(BUSYBOX_POOL)
+                .when().patch(poolPath(project, "absent"))
+                .then()
+                .statusCode(404)
+                .body("error.message", equalTo("Resource 'absent' of kind 'WORKER_POOL' in region '" + LOCATION
+                        + "' in project '" + project + "' does not exist."));
+        given()
+                .when().delete(poolPath(project, "absent"))
+                .then()
+                .statusCode(404)
+                .body("error.message", equalTo("Resource 'absent' of kind 'WORKER_POOL' in region '" + LOCATION
+                        + "' in project '" + project + "' does not exist."));
+
+        createPool(project, "wp");
+        given()
+                .when().get(poolPath(project, "wp") + "/revisions/wp-00009-zzz")
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo("Resource 'wp-00009-zzz' of kind 'REVISION' in region '" + LOCATION
+                        + "' in project '" + project + "' does not exist."));
+        given()
+                .when().delete(poolPath(project, "wp") + "/revisions/wp-00009-zzz")
+                .then()
+                .statusCode(404)
+                .body("error.message", equalTo("Resource 'wp-00009-zzz' of kind 'REVISION' in region '" + LOCATION
+                        + "' in project '" + project + "' does not exist."));
+    }
+
+    @Test
+    void createIgnoresOutputOnlyFieldsFromTheRequest() {
+        String project = "wp-it-output-only";
+        given()
+                .contentType("application/json")
+                .queryParam("workerPoolId", "wp")
+                .body("""
+                        {
+                          "creator": "mallory@example.com",
+                          "lastModifier": "mallory@example.com",
+                          "satisfiesPzs": true,
+                          "threatDetectionEnabled": true,
+                          "reconciling": true,
+                          "observedGeneration": "7",
+                          "latestReadyRevision": "bogus",
+                          "template": {"containers": [{"image": "docker.io/library/busybox"}]}
+                        }
+                        """)
+                .when().post(parentPath(project) + "/workerPools")
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get(poolPath(project, "wp"))
+                .then()
+                .statusCode(200)
+                .body("creator", nullValue())
+                .body("lastModifier", nullValue())
+                .body("satisfiesPzs", nullValue())
+                .body("threatDetectionEnabled", nullValue())
+                .body("reconciling", nullValue())
+                .body("observedGeneration", equalTo("1"))
+                .body("latestReadyRevision", containsString("/revisions/wp-00001-"));
+    }
+
+    @Test
+    void iamPolicyOnMissingPoolIsNotFoundAndNeverStored() {
+        String project = "wp-it-iam-missing";
+        String pool = poolPath(project, "wp");
+        String notFound = "Resource 'wp' of kind 'WORKER_POOL' in region '" + LOCATION + "' in project '" + project
+                + "' does not exist.";
+        String policy = "{\"policy\":{\"bindings\":[{\"role\":\"roles/run.developer\","
+                + "\"members\":[\"user:dev@example.com\"]}]}}";
+
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(pool + ":getIamPolicy")
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo(notFound));
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(policy)
+                .when().post(pool + ":setIamPolicy")
+                .then()
+                .statusCode(404)
+                .body("error.message", equalTo(notFound));
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"permissions\":[\"run.workerpools.get\"]}")
+                .when().post(pool + ":testIamPermissions")
+                .then()
+                .statusCode(200)
+                .body("permissions", nullValue());
+
+        createPool(project, "wp");
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(policy)
+                .when().post(pool + ":setIamPolicy")
+                .then()
+                .statusCode(200);
+        given().when().delete(pool).then().statusCode(200);
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(policy)
+                .when().post(pool + ":setIamPolicy")
+                .then()
+                .statusCode(404);
+
+        createPool(project, "wp");
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(pool + ":getIamPolicy")
+                .then()
+                .statusCode(200)
+                .body("bindings", nullValue());
     }
 
     @Test

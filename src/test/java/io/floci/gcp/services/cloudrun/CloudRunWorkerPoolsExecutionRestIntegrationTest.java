@@ -1,9 +1,15 @@
 package io.floci.gcp.services.cloudrun;
 
+import com.google.cloud.run.v2.WorkerPool;
+import com.google.longrunning.Operation;
+import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
+import io.floci.gcp.services.operations.LongRunningOperationsService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -11,6 +17,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -29,6 +38,15 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
 
     private static final String LOCATION = "us-central1";
     private static final String WORKER_LOOP = "trap 'exit 0' TERM; while true; do sleep 1; done";
+
+    @Inject
+    CloudRunWorkerPoolsService workerPools;
+
+    @Inject
+    LongRunningOperationsService operations;
+
+    @Inject
+    EmulatorConfig config;
 
     @BeforeAll
     static void requireDocker() {
@@ -57,6 +75,8 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
                 .body("done", nullValue())
                 .body("metadata.reconciling", equalTo(true))
                 .body("metadata.terminalCondition.state", equalTo("CONDITION_RECONCILING"))
+                .body("metadata.generation", equalTo("1"))
+                .body("metadata.observedGeneration", nullValue())
                 .extract().path("name");
 
         String firstRevision = waitOperation(operationName)
@@ -65,6 +85,7 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
                 .body("done", equalTo(true))
                 .body("error", nullValue())
                 .body("response.terminalCondition.state", equalTo("CONDITION_SUCCEEDED"))
+                .body("response.observedGeneration", equalTo("1"))
                 .body("response.scaling.manualInstanceCount", equalTo(3))
                 .extract().path("response.latestReadyRevision");
         assertEquals(2, runningContainers(firstRevision));
@@ -121,6 +142,48 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
                 .body("response.deleteTime", notNullValue());
         assertEquals(0, runningContainers(secondRevision));
         given().when().get(pool).then().statusCode(404);
+    }
+
+    @Test
+    void restartRecoveryRemovesLeftoverContainersAndFailsPendingOperations() {
+        String project = "wp-exec-restart";
+        String ghostPool = "projects/" + project + "/locations/" + LOCATION + "/workerPools/ghost";
+        String ghostRevision = ghostPool + "/revisions/ghost-00001-abc";
+        List<String> run = new ArrayList<>(List.of("run", "-d"));
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
+        labels.put("floci_service", "cloudrun");
+        labels.put("floci_resource", ghostRevision);
+        for (Map.Entry<String, String> label : labels.entrySet()) {
+            run.add("--label");
+            run.add(label.getKey() + "=" + label.getValue());
+        }
+        run.addAll(List.of("busybox:latest", "sleep", "300"));
+        List<String> output = docker(run.toArray(String[]::new)).strip().lines().toList();
+        String containerId = output.getLast();
+        try {
+            assertEquals(1, runningContainers(ghostRevision));
+            Operation interrupted = operations.pending("projects/" + project + "/locations/" + LOCATION,
+                    WorkerPool.newBuilder().setName(ghostPool).build());
+
+            workerPools.recoverAfterRestart();
+
+            assertEquals(0, runningContainers(ghostRevision));
+            assertInterrupted(interrupted.getName());
+        } finally {
+            if (!docker("ps", "-aq", "--filter", "id=" + containerId).isBlank()) {
+                docker("rm", "-f", containerId);
+            }
+        }
+    }
+
+    private static void assertInterrupted(String operationName) {
+        given()
+                .when().get("/v2/" + operationName)
+                .then()
+                .statusCode(200)
+                .body("done", equalTo(true))
+                .body("error.code", equalTo(10))
+                .body("error.message", equalTo("The emulator restarted before the operation completed."));
     }
 
     @Test
@@ -182,18 +245,19 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
     }
 
     private static void patchScaling(String pool, int count) {
-        String operationName = given()
+        Response patch = given()
                 .contentType("application/json")
                 .queryParam("updateMask", "scaling.manualInstanceCount")
                 .body("{\"scaling\":{\"manualInstanceCount\":" + count + "}}")
-                .when().patch(pool)
-                .then()
-                .statusCode(200)
-                .extract().path("name");
-        waitOperation(operationName)
+                .when().patch(pool);
+        patch.then().statusCode(200);
+        long generation = Long.parseLong(patch.path("metadata.generation"));
+        patch.then().body("metadata.observedGeneration", equalTo(Long.toString(generation - 1)));
+        waitOperation(patch.path("name"))
                 .then()
                 .body("done", equalTo(true))
-                .body("error", nullValue());
+                .body("error", nullValue())
+                .body("response.observedGeneration", equalTo(Long.toString(generation)));
     }
 
     private static String poolBody(String image, String script, int instances) {

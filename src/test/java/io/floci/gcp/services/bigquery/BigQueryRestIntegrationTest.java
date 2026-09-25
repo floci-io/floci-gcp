@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
@@ -661,6 +663,9 @@ class BigQueryRestIntegrationTest {
     @Inject
     BigQueryUploadController uploads;
 
+    @Inject
+    BigQueryLoadFiles loadFiles;
+
     private static String openResumable(String table) {
         String location = given().contentType("application/json").body(LOAD_JOB.formatted(table))
                 .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
@@ -772,5 +777,23 @@ class BigQueryRestIntegrationTest {
                 .when().put(completed).then().statusCode(200)
                 .body("statistics.load.outputRows", equalTo("1"));
         given().when().delete(completed).then().statusCode(404);
+    }
+
+    @Test
+    @Order(20)
+    void loadFileRouteIgnoresRangesItCannotServe() {
+        String id = loadFiles.register("0123456789".getBytes());
+        String url = "/_floci-gcp/bigquery/projects/" + PROJECT + "/load-files/" + id;
+        try {
+            given().header("Range", "bytes=2-4").when().get(url).then().statusCode(206)
+                    .header("Content-Range", "bytes 2-4/10").body(equalTo("234"));
+            given().header("Range", "bytes=-3").when().get(url).then().statusCode(206).body(equalTo("789"));
+            given().header("Range", "bytes=abc-").when().get(url).then().statusCode(200).body(equalTo("0123456789"));
+            given().header("Range", "bytes=0-1,4-5").when().get(url).then().statusCode(200)
+                    .body(equalTo("0123456789"));
+            given().header("Range", "bytes=99999999999999999999-").when().get(url).then().statusCode(200);
+        } finally {
+            loadFiles.release(List.of(id));
+        }
     }
 }

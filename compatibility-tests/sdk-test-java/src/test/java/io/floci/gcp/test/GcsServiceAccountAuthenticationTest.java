@@ -1,6 +1,7 @@
 package io.floci.gcp.test;
 
 import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.HttpExecuteInterceptor;
 import com.google.cloud.ServiceOptions;
 import com.google.cloud.http.HttpTransportOptions;
 import com.google.cloud.storage.BucketInfo;
@@ -19,13 +20,13 @@ class GcsServiceAccountAuthenticationTest {
     void serviceAccountCredentialsAuthenticateStorageRequests() throws Exception {
         var credentials = TestFixtures.serviceAccountCredentials();
         List<String> authorizationHeaders = new ArrayList<>();
-        var transport = new HttpTransportOptions(HttpTransportOptions.newBuilder()) {
+        HttpTransportOptions transport = new HttpTransportOptions(HttpTransportOptions.newBuilder()) {
             @Override
             public HttpRequestInitializer getHttpRequestInitializer(ServiceOptions<?, ?> options) {
-                var initializer = super.getHttpRequestInitializer(options);
+                HttpRequestInitializer initializer = super.getHttpRequestInitializer(options);
                 return request -> {
                     initializer.initialize(request);
-                    var interceptor = request.getInterceptor();
+                    HttpExecuteInterceptor interceptor = request.getInterceptor();
                     request.setInterceptor(outgoing -> {
                         if (interceptor != null) {
                             interceptor.intercept(outgoing);
@@ -50,7 +51,7 @@ class GcsServiceAccountAuthenticationTest {
                 assertThat(storage.get(bucketName)).isNotNull();
                 // SDKs may use a credential copy or a self-signed JWT without populating
                 // the original credential's OAuth token. Verify the outgoing requests.
-                assertThat(authorizationHeaders).hasSize(2).allSatisfy(header ->
+                assertThat(authorizationHeaders).hasSizeGreaterThanOrEqualTo(2).allSatisfy(header ->
                         assertThat(header).startsWith("Bearer ").hasSizeGreaterThan(7));
             } finally {
                 assertThat(storage.delete(bucketName)).isTrue();

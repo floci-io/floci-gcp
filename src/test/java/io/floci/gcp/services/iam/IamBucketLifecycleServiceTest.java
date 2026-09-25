@@ -119,7 +119,8 @@ class IamBucketLifecycleServiceTest {
                         bucketCreated.countDown();
                         await(allowCreateToFinish);
                         return BUCKET;
-                    }));
+                    },
+                    ignored -> bucketExists.set(false)));
             assertTrue(bucketCreated.await(5, TimeUnit.SECONDS));
 
             CountDownLatch writerStarted = new CountDownLatch(1);
@@ -171,7 +172,8 @@ class IamBucketLifecycleServiceTest {
                         () -> {
                             bucketExists.set(true);
                             return BUCKET;
-                        });
+                        },
+                        ignored -> bucketExists.set(false));
             });
             assertTrue(creationStarted.await(5, TimeUnit.SECONDS));
             assertBlocked(creation);

@@ -207,18 +207,44 @@ public class IamService {
      * Creates a resource and establishes its initial policy as one lifecycle
      * transition. Any policy left by an older holder of the same resource name
      * is removed before the new resource becomes observable to policy readers.
+     * If the policy durability boundary fails, the resource callback is rolled
+     * back and the previous policy state is restored before the failure escapes.
      */
     public <T> T createResourceAndPolicy(String resource, StoredPolicy initialPolicy,
-            Supplier<T> createResource) {
+            Supplier<T> createResource, Consumer<T> rollbackResource) {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
+            Optional<StoredPolicy> previousPolicy = policyStore.get(key);
             T created = createResource.get();
-            policyStore.delete(key);
-            if (initialPolicy != null) {
-                setPolicy(resource, initialPolicy);
+            try {
+                policyStore.delete(key);
+                if (initialPolicy != null) {
+                    setPolicy(resource, initialPolicy);
+                }
+                policyStore.checkpoint();
+                return created;
+            } catch (RuntimeException | Error failure) {
+                rollbackFailedCreation(key, previousPolicy, created, rollbackResource, failure);
+                throw failure;
             }
-            policyStore.checkpoint();
-            return created;
+        }
+    }
+
+    private <T> void rollbackFailedCreation(String key, Optional<StoredPolicy> previousPolicy,
+            T created, Consumer<T> rollbackResource, Throwable failure) {
+        try {
+            rollbackResource.accept(created);
+        } catch (RuntimeException | Error rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+        }
+        try {
+            if (previousPolicy.isPresent()) {
+                policyStore.put(key, previousPolicy.get());
+            } else {
+                policyStore.delete(key);
+            }
+        } catch (RuntimeException | Error policyRollbackFailure) {
+            failure.addSuppressed(policyRollbackFailure);
         }
     }
 

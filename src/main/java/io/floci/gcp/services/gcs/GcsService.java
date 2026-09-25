@@ -142,6 +142,15 @@ public class GcsService {
             StorageBackend<String, byte[]> objectDataStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
+        this(bucketStore, objectMetaStore, objectDataStore, aclStore, defaultProjectId, null);
+    }
+
+    GcsService(StorageBackend<String, GcsBucket> bucketStore,
+            StorageBackend<String, GcsObjectMeta> objectMetaStore,
+            StorageBackend<String, byte[]> objectDataStore,
+            StorageBackend<String, StoredAcl> aclStore,
+            String defaultProjectId,
+            IamBucketLifecycleService bucketLifecycleService) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
         this.objectDataStore = objectDataStore;
@@ -156,7 +165,7 @@ public class GcsService {
         this.grpcServerManager = null;
         this.authorizationService = null;
         this.grpcAuthorizationInterceptor = null;
-        this.bucketLifecycleService = null;
+        this.bucketLifecycleService = bucketLifecycleService;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -192,8 +201,11 @@ public class GcsService {
         if (bucketLifecycleService == null) {
             return createBucketUncoordinated(name, projectId, baseUrl, body);
         }
-        return bucketLifecycleService.createBucket(name, authorization,
-                () -> createBucketUncoordinated(name, projectId, baseUrl, body));
+        return bucketLifecycleService.createBucket(
+                name,
+                authorization,
+                () -> createBucketUncoordinated(name, projectId, baseUrl, body),
+                created -> rollbackBucketCreation(name, created));
     }
 
     @SuppressWarnings("unchecked")
@@ -257,6 +269,14 @@ public class GcsService {
             }
             bucketStore.put(name, bucket);
             return bucket;
+        }
+    }
+
+    private void rollbackBucketCreation(String name, GcsBucket created) {
+        synchronized (bucketLock(name)) {
+            if (bucketStore.get(name).orElse(null) == created) {
+                bucketStore.delete(name);
+            }
         }
     }
 

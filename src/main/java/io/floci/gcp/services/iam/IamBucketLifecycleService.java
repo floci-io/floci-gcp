@@ -35,9 +35,11 @@ public class IamBucketLifecycleService {
                 resource -> requireBucketExists.accept(resource.substring("buckets/".length())));
     }
 
-    public <T> T createBucket(String bucket, String authorization, Supplier<T> createBucket) {
+    public <T> T createBucket(String bucket, String authorization, Supplier<T> createBucket,
+            Consumer<T> rollbackBucket) {
         StoredPolicy initialPolicy = bootstrapService.initialBucketPolicy(authorization);
-        return iamService.createResourceAndPolicy(policyResource(bucket), initialPolicy, createBucket);
+        return iamService.createResourceAndPolicy(
+                policyResource(bucket), initialPolicy, createBucket, rollbackBucket);
     }
 
     public boolean deleteBucketIfEmpty(String bucket, BooleanSupplier deleteBucket) {

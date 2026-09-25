@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
@@ -279,7 +280,8 @@ class IamServiceTest {
         stale.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
         service.setPolicy(resource, stale);
 
-        String created = service.createResourceAndPolicy(resource, null, () -> "created");
+        String created = service.createResourceAndPolicy(
+                resource, null, () -> "created", ignored -> { });
 
         assertEquals("created", created);
         assertTrue(service.getPolicy(resource).getBindings().isEmpty());
@@ -302,7 +304,7 @@ class IamServiceTest {
                     "members", List.of("serviceAccount:creator@example.test"))));
 
             durableService.createResourceAndPolicy(
-                    "buckets/durable-bucket", initialPolicy, () -> "created");
+                    "buckets/durable-bucket", initialPolicy, () -> "created", ignored -> { });
 
             restoredStore.load();
             IamService restoredService = new IamService(
@@ -315,12 +317,48 @@ class IamServiceTest {
         }
     }
 
+    @Test
+    void failedCreateCheckpointRollsBackResourceAndRestoresPreviousPolicy() {
+        String resource = "buckets/checkpoint-failure";
+        FailingCheckpointStorage policyStore = new FailingCheckpointStorage();
+        IamService durableService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);
+        StoredPolicy previousPolicy = new StoredPolicy();
+        previousPolicy.setBindings(List.of(Map.of(
+                "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
+        durableService.setPolicy(resource, previousPolicy);
+        StoredPolicy initialPolicy = new StoredPolicy();
+        initialPolicy.setBindings(List.of(Map.of(
+                "role", "roles/storage.admin", "members", List.of("serviceAccount:creator@example.test"))));
+        AtomicBoolean resourceExists = new AtomicBoolean();
+
+        assertThrows(StorageException.class, () -> durableService.createResourceAndPolicy(
+                resource,
+                initialPolicy,
+                () -> {
+                    resourceExists.set(true);
+                    return "created";
+                },
+                ignored -> resourceExists.set(false)));
+
+        assertFalse(resourceExists.get());
+        assertEquals("roles/storage.objectViewer",
+                durableService.getPolicy(resource).getBindings().get(0).get("role"));
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AssertionError("Interrupted while awaiting test latch", e);
+        }
+    }
+
+    private static final class FailingCheckpointStorage extends InMemoryStorage<String, StoredPolicy> {
+        @Override
+        public void checkpoint() {
+            throw new StorageException("checkpoint failed", new IllegalStateException("test failure"));
         }
     }
 }

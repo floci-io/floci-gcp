@@ -199,6 +199,14 @@ public class CloudRunRuntimeService {
         }
     }
 
+    Optional<CloudRunRuntimeInstance> runtimeRecord(String key) {
+        return runtimeStore.get(key);
+    }
+
+    void saveRuntimeRecord(String key, CloudRunRuntimeInstance instance) {
+        runtimeStore.put(key, instance);
+    }
+
     void markFailed(String revisionName, String message) {
         runtimeStore.get(revisionName)
                 .map(instance -> instance.withStatus("FAILED", message))
@@ -1043,7 +1051,7 @@ public class CloudRunRuntimeService {
         return config.services().cloudrun().execution().requestTimeout();
     }
 
-    private void waitForReady(ContainerLifecycleManager.EndpointInfo endpoint, Duration timeout) {
+    void waitForReady(ContainerLifecycleManager.EndpointInfo endpoint, Duration timeout) {
         long deadline = System.nanoTime() + timeout.toNanos();
         RuntimeException last = null;
         while (System.nanoTime() < deadline) {

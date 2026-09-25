@@ -24,6 +24,7 @@ public final class ProtoJson {
             .add(com.google.cloud.run.v2.Job.getDescriptor())
             .add(com.google.cloud.run.v2.Execution.getDescriptor())
             .add(com.google.cloud.run.v2.WorkerPool.getDescriptor())
+            .add(com.google.cloud.run.v2.Instance.getDescriptor())
             .add(com.google.cloud.functions.v2.Function.getDescriptor())
             .add(com.google.cloud.functions.v2.OperationMetadata.getDescriptor())
             .add(com.google.cloud.eventarc.v1.Trigger.getDescriptor())

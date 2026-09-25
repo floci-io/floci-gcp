@@ -10,6 +10,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URI;
+import java.util.Optional;
 
 @Provider
 @PreMatching
@@ -21,10 +22,16 @@ public class CloudRunUrlRoutingFilter implements ContainerRequestFilter {
     static final String ORIGINAL_PATH_QUERY = "io.floci.gcp.cloudrun.originalPathQuery";
 
     private final CloudRunService cloudRunService;
+    private final CloudRunInstancesService instancesService;
 
     @Inject
-    public CloudRunUrlRoutingFilter(CloudRunService cloudRunService) {
+    public CloudRunUrlRoutingFilter(CloudRunService cloudRunService, CloudRunInstancesService instancesService) {
         this.cloudRunService = cloudRunService;
+        this.instancesService = instancesService;
+    }
+
+    CloudRunUrlRoutingFilter(CloudRunService cloudRunService) {
+        this(cloudRunService, null);
     }
 
     @Override
@@ -36,25 +43,37 @@ public class CloudRunUrlRoutingFilter implements ContainerRequestFilter {
         }
         String requestHost = host;
 
-        cloudRunService.resolveInvocationHost(requestHost).ifPresentOrElse(route -> {
-            String originalPathAndQuery = rawPathAndQuery(original);
-            ctx.setProperty(ORIGINAL_SCHEME, original.getScheme());
-            ctx.setProperty(ORIGINAL_AUTHORITY, requestHost);
-            ctx.setProperty(ORIGINAL_PATH_QUERY, originalPathAndQuery);
+        cloudRunService.resolveInvocationHost(requestHost).ifPresentOrElse(
+                route -> rewrite(ctx, original, requestHost, "services", route),
+                () -> {
+                    Optional<CloudRunService.InvocationRoute> instanceRoute = instancesService == null
+                            ? Optional.empty()
+                            : instancesService.resolveInvocationHost(requestHost);
+                    if (instanceRoute.isPresent()) {
+                        rewrite(ctx, original, requestHost, "instances", instanceRoute.get());
+                        return;
+                    }
+                    if (cloudRunService.isGeneratedInvocationHost(requestHost)) {
+                        throw GcpException.notFound("Cloud Run service not found for host: " + requestHost);
+                    }
+                });
+    }
 
-            String internalPath = "/run/v2/projects/" + route.project()
-                    + "/locations/" + route.location()
-                    + "/services/" + route.serviceId()
-                    + original.getRawPath();
-            URI rewritten = URI.create(original.getScheme() + "://" + original.getRawAuthority()
-                    + internalPath
-                    + query(original));
-            ctx.setRequestUri(rewritten);
-        }, () -> {
-            if (cloudRunService.isGeneratedInvocationHost(requestHost)) {
-                throw GcpException.notFound("Cloud Run service not found for host: " + requestHost);
-            }
-        });
+    private static void rewrite(ContainerRequestContext ctx, URI original, String requestHost, String collection,
+                                CloudRunService.InvocationRoute route) {
+        String originalPathAndQuery = rawPathAndQuery(original);
+        ctx.setProperty(ORIGINAL_SCHEME, original.getScheme());
+        ctx.setProperty(ORIGINAL_AUTHORITY, requestHost);
+        ctx.setProperty(ORIGINAL_PATH_QUERY, originalPathAndQuery);
+
+        String internalPath = "/run/v2/projects/" + route.project()
+                + "/locations/" + route.location()
+                + "/" + collection + "/" + route.serviceId()
+                + original.getRawPath();
+        URI rewritten = URI.create(original.getScheme() + "://" + original.getRawAuthority()
+                + internalPath
+                + query(original));
+        ctx.setRequestUri(rewritten);
     }
 
     private static String firstHeader(ContainerRequestContext ctx, String name) {

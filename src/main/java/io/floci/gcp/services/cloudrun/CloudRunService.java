@@ -147,7 +147,8 @@ public class CloudRunService {
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
                         CloudRunUrlRoutingFilter.class, CloudRunJobsController.class,
-                        CloudRunWorkerPoolsController.class)
+                        CloudRunWorkerPoolsController.class,
+                        CloudRunInstancesController.class, CloudRunInstanceInvocationController.class)
                 .build());
     }
 
@@ -217,6 +218,10 @@ public class CloudRunService {
         return serviceStore.get(name)
                 .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build())
                 .orElseThrow(() -> GcpException.notFound("Cloud Run service not found: " + name));
+    }
+
+    public boolean serviceExists(String name) {
+        return serviceStore.get(name).isPresent();
     }
 
     public ListServicesResponse listServices(String project, String location, int pageSize, String pageToken) {

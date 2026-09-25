@@ -33,6 +33,24 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Imported ahead of libraries-bom, whose google-cloud-run (0.56.0) predates the
+                 WorkerPoolsClient, JobsClient and InstancesClient; first import wins for the run artifacts.
+                 google-cloud-run 0.96.0 is built against gax 2.84.0 and protobuf-java 4.33.x, newer than
+                 libraries-bom's, so the matching gapic-generator-java-bom is lifted with it. -->
+            <dependency>
+                <groupId>com.google.cloud</groupId>
+                <artifactId>google-cloud-run-bom</artifactId>
+                <version>0.96.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.api</groupId>
+                <artifactId>gapic-generator-java-bom</artifactId>
+                <version>2.76.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>com.google.cloud</groupId>
                 <artifactId>libraries-bom</artifactId>

@@ -200,11 +200,15 @@ use `bqstorage_client=storage` as above, or `create_bqstorage_client=False` to r
   `NUMERIC` is `bytes`/`decimal(38, 9)`, `BIGNUMERIC` `decimal(77, 38)`, `TIMESTAMP`
   `timestamp-micros`.
 - **Read options**: `selected_fields` (top-level fields, returned in table order) and
-  `row_restriction` (a GoogleSQL filter, run through the SQL engine).
+  `row_restriction` (a GoogleSQL filter, run through the SQL engine). The restriction must be a
+  single predicate over the table being read: subqueries, `UNION`, other tables, `;` and comments
+  are rejected with `INVALID_ARGUMENT`.
 - A session snapshots the table when it is created and has **one stream**; `SplitReadStream`
   returns an empty response ("the original stream can no longer be split"). `ReadRows` honors
   `offset` (for `ARROW`, at record batch boundaries), sends the schema in its first response and
-  reports `row_count` and progress. Sessions expire after 6 hours.
+  reports `row_count` and progress. Sessions expire after 6 hours. Each session holds a snapshot
+  in memory, so at most 256 are kept; creating one past that drops the oldest, whose stream then
+  returns `NOT_FOUND`.
 - Query results can be read from their anonymous destination table, as the SDKs do.
 - Tables are read from the project in `read_session.table`.
 

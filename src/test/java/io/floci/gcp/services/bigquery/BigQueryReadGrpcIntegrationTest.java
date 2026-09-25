@@ -165,4 +165,33 @@ class BigQueryReadGrpcIntegrationTest {
                 () -> readAll("projects/" + PROJECT + "/locations/us/sessions/nope/streams/0", 0))
                 .getStatus().getCode());
     }
+
+    @Test
+    @Order(6)
+    void rowRestrictionMustStayAPredicateOverTheTable() {
+        String base = "/bigquery/v2/projects/" + PROJECT;
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "secrets"}, "schema": {"fields": [{"name": "age", "type": "INT64"}]}}
+                """).when().post(base + "/datasets/reads/tables").then().statusCode(200);
+        for (String restriction : List.of(
+                "age = 7 UNION SELECT age FROM `reads.secrets`",
+                "age = 7) UNION ALL (SELECT 1",
+                "age IN (FROM `reads.secrets`)",
+                "age = 7; DELETE FROM `reads.people` WHERE true")) {
+            StatusRuntimeException e = assertThrows(StatusRuntimeException.class,
+                    () -> session(DataFormat.AVRO, restriction), restriction);
+            assertEquals(Status.Code.INVALID_ARGUMENT, e.getStatus().getCode(), restriction);
+        }
+    }
+
+    @Test
+    @Order(7)
+    void creatingSessionsPastTheBoundDropsTheOldest() {
+        String oldest = session(DataFormat.AVRO, "age = 1").getStreams(0).getName();
+        for (int i = 0; i < BigQueryStorageRead.MAX_SESSIONS; i++) {
+            session(DataFormat.AVRO, "age = 1");
+        }
+        assertEquals(Status.Code.NOT_FOUND,
+                assertThrows(StatusRuntimeException.class, () -> readAll(oldest, 0)).getStatus().getCode());
+    }
 }

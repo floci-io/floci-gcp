@@ -13,6 +13,7 @@ import com.google.cloud.bigquery.storage.v1.ReadStream;
 import com.google.cloud.bigquery.storage.v1.StreamStats;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.bigquery.model.Dataset;
@@ -27,9 +28,11 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -49,25 +52,37 @@ public class BigQueryStorageRead {
     private static final Pattern STREAM = Pattern.compile("(projects/[^/]+/locations/[^/]+/sessions/[^/]+)/streams/[^/]+");
     private static final Duration SESSION_LIFETIME = Duration.ofHours(6);
     private static final int AVRO_ROWS_PER_BLOCK = 1000;
+    /**
+     * Sessions hold a full snapshot of what they read, so the number kept is bounded; creating one
+     * past the bound drops the oldest. Real BigQuery keeps every session until it expires.
+     */
+    static final int MAX_SESSIONS = 256;
+    /** Keywords that would turn a row restriction into more than a predicate over one table. */
+    private static final Set<String> RESTRICTION_KEYWORDS = Set.of("SELECT", "UNION", "INTERSECT", "EXCEPT", "WITH");
 
     /** One ReadRows block: the serialized rows and how many rows they hold. */
     private record Block(ByteString data, long rowCount) {}
 
     private record Session(ReadSession resource, List<Block> arrowBlocks, List<TableFieldSchema> avroFields,
-                           List<Map<String, Object>> avroRows, long totalRows, Instant expireTime) {}
+                           List<Map<String, Object>> avroRows, long totalRows, Instant createTime,
+                           Instant expireTime) {}
 
     private final BigQueryService service;
     private final GrpcServerManager grpcServerManager;
+    private final EmulatorConfig config;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
 
     @Inject
-    public BigQueryStorageRead(BigQueryService service, GrpcServerManager grpcServerManager) {
+    public BigQueryStorageRead(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config) {
         this.service = service;
         this.grpcServerManager = grpcServerManager;
+        this.config = config;
     }
 
     void onStart(@Observes StartupEvent event) {
-        grpcServerManager.bind(new BigQueryReadController(this));
+        if (config.services().bigquery().enabled()) {
+            grpcServerManager.bind(new BigQueryReadController(this));
+        }
     }
 
     /** The project whose storage a request reads: the table's project, else the parent's. */
@@ -111,7 +126,8 @@ public class BigQueryStorageRead {
         String location = location(projectId, datasetId);
         String sessionName = "projects/" + projectId + "/locations/" + location + "/sessions/"
                 + UUID.randomUUID().toString().replace("-", "");
-        Instant expireTime = Instant.now().plus(SESSION_LIFETIME);
+        Instant createTime = Instant.now();
+        Instant expireTime = createTime.plus(SESSION_LIFETIME);
         ReadSession.Builder resource = requested.toBuilder()
                 .setName(sessionName)
                 .setExpireTime(Timestamp.newBuilder().setSeconds(expireTime.getEpochSecond()))
@@ -142,7 +158,9 @@ public class BigQueryStorageRead {
         resource.setEstimatedRowCount(totalRows).setEstimatedTotalBytesScanned(totalBytes);
         ReadSession session = resource.build();
         evictExpired();
-        sessions.put(sessionName, new Session(session, arrowBlocks, fields, avroRows, totalRows, expireTime));
+        sessions.put(sessionName, new Session(session, arrowBlocks, fields, avroRows, totalRows, createTime,
+                expireTime));
+        evictOldest();
         return session;
     }
 
@@ -232,6 +250,14 @@ public class BigQueryStorageRead {
         sessions.values().removeIf(s -> now.isAfter(s.expireTime()));
     }
 
+    private void evictOldest() {
+        while (sessions.size() > MAX_SESSIONS) {
+            sessions.entrySet().stream()
+                    .min(Comparator.comparing((Map.Entry<String, Session> e) -> e.getValue().createTime()))
+                    .ifPresent(oldest -> sessions.remove(oldest.getKey(), oldest.getValue()));
+        }
+    }
+
     /** Selected top-level fields in table order; nested selections are not emulated. */
     private static List<TableFieldSchema> selectedFields(Table table, List<String> selected) {
         List<TableFieldSchema> all = table.getSchema() != null && table.getSchema().getFields() != null
@@ -257,10 +283,71 @@ public class BigQueryStorageRead {
                 ? String.join(", ", fields.stream().map(f -> "`" + f.getName() + "`").toList())
                 : "*";
         String sql = "SELECT " + columns + " FROM `" + projectId + "." + datasetId + "." + tableId + "`";
-        if (rowRestriction != null && !rowRestriction.isBlank()) {
-            sql += " WHERE " + rowRestriction;
+        if (rowRestriction == null || rowRestriction.isBlank()) {
+            return sql;
+        }
+        checkRestrictionIsPredicate(rowRestriction);
+        sql += " WHERE " + rowRestriction;
+        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(sql, projectId, null,
+                SqlDialectTranslator.QueryParameters.none());
+        if (!translation.tables().equals(Set.of(new SqlDialectTranslator.TableRef(datasetId, tableId)))
+                || !translation.informationSchema().isEmpty()) {
+            throw invalidRestriction(rowRestriction, "it may only reference columns of the table being read");
         }
         return sql;
+    }
+
+    /**
+     * {@code row_restriction} is "a SQL text filtering statement, similar to a WHERE clause", so it
+     * must stay one predicate: balanced parentheses, no statement separators or comments, and no
+     * keyword that would add a query of its own. Quoted text is skipped.
+     */
+    static void checkRestrictionIsPredicate(String restriction) {
+        int depth = 0;
+        int i = 0;
+        while (i < restriction.length()) {
+            char c = restriction.charAt(i);
+            if (c == '\'' || c == '"' || c == '`') {
+                int end = i + 1;
+                while (end < restriction.length() && restriction.charAt(end) != c) {
+                    end += restriction.charAt(end) == '\\' ? 2 : 1;
+                }
+                if (end >= restriction.length()) {
+                    throw invalidRestriction(restriction, "it has an unterminated quote");
+                }
+                i = end + 1;
+                continue;
+            }
+            if (Character.isLetter(c) || c == '_') {
+                int end = i;
+                while (end < restriction.length()
+                        && (Character.isLetterOrDigit(restriction.charAt(end)) || restriction.charAt(end) == '_')) {
+                    end++;
+                }
+                String word = restriction.substring(i, end).toUpperCase(Locale.ROOT);
+                if (RESTRICTION_KEYWORDS.contains(word)) {
+                    throw invalidRestriction(restriction, word + " is not allowed in a row restriction");
+                }
+                i = end;
+                continue;
+            }
+            if (c == ';' || c == '#' || restriction.startsWith("--", i) || restriction.startsWith("/*", i)) {
+                throw invalidRestriction(restriction, "statement separators and comments are not allowed");
+            }
+            if (c == '(') {
+                depth++;
+            } else if (c == ')' && --depth < 0) {
+                throw invalidRestriction(restriction, "its parentheses are unbalanced");
+            }
+            i++;
+        }
+        if (depth != 0) {
+            throw invalidRestriction(restriction, "its parentheses are unbalanced");
+        }
+    }
+
+    private static GcpException invalidRestriction(String restriction, String reason) {
+        return GcpException.invalidArgument("Invalid row_restriction \"" + restriction + "\": " + reason);
     }
 
     private String location(String projectId, String datasetId) {

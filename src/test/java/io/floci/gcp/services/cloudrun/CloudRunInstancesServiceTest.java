@@ -147,6 +147,89 @@ class CloudRunInstancesServiceTest {
     }
 
     @Test
+    void startSupersededByDeleteAndRecreateDoesNotWriteIntoTheNewInstance() throws Exception {
+        CountDownLatch firstStartEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstStart = new CountDownLatch(1);
+        CountDownLatch secondStartEntered = new CountDownLatch(1);
+        CountDownLatch releaseSecondStart = new CountDownLatch(1);
+        when(runtime.start(anyString(), anyString(), any(Instance.class), anyString()))
+                .thenAnswer(invocation -> {
+                    firstStartEntered.countDown();
+                    assertTrue(releaseFirstStart.await(5, TimeUnit.SECONDS));
+                    return started();
+                })
+                .thenAnswer(invocation -> {
+                    secondStartEntered.countDown();
+                    assertTrue(releaseSecondStart.await(5, TimeUnit.SECONDS));
+                    return started();
+                });
+        CloudRunInstancesService service = dockerService();
+
+        Operation firstCreate = service.createInstance("p1", "us-central1", "inst", BODY, false);
+        String firstUid = service.getInstance(NAME).getUid();
+        assertTrue(firstStartEntered.await(5, TimeUnit.SECONDS));
+        Operation delete = service.deleteInstance(NAME, false);
+        Operation secondCreate = service.createInstance("p1", "us-central1", "inst", BODY, false);
+        String secondUid = service.getInstance(NAME).getUid();
+        assertNotEquals(firstUid, secondUid);
+        releaseFirstStart.countDown();
+
+        Instance firstResult = awaitComplete(firstCreate);
+        assertEquals(firstUid, firstResult.getUid());
+        awaitComplete(delete);
+        assertTrue(secondStartEntered.await(5, TimeUnit.SECONDS));
+        Instance recreated = service.getInstance(NAME);
+        assertEquals(secondUid, recreated.getUid());
+        assertEquals(CloudRunInstanceStates.Phase.STARTING, CloudRunInstanceStates.phase(recreated));
+        assertEquals(0, recreated.getContainerStatusesCount());
+        assertEquals(0, recreated.getConditionsCount());
+        assertEquals(0, recreated.getUrlsCount());
+        verify(operations, never()).complete(eq(secondCreate.getName()), any(Message.class), any(Message.class));
+
+        releaseSecondStart.countDown();
+        Instance secondResult = awaitComplete(secondCreate);
+        assertEquals(secondUid, secondResult.getUid());
+        assertEquals(CloudRunInstanceStates.Phase.RUNNING, CloudRunInstanceStates.phase(service.getInstance(NAME)));
+    }
+
+    @Test
+    void failedRestartReplacesTheEarlierSuccessConditionsAndDigest() throws Exception {
+        when(runtime.start(anyString(), anyString(), any(Instance.class), anyString()))
+                .thenReturn(started())
+                .thenThrow(GcpException.unavailable("port never opened"));
+        CloudRunInstancesService service = dockerService();
+        Instance running = awaitComplete(service.createInstance("p1", "us-central1", "inst", BODY, false));
+        assertEquals("busybox@sha256:abc", running.getContainerStatuses(0).getImageDigest());
+
+        Operation patch = service.updateInstance(NAME, "{\"containers\":[{\"name\":\"app\",\"image\":\"nginx\"}]}",
+                "containers", false, false);
+        verify(operations, timeout(5000)).fail(eq(patch.getName()), any(Status.class), any(Message.class));
+
+        Instance failed = service.getInstance(NAME);
+        assertEquals(CloudRunInstanceStates.Phase.FAILED, CloudRunInstanceStates.phase(failed));
+        assertEquals(1, failed.getContainerStatusesCount());
+        assertEquals("app", failed.getContainerStatuses(0).getName());
+        assertEquals("", failed.getContainerStatuses(0).getImageDigest());
+        assertEquals(2, failed.getConditionsCount());
+        for (Condition condition : failed.getConditionsList()) {
+            assertEquals(Condition.State.CONDITION_FAILED, condition.getState(), condition.getType());
+            assertEquals("port never opened", condition.getMessage());
+        }
+        assertEquals(1, failed.getUrlsCount());
+    }
+
+    @Test
+    void stopManagedContainersRemovesInstanceContainersOnlyWithExecution() {
+        dockerService().stopManagedContainers();
+        verify(runtime).stopAll();
+
+        CloudRunInstancesRuntime mockRuntime = mock(CloudRunInstancesRuntime.class);
+        new CloudRunInstancesService(store, operations, iamService, name -> false, mockRuntime, urlService, true)
+                .stopManagedContainers();
+        verify(mockRuntime, never()).stopAll();
+    }
+
+    @Test
     void labelPatchWhileStartingLeavesTheStartOwningTheTerminalCondition() throws Exception {
         CountDownLatch startEntered = new CountDownLatch(1);
         CountDownLatch releaseStart = new CountDownLatch(1);

@@ -9,7 +9,6 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
-import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
@@ -136,7 +135,7 @@ public class GcsService {
             StorageBackend<String, GcsObjectMeta> objectMetaStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
-        this(bucketStore, objectMetaStore, new io.floci.gcp.core.storage.InMemoryStorage<>(),
+        this(bucketStore, objectMetaStore, StorageFactory.createInMemory(),
                 aclStore, defaultProjectId);
     }
 
@@ -145,7 +144,7 @@ public class GcsService {
             StorageBackend<String, byte[]> objectDataStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
-        this(bucketStore, objectMetaStore, objectDataStore, aclStore, new InMemoryStorage<>(), defaultProjectId);
+        this(bucketStore, objectMetaStore, objectDataStore, aclStore, StorageFactory.createInMemory(), defaultProjectId);
     }
 
     GcsService(StorageBackend<String, GcsBucket> bucketStore,
@@ -162,7 +161,7 @@ public class GcsService {
         this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = aclStore;
         this.defaultProjectId = defaultProjectId;
-        this.notificationStore = new io.floci.gcp.core.storage.InMemoryStorage<>();
+        this.notificationStore = StorageFactory.createInMemory();
         this.serviceRegistry = null;
         this.config = null;
         this.pubSubService = null;

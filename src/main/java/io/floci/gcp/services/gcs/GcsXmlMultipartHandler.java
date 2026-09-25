@@ -60,21 +60,21 @@ public class GcsXmlMultipartHandler {
                 return xml(new XmlBuilder().start("InitiateMultipartUploadResult", NS).elem("Bucket", bucket).elem("Key", object).elem("UploadId", upload.id).end("InitiateMultipartUploadResult"));
             }
             if (id == null || id.isBlank()) { throw GcpException.invalidArgument("uploadId is required"); }
-            switch (method) {
+            return switch (method) {
                 case "PUT" -> {
                     int number = number(query.getFirst("partNumber"), 1, 10000);
                     GcsMultipartUpload.Part part = service.putPart(bucket, object, id, number, bytes == null ? new byte[0] : bytes, headers.getHeaderString("Content-MD5"));
-                    return Response.ok().header("ETag", part.etag()).build();
+                    yield Response.ok().header("ETag", part.etag()).build();
                 }
                 case "POST" -> {
                     List<Map<String, String>> requested = XmlParser.parseRecords(new String(bytes == null ? new byte[0] : bytes, StandardCharsets.UTF_8), "CompleteMultipartUpload", "Part");
                     String base = RequestBaseUrl.resolve(uri, headers, config.baseUrl(), config.port());
                     GcsObjectMeta meta = service.complete(bucket, object, id, requested, base);
-                    return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", meta.getMediaLink())
+                    yield Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", meta.getMediaLink())
                             .elem("Bucket", bucket).elem("Key", object).elem("ETag", "\"" + meta.getEtag() + "\"").end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
                             .header("ETag", "\"" + meta.getEtag() + "\"").header("x-goog-generation", meta.getGeneration()).build();
                 }
-                case "DELETE" -> { service.abort(bucket, object, id); return Response.noContent().build(); }
+                case "DELETE" -> { service.abort(bucket, object, id); yield Response.noContent().build(); }
                 case "GET" -> {
                     int marker = number(Optional.ofNullable(query.getFirst("part-number-marker")).orElse("0"), 0, 10000);
                     int max = number(Optional.ofNullable(query.getFirst("max-parts")).orElse("1000"), 1, 1000);
@@ -84,10 +84,10 @@ public class GcsXmlMultipartHandler {
                             .elem("PartNumberMarker", marker).elem("MaxParts", max).elem("IsTruncated", parts.size() > max);
                     if (parts.size() > max) { response.elem("NextPartNumberMarker", page.getLast().number()); }
                     for (GcsMultipartUpload.Part part : page) { response.start("Part").elem("PartNumber", part.number()).elem("ETag", part.etag()).elem("Size", part.data().length).elem("LastModified", part.modified()).end("Part"); }
-                    return xml(response.end("ListPartsResult"));
+                    yield xml(response.end("ListPartsResult"));
                 }
                 default -> throw GcpException.unimplemented("Unsupported multipart method");
-            }
+            };
         } catch (GcpException error) {
             String code = error.getReason() != null ? error.getReason() : switch (error.getHttpStatus()) {
                 case 403 -> "AccessDenied"; case 404 -> "NoSuchBucket"; default -> "InvalidArgument";

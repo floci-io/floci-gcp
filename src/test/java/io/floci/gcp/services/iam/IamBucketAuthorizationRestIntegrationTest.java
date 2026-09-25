@@ -67,6 +67,15 @@ class IamBucketAuthorizationRestIntegrationTest {
     }
 
     @Test
+    void objectViewerCanReadStorageLayoutWithoutBucketMetadataPermission() {
+        String bucket = createBucket();
+        iamService.setPolicy("buckets/" + bucket, objectViewerPolicy());
+
+        given().when().get("/storage/v1/b/" + bucket + "/storageLayout").then().statusCode(200);
+        given().when().get("/storage/v1/b/" + bucket).then().statusCode(403);
+    }
+
+    @Test
     void missingBucketRemainsNotFoundWhenAuthorizationIsEnforced() {
         String bucket = "missing-iam-bucket-" + UUID.randomUUID().toString().substring(0, 8);
 
@@ -103,6 +112,13 @@ class IamBucketAuthorizationRestIntegrationTest {
         StoredPolicy policy = new StoredPolicy();
         policy.setBindings(List.of(Map.of(
                 "role", "roles/storage.admin", "members", List.of("allUsers"))));
+        return policy;
+    }
+
+    private static StoredPolicy objectViewerPolicy() {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of(
+                "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
         return policy;
     }
 

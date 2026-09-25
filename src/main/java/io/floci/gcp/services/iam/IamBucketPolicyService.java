@@ -103,7 +103,7 @@ public class IamBucketPolicyService {
         return uniformBucketLevelAccessEnabled(gcsService.getBucket(bucket).getIamConfiguration());
     }
 
-    private static boolean uniformBucketLevelAccessEnabled(Object iamConfiguration) {
+    static boolean uniformBucketLevelAccessEnabled(Object iamConfiguration) {
         if (!(iamConfiguration instanceof Map<?, ?> iamConfigurationMap)) {
             return false;
         }

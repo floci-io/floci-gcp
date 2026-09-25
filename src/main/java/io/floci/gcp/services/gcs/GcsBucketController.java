@@ -165,7 +165,7 @@ public class GcsBucketController {
     @Path("/{bucket}/storageLayout")
 	public Response getStorageLayout(@PathParam("bucket") String bucket,
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
-        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.buckets.get");
+        iamAuthorizationService.requireBucketPermission(authorization, bucket, "storage.objects.list");
         GcsBucket b = service.getBucket(bucket);
         String location = b.getLocation() != null ? b.getLocation() : "US";
         Map<String, Object> response = new LinkedHashMap<>();

@@ -49,22 +49,11 @@ public class IamBucketLifecycleService {
     }
 
     public void validateIamConfiguration(String bucket, Map<String, Object> iamConfiguration) {
-        if (!uniformBucketLevelAccessEnabled(iamConfiguration)
+        if (!IamBucketPolicyService.uniformBucketLevelAccessEnabled(iamConfiguration)
                 && hasConditionalBindings(bucket, iamService.getPolicy(policyResource(bucket)))) {
             throw GcpException.invalidArgument(
                     "Cannot disable uniform bucket-level access while IAM Conditions are configured");
         }
-    }
-
-    private static boolean uniformBucketLevelAccessEnabled(Object iamConfiguration) {
-        if (!(iamConfiguration instanceof Map<?, ?> iamConfigurationMap)) {
-            return false;
-        }
-        Object uniformBucketLevelAccess = iamConfigurationMap.get("uniformBucketLevelAccess");
-        if (!(uniformBucketLevelAccess instanceof Map<?, ?> uniformBucketLevelAccessMap)) {
-            return false;
-        }
-        return Boolean.TRUE.equals(uniformBucketLevelAccessMap.get("enabled"));
     }
 
     private static boolean hasConditionalBindings(String bucket, StoredPolicy policy) {

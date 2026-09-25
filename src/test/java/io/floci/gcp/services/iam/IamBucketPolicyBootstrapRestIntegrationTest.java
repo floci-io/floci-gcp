@@ -6,6 +6,7 @@ import com.google.storage.v2.StorageGrpc;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -78,7 +79,7 @@ class IamBucketPolicyBootstrapRestIntegrationTest {
 
     private String createBucket(String authorization) {
         String bucket = "iam-bootstrap-" + UUID.randomUUID().toString().substring(0, 8);
-        var request = given().contentType("application/json").body(Map.of("name", bucket));
+        RequestSpecification request = given().contentType("application/json").body(Map.of("name", bucket));
         if (authorization != null) {
             request.header("Authorization", authorization);
         }

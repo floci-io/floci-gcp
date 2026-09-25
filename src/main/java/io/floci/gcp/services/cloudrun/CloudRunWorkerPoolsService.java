@@ -33,9 +33,13 @@ import io.floci.gcp.services.cloudrun.CloudRunWorkerPoolRuntime.DesiredWorkers;
 import io.floci.gcp.services.iam.IamPolicyCodec;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
@@ -47,6 +51,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -62,16 +67,21 @@ import java.util.stream.Collectors;
  * Cloud Run v2 worker pools and their revisions.
  *
  * <p>Concurrency invariant: for a worker pool name {@code N}, the stored pool record, every revision record
- * under {@code N/revisions/}, and the pool's IAM policy deletion are only checked and mutated while holding
- * {@code lockFor(N)}. Create, patch (including the {@code allowMissing} upsert), delete, revision delete and
- * the reconciler's readiness publication all take that lock, so their checks and writes never interleave.
+ * under {@code N/revisions/}, and the pool's IAM policy are only checked and mutated while holding
+ * {@code lockFor(N)}. Create, patch (including the {@code allowMissing} upsert), delete, revision delete, the
+ * IAM policy methods and the reconciler's readiness publication all take that lock, so their checks and
+ * writes never interleave (in particular, no IAM policy is stored for a pool that does not exist).
  * Replica containers of {@code N} are only started and stopped by {@code N}'s reconciler, a serial chain of
  * tasks per pool name. A reconcile task reads the desired state under the lock, releases it for the Docker
  * work, and reacquires it to publish readiness only when the pool's generation is still the one it
  * converged on. Every committed mutation enqueues a reconcile task after it, so the last task always
  * converges on the last committed state (no containers once the pool is gone). Lock order: pool lock, then
- * the IAM policy lock taken inside {@link IamService#deleteResourceAndPolicy}. No path waits on the
- * reconciler while holding the pool lock.
+ * the IAM policy lock taken inside {@link IamService}. No path waits on the reconciler while holding the
+ * pool lock.
+ *
+ * <p>Restart: replica tracking lives in memory, so at startup {@link #recoverAfterRestart} fails the worker
+ * pool operations the previous process left pending, removes leftover worker pool containers and enqueues a
+ * reconcile task per stored pool (Docker mode) or settles pools still marked reconciling (mock mode).
  */
 @ApplicationScoped
 public class CloudRunWorkerPoolsService {
@@ -84,6 +94,8 @@ public class CloudRunWorkerPoolsService {
     private static final String DEPLOYING_MESSAGE = "Deploying Revision.";
     private static final String PROVISIONING_MESSAGE = "Provisioning revision instances to process workloads.";
     private static final String RETIRED_MESSAGE = "Revision retired.";
+    private static final String RESTARTED_MESSAGE = "The emulator restarted before the operation completed.";
+    private static final Duration SHUTDOWN_WAIT = Duration.ofSeconds(10);
 
     private final StorageBackend<String, String> workerPoolStore;
     private final StorageBackend<String, String> revisionStore;
@@ -128,10 +140,51 @@ public class CloudRunWorkerPoolsService {
         this.workerRuntime = workerRuntime;
     }
 
+    void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent event) {
+        recoverAfterRestart();
+    }
+
     @PreDestroy
     void shutdown() {
         operationTimeouts.shutdownNow();
         reconcileExecutor.shutdownNow();
+        try {
+            if (!reconcileExecutor.awaitTermination(SHUTDOWN_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.warnf("Cloud Run worker pool reconcile tasks still running after %s", SHUTDOWN_WAIT);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugf("Interrupted while waiting for Cloud Run worker pool reconcile tasks to stop");
+        }
+    }
+
+    /**
+     * Settles what the previous emulator process left behind. Its pending worker pool operations can never
+     * complete, so they fail with {@code ABORTED}. In Docker mode, containers of the previous process are
+     * removed and every stored pool gets a reconcile task that starts its replicas again and clears
+     * {@code reconciling}. In mock mode, pools still marked reconciling are settled directly.
+     */
+    void recoverAfterRestart() {
+        List<String> poolNames = List.copyOf(workerPoolStore.keys());
+        Set<String> parents = new TreeSet<>();
+        for (String name : poolNames) {
+            parents.add(parentFromName(name));
+        }
+        if (executionEnabled()) {
+            for (String resource : workerRuntime.removeLeftoverContainers()) {
+                parents.add(parentFromName(resource));
+            }
+        }
+        for (String parent : parents) {
+            failInterruptedOperations(parent);
+        }
+        for (String name : poolNames) {
+            if (executionEnabled()) {
+                enqueueReconcile(name, () -> reconcileAfterRestart(name));
+            } else {
+                settleInterrupted(name);
+            }
+        }
     }
 
     public Operation createWorkerPool(String project, String location, String workerPoolId,
@@ -150,7 +203,7 @@ public class CloudRunWorkerPoolsService {
     public WorkerPool getWorkerPool(String name) {
         return workerPoolStore.get(name)
                 .map(CloudRunWorkerPoolsService::parsePool)
-                .orElseThrow(() -> GcpException.notFound("Cloud Run worker pool not found: " + name));
+                .orElseThrow(() -> notFound("WORKER_POOL", name));
     }
 
     public ListWorkerPoolsResponse listWorkerPools(String project, String location, int pageSize, String pageToken) {
@@ -175,7 +228,7 @@ public class CloudRunWorkerPoolsService {
             WorkerPool existing = workerPoolStore.get(name).map(CloudRunWorkerPoolsService::parsePool).orElse(null);
             if (existing == null) {
                 if (!allowMissing) {
-                    throw GcpException.notFound("Cloud Run worker pool not found: " + name);
+                    throw notFound("WORKER_POOL", name);
                 }
                 return createLocked(name, requested, validateOnly);
             }
@@ -191,7 +244,6 @@ public class CloudRunWorkerPoolsService {
 
             WorkerPool.Builder builder = merged.toBuilder()
                     .setGeneration(existing.getGeneration() + 1)
-                    .setObservedGeneration(existing.getGeneration() + 1)
                     .setUpdateTime(now)
                     .setEtag(newEtag());
             Revision revision = null;
@@ -201,7 +253,7 @@ public class CloudRunWorkerPoolsService {
                 builder.setLatestCreatedRevision(name + "/revisions/" + revisionId);
                 revision = buildRevision(builder.build(), name + "/revisions/" + revisionId, now);
             }
-            validateSplits(name, builder.getInstanceSplitsList(), revision);
+            validateSplits(name, builder.getInstanceSplitsList(), revision, builder.getLatestCreatedRevision());
             builder.clearInstanceSplitStatuses()
                     .addAllInstanceSplitStatuses(splitStatuses(builder.getInstanceSplitsList(),
                             GcpResourceNames.lastSegment(builder.getLatestCreatedRevision())));
@@ -263,7 +315,7 @@ public class CloudRunWorkerPoolsService {
     public Revision getRevision(String name) {
         return revisionStore.get(name)
                 .map(CloudRunWorkerPoolsService::parseRevision)
-                .orElseThrow(() -> GcpException.notFound("Cloud Run revision not found: " + name));
+                .orElseThrow(() -> notFound("REVISION", name));
     }
 
     public ListRevisionsResponse listRevisions(String poolName, int pageSize, String pageToken) {
@@ -284,7 +336,7 @@ public class CloudRunWorkerPoolsService {
         synchronized (lockFor(poolName)) {
             Revision existing = getRevision(revisionName);
             WorkerPool pool = workerPoolStore.get(poolName).map(CloudRunWorkerPoolsService::parsePool).orElse(null);
-            if (pool != null && servingRevisionIds(pool.getInstanceSplitStatusesList()).contains(revisionId)) {
+            if (pool != null && servesRevision(pool, revisionName)) {
                 throw GcpException.failedPrecondition("Revision \"" + revisionId
                         + "\" cannot be directly deleted because it is actively serving.");
             }
@@ -306,17 +358,31 @@ public class CloudRunWorkerPoolsService {
     }
 
     public Policy getIamPolicy(String resource) {
-        return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
+        synchronized (lockFor(resource)) {
+            getWorkerPool(resource);
+            return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
+        }
     }
 
     public Policy setIamPolicy(String resource, Policy policy) {
-        return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, IamPolicyCodec.toStoredPolicy(policy)));
+        synchronized (lockFor(resource)) {
+            getWorkerPool(resource);
+            return IamPolicyCodec.toProtoPolicy(
+                    iamService.setPolicy(resource, IamPolicyCodec.toStoredPolicy(policy)));
+        }
     }
 
+    /**
+     * Grants nothing on a missing pool, like the jobs API, rather than failing the request.
+     */
     public TestIamPermissionsResponse testIamPermissions(String resource, List<String> permissions) {
-        return TestIamPermissionsResponse.newBuilder()
-                .addAllPermissions(iamService.testPermissions(resource, permissions))
-                .build();
+        synchronized (lockFor(resource)) {
+            TestIamPermissionsResponse.Builder response = TestIamPermissionsResponse.newBuilder();
+            if (workerPoolStore.get(resource).isPresent()) {
+                response.addAllPermissions(iamService.testPermissions(resource, permissions));
+            }
+            return response.build();
+        }
     }
 
     private Operation createLocked(String name, WorkerPool requested, boolean validateOnly) {
@@ -330,11 +396,17 @@ public class CloudRunWorkerPoolsService {
                 .setName(name)
                 .setUid(UUID.randomUUID().toString())
                 .setGeneration(1)
-                .setObservedGeneration(1)
+                .clearObservedGeneration()
                 .setCreateTime(now)
                 .setUpdateTime(now)
                 .clearDeleteTime()
                 .clearExpireTime()
+                .clearCreator()
+                .clearLastModifier()
+                .clearSatisfiesPzs()
+                .clearThreatDetectionEnabled()
+                .clearReconciling()
+                .clearTerminalCondition()
                 .clearConditions()
                 .clearLatestReadyRevision()
                 .setLatestCreatedRevision(revisionName)
@@ -343,7 +415,7 @@ public class CloudRunWorkerPoolsService {
         if (executionEnabled()) {
             validateSupported(builder.build());
         }
-        validateSplits(name, builder.getInstanceSplitsList(), revision);
+        validateSplits(name, builder.getInstanceSplitsList(), revision, revisionName);
         builder.clearInstanceSplitStatuses()
                 .addAllInstanceSplitStatuses(splitStatuses(builder.getInstanceSplitsList(),
                         GcpResourceNames.lastSegment(revisionName)));
@@ -412,6 +484,59 @@ public class CloudRunWorkerPoolsService {
         }
     }
 
+    private void reconcileAfterRestart(String name) {
+        DesiredWorkers desired = null;
+        try {
+            desired = desiredWorkers(name);
+            workerRuntime.apply(desired);
+            publishRecovered(name, desired.generation());
+            LOG.infof("Reconciled Cloud Run worker pool after an emulator restart name=%s", name);
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? e.toString() : e.getMessage();
+            LOG.warnf(e, "Cloud Run worker pool reconcile after restart failed name=%s", name);
+            if (desired != null) {
+                publishFailure(name, desired.generation(), message);
+            }
+        }
+    }
+
+    private void failInterruptedOperations(String parent) {
+        for (Operation operation : operations.list(parent, 0, null).getOperationsList()) {
+            if (operation.getDone() || !operation.hasMetadata() || !operation.getMetadata().is(WorkerPool.class)) {
+                continue;
+            }
+            LOG.infof("Failing Cloud Run worker pool operation interrupted by an emulator restart operation=%s",
+                    operation.getName());
+            operations.fail(operation.getName(), Status.newBuilder()
+                    .setCode(Code.ABORTED_VALUE)
+                    .setMessage(RESTARTED_MESSAGE)
+                    .build(), null);
+        }
+    }
+
+    private void settleInterrupted(String name) {
+        synchronized (lockFor(name)) {
+            workerPoolStore.get(name)
+                    .map(CloudRunWorkerPoolsService::parsePool)
+                    .filter(WorkerPool::getReconciling)
+                    .ifPresent(pool -> settleLocked(pool, timestampNow()));
+        }
+    }
+
+    private void publishRecovered(String name, long generation) {
+        synchronized (lockFor(name)) {
+            WorkerPool pool = workerPoolStore.get(name).map(CloudRunWorkerPoolsService::parsePool).orElse(null);
+            if (pool == null || pool.getGeneration() != generation) {
+                return;
+            }
+            boolean ready = !pool.getReconciling()
+                    && pool.getTerminalCondition().getState() == Condition.State.CONDITION_SUCCEEDED;
+            if (!ready) {
+                settleLocked(pool, timestampNow());
+            }
+        }
+    }
+
     private DesiredWorkers desiredWorkers(String name) {
         synchronized (lockFor(name)) {
             String project = nameSegment(name, 1);
@@ -449,6 +574,7 @@ public class CloudRunWorkerPoolsService {
             }
             Timestamp now = timestampNow();
             WorkerPool failed = pool.toBuilder()
+                    .setObservedGeneration(pool.getGeneration())
                     .setTerminalCondition(condition("Ready", Condition.State.CONDITION_FAILED, message, now))
                     .setReconciling(false)
                     .build();
@@ -593,21 +719,27 @@ public class CloudRunWorkerPoolsService {
                 .toList();
     }
 
-    private void validateSplits(String poolName, List<InstanceSplit> splits, Revision pendingRevision) {
+    /**
+     * Checks that the percentages add up to 100 and that every revision the splits resolve to exists: a
+     * REVISION split names its own revision, a LATEST split resolves to {@code latestRevisionName}.
+     */
+    private void validateSplits(String poolName, List<InstanceSplit> splits, Revision pendingRevision,
+                                String latestRevisionName) {
         int total = 0;
         for (InstanceSplit split : splits) {
             if (split.getPercent() < 0) {
                 throw GcpException.invalidArgument("Instance split percent must not be negative.");
             }
             total += split.getPercent();
-            if (allocationType(split) == InstanceSplitAllocationType.INSTANCE_SPLIT_ALLOCATION_TYPE_REVISION) {
-                String revisionId = GcpResourceNames.lastSegment(split.getRevision());
-                boolean pending = pendingRevision != null
-                        && GcpResourceNames.lastSegment(pendingRevision.getName()).equals(revisionId);
-                if (!pending && revisionStore.get(poolName + "/revisions/" + revisionId).isEmpty()) {
-                    throw GcpException.invalidArgument("Revision " + revisionId + " referenced by instanceSplits "
-                            + "does not exist in worker pool " + poolId(poolName) + ".");
-                }
+            String revisionId = allocationType(split)
+                    == InstanceSplitAllocationType.INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST
+                    ? GcpResourceNames.lastSegment(latestRevisionName)
+                    : GcpResourceNames.lastSegment(split.getRevision());
+            boolean pending = pendingRevision != null
+                    && GcpResourceNames.lastSegment(pendingRevision.getName()).equals(revisionId);
+            if (!pending && revisionStore.get(poolName + "/revisions/" + revisionId).isEmpty()) {
+                throw GcpException.invalidArgument("Revision " + revisionId + " referenced by instanceSplits "
+                        + "does not exist in worker pool " + poolId(poolName) + ".");
             }
         }
         if (total != 100) {
@@ -698,6 +830,20 @@ public class CloudRunWorkerPoolsService {
             }
         }
         return serving;
+    }
+
+    /**
+     * Whether deleting {@code revisionName} would leave the pool without a revision it depends on: the
+     * revisions receiving instances, and the latest created and latest ready revisions that LATEST splits
+     * resolve to.
+     */
+    static boolean servesRevision(WorkerPool pool, String revisionName) {
+        if (revisionName.equals(pool.getLatestCreatedRevision())
+                || revisionName.equals(pool.getLatestReadyRevision())) {
+            return true;
+        }
+        return servingRevisionIds(pool.getInstanceSplitStatusesList())
+                .contains(GcpResourceNames.lastSegment(revisionName));
     }
 
     static Set<String> servingRevisionIds(List<InstanceSplitStatus> statuses) {
@@ -921,6 +1067,16 @@ public class CloudRunWorkerPoolsService {
 
     private static String poolId(String poolName) {
         return GcpResourceNames.lastSegment(poolName);
+    }
+
+    /**
+     * GCP's NOT_FOUND message for a Cloud Run resource, for example {@code Resource 'wp' of kind 'WORKER_POOL'
+     * in region 'us-central1' in project 'p' does not exist.}
+     */
+    static GcpException notFound(String kind, String name) {
+        return GcpException.notFound("Resource '" + GcpResourceNames.lastSegment(name) + "' of kind '" + kind
+                + "' in region '" + nameSegment(name, 3) + "' in project '" + nameSegment(name, 1)
+                + "' does not exist.");
     }
 
     private static String nameSegment(String name, int index) {

@@ -5,6 +5,7 @@ import com.google.cloud.run.v2.Revision;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,11 +15,14 @@ import org.jboss.logging.Logger;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,9 +30,14 @@ import java.util.concurrent.Executors;
 /**
  * Runs worker pool replica containers.
  *
- * <p>Callers must serialize {@link #apply} and {@link #stopAll} per worker pool name. The replica map is
- * keyed by pool name and each entry is only read or written by the call currently holding that pool's
- * turn, so no two calls ever touch the same pool's replicas concurrently.
+ * <p>Callers must serialize {@link #apply} per worker pool name. The replica map is keyed by pool name and
+ * each entry is only read or written by the call currently holding that pool's turn, so no two calls ever
+ * touch the same pool's replicas concurrently.
+ *
+ * <p>Every started container is also registered in {@code started}, under {@code lifecycle}, together with
+ * the {@code closed} check. {@link #shutdown} sets {@code closed} and takes the registered containers under
+ * the same monitor, so a replica whose start completes after shutdown removes its own container instead of
+ * registering it, and no container outlives the runtime.
  */
 @ApplicationScoped
 public class CloudRunWorkerPoolRuntime {
@@ -40,6 +49,9 @@ public class CloudRunWorkerPoolRuntime {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final Map<String, List<WorkerReplica>> replicas = new ConcurrentHashMap<>();
+    private final Object lifecycle = new Object();
+    private final Map<String, WorkerReplica> started = new HashMap<>();
+    private boolean closed;
 
     @Inject
     public CloudRunWorkerPoolRuntime(CloudRunRuntimeService runtimeService,
@@ -102,26 +114,63 @@ public class CloudRunWorkerPoolRuntime {
     }
 
     /**
-     * Stops every replica of the pool, SIGTERM first and kill after the cleanup timeout.
+     * Removes the worker pool containers of this emulator (same {@code floci_emulator} and
+     * {@code floci_namespace} labels) that no replica of this process tracks, which are the ones a previous
+     * process left behind. Returns the {@code floci_resource} label (revision name) of each removed container.
      */
-    void stopAll(String poolName) {
-        List<WorkerReplica> current = replicas.remove(poolName);
-        if (current != null) {
-            stopReplicas(current);
+    Set<String> removeLeftoverContainers() {
+        Map<String, String> filter = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
+        filter.put("floci_service", "cloudrun");
+        String namespace = filter.get("floci_namespace");
+        Set<String> tracked;
+        synchronized (lifecycle) {
+            tracked = Set.copyOf(started.keySet());
         }
+        List<LeftoverContainer> leftovers;
+        try {
+            leftovers = lifecycleManager.runDockerApi("list Cloud Run worker pool containers",
+                    () -> lifecycleManager.getDockerClient().listContainersCmd()
+                            .withShowAll(true)
+                            .withLabelFilter(filter)
+                            .exec()
+                            .stream()
+                            .map(container -> new LeftoverContainer(container.getId(),
+                                    container.getLabels() == null ? Map.of() : container.getLabels()))
+                            .toList());
+        } catch (Exception e) {
+            LOG.warnf(e, "Could not list leftover Cloud Run worker pool containers");
+            return Set.of();
+        }
+        Set<String> resources = new TreeSet<>();
+        for (LeftoverContainer container : leftovers) {
+            String resource = container.labels().getOrDefault("floci_resource", "");
+            if (!resource.contains("/workerPools/") || tracked.contains(container.id())
+                    || !Objects.equals(namespace, container.labels().get("floci_namespace"))) {
+                continue;
+            }
+            LOG.infof("Removing Cloud Run worker pool container left by a previous emulator process "
+                    + "container=%s revision=%s", container.id(), resource);
+            lifecycleManager.forceRemove(container.id(), null);
+            resources.add(resource);
+        }
+        return resources;
     }
 
     @PreDestroy
     void shutdown() {
-        for (List<WorkerReplica> poolReplicas : List.copyOf(replicas.values())) {
-            for (WorkerReplica replica : poolReplicas) {
-                try {
-                    lifecycleManager.forceRemove(replica.containerId(), null);
-                    runtimeService.releaseGcsVolumeMounts(replica.mounts());
-                } catch (Exception e) {
-                    LOG.warnf(e, "Cloud Run worker pool container cleanup on shutdown failed container=%s",
-                            replica.containerId());
-                }
+        List<WorkerReplica> toRemove;
+        synchronized (lifecycle) {
+            closed = true;
+            toRemove = List.copyOf(started.values());
+            started.clear();
+        }
+        for (WorkerReplica replica : toRemove) {
+            try {
+                lifecycleManager.forceRemove(replica.containerId(), null);
+                runtimeService.releaseGcsVolumeMounts(replica.mounts());
+            } catch (Exception e) {
+                LOG.warnf(e, "Cloud Run worker pool container cleanup on shutdown failed container=%s",
+                        replica.containerId());
             }
         }
         replicas.clear();
@@ -139,6 +188,11 @@ public class CloudRunWorkerPoolRuntime {
     }
 
     private WorkerReplica startReplica(DesiredWorkers desired, int index) {
+        synchronized (lifecycle) {
+            if (closed) {
+                throw new IllegalStateException("Cloud Run worker pool runtime is shutting down");
+            }
+        }
         Revision revision = desired.revision();
         Container container = revision.getContainers(0);
         String poolId = CloudRunRuntimeService.lastSegment(desired.poolName());
@@ -154,15 +208,30 @@ public class CloudRunWorkerPoolRuntime {
         env.put("CLOUD_RUN_REVISION", revisionId);
         ContainerSpec spec = runtimeService.buildWorkloadSpec(desired.project(), desired.location(),
                 revision.getName(), containerName, container, env, null, mounts);
+        ContainerLifecycleManager.ContainerInfo info;
         try {
-            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
-            LOG.infof("Cloud Run worker pool replica started pool=%s revision=%s index=%d container=%s",
-                    desired.poolName(), revisionId, index, info.containerId());
-            return new WorkerReplica(revision.getName(), index, info.containerId(), mounts);
+            info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
             runtimeService.releaseGcsVolumeMounts(mounts);
             throw e;
         }
+        WorkerReplica replica = new WorkerReplica(revision.getName(), index, info.containerId(), mounts);
+        synchronized (lifecycle) {
+            if (!closed) {
+                started.put(replica.containerId(), replica);
+                LOG.infof("Cloud Run worker pool replica started pool=%s revision=%s index=%d container=%s",
+                        desired.poolName(), revisionId, index, replica.containerId());
+                return replica;
+            }
+        }
+        LOG.infof("Cloud Run worker pool replica started during shutdown; removing it container=%s",
+                replica.containerId());
+        try {
+            lifecycleManager.forceRemove(replica.containerId(), null);
+        } finally {
+            runtimeService.releaseGcsVolumeMounts(mounts);
+        }
+        throw new IllegalStateException("Cloud Run worker pool runtime is shutting down");
     }
 
     private void stopReplicas(List<WorkerReplica> toStop) {
@@ -193,6 +262,9 @@ public class CloudRunWorkerPoolRuntime {
         try {
             lifecycleManager.forceRemove(replica.containerId(), null);
         } finally {
+            synchronized (lifecycle) {
+                started.remove(replica.containerId());
+            }
             runtimeService.releaseGcsVolumeMounts(replica.mounts());
         }
         LOG.infof("Cloud Run worker pool replica stopped revision=%s index=%d container=%s",
@@ -216,4 +288,6 @@ public class CloudRunWorkerPoolRuntime {
 
     private record WorkerReplica(String revisionName, int index, String containerId,
                                  List<CloudRunRuntimeVolumeMount> mounts) {}
+
+    private record LeftoverContainer(String id, Map<String, String> labels) {}
 }

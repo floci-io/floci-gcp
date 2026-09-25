@@ -1,7 +1,7 @@
 package io.floci.gcp.test;
 
-import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpExecuteInterceptor;
+import com.google.api.client.http.HttpRequestInitializer;
 import com.google.cloud.ServiceOptions;
 import com.google.cloud.http.HttpTransportOptions;
 import com.google.cloud.storage.BucketInfo;

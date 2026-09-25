@@ -94,10 +94,20 @@ class RestartContractTest < Minitest::Test
       assert_nil storage.bucket(state["bucket"]).file("pending")
       path = "/#{state['bucket']}/pending?uploadId=#{state['upload']}"
       assert_includes http("get", path).body, "<PartNumber>7</PartNumber>"
-      body = "<CompleteMultipartUpload><Part><PartNumber>7</PartNumber><ETag>#{state['etag']}</ETag></Part></CompleteMultipartUpload>"
+      first = "a" * (5 * 1024 * 1024)
+      part = http("put", path + "&partNumber=1", first)
+      assert_equal "200", part.code
+      page = REXML::Document.new(http("get", path + "&max-parts=1").body)
+      assert_equal "1", page.elements["ListPartsResult/Part/PartNumber"].text
+      marker = page.elements["ListPartsResult/NextPartNumberMarker"].text
+      assert_equal "1", marker
+      next_page = REXML::Document.new(http("get", path + "&max-parts=1&part-number-marker=#{marker}").body)
+      assert_equal "7", next_page.elements["ListPartsResult/Part/PartNumber"].text
+      assert_equal "false", next_page.elements["ListPartsResult/IsTruncated"].text
+      body = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>#{part['etag']}</ETag></Part><Part><PartNumber>7</PartNumber><ETag>#{state['etag']}</ETag></Part></CompleteMultipartUpload>"
       assert_equal "200", http("post", path, body).code
       bucket = storage.bucket(state["bucket"])
-      assert_equal "persistent\x00bytes", bucket.file("pending").download(StringIO.new).string
+      assert_equal first + "persistent\x00bytes", bucket.file("pending").download(StringIO.new).string
       bucket.file("pending").delete
       bucket.delete
       disk_client.delete(project: state["project"], zone: "us-central1-a", disk: "persistent").tap { |operation| wait(operation) }

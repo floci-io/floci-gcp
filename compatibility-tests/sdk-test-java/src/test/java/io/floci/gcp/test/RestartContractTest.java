@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Arrays;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -72,9 +73,24 @@ class RestartContractTest {
             var uploads = MultipartUploadClient.create(MultipartUploadSettings.of(options));
             assertThat(storage.get(bucket, "pending")).isNull();
             assertThat(uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload).build()).parts()).hasSize(1);
+            byte[] first = new byte[5 * 1024 * 1024]; Arrays.fill(first, (byte) 71);
+            String firstEtag = uploads.uploadPart(UploadPartRequest.builder().bucket(bucket).key("pending").uploadId(upload)
+                    .partNumber(1).build(), RequestBody.of(ByteBuffer.wrap(first))).eTag();
+            var page = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload).maxParts(1).build());
+            assertThat(page.parts().getFirst().partNumber()).isEqualTo(1);
+            assertThat(page.nextPartNumberMarker()).isEqualTo(1);
+            assertThat(page.truncated()).isTrue();
+            var next = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload)
+                    .maxParts(1).partNumberMarker(page.nextPartNumberMarker()).build());
+            assertThat(next.parts().getFirst().partNumber()).isEqualTo(7);
+            assertThat(next.truncated()).isFalse();
             uploads.completeMultipartUpload(CompleteMultipartUploadRequest.builder().bucket(bucket).key("pending").uploadId(upload)
-                    .multipartUpload(CompletedMultipartUpload.builder().parts(List.of(CompletedPart.builder().partNumber(7).eTag(state.getProperty("etag")).build())).build()).build());
-            assertThat(storage.readAllBytes(bucket, "pending")).isEqualTo(new byte[]{1,0,3,4});
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(List.of(
+                            CompletedPart.builder().partNumber(1).eTag(firstEtag).build(),
+                            CompletedPart.builder().partNumber(7).eTag(state.getProperty("etag")).build())).build()).build());
+            byte[] expected = Arrays.copyOf(first, first.length + 4);
+            System.arraycopy(new byte[]{1,0,3,4}, 0, expected, first.length, 4);
+            assertThat(storage.readAllBytes(bucket, "pending")).isEqualTo(expected);
             storage.delete(bucket, "pending"); storage.delete(bucket);
             disks.deleteAsync(project, "us-central1-a", "persistent").get(20, TimeUnit.SECONDS);
             assertThat(disks.list(project, "us-central1-a").iterateAll()).isEmpty();

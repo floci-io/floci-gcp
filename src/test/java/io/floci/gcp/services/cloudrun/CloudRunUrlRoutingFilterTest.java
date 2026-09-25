@@ -34,6 +34,41 @@ class CloudRunUrlRoutingFilterTest {
     }
 
     @Test
+    void instanceHostRewritesToInstanceInvocationPathWhenNoServiceMatches() {
+        CloudRunService service = mock(CloudRunService.class);
+        CloudRunInstancesService instances = mock(CloudRunInstancesService.class);
+        String host = "sandbox-f64551fcd6f0.us-central1.run.localhost.floci.io:4588";
+        when(service.resolveInvocationHost(host)).thenReturn(Optional.empty());
+        when(instances.resolveInvocationHost(host)).thenReturn(Optional.of(
+                new CloudRunService.InvocationRoute("p1", "us-central1", "sandbox")));
+        CloudRunUrlRoutingFilter filter = new CloudRunUrlRoutingFilter(service, instances);
+        ContainerRequestContext ctx = context("http://localhost:4588/env?x=1", host);
+
+        filter.filter(ctx);
+
+        verify(ctx).setRequestUri(URI.create("http://localhost:4588/run/v2/projects/p1"
+                + "/locations/us-central1/instances/sandbox/env?x=1"));
+        verify(ctx).setProperty(CloudRunUrlRoutingFilter.ORIGINAL_PATH_QUERY, "/env?x=1");
+    }
+
+    @Test
+    void serviceRouteWinsOverInstanceRoute() {
+        CloudRunService service = mock(CloudRunService.class);
+        CloudRunInstancesService instances = mock(CloudRunInstancesService.class);
+        String host = "shared-f64551fcd6f0.us-central1.run.localhost.floci.io:4588";
+        when(service.resolveInvocationHost(host)).thenReturn(Optional.of(
+                new CloudRunService.InvocationRoute("p1", "us-central1", "shared")));
+        CloudRunUrlRoutingFilter filter = new CloudRunUrlRoutingFilter(service, instances);
+        ContainerRequestContext ctx = context("http://localhost:4588/", host);
+
+        filter.filter(ctx);
+
+        verify(ctx).setRequestUri(URI.create("http://localhost:4588/run/v2/projects/p1"
+                + "/locations/us-central1/services/shared/"));
+        verifyNoInteractions(instances);
+    }
+
+    @Test
     void ignoresNonCloudRunHosts() {
         CloudRunService service = mock(CloudRunService.class);
         when(service.resolveInvocationHost("localhost:4588")).thenReturn(Optional.empty());

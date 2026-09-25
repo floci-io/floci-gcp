@@ -186,19 +186,29 @@ public class CloudRunInvocationController {
         String serviceName = "projects/" + project + "/locations/" + location + "/services/" + serviceId;
         CloudRunRuntimeInstance instance = cloudRunService.readyRuntime(serviceName)
                 .orElseThrow(() -> GcpException.unavailable("Cloud Run service has no ready runtime: " + serviceName));
-        String target = instance.endpointUri(pathAndQueryFromRequest(project, location, serviceId, uriInfo));
+        return forward(method, serviceName, instance, pathAndQueryFromRequest(project, location, serviceId, uriInfo),
+                body, headers, uriInfo);
+    }
+
+    /**
+     * Proxies one request to a ready Cloud Run runtime container. Shared by the Services and Instances
+     * invocation routes; {@code resourceName} only appears in error messages.
+     */
+    Response forward(String method, String resourceName, CloudRunRuntimeInstance instance, String pathAndQuery,
+                     byte[] body, HttpHeaders headers, UriInfo uriInfo) {
+        String target = instance.endpointUri(pathAndQuery);
         HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis(),
                 instance.ingressH2c());
         try {
             HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
             return toResponse(response);
         } catch (HttpTimeoutException e) {
-            throw GcpException.deadlineExceeded("Cloud Run runtime request timed out: " + serviceName);
+            throw GcpException.deadlineExceeded("Cloud Run runtime request timed out: " + resourceName);
         } catch (IOException e) {
             throw GcpException.badGateway("Cloud Run runtime connection failed: " + e.getMessage());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw GcpException.unavailable("Cloud Run runtime request interrupted: " + serviceName);
+            throw GcpException.unavailable("Cloud Run runtime request interrupted: " + resourceName);
         }
     }
 

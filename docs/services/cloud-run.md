@@ -12,6 +12,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT` | `300s` | Maximum time for asynchronous Cloud Run execution operations before their LRO fails |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` | `15s` | Maximum time to wait for best-effort Docker cleanup after an operation is already resolved |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES` | `1` | Maximum replica containers run per worker pool (see [Worker Pools](#worker-pools)) |
 
 ## Supported API Surface
 
@@ -27,6 +28,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | Test IAM permissions | `POST /v2/projects/{project}/locations/{location}/services/{service}:testIamPermissions` |
 | List revisions | `GET /v2/projects/{project}/locations/{location}/services/{service}/revisions` |
 | Get revision | `GET /v2/projects/{project}/locations/{location}/services/{service}/revisions/{revision}` |
+| Delete revision | `DELETE /v2/projects/{project}/locations/{location}/services/{service}/revisions/{revision}` |
 
 When execution is disabled, create, update, and delete return completed `google.longrunning.Operation` resources immediately. When execution is enabled, create, template-changing update, and delete return pending operations and complete or fail after runtime startup or cleanup. Operations can be read, listed, waited on, and deleted under `/v2/projects/{project}/locations/{location}/operations`.
 
@@ -58,6 +60,8 @@ The invocation proxy accepts both generated host-routed URLs and the legacy pref
 
 `validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.
 
+Deleting a service revision that is the service's `latestReadyRevision` or is named in its `trafficStatuses` fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Other revisions are removed and the completed operation returns the revision with `deleteTime` and `expireTime` set. Runtime containers are not touched by revision delete; retired service revisions have no running container.
+
 ## SDK Usage
 
 Cloud Run clients should use the HTTP JSON transport, an explicit endpoint, and no credentials:
@@ -72,7 +76,6 @@ ServicesSettings settings = ServicesSettings.newHttpJsonBuilder()
 ## Not Implemented
 
 - Source builds and buildpacks
-- WorkerPools
 - Traffic splitting
 - Autoscaling and scale-to-zero
 - Sidecars, non-GCS volumes, secrets, startup probes
@@ -164,3 +167,77 @@ Every change to an execution and its tasks is applied by a single per-execution 
 - IAM policies use the same codec as services, so the initial `ACAB` etag is returned as the base64 of its UTF-8 bytes.
 - gcloud is not supported.
 
+## Worker Pools
+
+Worker pools run pull-based workloads (queue consumers, Kafka or Pub/Sub pullers) that serve no HTTP traffic. floci-gcp implements the Cloud Run Admin API v2 `workerPools` resource and its revisions over REST JSON. gcloud is not supported: `gcloud run worker-pools` reads through the v1 Knative API and writes through gRPC, neither of which floci-gcp serves for Cloud Run.
+
+### Supported API Surface
+
+| Operation | Path |
+|---|---|
+| Create worker pool | `POST /v2/projects/{project}/locations/{location}/workerPools?workerPoolId={id}` |
+| List worker pools | `GET /v2/projects/{project}/locations/{location}/workerPools` |
+| Get worker pool | `GET /v2/projects/{project}/locations/{location}/workerPools/{pool}` |
+| Update worker pool | `PATCH /v2/projects/{project}/locations/{location}/workerPools/{pool}` |
+| Delete worker pool | `DELETE /v2/projects/{project}/locations/{location}/workerPools/{pool}` |
+| Get IAM policy | `GET /v2/projects/{project}/locations/{location}/workerPools/{pool}:getIamPolicy` |
+| Set IAM policy | `POST /v2/projects/{project}/locations/{location}/workerPools/{pool}:setIamPolicy` |
+| Test IAM permissions | `POST /v2/projects/{project}/locations/{location}/workerPools/{pool}:testIamPermissions` |
+| List revisions | `GET /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions` |
+| Get revision | `GET /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}` |
+| Delete revision | `DELETE /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}` |
+
+Create accepts `workerPoolId` and `validateOnly`. Update accepts `updateMask`, `validateOnly`, `allowMissing` (creates the pool when it does not exist) and `forceNewRevision`; without `updateMask` every updatable field is replaced from the body, which is what the Terraform provider sends. Delete accepts `validateOnly` and `etag`. List accepts `pageSize` and `pageToken`; `showDeleted` is accepted and ignored. Creating a pool whose ID already exists fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`.
+
+### Resource Behavior
+
+- Defaults: `scaling.manualInstanceCount` is `1` when unset, every template container gets `resources.limits` `cpu: 1000m` and `memory: 512Mi` when those keys are missing, `launchStage` is `GA`, and an empty `instanceSplits` becomes one `INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST` split at 100%. `template.serviceAccount` is stored as given, as for services. `customAudiences` is dropped, because GCP ignores it.
+- Revisions are named `{pool}-{5-digit counter}-{3 random lowercase alphanumerics}`, for example `orders-00002-jw2`. A revision is created on create, whenever the template changes (compared after defaults are applied), and whenever `forceNewRevision=true`. Any other update, such as scaling, labels or splits, only increments `generation`.
+- A revision copies the template: unnamed containers are named `{last image path segment}-{1-based index}` (`busybox-1`), `executionEnvironment` is `EXECUTION_ENVIRONMENT_GEN2`, and the `service` field is not set. Images are stored as given; they are not resolved to digests.
+- `instanceSplitStatuses` mirrors `instanceSplits` and always names a concrete revision: a `LATEST` split names `latestCreatedRevision`. `REVISION` splits must reference an existing revision of the same pool and the percentages must add up to 100, otherwise the update fails with `400 INVALID_ARGUMENT`.
+- The pool carries `latestCreatedRevision`, `latestReadyRevision`, `terminalCondition {type: Ready}` with no top-level `conditions`, `generation`, `observedGeneration` and an `etag`.
+- A revision named in `instanceSplitStatuses` is serving. Serving revisions carry `Ready`, `Active`, `ResourcesAvailable`, `ContainerReady` and `MinInstancesProvisioned` conditions with the GCP messages (for example `Deploying revision succeeded in 0.42s.`) and `scalingStatus.desiredMinInstanceCount` equal to the pool's `manualInstanceCount`. Other revisions are retired: `Active` is `CONDITION_FAILED` with `Revision retired.` and `revisionReason: RETIRED`, and `scalingStatus` is cleared.
+- Deleting a serving revision fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Deleting any other revision returns a completed operation whose response is the revision with `deleteTime` and `expireTime` set.
+- Revisions are listed newest first. Listing the revisions of a pool that does not exist returns an empty response, as GCP does after a pool is deleted.
+- IAM get, set and test delegate to the shared IAM service exactly as for services.
+- Deleting a pool removes the pool, all of its revisions and its IAM policy immediately. The operation response carries `deleteTime` and `expireTime`.
+
+In mock mode (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true`) worker pools are metadata only: every operation is returned completed, the pool is ready at once and no container is started.
+
+### Execution
+
+With execution enabled (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false`, the default) floci-gcp runs worker pool replicas as Docker containers.
+
+- Only one revision runs: the one with the largest percent in `instanceSplitStatuses` (the first on ties). The split between several revisions is metadata only.
+- The serving revision runs `scaling.manualInstanceCount` replicas, capped by `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES` (default `1`). A larger request is clamped with a warning in the emulator log; the pool and revision metadata still report the requested count. `manualInstanceCount: 0` stops every replica.
+- Each replica receives the container's own `env` plus `CLOUD_RUN_WORKER_POOL` (the pool ID) and `CLOUD_RUN_REVISION` (the revision ID), which win on conflict. No `PORT` or `K_*` variables are injected and no port is published.
+- Create, update and delete return pending operations. While the containers converge, the pool has `reconciling: true` and `terminalCondition` `CONDITION_RECONCILING` with `Deploying Revision.` (new revision) or `Provisioning revision instances to process workloads.` (scaling, splits or other fields). The operation completes once the containers match the latest committed state. If a container cannot be started the operation fails with code 13, the pool's `terminalCondition` becomes `CONDITION_FAILED` with the Docker error, and the previously running containers are left in place. Operations fail with `DEADLINE_EXCEEDED` after `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT`.
+- When the serving revision changes, the new revision's replicas are started before the old revision's replicas are stopped.
+- Replicas are stopped with SIGTERM and killed after `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` (kept below `FLOCI_GCP_DOCKER_API_TIMEOUT`). Deleting a pool stops all of its replicas before the delete operation completes.
+- The template must satisfy the same execution-mode constraints as services: exactly one container, GCS volumes only (no `mountOptions`), at most one container port, an image, and no env `valueSource`. Each replica gets its own snapshot of a GCS volume; writable volumes are written back to the bucket when that replica stops, so with several replicas the last one stopped wins.
+- A replica container that exits is replaced on the next update of the pool, not automatically. Replica containers are removed when the emulator shuts down, and with persistent storage a restored pool starts its replicas again on its next update.
+
+Terraform and OpenTofu can manage `google_cloud_run_v2_worker_pool` with the `cloud_run_v2_custom_endpoint` shown for services; set `deletion_protection = false` so the resource can be destroyed.
+
+### Deviations from GCP
+
+- Only the revision with the largest split percent runs containers; the split is metadata only.
+- The worker pool revision name format (`{pool}-00001-abc`) differs from the one floci-gcp uses for services (`{service}-00001`, no random suffix).
+- `etag` is a random UUID and is never validated on update or delete.
+- There is no soft delete: `showDeleted` is ignored and `deleteTime` and `expireTime` appear only on the delete operation response.
+- While reconciling, GCP keeps reporting the previous `instanceSplitStatuses`; floci-gcp reports the new statuses at once.
+- `template.revision` (a caller-chosen revision name) is ignored. Revisions have no `logUri` or `creator`, and GCP's transient `Retry` and `InstanceShutDown` conditions are not emitted.
+- Scaling fields newer than the Cloud Run v2 protos floci-gcp is built on (`scalingMode`, `minInstanceCount`, `maxInstanceCount`) are dropped.
+- The `400 INVALID_ARGUMENT` messages for invalid `instanceSplits` are floci-gcp's own.
+- gcloud is not supported.
+
+### SDK Usage
+
+```java
+WorkerPoolsSettings settings = WorkerPoolsSettings.newHttpJsonBuilder()
+    .setEndpoint("http://localhost:4588")
+    .setCredentialsProvider(NoCredentialsProvider.create())
+    .build();
+```
+
+`RevisionsClient` lists and deletes worker pool revisions with a `projects/{project}/locations/{location}/workerPools/{pool}` parent.

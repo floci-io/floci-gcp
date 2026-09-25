@@ -422,6 +422,9 @@ public interface EmulatorConfig {
             Duration cleanupTimeout();
 
             Optional<String> urlHostSuffix();
+
+            @WithDefault("1")
+            int maxWorkerInstances();
         }
     }
 

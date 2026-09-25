@@ -2,6 +2,7 @@ package io.floci.gcp.core.common;
 
 import com.google.cloud.run.v2.Execution;
 import com.google.cloud.run.v2.Job;
+import com.google.cloud.run.v2.WorkerPool;
 import com.google.longrunning.ListOperationsResponse;
 import com.google.longrunning.Operation;
 import com.google.protobuf.Empty;
@@ -25,6 +26,7 @@ public final class ProtoJson {
             .add(com.google.cloud.run.v2.Revision.getDescriptor())
             .add(Job.getDescriptor())
             .add(Execution.getDescriptor())
+            .add(WorkerPool.getDescriptor())
             .add(com.google.cloud.functions.v2.Function.getDescriptor())
             .add(com.google.cloud.functions.v2.OperationMetadata.getDescriptor())
             .add(com.google.cloud.eventarc.v1.Trigger.getDescriptor())

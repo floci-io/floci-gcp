@@ -145,7 +145,8 @@ public class CloudRunService {
                 .storageKey("cloudrun")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
-                        CloudRunUrlRoutingFilter.class, CloudRunJobsController.class)
+                        CloudRunUrlRoutingFilter.class, CloudRunJobsController.class,
+                        CloudRunWorkerPoolsController.class)
                 .build());
     }
 
@@ -362,6 +363,41 @@ public class CloudRunService {
             response.setNextPageToken(page.nextPageToken());
         }
         return response.build();
+    }
+
+    public Operation deleteRevision(String serviceName, String revisionId, boolean validateOnly) {
+        String revisionName = serviceName + "/revisions/" + revisionId;
+        Revision existing = getRevision(revisionName);
+        Optional<com.google.cloud.run.v2.Service> service = serviceStore.get(serviceName)
+                .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build());
+        if (service.isPresent() && servesRevision(service.get(), revisionName)) {
+            throw GcpException.failedPrecondition("Revision \"" + revisionId
+                    + "\" cannot be directly deleted because it is actively serving.");
+        }
+        Timestamp now = timestampNow();
+        Revision deleted = existing.toBuilder()
+                .setGeneration(existing.getGeneration() + 1)
+                .setObservedGeneration(existing.getGeneration() + 1)
+                .setUpdateTime(now)
+                .setDeleteTime(now)
+                .setExpireTime(now.toBuilder().setSeconds(now.getSeconds() + Duration.ofDays(30).toSeconds()))
+                .build();
+        LOG.infof("delete Cloud Run revision name=%s validateOnly=%s", revisionName, validateOnly);
+        if (validateOnly) {
+            return operations.doneTransient(parentFromName(serviceName), deleted, deleted);
+        }
+        revisionStore.delete(revisionName);
+        return operations.done(parentFromName(serviceName), deleted, deleted);
+    }
+
+    private static boolean servesRevision(com.google.cloud.run.v2.Service service, String revisionName) {
+        String revisionId = GcpResourceNames.lastSegment(revisionName);
+        if (revisionName.equals(service.getLatestReadyRevision())) {
+            return true;
+        }
+        return service.getTrafficStatusesList().stream()
+                .map(TrafficTargetStatus::getRevision)
+                .anyMatch(revision -> revision.equals(revisionName) || revision.equals(revisionId));
     }
 
     public Policy getIamPolicy(String resource) {

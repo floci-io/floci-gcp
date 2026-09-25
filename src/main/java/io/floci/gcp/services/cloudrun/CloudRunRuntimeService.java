@@ -48,6 +48,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 @ApplicationScoped
@@ -205,6 +206,14 @@ public class CloudRunRuntimeService {
 
     void saveRuntimeRecord(String key, CloudRunRuntimeInstance instance) {
         runtimeStore.put(key, instance);
+    }
+
+    List<CloudRunRuntimeInstance> runtimeRecords(Predicate<String> keyFilter) {
+        return List.copyOf(runtimeStore.keys()).stream()
+                .filter(keyFilter)
+                .map(runtimeStore::get)
+                .flatMap(Optional::stream)
+                .toList();
     }
 
     void markFailed(String revisionName, String message) {

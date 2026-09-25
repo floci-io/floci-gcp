@@ -9,6 +9,7 @@ import org.jboss.logging.Logger;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -35,7 +36,8 @@ public class IamBucketLifecycleService {
                 resource -> requireBucketExists.accept(resource.substring("buckets/".length())));
     }
 
-    public <T> T createBucket(String bucket, String authorization, Supplier<T> createBucket) {
+    public <T> T createBucket(String bucket, String authorization,
+            Function<Runnable, T> createBucket) {
         StoredPolicy initialPolicy = bootstrapService.initialBucketPolicy(authorization);
         return iamService.createResourceAndPolicy(policyResource(bucket), initialPolicy, createBucket);
     }

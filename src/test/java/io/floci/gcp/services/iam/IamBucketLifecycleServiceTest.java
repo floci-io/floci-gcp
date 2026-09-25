@@ -114,10 +114,11 @@ class IamBucketLifecycleServiceTest {
             Future<String> creation = executor.submit(() -> lifecycleService.createBucket(
                     BUCKET,
                     null,
-                    () -> {
+                    establishPolicy -> {
                         bucketExists.set(true);
                         bucketCreated.countDown();
                         await(allowCreateToFinish);
+                        establishPolicy.run();
                         return BUCKET;
                     }));
             assertTrue(bucketCreated.await(5, TimeUnit.SECONDS));
@@ -168,8 +169,9 @@ class IamBucketLifecycleServiceTest {
                 return lifecycleService.createBucket(
                         BUCKET,
                         null,
-                        () -> {
+                        establishPolicy -> {
                             bucketExists.set(true);
+                            establishPolicy.run();
                             return BUCKET;
                         });
             });

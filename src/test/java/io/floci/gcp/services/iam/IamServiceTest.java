@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
@@ -279,7 +280,10 @@ class IamServiceTest {
         stale.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
         service.setPolicy(resource, stale);
 
-        String created = service.createResourceAndPolicy(resource, null, () -> "created");
+        String created = service.createResourceAndPolicy(resource, null, establishPolicy -> {
+            establishPolicy.run();
+            return "created";
+        });
 
         assertEquals("created", created);
         assertTrue(service.getPolicy(resource).getBindings().isEmpty());
@@ -302,7 +306,10 @@ class IamServiceTest {
                     "members", List.of("serviceAccount:creator@example.test"))));
 
             durableService.createResourceAndPolicy(
-                    "buckets/durable-bucket", initialPolicy, () -> "created");
+                    "buckets/durable-bucket", initialPolicy, establishPolicy -> {
+                        establishPolicy.run();
+                        return "created";
+                    });
 
             restoredStore.load();
             IamService restoredService = new IamService(
@@ -315,12 +322,100 @@ class IamServiceTest {
         }
     }
 
+    @Test
+    void failedCreateCheckpointDurablyRestoresPreviousPolicy(@TempDir Path tempDir) {
+        String resource = "buckets/checkpoint-failure";
+        Path policyPath = tempDir.resolve("iam-policies.json");
+        TypeReference<Map<String, StoredPolicy>> policyType = new TypeReference<>() {};
+        FailingOnceHybridStorage policyStore = new FailingOnceHybridStorage(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, StoredPolicy> restoredStore = new HybridStorage<>(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        try {
+            IamService durableService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);
+            StoredPolicy previousPolicy = new StoredPolicy();
+            previousPolicy.setBindings(List.of(Map.of(
+                    "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
+            durableService.setPolicy(resource, previousPolicy);
+            policyStore.checkpoint();
+            StoredPolicy initialPolicy = new StoredPolicy();
+            initialPolicy.setBindings(List.of(Map.of(
+                    "role", "roles/storage.admin",
+                    "members", List.of("serviceAccount:creator@example.test"))));
+            policyStore.failNextCheckpoint();
+
+            assertThrows(StorageException.class, () -> durableService.createResourceAndPolicy(
+                    resource,
+                    initialPolicy,
+                    establishPolicy -> {
+                        establishPolicy.run();
+                        return "created";
+                    }));
+
+            restoredStore.load();
+            IamService restoredService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), restoredStore);
+            assertEquals("roles/storage.objectViewer",
+                    restoredService.getPolicy(resource).getBindings().get(0).get("role"));
+        } finally {
+            restoredStore.shutdown();
+            policyStore.shutdown();
+        }
+    }
+
+    @Test
+    void failedPolicyRollbackCheckpointIsReportedOnOriginalFailure() {
+        IamService durableService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new AlwaysFailCheckpointStorage());
+
+        StorageException failure = assertThrows(StorageException.class,
+                () -> durableService.createResourceAndPolicy(
+                        "buckets/checkpoint-failure",
+                        null,
+                        establishPolicy -> {
+                            establishPolicy.run();
+                            return "created";
+                        }));
+
+        assertEquals(1, failure.getSuppressed().length);
+        assertInstanceOf(StorageException.class, failure.getSuppressed()[0]);
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AssertionError("Interrupted while awaiting test latch", e);
+        }
+    }
+
+    private static final class FailingOnceHybridStorage extends HybridStorage<String, StoredPolicy> {
+        private final AtomicBoolean failNextCheckpoint = new AtomicBoolean();
+
+        private FailingOnceHybridStorage(Path filePath,
+                TypeReference<Map<String, StoredPolicy>> typeReference, long flushIntervalMs) {
+            super(filePath, typeReference, flushIntervalMs);
+        }
+
+        private void failNextCheckpoint() {
+            failNextCheckpoint.set(true);
+        }
+
+        @Override
+        public void checkpoint() {
+            if (failNextCheckpoint.compareAndSet(true, false)) {
+                throw new StorageException("checkpoint failed", new IllegalStateException("test failure"));
+            }
+            super.checkpoint();
+        }
+    }
+
+    private static final class AlwaysFailCheckpointStorage extends InMemoryStorage<String, StoredPolicy> {
+        @Override
+        public void checkpoint() {
+            throw new StorageException("checkpoint failed", new IllegalStateException("test failure"));
         }
     }
 }

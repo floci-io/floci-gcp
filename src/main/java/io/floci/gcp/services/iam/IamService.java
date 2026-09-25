@@ -37,6 +37,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 @ApplicationScoped
@@ -207,18 +208,46 @@ public class IamService {
      * Creates a resource and establishes its initial policy as one lifecycle
      * transition. Any policy left by an older holder of the same resource name
      * is removed before the new resource becomes observable to policy readers.
+     * The resource callback controls its mutation lock and invokes the supplied
+     * policy transition before publishing the completed resource. If the policy
+     * durability boundary fails, the previous policy state is restored through
+     * a checked durability boundary before the failure escapes.
      */
     public <T> T createResourceAndPolicy(String resource, StoredPolicy initialPolicy,
-            Supplier<T> createResource) {
+            Function<Runnable, T> createResource) {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
-            T created = createResource.get();
+            Optional<StoredPolicy> previousPolicy = policyStore.get(key);
+            return createResource.apply(() -> establishInitialPolicy(
+                    resource, key, initialPolicy, previousPolicy));
+        }
+    }
+
+    private void establishInitialPolicy(String resource, String key, StoredPolicy initialPolicy,
+            Optional<StoredPolicy> previousPolicy) {
+        try {
             policyStore.delete(key);
             if (initialPolicy != null) {
                 setPolicy(resource, initialPolicy);
             }
             policyStore.checkpoint();
-            return created;
+        } catch (RuntimeException | Error failure) {
+            rollbackPolicyCreation(key, previousPolicy, failure);
+            throw failure;
+        }
+    }
+
+    private void rollbackPolicyCreation(String key, Optional<StoredPolicy> previousPolicy,
+            Throwable failure) {
+        try {
+            if (previousPolicy.isPresent()) {
+                policyStore.put(key, previousPolicy.get());
+            } else {
+                policyStore.delete(key);
+            }
+            policyStore.checkpoint();
+        } catch (RuntimeException | Error rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
         }
     }
 

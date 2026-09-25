@@ -142,6 +142,15 @@ public class GcsService {
             StorageBackend<String, byte[]> objectDataStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
+        this(bucketStore, objectMetaStore, objectDataStore, aclStore, defaultProjectId, null);
+    }
+
+    GcsService(StorageBackend<String, GcsBucket> bucketStore,
+            StorageBackend<String, GcsObjectMeta> objectMetaStore,
+            StorageBackend<String, byte[]> objectDataStore,
+            StorageBackend<String, StoredAcl> aclStore,
+            String defaultProjectId,
+            IamBucketLifecycleService bucketLifecycleService) {
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
         this.objectDataStore = objectDataStore;
@@ -156,7 +165,7 @@ public class GcsService {
         this.grpcServerManager = null;
         this.authorizationService = null;
         this.grpcAuthorizationInterceptor = null;
-        this.bucketLifecycleService = null;
+        this.bucketLifecycleService = bucketLifecycleService;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -192,8 +201,11 @@ public class GcsService {
         if (bucketLifecycleService == null) {
             return createBucketUncoordinated(name, projectId, baseUrl, body);
         }
-        return bucketLifecycleService.createBucket(name, authorization,
-                () -> createBucketUncoordinated(name, projectId, baseUrl, body));
+        return bucketLifecycleService.createBucket(
+                name,
+                authorization,
+                establishPolicy -> createBucketAndPolicy(
+                        name, projectId, baseUrl, body, establishPolicy));
     }
 
     @SuppressWarnings("unchecked")
@@ -257,6 +269,31 @@ public class GcsService {
             }
             bucketStore.put(name, bucket);
             return bucket;
+        }
+    }
+
+    private GcsBucket createBucketAndPolicy(String name, String projectId, String baseUrl,
+            Map<String, Object> body, Runnable establishPolicy) {
+        synchronized (bucketLock(name)) {
+            GcsBucket created = createBucketUncoordinated(name, projectId, baseUrl, body);
+            try {
+                establishPolicy.run();
+                return created;
+            } catch (RuntimeException | Error failure) {
+                rollbackBucketCreation(name, created, failure);
+                throw failure;
+            }
+        }
+    }
+
+    private void rollbackBucketCreation(String name, GcsBucket created, Throwable failure) {
+        try {
+            if (bucketStore.get(name).orElse(null) == created) {
+                bucketStore.delete(name);
+                bucketStore.checkpoint();
+            }
+        } catch (RuntimeException | Error rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
         }
     }
 

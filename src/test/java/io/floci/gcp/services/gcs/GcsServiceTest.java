@@ -6,6 +6,7 @@ import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.core.storage.WalStorage;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
@@ -13,6 +14,9 @@ import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.floci.gcp.services.gcs.model.StoredAcl;
+import io.floci.gcp.services.iam.IamBucketLifecycleService;
+import io.floci.gcp.services.iam.IamBucketPolicyBootstrapService;
+import io.floci.gcp.services.iam.IamService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,10 +42,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class GcsServiceTest {
 
@@ -67,6 +77,108 @@ class GcsServiceTest {
         GcsBucket bucket = service.getBucket("my-bucket");
         assertNotNull(bucket);
         assertEquals("my-bucket", bucket.getName());
+    }
+
+    @Test
+    void failedPolicyCheckpointDurablyRollsBackBucketAndAllowsRetry() {
+        Path bucketPath = tempDir.resolve("rollback-buckets.json");
+        TypeReference<Map<String, GcsBucket>> bucketType = new TypeReference<>() {};
+        WriteThroughHybridBucketStorage bucketStore = new WriteThroughHybridBucketStorage(
+                bucketPath, bucketType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, GcsBucket> restoredStore = new HybridStorage<>(
+                bucketPath, bucketType, TimeUnit.HOURS.toMillis(1));
+        try {
+            IamService iamService = checkpointFailingIamService();
+            IamBucketLifecycleService lifecycleService = new IamBucketLifecycleService(
+                    iamService, mock(IamBucketPolicyBootstrapService.class));
+            GcsService durableService = new GcsService(
+                    bucketStore,
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "test-project",
+                    lifecycleService);
+
+            assertThrows(StorageException.class, () -> durableService.createBucket(
+                    "checkpoint-failure-bucket", "test-project", BASE_URL, Map.of()));
+
+            restoredStore.load();
+            assertTrue(restoredStore.get("checkpoint-failure-bucket").isEmpty());
+            assertEquals(404, assertThrows(GcpException.class,
+                    () -> durableService.getBucket("checkpoint-failure-bucket")).getHttpStatus());
+
+            durableService.createBucket(
+                    "checkpoint-failure-bucket", "test-project", BASE_URL, Map.of());
+            assertEquals("checkpoint-failure-bucket",
+                    durableService.getBucket("checkpoint-failure-bucket").getName());
+        } finally {
+            restoredStore.shutdown();
+            bucketStore.shutdown();
+        }
+    }
+
+    @Test
+    void failedPolicyCheckpointBlocksUploadUntilBucketRollbackCompletes() throws Exception {
+        CountDownLatch checkpointStarted = new CountDownLatch(1);
+        CountDownLatch allowCheckpointFailure = new CountDownLatch(1);
+        IamService iamService = mock(IamService.class);
+        when(iamService.createResourceAndPolicy(
+                eq("buckets/checkpoint-race-bucket"), isNull(), any()))
+                .thenAnswer(invocation -> {
+                    Function<Runnable, GcsBucket> createBucket = invocation.getArgument(2);
+                    return createBucket.apply(() -> {
+                        checkpointStarted.countDown();
+                        await(allowCheckpointFailure);
+                        throw new StorageException(
+                                "checkpoint failed", new IllegalStateException("test failure"));
+                    });
+                });
+        IamBucketLifecycleService lifecycleService = new IamBucketLifecycleService(
+                iamService, mock(IamBucketPolicyBootstrapService.class));
+        InMemoryStorage<String, GcsObjectMeta> metadataStore = new InMemoryStorage<>();
+        InMemoryStorage<String, byte[]> dataStore = new InMemoryStorage<>();
+        GcsService coordinatedService = new GcsService(
+                new InMemoryStorage<>(),
+                metadataStore,
+                dataStore,
+                new InMemoryStorage<>(),
+                "test-project",
+                lifecycleService);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<GcsBucket> creation = executor.submit(() -> coordinatedService.createBucket(
+                    "checkpoint-race-bucket", "test-project", BASE_URL, Map.of()));
+            assertTrue(checkpointStarted.await(5, TimeUnit.SECONDS));
+
+            CountDownLatch uploadStarted = new CountDownLatch(1);
+            Future<GcsObjectMeta> upload = executor.submit(() -> {
+                uploadStarted.countDown();
+                return coordinatedService.putObject(
+                        "checkpoint-race-bucket",
+                        "object.txt",
+                        "text/plain",
+                        new byte[]{1},
+                        GcsCustomerEncryption.none(),
+                        BASE_URL);
+            });
+            assertTrue(uploadStarted.await(5, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> upload.get(100, TimeUnit.MILLISECONDS));
+
+            allowCheckpointFailure.countDown();
+            ExecutionException creationFailure = assertThrows(
+                    ExecutionException.class, () -> creation.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(StorageException.class, creationFailure.getCause());
+            ExecutionException uploadFailure = assertThrows(
+                    ExecutionException.class, () -> upload.get(5, TimeUnit.SECONDS));
+            GcpException missingBucket = assertInstanceOf(GcpException.class, uploadFailure.getCause());
+            assertEquals(404, missingBucket.getHttpStatus());
+            assertTrue(metadataStore.keys().isEmpty());
+            assertTrue(dataStore.keys().isEmpty());
+        } finally {
+            allowCheckpointFailure.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -1120,6 +1232,47 @@ class GcsServiceTest {
         } finally {
             stop.set(true);
             writer.join();
+        }
+    }
+
+    private static IamService checkpointFailingIamService() {
+        AtomicBoolean failFirstCheckpoint = new AtomicBoolean(true);
+        IamService iamService = mock(IamService.class);
+        when(iamService.createResourceAndPolicy(
+                eq("buckets/checkpoint-failure-bucket"), isNull(), any()))
+                .thenAnswer(invocation -> {
+                    Function<Runnable, GcsBucket> createBucket = invocation.getArgument(2);
+                    return createBucket.apply(() -> {
+                        if (failFirstCheckpoint.compareAndSet(true, false)) {
+                            throw new StorageException(
+                                    "checkpoint failed", new IllegalStateException("test failure"));
+                        }
+                    });
+                });
+        return iamService;
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting for test latch");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted while waiting for test latch", e);
+        }
+    }
+
+    private static final class WriteThroughHybridBucketStorage extends HybridStorage<String, GcsBucket> {
+        private WriteThroughHybridBucketStorage(Path filePath,
+                TypeReference<Map<String, GcsBucket>> typeReference, long flushIntervalMs) {
+            super(filePath, typeReference, flushIntervalMs);
+        }
+
+        @Override
+        public void put(String key, GcsBucket value) {
+            super.put(key, value);
+            super.checkpoint();
         }
     }
 

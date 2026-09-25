@@ -98,6 +98,26 @@ final class CloudRunInstanceStates {
     }
 
     /**
+     * Container conditions after a start that did not bring the container up. GCP's shape for this case
+     * was not observed; both conditions report the start error so no earlier success survives it.
+     */
+    static List<Condition> failedConditions(Timestamp now, String message) {
+        return List.of(
+                Condition.newBuilder()
+                        .setType("ContainerReady")
+                        .setState(Condition.State.CONDITION_FAILED)
+                        .setMessage(message)
+                        .setLastTransitionTime(now)
+                        .build(),
+                Condition.newBuilder()
+                        .setType("ResourcesAvailable")
+                        .setState(Condition.State.CONDITION_FAILED)
+                        .setMessage(message)
+                        .setLastTransitionTime(now)
+                        .build());
+    }
+
+    /**
      * Formats a duration the way GCP condition messages do: seconds with at most two decimals and no
      * trailing zeros ({@code 14.39s}, {@code 1.1s}, {@code 0s}).
      */

@@ -17,6 +17,7 @@ import com.google.protobuf.Timestamp;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
@@ -50,6 +51,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 
@@ -61,14 +63,16 @@ import java.util.function.Predicate;
  * container side effect runs on the instance's single work queue in request order. A queued transition
  * publishes its terminal condition only while it is still the latest lifecycle transition for the
  * instance (its ticket matches); a superseded transition only merges the runtime facts it observed
- * (URL, container statuses, container conditions). Nothing is published for an instance that has been
- * deleted in the meantime.
+ * (URL, container statuses, container conditions). A transition writes only into the instance it was
+ * queued for (same {@code uid}): nothing is published for an instance that has been deleted in the
+ * meantime, even when an instance with the same name has been created since.
  */
 @ApplicationScoped
-public class CloudRunInstancesService {
+public class CloudRunInstancesService implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CloudRunInstancesService.class);
     private static final Duration DELETED_RETENTION = Duration.ofDays(30);
+    private static final Duration SHUTDOWN_WAIT = Duration.ofSeconds(5);
     private static final String DEFAULT_CPU = "2000m";
     private static final String DEFAULT_MEMORY = "2048Mi";
     private static final String DEFAULT_PORT_NAME = "http1";
@@ -120,9 +124,29 @@ public class CloudRunInstancesService {
         this.mock = mock;
     }
 
+    /**
+     * Stops the per-instance work queues, then removes every instance container and writes its GCS
+     * volumes back. Runs in the shutdown phase before the final storage flush, and again from
+     * {@code @PreDestroy} as a no-op fallback.
+     */
+    @Override
+    public void stopManagedContainers() {
+        workExecutor.shutdownNow();
+        try {
+            if (!workExecutor.awaitTermination(SHUTDOWN_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.warnf("Cloud Run instance work did not stop within %s", SHUTDOWN_WAIT);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!mock && runtime != null) {
+            runtime.stopAll();
+        }
+    }
+
     @PreDestroy
     void shutdown() {
-        workExecutor.shutdownNow();
+        stopManagedContainers();
     }
 
     public Operation createInstance(String project, String location, String instanceId, String body,
@@ -444,21 +468,23 @@ public class CloudRunInstancesService {
         slot.lock.lock();
         try {
             Timestamp now = timestampNow();
-            Instance base = find(starting.getName()).orElse(starting);
-            Instance.Builder builder = base.toBuilder()
+            Optional<Instance> current = findSameInstance(starting);
+            Instance.Builder builder = current.orElse(starting).toBuilder()
                     .clearUrls()
                     .addUrls(url(starting.getName()))
                     .clearContainerStatuses()
                     .addAllContainerStatuses(containerStatuses(starting.getContainersList(), started.imageDigest()))
                     .clearConditions()
                     .addAllConditions(CloudRunInstanceStates.readyConditions(now, started.imageImport()));
-            if (slot.ticket == ticket) {
+            if (current.isPresent() && slot.ticket == ticket) {
                 builder.setTerminalCondition(CloudRunInstanceStates.running(now, startup))
                         .setObservedGeneration(builder.getGeneration())
                         .setReconciling(false);
             }
             Instance result = builder.build();
-            publish(result);
+            if (current.isPresent()) {
+                store(result);
+            }
             guard.complete(result, result);
         } finally {
             slot.lock.unlock();
@@ -469,14 +495,20 @@ public class CloudRunInstancesService {
                                String message) {
         slot.lock.lock();
         try {
-            Instance result = find(starting.getName()).orElse(starting);
-            if (slot.ticket == ticket) {
+            Optional<Instance> current = findSameInstance(starting);
+            Instance result = current.orElse(starting);
+            if (current.isPresent() && slot.ticket == ticket) {
+                Timestamp now = timestampNow();
                 result = result.toBuilder()
-                        .setTerminalCondition(CloudRunInstanceStates.failed(timestampNow(), message))
+                        .setTerminalCondition(CloudRunInstanceStates.failed(now, message))
+                        .clearConditions()
+                        .addAllConditions(CloudRunInstanceStates.failedConditions(now, message))
+                        .clearContainerStatuses()
+                        .addAllContainerStatuses(containerStatuses(result.getContainersList(), ""))
                         .setObservedGeneration(result.getGeneration())
                         .setReconciling(false)
                         .build();
-                publish(result);
+                store(result);
             }
             guard.fail(Status.newBuilder().setCode(Code.INTERNAL_VALUE).setMessage(message).build(), result);
         } finally {
@@ -487,14 +519,15 @@ public class CloudRunInstancesService {
     private void publishStopped(InstanceSlot slot, long ticket, CloudRunOperationGuard guard, Instance stopping) {
         slot.lock.lock();
         try {
-            Instance result = find(stopping.getName()).orElse(stopping);
-            if (slot.ticket == ticket) {
+            Optional<Instance> current = findSameInstance(stopping);
+            Instance result = current.orElse(stopping);
+            if (current.isPresent() && slot.ticket == ticket) {
                 result = result.toBuilder()
                         .setTerminalCondition(CloudRunInstanceStates.stopped(timestampNow()))
                         .setObservedGeneration(result.getGeneration())
                         .setReconciling(false)
                         .build();
-                publish(result);
+                store(result);
             }
             guard.complete(result, result);
         } finally {
@@ -503,13 +536,12 @@ public class CloudRunInstancesService {
     }
 
     /**
-     * Writes a background transition's result unless the instance has been deleted since it was queued.
-     * Callers hold the instance lock.
+     * The stored instance a background transition may write into: the one it was queued for, identified
+     * by {@code uid}. Empty once that instance has been deleted, even when an instance with the same name
+     * has been created since. Callers hold the instance lock.
      */
-    private void publish(Instance instance) {
-        if (instanceStore.get(instance.getName()).isPresent()) {
-            store(instance);
-        }
+    private Optional<Instance> findSameInstance(Instance transition) {
+        return find(transition.getName()).filter(stored -> stored.getUid().equals(transition.getUid()));
     }
 
     private void enqueue(InstanceSlot slot, Runnable work) {

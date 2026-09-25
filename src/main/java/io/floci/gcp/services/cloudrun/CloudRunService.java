@@ -145,7 +145,7 @@ public class CloudRunService {
                 .storageKey("cloudrun")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
-                        CloudRunUrlRoutingFilter.class)
+                        CloudRunUrlRoutingFilter.class, CloudRunJobsController.class)
                 .build());
     }
 

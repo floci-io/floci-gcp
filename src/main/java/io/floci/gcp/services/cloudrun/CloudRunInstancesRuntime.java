@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * Docker runtime for Cloud Run v2 Instances: one HTTP container per instance, created on create and start,
@@ -26,6 +27,7 @@ import java.util.Optional;
 public class CloudRunInstancesRuntime {
 
     private static final Logger LOG = Logger.getLogger(CloudRunInstancesRuntime.class);
+    private static final Pattern INSTANCE_KEY = Pattern.compile("projects/[^/]+/locations/[^/]+/instances/[^/]+");
 
     private final CloudRunRuntimeService runtimeService;
     private final ContainerLifecycleManager lifecycleManager;
@@ -111,8 +113,51 @@ public class CloudRunInstancesRuntime {
         lifecycleManager.removeIfExists(containerName(instance));
     }
 
+    /**
+     * Removes every instance container this emulator is tracking and writes its GCS volumes back. Used on
+     * emulator shutdown, after the instance work queues have stopped.
+     */
+    void stopAll() {
+        for (CloudRunRuntimeInstance record : runtimeService.runtimeRecords(CloudRunInstancesRuntime::isInstanceKey)) {
+            try {
+                runtimeService.stopInstances(List.of(record));
+                LOG.infof("Cloud Run instance container removed on shutdown instance=%s container=%s",
+                        record.revisionName(), record.containerId());
+            } catch (Exception e) {
+                LOG.warnf(e, "Cloud Run instance container cleanup on shutdown failed instance=%s container=%s",
+                        record.revisionName(), record.containerId());
+            }
+        }
+    }
+
+    /**
+     * The instance's ready container, if it is still running. Read-only: an instance keeps one runtime
+     * record key across restarts, so a proxy request must not delete or overwrite a record that a
+     * concurrent restart may have replaced, and a record whose container exited on its own is left for the
+     * next stop, restart or delete, which also writes its GCS volumes back.
+     */
     Optional<CloudRunRuntimeInstance> ready(String instanceName) {
-        return runtimeService.getReady(instanceName);
+        Optional<CloudRunRuntimeInstance> stored = runtimeService.runtimeRecord(instanceName);
+        if (stored.isEmpty() || !stored.get().ready()) {
+            return Optional.empty();
+        }
+        CloudRunRuntimeInstance record = stored.get();
+        String containerId = record.containerId();
+        if (containerId == null || containerId.isBlank() || !lifecycleManager.isContainerRunning(containerId)) {
+            return Optional.empty();
+        }
+        try {
+            ContainerLifecycleManager.EndpointInfo endpoint = lifecycleManager.resolveEndpoint(containerId,
+                    record.ingressContainerPort(), record.dockerNetwork());
+            return Optional.of(record.withEndpoint(endpoint.host(), endpoint.port()));
+        } catch (RuntimeException e) {
+            LOG.debugf(e, "Cloud Run instance endpoint lookup failed instance=%s", instanceName);
+            return Optional.empty();
+        }
+    }
+
+    static boolean isInstanceKey(String runtimeKey) {
+        return INSTANCE_KEY.matcher(runtimeKey).matches();
     }
 
     private void gracefulStop(String instanceName, String containerId) {

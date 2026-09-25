@@ -286,7 +286,7 @@ The instance state is reported by `terminalCondition`, whose `type` is always `R
 | Stopped | `CONDITION_FAILED` | `Instance stopped.` |
 | Deleted (delete operation response) | `CONDITION_FAILED` | `Instance completed for deletion.` |
 
-`conditions` holds `ContainerReady` (`Imported container image in {seconds}s.`) and `ResourcesAvailable` (`Provisioned imported containers.`). Every create, update, start, stop and delete increments `generation`; `observedGeneration` catches up when the transition finishes and `reconciling` is true while it is in progress. Stopping an instance that is not running returns `400 FAILED_PRECONDITION` with `Instance '{id}' cannot be stopped because it is not running.`; starting a running (or starting) instance returns `400 FAILED_PRECONDITION` with `Instance '{id}' cannot be started because it is already running.`. A start whose container fails to come up leaves the instance in `CONDITION_FAILED` with the error message and fails the operation; it can be started again.
+`conditions` holds `ContainerReady` (`Imported container image in {seconds}s.`) and `ResourcesAvailable` (`Provisioned imported containers.`). Every create, update, start, stop and delete increments `generation`; `observedGeneration` catches up when the transition finishes and `reconciling` is true while it is in progress. Stopping an instance that is not running returns `400 FAILED_PRECONDITION` with `Instance '{id}' cannot be stopped because it is not running.`; starting a running (or starting) instance returns `400 FAILED_PRECONDITION` with `Instance '{id}' cannot be started because it is already running.`. A start whose container fails to come up leaves the instance in `CONDITION_FAILED` with the error message and fails the operation; it can be started again. After such a failure `ContainerReady` and `ResourcesAvailable` are `CONDITION_FAILED` with the same message, and `containerStatuses` lists the current containers without an `imageDigest`, so no state from an earlier successful start survives.
 
 `urls` and `containerStatuses` are kept while the instance is stopped. The delete operation response carries `deleteTime` and `expireTime` (30 days later), but the instance is removed immediately.
 
@@ -298,7 +298,9 @@ With execution enabled, an instance runs one Docker container. Create, start and
 
 The container receives only `PORT` from the emulator, in addition to the environment variables declared on the container.
 
-For one instance, create, update, start, stop and delete are applied in request order: each request checks its precondition against the stored instance while holding that instance's lock, and container work runs on a per-instance queue. A transition that has been superseded by a later start, stop, restart or delete before its container work finished does not overwrite the later transition's state; a deleted instance is never written back.
+For one instance, create, update, start, stop and delete are applied in request order: each request checks its precondition against the stored instance while holding that instance's lock, and container work runs on a per-instance queue. A transition that has been superseded by a later start, stop, restart or delete before its container work finished does not overwrite the later transition's state; a deleted instance is never written back. A transition only writes into the instance it was requested for, identified by `uid`: when an instance is deleted and re-created with the same ID while an earlier start is still running, that start completes its own operation with the deleted instance and leaves the new instance untouched.
+
+A container that exits on its own is not restarted and its instance keeps its phase; requests to its URL return `503` until the instance is stopped, updated or deleted, which removes the container and writes its GCS volumes back. On emulator shutdown every instance container is removed and its writable GCS volumes are written back.
 
 ### URL routing
 
@@ -315,4 +317,5 @@ Use the Java `InstancesClient` with the HTTP JSON transport, as for `ServicesCli
 - `creator`, `lastModifier`, `logUri` and a default `serviceAccount` are not filled in, the same as Services. The resource `etag` is a random token per change, not GCP's format.
 - Pending operations do not emit GCP's transient `Retry` condition or `CONDITION_PENDING` phase.
 - gcloud is not supported: gcloud uses the v1 Knative API for instances.
-- Instances found in the starting or stopping phase after an emulator restart are not reconciled.
+- Instances are not reconciled after an emulator restart. With persistent storage, an instance that was running is still reported in its last phase but has no container, since shutdown removed it; requests to its URL return `503` until it is stopped and started again. Containers left behind by a crashed emulator (no graceful shutdown) are not removed at startup.
+- GCP's conditions after a failed start were not observed; the emulator marks `ContainerReady` and `ResourcesAvailable` as `CONDITION_FAILED` with the start error.

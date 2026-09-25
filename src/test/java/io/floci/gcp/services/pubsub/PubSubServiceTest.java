@@ -1,5 +1,9 @@
 package io.floci.gcp.services.pubsub;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
+
 import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
@@ -11,7 +15,12 @@ import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -34,6 +43,11 @@ class PubSubServiceTest {
                 subStore,
                 new InMemoryStorage<>(),
                 iamService);
+    }
+
+    @AfterEach
+    void tearDown() {
+        service.shutdownPushExecutors();
     }
 
     @Test
@@ -583,5 +597,398 @@ class PubSubServiceTest {
                 .setData(ByteString.copyFromUtf8(data))
                 .putAttributes(attributeKey, attributeValue)
                 .build();
+    }
+
+    @Test
+    void failedPushDeliveryIsRetried() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger attempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch retryLatch =
+                new java.util.concurrent.CountDownLatch(1);
+
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+
+        server.createContext("/hook", exchange -> {
+            int attempt = attempts.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+
+            if (attempt == 1) {
+                exchange.sendResponseHeaders(500, -1);
+            } else {
+                retryLatch.countDown();
+                exchange.sendResponseHeaders(204, -1);
+            }
+
+            exchange.close();
+        });
+
+        server.start();
+
+        try {
+            service.createTopic("projects/p/topics/retry");
+
+            String endpoint = "http" + "://" + "localhost:"
+                    + server.getAddress().getPort()
+                    + "/hook";
+
+            service.createSubscription(
+                    "projects/p/subscriptions/retry",
+                    "projects/p/topics/retry",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    endpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+
+            PubsubMessage message = PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("retry-body"))
+                    .build();
+
+            service.publish(
+                    "projects/p/topics/retry",
+                    List.of(message));
+
+            assertTrue(
+                    retryLatch.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Timed out waiting for push retry");
+
+            assertEquals(2, attempts.get());
+
+            assertEquals(
+                    0,
+                    service.pull(
+                            "projects/p/subscriptions/retry",
+                            10).size());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void failedPushDeliveryDoesNotRetryAfterSubscriptionDeletion() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger attempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        java.util.concurrent.CountDownLatch firstAttempt =
+                new java.util.concurrent.CountDownLatch(1);
+
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+
+        server.createContext("/hook", exchange -> {
+            attempts.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            firstAttempt.countDown();
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+
+        server.start();
+
+        try {
+            service.createTopic("projects/p/topics/retry-delete");
+
+            String endpoint = "http" + "://" + "localhost:"
+                    + server.getAddress().getPort()
+                    + "/hook";
+
+            String subscription = "projects/p/subscriptions/retry-delete";
+
+            service.createSubscription(
+                    subscription,
+                    "projects/p/topics/retry-delete",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    endpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+
+            PubsubMessage message = PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("retry-delete-body"))
+                    .build();
+
+            service.publish(
+                    "projects/p/topics/retry-delete",
+                    List.of(message));
+
+            assertTrue(
+                    firstAttempt.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Timed out waiting for initial push delivery");
+
+            service.deleteSubscription(subscription);
+
+            Thread.sleep(1500);
+
+            assertEquals(1, attempts.get(),
+                    "Deleted subscription must not receive a scheduled retry");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void failedPushDeliveryDoesNotRetryAfterSubscriptionDetachment() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger attempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch firstAttempt =
+                new java.util.concurrent.CountDownLatch(1);
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            attempts.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            firstAttempt.countDown();
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            service.createTopic("projects/p/topics/retry-detach");
+            String endpoint = "http" + "://" + "localhost:"
+                    + server.getAddress().getPort()
+                    + "/hook";
+            String subscription = "projects/p/subscriptions/retry-detach";
+            service.createSubscription(
+                    subscription,
+                    "projects/p/topics/retry-detach",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    endpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+            PubsubMessage message = PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("retry-detach-body"))
+                    .build();
+            service.publish(
+                    "projects/p/topics/retry-detach",
+                    List.of(message));
+            assertTrue(
+                    firstAttempt.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Timed out waiting for initial push delivery");
+
+            service.detachSubscription(subscription);
+
+            Thread.sleep(1500);
+
+            assertEquals(1, attempts.get(),
+                    "Detached subscription must not receive a scheduled retry");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void failedPushDeliveryDoesNotRetryToReplacementSubscription() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger oldAttempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger replacementAttempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch firstAttempt =
+                new java.util.concurrent.CountDownLatch(1);
+
+        HttpServer oldServer = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        oldServer.createContext("/hook", exchange -> {
+            oldAttempts.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            firstAttempt.countDown();
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+
+        HttpServer replacementServer = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        replacementServer.createContext("/hook", exchange -> {
+            replacementAttempts.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        oldServer.start();
+        replacementServer.start();
+
+        try {
+            service.createTopic("projects/p/topics/retry-replacement");
+
+            String oldEndpoint = "http" + "://" + "localhost:"
+                    + oldServer.getAddress().getPort()
+                    + "/hook";
+            String replacementEndpoint = "http" + "://" + "localhost:"
+                    + replacementServer.getAddress().getPort()
+                    + "/hook";
+            String subscription =
+                    "projects/p/subscriptions/retry-replacement";
+
+            service.createSubscription(
+                    subscription,
+                    "projects/p/topics/retry-replacement",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    oldEndpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+
+            PubsubMessage message = PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("retry-replacement-body"))
+                    .build();
+
+            service.publish(
+                    "projects/p/topics/retry-replacement",
+                    List.of(message));
+
+            assertTrue(
+                    firstAttempt.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Timed out waiting for initial push delivery");
+
+            service.deleteSubscription(subscription);
+
+            service.createSubscription(
+                    subscription,
+                    "projects/p/topics/retry-replacement",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    replacementEndpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+
+            Thread.sleep(1500);
+
+            assertEquals(1, oldAttempts.get(),
+                    "Original subscription should only receive the initial attempt");
+            assertEquals(0, replacementAttempts.get(),
+                    "Replacement subscription must not receive a retry for the old subscription");
+        } finally {
+            oldServer.stop(0);
+            replacementServer.stop(0);
+        }
+    }
+
+    @Test
+    void pushSubscriptionDeliversMessageToPushEndpoint() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        java.util.concurrent.CountDownLatch deliveryLatch =
+                new java.util.concurrent.CountDownLatch(1);
+
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+
+        server.createContext("/hook", exchange -> {
+            body.set(new String(
+                    exchange.getRequestBody().readAllBytes(),
+                    StandardCharsets.UTF_8));
+            deliveryLatch.countDown();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        server.start();
+
+        try {
+            service.createTopic("projects/p/topics/t");
+
+            String endpoint = "http" + "://" + "localhost:"
+                    + server.getAddress().getPort()
+                    + "/hook";
+
+            service.createSubscription(
+                    "projects/p/subscriptions/s",
+                    "projects/p/topics/t",
+                    10,
+                    null,
+                    false,
+                    null,
+                    null,
+                    endpoint,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                    false,
+                    false);
+
+            PubsubMessage message = PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("body"))
+                    .putAttributes("key", "value")
+                    .setOrderingKey("orders")
+                    .build();
+
+            service.publish("projects/p/topics/t", List.of(message));
+
+            assertTrue(
+                    deliveryLatch.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "Timed out waiting for push delivery");
+            assertNotNull(body.get());
+
+            JsonNode envelope = new ObjectMapper().readTree(body.get());
+
+            assertEquals(
+                    "Ym9keQ==",
+                    envelope.get("message").get("data").asText());
+            assertEquals(
+                    "value",
+                    envelope.get("message")
+                            .get("attributes")
+                            .get("key")
+                            .asText());
+            assertEquals(
+                    "projects/p/subscriptions/s",
+                    envelope.get("subscription").asText());
+            assertTrue(envelope.get("message").has("messageId"));
+            assertTrue(envelope.get("message").has("publishTime"));
+            assertEquals(
+                    "orders",
+                    envelope.get("message").get("orderingKey").asText());
+
+            assertEquals(
+                    0,
+                    service.pull(
+                            "projects/p/subscriptions/s",
+                            10).size());
+        } finally {
+            server.stop(0);
+        }
     }
 }

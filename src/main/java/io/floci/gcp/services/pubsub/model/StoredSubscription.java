@@ -4,12 +4,14 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.Map;
+import java.util.UUID;
 
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class StoredSubscription {
 
     private String name;
+    private String creationId;
     private String topic;
     private int ackDeadlineSeconds = 10;
     private Map<String, String> labels;
@@ -26,13 +28,20 @@ public class StoredSubscription {
     private boolean enableExactlyOnceDelivery;
     private boolean detached;
 
-    public StoredSubscription() {}
+    public StoredSubscription() {
+        this.creationId = UUID.randomUUID().toString();
+    }
 
     public StoredSubscription(String name, String topic, int ackDeadlineSeconds) {
+        this();
         this.name = name;
         this.topic = topic;
         this.ackDeadlineSeconds = ackDeadlineSeconds;
     }
+
+    public String getCreationId() { return creationId; }
+
+    public void setCreationId(String creationId) { this.creationId = creationId; }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }

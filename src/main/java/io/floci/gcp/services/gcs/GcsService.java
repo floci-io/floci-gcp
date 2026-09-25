@@ -16,9 +16,9 @@ import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsBucket;
-import io.floci.gcp.services.gcs.model.GcsMultipartUpload;
 import io.floci.gcp.services.gcs.model.GcsComposeSource;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
+import io.floci.gcp.services.gcs.model.GcsMultipartUpload;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsRewriteResult;
@@ -58,8 +58,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.zip.CRC32C;
 import java.util.function.Supplier;
+import java.util.zip.CRC32C;
 
 @ApplicationScoped
 public class GcsService {

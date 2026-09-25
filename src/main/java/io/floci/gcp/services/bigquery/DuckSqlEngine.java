@@ -62,7 +62,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
 
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), tables, flociEndpoint);
+        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(), tables,
+                flociEndpoint);
         String sql = translation.sql();
         String setupSql = staging.setup();
         if (request.dryRun()) {
@@ -98,7 +99,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
 
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), tables, flociEndpoint);
+        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
+                tables, flociEndpoint);
         if (request.dryRun()) {
             // EXPLAIN binds the statement against the staged tables without running it, so a missing
             // column or a malformed clause fails the dry run just as it would fail the real one.
@@ -363,12 +365,34 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      */
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs, Tables tables,
                           String flociEndpoint) {
+        return stage(projectId, refs, Set.of(), tables, flociEndpoint);
+    }
+
+    private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs,
+                          Set<InformationSchema.Ref> informationSchema, Tables tables, String flociEndpoint) {
         StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
         long[] bytes = {0};
         Set<String> schemas = new HashSet<>();
         Set<SqlDialectTranslator.TableRef> staged = new HashSet<>();
         for (SqlDialectTranslator.TableRef ref : refs) {
             stageOne(projectId, ref, tables, flociEndpoint, setup, schemas, staged, new LinkedHashSet<>(), bytes);
+        }
+        if (!informationSchema.isEmpty()) {
+            setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA))
+                    .append(";\n");
+        }
+        for (InformationSchema.Ref ref : informationSchema) {
+            boolean empty = tables.informationSchema(ref).isEmpty();
+            StringBuilder url = new StringBuilder(flociEndpoint).append("/_floci-gcp/bigquery/projects/")
+                    .append(encode(projectId)).append("/information-schema/").append(ref.view()).append("?");
+            if (ref.dataset() != null) {
+                url.append("dataset=").append(encode(ref.dataset()));
+            } else {
+                url.append("region=").append(encode(ref.region()));
+            }
+            setup.append(stageRows(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA) + "."
+                    + DuckTypes.quoteIdentifier(ref.stagedName()), InformationSchema.columns(ref.view()), empty,
+                    url.toString())).append('\n');
         }
         return new Staging(setup.toString(), bytes[0]);
     }
@@ -519,6 +543,13 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             throw SqlDialectTranslator.invalidQuery("Table " + projectId + ":" + ref.datasetId() + "."
                     + ref.tableId() + " has no schema.");
         }
+        String url = flociEndpoint + "/_floci-gcp/bigquery/projects/" + encode(projectId)
+                + "/datasets/" + encode(ref.datasetId()) + "/tables/" + encode(ref.tableId()) + "/rows.ndjson";
+        return stageRows(target, fields, empty, url);
+    }
+
+    /** {@code CREATE TABLE target} from NDJSON rows at {@code url}, or empty with the given columns. */
+    private static String stageRows(String target, List<TableFieldSchema> fields, boolean empty, String url) {
         if (empty) {
             StringBuilder ddl = new StringBuilder("CREATE TABLE ").append(target).append(" (");
             for (int i = 0; i < fields.size(); i++) {
@@ -545,8 +576,6 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             columns.append(DuckTypes.quoteLiteral(field.getName())).append(": ")
                     .append(DuckTypes.quoteLiteral(text ? "VARCHAR" : DuckTypes.duckType(field)));
         }
-        String url = flociEndpoint + "/_floci-gcp/bigquery/projects/" + encode(projectId)
-                + "/datasets/" + encode(ref.datasetId()) + "/tables/" + encode(ref.tableId()) + "/rows.ndjson";
         return "CREATE TABLE " + target + " AS SELECT " + projection + " FROM read_json("
                 + DuckTypes.quoteLiteral(url) + ", format = 'newline_delimited', columns = {" + columns + "});";
     }

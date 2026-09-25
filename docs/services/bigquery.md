@@ -148,6 +148,29 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `JSON`, `RECORD` (with nested fields) and `REPEATED`
   arrays.
 
+## INFORMATION_SCHEMA
+
+Queries can read these views, generated from the emulator's dataset and table metadata, with the
+columns BigQuery documents:
+
+| View | Qualifiers |
+|---|---|
+| `SCHEMATA` | `[project.]INFORMATION_SCHEMA.SCHEMATA` (US region), ``[project.]`region-x`.INFORMATION_SCHEMA.SCHEMATA`` |
+| `TABLES`, `COLUMNS`, `COLUMN_FIELD_PATHS`, `TABLE_OPTIONS`, `VIEWS` | `[project.]dataset.INFORMATION_SCHEMA.VIEW` or ``[project.]`region-x`.INFORMATION_SCHEMA.VIEW`` |
+
+- A region qualifier covers every dataset whose location matches (`region-us` matches `US`); a
+  dataset qualifier for a missing dataset is a 404. Without a qualifier, the request's
+  `defaultDataset` is used. View names are case-sensitive, as in BigQuery.
+- `data_type` uses GoogleSQL names (`INT64`, `ARRAY<STRING>`, `STRUCT<name STRING, ...>`);
+  `COLUMN_FIELD_PATHS` has one row per nested field path (`customer.name`).
+- `ddl` is a `CREATE TABLE` / `CREATE VIEW` / `CREATE SCHEMA` statement in BigQuery's format.
+- `TABLE_OPTIONS` reports `description`, `friendly_name` and `labels` as GoogleSQL literals
+  (`"text"`, `[STRUCT("key", "value")]`).
+- Columns describing features the emulator does not model (clones, snapshots, replicas, identity
+  and generated columns, policy tags) are present and `NULL`, `NO` or empty. `COLUMNS` omits
+  `async_generation_status` and `data_policies`; `COLUMN_FIELD_PATHS` omits `data_policies`.
+- Other views (`JOBS`, `PARTITIONS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
+
 ## Load jobs
 
 `jobs.insert` with `configuration.load` loads data into a table, synchronously:
@@ -253,7 +276,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
 - `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias
   (`UNNEST(array) AS x`) the element is one column `x`.
-- `UNNEST ... WITH OFFSET`, `INFORMATION_SCHEMA`, wildcard tables, `FOR SYSTEM_TIME AS OF`,
+- `UNNEST ... WITH OFFSET`, INFORMATION_SCHEMA views other than the six above, wildcard tables, `FOR SYSTEM_TIME AS OF`,
   `GEOGRAPHY` functions, BigQuery ML and remote functions are not emulated.
 - `ARRAY_AGG(... IGNORE NULLS)`, `SAFE.`-prefixed functions and GoogleSQL `WEEK` boundaries
   (Sunday-based) follow DuckDB's behavior.

@@ -369,6 +369,40 @@ class SqlDialectTranslatorTest {
         assertEquals("DELETE", SqlDialectTranslator.statementType("DELETE FROM ds.t WHERE true"));
     }
 
+
+    // ── INFORMATION_SCHEMA ───────────────────────────────────────────────────
+
+    @Test
+    void informationSchemaReferencesResolveToAScope() {
+        SqlDialectTranslator.Translation dataset = translate("SELECT table_name FROM ds.INFORMATION_SCHEMA.TABLES");
+        assertEquals(Set.of(new InformationSchema.Ref("TABLES", "ds", null)), dataset.informationSchema());
+        assertTrue(dataset.tables().isEmpty());
+        assertEquals("SELECT table_name FROM \"_floci_information_schema\".\"tables__ds_ds\" AS \"TABLES\"",
+                dataset.sql());
+
+        assertEquals(Set.of(new InformationSchema.Ref("COLUMNS", "ds", null)),
+                translate("SELECT * FROM `test-project.ds.INFORMATION_SCHEMA.COLUMNS` c").informationSchema());
+        assertEquals(Set.of(new InformationSchema.Ref("TABLES", null, "us")),
+                translate("SELECT * FROM `region-us`.INFORMATION_SCHEMA.TABLES").informationSchema());
+        assertEquals(Set.of(new InformationSchema.Ref("SCHEMATA", null, "us-central1")),
+                translate("SELECT * FROM region-us-central1.INFORMATION_SCHEMA.SCHEMATA").informationSchema());
+        assertEquals(Set.of(new InformationSchema.Ref("SCHEMATA", null, "us")),
+                translate("SELECT * FROM INFORMATION_SCHEMA.SCHEMATA").informationSchema());
+        assertEquals(Set.of(new InformationSchema.Ref("SCHEMATA", null, "us")),
+                translate("SELECT * FROM `test-project`.INFORMATION_SCHEMA.SCHEMATA").informationSchema());
+    }
+
+    @Test
+    void informationSchemaUsesTheDefaultDatasetAndValidatesTheView() {
+        assertEquals(Set.of(new InformationSchema.Ref("VIEWS", "dflt", null)),
+                SqlDialectTranslator.translate("SELECT * FROM INFORMATION_SCHEMA.VIEWS", "test-project", "dflt",
+                        SqlDialectTranslator.QueryParameters.none()).informationSchema());
+        assertTrue(invalid("SELECT * FROM INFORMATION_SCHEMA.TABLES").getMessage().contains("qualifier"));
+        assertTrue(invalid("SELECT * FROM ds.INFORMATION_SCHEMA.tables").getMessage().contains("case-sensitive"));
+        invalid("SELECT * FROM ds.INFORMATION_SCHEMA.JOBS");
+        invalid("SELECT * FROM ds.INFORMATION_SCHEMA.SCHEMATA");
+    }
+
     private static Map<String, Object> param(String name, String type, String value) {
         return Map.of("name", name, "parameterType", Map.of("type", type), "parameterValue", Map.of("value", value));
     }

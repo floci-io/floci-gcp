@@ -10,6 +10,7 @@ import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 
@@ -39,6 +40,22 @@ public class BigQueryInternalController {
         this.service = service;
         this.loadFiles = loadFiles;
         this.mapper = mapper;
+    }
+
+    /** Rows of an INFORMATION_SCHEMA view, scoped to a dataset or a region. */
+    @GET
+    @Path("/projects/{projectId}/information-schema/{view}")
+    @Produces("application/x-ndjson")
+    public Response informationSchema(@PathParam("projectId") String projectId, @PathParam("view") String view,
+                                      @QueryParam("dataset") String dataset, @QueryParam("region") String region) {
+        List<Map<String, Object>> rows = service.informationSchemaRows(projectId, view, dataset, region);
+        StreamingOutput body = out -> {
+            for (Map<String, Object> row : rows) {
+                out.write(mapper.writeValueAsBytes(row));
+                out.write('\n');
+            }
+        };
+        return Response.ok(body).build();
     }
 
     /**

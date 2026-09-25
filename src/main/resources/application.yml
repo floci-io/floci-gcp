@@ -81,6 +81,7 @@ floci-gcp:
     iam:
       enabled: true
       authorization-mode: disabled
+      # bootstrap-admin-member: serviceAccount:admin@example.iam.gserviceaccount.com
     iamcredentials:
       enabled: true
     sts:

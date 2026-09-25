@@ -35,7 +35,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class IamService {
@@ -195,6 +197,31 @@ public class IamService {
         }
     }
 
+    public <T> T withPolicyLock(String resource, Supplier<T> action) {
+        synchronized (policyLock(policyKey(resource))) {
+            return action.get();
+        }
+    }
+
+    /**
+     * Creates a resource and establishes its initial policy as one lifecycle
+     * transition. Any policy left by an older holder of the same resource name
+     * is removed before the new resource becomes observable to policy readers.
+     */
+    public <T> T createResourceAndPolicy(String resource, StoredPolicy initialPolicy,
+            Supplier<T> createResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            T created = createResource.get();
+            policyStore.delete(key);
+            if (initialPolicy != null) {
+                setPolicy(resource, initialPolicy);
+            }
+            policyStore.checkpoint();
+            return created;
+        }
+    }
+
     public void deletePolicy(String resource) {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
@@ -217,6 +244,19 @@ public class IamService {
             deleteResource.run();
             policyStore.delete(key);
             policyStore.flush();
+        }
+    }
+
+    /** Deletes the policy only when the owning service actually deletes the resource. */
+    public boolean deleteResourceAndPolicyIf(String resource, BooleanSupplier deleteResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            if (!deleteResource.getAsBoolean()) {
+                return false;
+            }
+            policyStore.delete(key);
+            policyStore.flush();
+            return true;
         }
     }
 

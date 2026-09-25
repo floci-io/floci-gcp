@@ -51,6 +51,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+// com.google.cloud.run.v2.Service stays fully qualified in this file: a bare Service would read as this class.
 @ApplicationScoped
 public class CloudRunService {
 

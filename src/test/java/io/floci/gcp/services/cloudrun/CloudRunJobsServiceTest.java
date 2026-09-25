@@ -4,16 +4,24 @@ import com.google.cloud.run.v2.Condition;
 import com.google.cloud.run.v2.Container;
 import com.google.cloud.run.v2.EnvVar;
 import com.google.cloud.run.v2.Execution;
+import com.google.cloud.run.v2.ExecutionReference;
 import com.google.cloud.run.v2.ExecutionTemplate;
 import com.google.cloud.run.v2.RunJobRequest;
 import com.google.cloud.run.v2.Task;
 import com.google.cloud.run.v2.TaskTemplate;
+import com.google.longrunning.Operation;
 import com.google.protobuf.Duration;
 import com.google.rpc.Status;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.Events;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskOutcome;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.operations.LongRunningOperationsService;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -28,7 +36,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,6 +46,11 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 // java.time.Duration is written fully qualified: it collides with the imported com.google.protobuf.Duration.
 class CloudRunJobsServiceTest {
@@ -346,7 +361,201 @@ class CloudRunJobsServiceTest {
         assertFalse(harness.sink.finishedError.isDone());
     }
 
+    @Test
+    void containerThatStopsWithoutAStopRequestIsAFailedAttemptAndIsRetried() throws Exception {
+        Harness harness = new Harness(execution(1, 1, 1), null);
+        harness.coordinator.begin();
+        harness.coordinator.start();
+        harness.await(() -> harness.runner.launches.size() == 1);
+
+        harness.runner.finish(0, 0, new TaskOutcome.Stopped());
+        harness.await(() -> harness.runner.launches.size() == 2);
+        assertEquals(1, harness.runner.launches.get(1).attempt);
+        harness.runner.finish(0, 1, new TaskOutcome.Stopped());
+
+        Execution result = harness.coordinator.finished().get(5, TimeUnit.SECONDS);
+        assertEquals(1, result.getFailedCount());
+        assertEquals(0, result.getCancelledCount());
+        assertEquals(1, result.getRetriedCount());
+        assertEquals(Condition.State.CONDITION_FAILED, completed(result).getState());
+        Status error = harness.sink.finishedError.get(5, TimeUnit.SECONDS).orElseThrow();
+        assertEquals(13, error.getCode());
+        assertEquals("Task job-abcde-task0 failed with message: The task container stopped unexpectedly.",
+                error.getMessage());
+        Task task = harness.sink.tasks.get(0);
+        assertEquals(13, task.getLastAttemptResult().getStatus().getCode());
+        assertEquals("The task container stopped unexpectedly.", task.getLastAttemptResult().getStatus().getMessage());
+    }
+
+    @Test
+    void cancelDuringADeadlineStopKeepsTheDeadlineFailure() throws Exception {
+        Harness harness = new Harness(execution(1, 1, 0), java.time.Duration.ofMillis(200));
+        harness.coordinator.begin();
+        harness.coordinator.start();
+        harness.await(() -> harness.runner.launches.size() == 1);
+        harness.await(() -> harness.runner.launches.get(0).stopped);
+
+        String operation = harness.coordinator.cancel().orElseThrow().get(5, TimeUnit.SECONDS);
+        harness.runner.finish(0, 0, new TaskOutcome.Stopped());
+
+        Execution result = harness.coordinator.finished().get(5, TimeUnit.SECONDS);
+        Status error = harness.sink.finishedError.get(5, TimeUnit.SECONDS).orElseThrow();
+        assertEquals(4, error.getCode());
+        assertEquals("Execution job-abcde did not complete within 0s.", completed(result).getMessage());
+        assertEquals(Condition.ExecutionReason.EXECUTION_REASON_UNDEFINED, completed(result).getExecutionReason());
+        assertEquals(result, harness.sink.completedOperations.get(operation));
+    }
+
+    @Test
+    void deleteRacingALaunchReachesTheLaunchingCoordinator() throws Exception {
+        Stores stores = new Stores();
+        CloudRunJobsService service = stores.service(null, null);
+        service.createJob("p", "us-central1", "job", JOB_BODY, false);
+        AtomicReference<Object> deleteResult = new AtomicReference<>();
+        AtomicReference<Thread> deleter = new AtomicReference<>();
+        stores.executions.onFirstPut = executionName -> {
+            Thread thread = Thread.ofPlatform().start(() -> {
+                try {
+                    deleteResult.set(service.deleteExecution(executionName, false));
+                } catch (RuntimeException e) {
+                    deleteResult.set(e);
+                }
+            });
+            deleter.set(thread);
+            awaitParked(thread);
+        };
+
+        Operation run = service.runJob(JOB, "{}");
+        deleter.get().join(TimeUnit.SECONDS.toMillis(10));
+
+        Execution metadata = run.getMetadata().unpack(Execution.class);
+        Operation delete = assertInstanceOf(Operation.class, deleteResult.get(),
+                () -> "delete failed: " + deleteResult.get());
+        assertTrue(stores.operations.get(delete.getName()).getDone());
+        assertTrue(run.getDone());
+        Execution cancelled = run.getResponse().unpack(Execution.class);
+        assertEquals(Condition.ExecutionReason.CANCELLED, completed(cancelled).getExecutionReason());
+        assertTrue(stores.executions.get(metadata.getName()).isEmpty(), "the deleted execution stays deleted");
+        assertTrue(stores.tasks.keys().isEmpty(), "no task record survives the delete");
+        assertTrue(stores.tombstones.keys().isEmpty());
+        GcpException missing = assertThrows(GcpException.class, () -> service.getExecution(metadata.getName()));
+        assertEquals("Resource '" + CloudRunRuntimeService.lastSegment(metadata.getName())
+                + "' of kind 'EXECUTION' in region 'us-central1' in project 'p' does not exist.",
+                missing.getMessage());
+    }
+
+    @Test
+    void startupCompletesTheOperationsOfAnExecutionDeletedWhileItsContainersWereStopping() throws Exception {
+        Stores stores = new Stores();
+        StubRunner runner = new StubRunner();
+        CloudRunJobsService before = stores.service(dockerConfig(), runner);
+        before.createJob("p", "us-central1", "job", JOB_BODY, false);
+        Operation run = before.runJob(JOB, "{}");
+        String executionName = run.getMetadata().unpack(Execution.class).getName();
+        for (int i = 0; i < 500 && runner.launches.isEmpty(); i++) {
+            Thread.sleep(10);
+        }
+        assertEquals(1, runner.launches.size());
+        Operation delete = before.deleteExecution(executionName, false);
+        assertFalse(delete.getDone(), "the delete waits for the container to stop");
+        before.stopManagedContainers();
+        assertFalse(stores.operations.get(run.getName()).getDone());
+        assertEquals(List.of(executionName), List.copyOf(stores.tombstones.keys()));
+
+        CloudRunJobsService after = stores.service(dockerConfig(), new StubRunner());
+        after.reconcileInterruptedExecutions();
+
+        for (Operation operation : List.of(stores.operations.get(run.getName()),
+                stores.operations.get(delete.getName()))) {
+            assertTrue(operation.getDone(), operation.getName());
+            assertFalse(operation.hasError(), operation.getName());
+            Execution response = operation.getResponse().unpack(Execution.class);
+            assertEquals(Condition.ExecutionReason.CANCELLED, completed(response).getExecutionReason());
+            assertEquals("Cancelled by user.", completed(response).getMessage());
+            assertEquals(1, response.getCancelledCount());
+            assertTrue(response.hasDeleteTime());
+            assertTrue(response.hasCompletionTime());
+        }
+        assertTrue(stores.tombstones.keys().isEmpty());
+        assertEquals(ExecutionReference.CompletionStatus.EXECUTION_CANCELLED,
+                after.getJob(JOB).getLatestCreatedExecution().getCompletionStatus());
+    }
+
+    @Test
+    void notFoundMessagesMatchGcp() {
+        assertEquals("Resource 'job' of kind 'JOB' in region 'us-central1' in project 'p' does not exist.",
+                CloudRunJobTemplates.notFoundMessage(CloudRunJobTemplates.KIND_JOB, JOB));
+        assertEquals("Resource 'job-abcde-task0' of kind 'TASK' in region 'us-central1' in project 'p' does not exist.",
+                CloudRunJobTemplates.notFoundMessage(CloudRunJobTemplates.KIND_TASK,
+                        JOB + "/executions/job-abcde/tasks/job-abcde-task0"));
+    }
+
     // ── Fixtures ────────────────────────────────────────────────────────────
+
+    private static final String JOB_BODY = """
+            {"template":{"template":{"maxRetries":0,"containers":[{"image":"busybox"}]}}}
+            """;
+
+    private static void awaitParked(Thread thread) {
+        for (int i = 0; i < 500; i++) {
+            Thread.State state = thread.getState();
+            if (state == Thread.State.TIMED_WAITING || state == Thread.State.WAITING
+                    || state == Thread.State.BLOCKED || state == Thread.State.TERMINATED) {
+                return;
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for the racing request", e);
+            }
+        }
+        throw new AssertionError("The racing request never parked");
+    }
+
+    private static EmulatorConfig dockerConfig() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().cloudrun().mock()).thenReturn(false);
+        when(config.services().cloudrun().execution().cleanupTimeout()).thenReturn(java.time.Duration.ofSeconds(1));
+        when(config.services().cloudrun().execution().startupTimeout()).thenReturn(java.time.Duration.ofSeconds(60));
+        return config;
+    }
+
+    /** Storage shared by the services of one test, so a second service instance acts as a restarted emulator. */
+    private static final class Stores {
+        final InMemoryStorage<String, String> jobs = new InMemoryStorage<>();
+        final HookedStorage executions = new HookedStorage();
+        final InMemoryStorage<String, String> tasks = new InMemoryStorage<>();
+        final InMemoryStorage<String, String> tombstones = new InMemoryStorage<>();
+        final LongRunningOperationsService operations;
+
+        Stores() {
+            StorageFactory factory = mock(StorageFactory.class);
+            StorageBackend<String, String> operationStore = new InMemoryStorage<>();
+            when(factory.<String>createGlobal(anyString(), anyString(), any())).thenReturn(operationStore);
+            operations = new LongRunningOperationsService(factory);
+        }
+
+        CloudRunJobsService service(EmulatorConfig config, CloudRunExecutionCoordinator.TaskRunner runner) {
+            return new CloudRunJobsService(jobs, executions, tasks, tombstones, operations, mock(IamService.class),
+                    config, runner, null, Clock.systemUTC());
+        }
+    }
+
+    /** Runs {@link #onFirstPut} once, right after the first execution record is written. */
+    private static final class HookedStorage extends InMemoryStorage<String, String> {
+        volatile Consumer<String> onFirstPut;
+
+        @Override
+        public void put(String key, String value) {
+            super.put(key, value);
+            Consumer<String> hook = onFirstPut;
+            if (hook != null) {
+                onFirstPut = null;
+                hook.accept(key);
+            }
+        }
+    }
 
     private static Condition completed(Execution execution) {
         return execution.getConditionsList().stream()

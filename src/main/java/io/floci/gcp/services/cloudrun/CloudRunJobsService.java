@@ -50,6 +50,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,8 +66,15 @@ import java.util.function.Function;
  * <p>Job records are guarded by a per-job monitor: create, patch, delete and the execution-creating part of
  * {@code jobs:run} (and of start/run execution tokens) check and mutate the job under it, and the execution
  * coordinators take it only to refresh {@code latestCreatedExecution}. Execution and task records are mutated only
- * by their {@link CloudRunExecutionCoordinator}; see its invariant. Lock order: the job monitor may be held while a
- * coordinator is registered, but no thread waits on a coordinator while holding a job monitor.
+ * by their {@link CloudRunExecutionCoordinator}; see its invariant. A launch registers the execution's coordinator
+ * before it persists the execution and task records, under the job monitor, and a coordinator is rebuilt from the
+ * stored records only under the same monitor and only when none is registered. So a request that races a launch
+ * always reaches the launching coordinator, and a rebuilt coordinator always sees a complete, terminal record set.
+ * Lock order: the job monitor may be held while a coordinator is registered, but no thread waits on a coordinator
+ * while holding a job monitor.
+ *
+ * <p>An execution deleted before it finished leaves a tombstone until its operations complete, so that startup
+ * reconciliation can complete the run and delete operations of an execution whose record is already gone.
  */
 @ApplicationScoped
 public class CloudRunJobsService implements ContainerTeardown {
@@ -79,6 +87,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     private final StorageBackend<String, String> jobStore;
     private final StorageBackend<String, String> executionStore;
     private final StorageBackend<String, String> taskStore;
+    private final StorageBackend<String, String> tombstoneStore;
     private final LongRunningOperationsService operations;
     private final IamService iamService;
     private final EmulatorConfig config;
@@ -86,6 +95,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     private final CloudRunJobsRuntime runtime;
     private final Clock clock;
     private final ConcurrentHashMap<String, CloudRunExecutionCoordinator> coordinators = new ConcurrentHashMap<>();
+    private final Set<CloudRunExecutionCoordinator> live = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> jobLocks = new ConcurrentHashMap<>();
 
     @Inject
@@ -100,12 +110,15 @@ public class CloudRunJobsService implements ContainerTeardown {
                         new TypeReference<Map<String, String>>() {}),
                 storageFactory.createGlobal("cloudrun-tasks", "cloudrun-tasks.json",
                         new TypeReference<Map<String, String>>() {}),
+                storageFactory.createGlobal("cloudrun-execution-tombstones", "cloudrun-execution-tombstones.json",
+                        new TypeReference<Map<String, String>>() {}),
                 operations, iamService, config, runtime, runtime, Clock.systemUTC());
     }
 
     CloudRunJobsService(StorageBackend<String, String> jobStore,
                         StorageBackend<String, String> executionStore,
                         StorageBackend<String, String> taskStore,
+                        StorageBackend<String, String> tombstoneStore,
                         LongRunningOperationsService operations,
                         IamService iamService,
                         EmulatorConfig config,
@@ -115,6 +128,7 @@ public class CloudRunJobsService implements ContainerTeardown {
         this.jobStore = jobStore;
         this.executionStore = executionStore;
         this.taskStore = taskStore;
+        this.tombstoneStore = tombstoneStore;
         this.operations = operations;
         this.iamService = iamService;
         this.config = config;
@@ -124,13 +138,16 @@ public class CloudRunJobsService implements ContainerTeardown {
     }
 
     void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent event) {
+        if (runtime != null && dockerMode()) {
+            runtime.removeOrphanedContainers();
+        }
         reconcileInterruptedExecutions();
     }
 
     @Override
     public void stopManagedContainers() {
         List<CompletableFuture<Void>> acks = new ArrayList<>();
-        for (CloudRunExecutionCoordinator coordinator : List.copyOf(coordinators.values())) {
+        for (CloudRunExecutionCoordinator coordinator : List.copyOf(live)) {
             coordinator.shutdown().ifPresent(acks::add);
         }
         for (CompletableFuture<Void> ack : acks) {
@@ -162,13 +179,13 @@ public class CloudRunJobsService implements ContainerTeardown {
         Job job = populateJob(requested, name, now);
         validateTemplate(job.getTemplate());
         LOG.infof("create Cloud Run job name=%s validateOnly=%s", name, validateOnly);
-        if (validateOnly) {
-            return operations.doneTransient(parent, job, job);
-        }
         Launch launch;
         synchronized (jobLock(name)) {
             if (jobStore.get(name).isPresent()) {
                 throw GcpException.alreadyExists("Resource '" + id + "' already exists.");
+            }
+            if (validateOnly) {
+                return operations.doneTransient(parent, job, job);
             }
             launch = storeAndLaunchToken(parent, job, "", "", now);
         }
@@ -176,7 +193,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     }
 
     public Job getJob(String name) {
-        return findJob(name).orElseThrow(() -> GcpException.notFound("Job not found: " + name));
+        return findJob(name).orElseThrow(() -> CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_JOB, name));
     }
 
     public ListJobsResponse listJobs(String project, String location, int pageSize, String pageToken) {
@@ -202,7 +219,7 @@ public class CloudRunJobsService implements ContainerTeardown {
             Optional<Job> existing = findJob(name);
             if (existing.isEmpty()) {
                 if (!allowMissing) {
-                    throw GcpException.notFound("Job not found: " + name);
+                    throw CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_JOB, name);
                 }
                 Job job = populateJob(requested, name, now);
                 validateTemplate(job.getTemplate());
@@ -320,7 +337,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     public Execution getExecution(String name) {
         return executionStore.get(name)
                 .map(CloudRunJobsService::parseExecution)
-                .orElseThrow(() -> GcpException.notFound("Execution not found: " + name));
+                .orElseThrow(() -> CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_EXECUTION, name));
     }
 
     public ListExecutionsResponse listExecutions(String jobName, int pageSize, String pageToken) {
@@ -381,7 +398,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     public Task getTask(String name) {
         return taskStore.get(name)
                 .map(CloudRunJobsService::parseTask)
-                .orElseThrow(() -> GcpException.notFound("Task not found: " + name));
+                .orElseThrow(() -> CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_TASK, name));
     }
 
     /**
@@ -428,9 +445,15 @@ public class CloudRunJobsService implements ContainerTeardown {
             Execution execution = stored.get();
             try {
                 PendingOperations pendingOperations = pendingOperations(execution);
-                CloudRunExecutionCoordinator coordinator = newCoordinator(execution, tasksOf(name),
-                        pendingOperations.run(), pendingOperations.job(), pendingOperations.other());
-                coordinators.put(name, coordinator);
+                CloudRunExecutionCoordinator coordinator;
+                synchronized (jobLock(jobNameOf(name))) {
+                    if (coordinators.containsKey(name)) {
+                        continue;
+                    }
+                    coordinator = newCoordinator(execution, tasksOf(name), pendingOperations.run(),
+                            pendingOperations.job(), pendingOperations.other());
+                    register(coordinator);
+                }
                 coordinator.reconcile();
                 coordinator.start();
                 LOG.infof("Reconciling Cloud Run execution interrupted by an emulator restart execution=%s", name);
@@ -438,6 +461,49 @@ public class CloudRunJobsService implements ContainerTeardown {
                 LOG.warnf(e, "Could not reconcile interrupted Cloud Run execution=%s", name);
             }
         }
+        for (String name : List.copyOf(tombstoneStore.keys())) {
+            try {
+                completeDeletedExecution(name);
+            } catch (RuntimeException e) {
+                LOG.warnf(e, "Could not complete the operations of deleted Cloud Run execution=%s", name);
+            }
+        }
+    }
+
+    /**
+     * Completes the run, delete and job operations of an execution that was deleted while it was running and whose
+     * containers had not stopped when the emulator stopped. The execution record is already gone, so the
+     * operations resolve like the delete path: the execution is reported cancelled.
+     */
+    private void completeDeletedExecution(String name) {
+        Optional<Execution> tombstone = tombstoneStore.get(name).map(CloudRunJobsService::parseExecution);
+        if (tombstone.isEmpty() || executionStore.get(name).isPresent() || coordinators.containsKey(name)) {
+            tombstoneStore.delete(name);
+            return;
+        }
+        Execution deleted = tombstone.get();
+        Timestamp now = now();
+        Execution cancelled = deleted.toBuilder()
+                .setCompletionTime(now)
+                .setReconciling(false)
+                .setObservedGeneration(deleted.getGeneration())
+                .setRunningCount(0)
+                .setCancelledCount(deleted.getTaskCount() - deleted.getSucceededCount() - deleted.getFailedCount())
+                .clearConditions()
+                .addAllConditions(deleted.getConditionsList().stream()
+                        .map(condition -> "Completed".equals(condition.getType())
+                                ? CloudRunJobTemplates.condition("Completed", Condition.State.CONDITION_FAILED,
+                                        CloudRunJobTemplates.CANCELLED_MESSAGE, now).toBuilder()
+                                        .setExecutionReason(Condition.ExecutionReason.CANCELLED)
+                                        .build()
+                                : condition)
+                        .toList())
+                .build();
+        PendingOperations pendingOperations = pendingOperations(deleted);
+        new StoreSink(jobNameOf(name), pendingOperations.run(), pendingOperations.job(), pendingOperations.other())
+                .finished(cancelled, null);
+        LOG.infof("Completed the operations of a Cloud Run execution deleted before an emulator restart execution=%s",
+                name);
     }
 
     private record PendingOperations(String run, List<String> job, List<String> other) {}
@@ -520,19 +586,26 @@ public class CloudRunJobsService implements ContainerTeardown {
     }
 
     /**
-     * Persists a new execution with its tasks, then registers and starts its coordinator. The job referencing the
-     * execution must already be stored. Must hold the job monitor.
+     * Registers the coordinator of a new execution, persists the execution with its tasks, then starts the
+     * coordinator. Commands that reach the coordinator between registration and start wait in its queue and are
+     * applied once the records exist. The job referencing the execution must already be stored. Must hold the job
+     * monitor.
      */
     private CloudRunExecutionCoordinator launchLocked(Execution execution, String runOperation,
                                                       List<String> jobOperations) {
         List<Task> tasks = newTasks(execution);
-        executionStore.put(execution.getName(), ProtoJson.print(execution));
-        for (Task task : tasks) {
-            taskStore.put(task.getName(), ProtoJson.print(task));
-        }
         CloudRunExecutionCoordinator coordinator = newCoordinator(execution, tasks, runOperation, jobOperations,
                 List.of());
-        coordinators.put(execution.getName(), coordinator);
+        register(coordinator);
+        try {
+            executionStore.put(execution.getName(), ProtoJson.print(execution));
+            for (Task task : tasks) {
+                taskStore.put(task.getName(), ProtoJson.print(task));
+            }
+        } catch (RuntimeException e) {
+            unregister(coordinator);
+            throw e;
+        }
         coordinator.begin();
         coordinator.start();
         return coordinator;
@@ -556,29 +629,69 @@ public class CloudRunJobsService implements ContainerTeardown {
                                                         List<String> jobOperations, List<String> otherOperations) {
         return new CloudRunExecutionCoordinator(execution, tasks, runner(),
                 new StoreSink(jobNameOf(execution.getName()), runOperation, jobOperations, otherOperations),
-                clock, dockerMode() ? runBound(execution) : null,
-                coordinator -> coordinators.remove(coordinator.name(), coordinator));
+                clock, dockerMode() ? runBound(execution) : null, this::unregister);
     }
 
     /**
-     * Applies {@code action} to the execution's coordinator, creating one from the stored records when none is
-     * registered. Retries when the coordinator it found closed before accepting the command.
+     * Registers {@code coordinator} for command routing and for shutdown. Must hold the job monitor, and the
+     * execution must not be stored yet (a launch) or must have no registered coordinator (a rebuild or startup
+     * reconciliation). A launch may therefore replace only the coordinator of a deleted execution with the same
+     * name that is still stopping its containers; that one stays in {@link #live} until it closes, so shutdown
+     * still reaches it.
+     */
+    private void register(CloudRunExecutionCoordinator coordinator) {
+        live.add(coordinator);
+        CloudRunExecutionCoordinator replaced = coordinators.put(coordinator.name(), coordinator);
+        if (replaced != null) {
+            LOG.debugf("Replacing the coordinator of a deleted execution with the same name execution=%s",
+                    coordinator.name());
+        }
+    }
+
+    private void unregister(CloudRunExecutionCoordinator coordinator) {
+        coordinators.remove(coordinator.name(), coordinator);
+        live.remove(coordinator);
+    }
+
+    /**
+     * Applies {@code action} to the execution's coordinator, rebuilding one from the stored records when none is
+     * registered. The rebuild holds the job monitor, so it cannot interleave with a launch, and it happens only when
+     * no coordinator is registered, which means the stored records are complete and terminal. Retries when the
+     * coordinator it found closed before accepting the command.
      */
     private <T> T withCoordinator(String executionName,
                                   Function<CloudRunExecutionCoordinator, Optional<T>> action) {
         while (true) {
-            CloudRunExecutionCoordinator[] created = new CloudRunExecutionCoordinator[1];
-            CloudRunExecutionCoordinator coordinator = coordinators.computeIfAbsent(executionName, key -> {
-                created[0] = newCoordinator(getExecution(key), tasksOf(key), null, List.of(), List.of());
-                return created[0];
-            });
+            CloudRunExecutionCoordinator coordinator = coordinators.get(executionName);
+            boolean created = false;
+            if (coordinator == null) {
+                synchronized (jobLock(jobNameOf(executionName))) {
+                    coordinator = coordinators.get(executionName);
+                    if (coordinator == null) {
+                        coordinator = restoreCoordinator(executionName);
+                        register(coordinator);
+                        created = true;
+                    }
+                }
+            }
             Optional<T> result = action.apply(coordinator);
-            if (created[0] != null) {
+            if (created) {
                 coordinator.start();
             }
             if (result.isPresent()) {
                 return result.get();
             }
+        }
+    }
+
+    private CloudRunExecutionCoordinator restoreCoordinator(String executionName) {
+        Execution execution = getExecution(executionName);
+        try {
+            return newCoordinator(execution, tasksOf(executionName), null, List.of(), List.of());
+        } catch (IllegalArgumentException e) {
+            LOG.warnf("Stored Cloud Run execution has incomplete task records execution=%s: %s", executionName,
+                    e.getMessage());
+            throw GcpException.internal("Execution " + executionName + " has incomplete task records.");
         }
     }
 
@@ -914,6 +1027,9 @@ public class CloudRunJobsService implements ContainerTeardown {
             for (Task task : tasks) {
                 taskStore.delete(task.getName());
             }
+            if (!execution.hasCompletionTime()) {
+                tombstoneStore.put(execution.getName(), ProtoJson.print(execution));
+            }
             executionStore.delete(execution.getName());
             syncJobReference(execution);
         }
@@ -947,10 +1063,11 @@ public class CloudRunJobsService implements ContainerTeardown {
                 } else {
                     operations.fail(operation, Status.newBuilder()
                             .setCode(Code.NOT_FOUND_VALUE)
-                            .setMessage("Job not found: " + jobName)
+                            .setMessage(CloudRunJobTemplates.notFoundMessage(CloudRunJobTemplates.KIND_JOB, jobName))
                             .build(), null);
                 }
             }
+            tombstoneStore.delete(execution.getName());
             LOG.infof("Cloud Run execution finished execution=%s error=%s", execution.getName(),
                     error == null ? "none" : error.getMessage());
         }

@@ -63,6 +63,10 @@ floci-gcp implements the standard OAuth JWT bearer exchange and returns a
 short-lived Bearer token. As with other emulator credentials, JWT signatures
 and Bearer tokens are not validated.
 
+The exchange is served at `/token` (Google's `oauth2.googleapis.com/token`) and
+at `/oauth2/v4/token` (the legacy `www.googleapis.com/oauth2/v4/token`), and
+accepts the request as `application/x-www-form-urlencoded` or `application/json`.
+
 ## Quick Start
 
 === "gcloud CLI"

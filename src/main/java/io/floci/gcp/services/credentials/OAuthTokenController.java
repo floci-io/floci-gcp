@@ -26,6 +26,21 @@ public class OAuthTokenController {
     public Response exchangeServiceAccountJwt(
             @FormParam("grant_type") String grantType,
             @FormParam("assertion") String assertion) {
+        return exchange(grantType, assertion);
+    }
+
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response exchangeServiceAccountJwtJson(Map<String, Object> body) {
+        return exchangeJson(body);
+    }
+
+    static Response exchangeJson(Map<String, Object> body) {
+        Map<String, Object> safe = body == null ? Map.of() : body;
+        return exchange(stringOrNull(safe.get("grant_type")), stringOrNull(safe.get("assertion")));
+    }
+
+    static Response exchange(String grantType, String assertion) {
         if (!JWT_BEARER_GRANT_TYPE.equals(grantType)) {
             return oauthError("unsupported_grant_type", "Unsupported grant type");
         }
@@ -38,6 +53,10 @@ public class OAuthTokenController {
                 "token_type", "Bearer",
                 "expires_in", 3600))
                 .build();
+    }
+
+    private static String stringOrNull(Object value) {
+        return value instanceof String s ? s : null;
     }
 
     private static Response oauthError(String error, String description) {

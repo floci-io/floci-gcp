@@ -43,6 +43,11 @@ final class CloudRunJobTemplates {
     static final String PROVISIONED_MESSAGE = "Provisioned imported containers.";
     static final String WAITING_TO_START_MESSAGE = "Waiting for execution to start.";
     static final String WAITING_FOR_CANCEL_MESSAGE = "Waiting for execution to be cancelled.";
+    static final String CONTAINER_VANISHED_MESSAGE = "The task container stopped unexpectedly.";
+
+    static final String KIND_JOB = "JOB";
+    static final String KIND_EXECUTION = "EXECUTION";
+    static final String KIND_TASK = "TASK";
 
     static final long EXPIRE_AFTER_DELETE_SECONDS = 30L * 24 * 60 * 60;
 
@@ -50,6 +55,22 @@ final class CloudRunJobTemplates {
     private static final int EXECUTION_SUFFIX_LENGTH = 5;
 
     private CloudRunJobTemplates() {}
+
+    /**
+     * The GCP NOT_FOUND message for a job, execution or task under
+     * {@code projects/{project}/locations/{location}/...}.
+     */
+    static String notFoundMessage(String kind, String resourceName) {
+        String[] parts = resourceName.split("/");
+        String project = parts.length > 1 ? parts[1] : "";
+        String location = parts.length > 3 ? parts[3] : "";
+        return "Resource '" + parts[parts.length - 1] + "' of kind '" + kind + "' in region '" + location
+                + "' in project '" + project + "' does not exist.";
+    }
+
+    static GcpException notFound(String kind, String resourceName) {
+        return GcpException.notFound(notFoundMessage(kind, resourceName));
+    }
 
     /**
      * Completes the defaults GCP fills in on a job template: task count, retries, timeout, container resource

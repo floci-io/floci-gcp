@@ -11,6 +11,7 @@ import com.google.cloud.run.v2.Task;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.Events;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
@@ -29,6 +30,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
+
+// com.github.dockerjava.api.model.Container is written fully qualified: it collides with the imported
+// com.google.cloud.run.v2.Container.
 
 /**
  * Runs Cloud Run job task attempts as Docker containers. Each attempt gets a fresh container on its own virtual
@@ -41,6 +46,9 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
     private static final Logger LOG = Logger.getLogger(CloudRunJobsRuntime.class);
     private static final long POLL_INTERVAL_MILLIS = 200;
     private static final long LOG_DRAIN_SECONDS = 2;
+    private static final Duration SHUTDOWN_DRAIN = Duration.ofSeconds(10);
+    private static final Pattern TASK_RESOURCE =
+            Pattern.compile("projects/[^/]+/locations/[^/]+/jobs/[^/]+/executions/[^/]+/tasks/[^/]+");
 
     private final CloudRunRuntimeService runtimeService;
     private final ContainerLifecycleManager lifecycleManager;
@@ -81,19 +89,62 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
     public TaskHandle launch(Execution execution, Task task, int attempt, Events events) {
         Attempt handle = new Attempt();
         String taskId = CloudRunRuntimeService.lastSegment(task.getName());
+        String key = task.getName() + "#" + attempt;
+        active.put(key, handle);
         Thread.ofVirtual()
                 .name("cloudrun-task-" + taskId + "-" + attempt)
-                .start(() -> run(handle, execution, task, attempt, events));
+                .start(() -> run(key, handle, execution, task, attempt, events));
         return handle;
     }
 
-    /** Removes every running task container; used on emulator shutdown. */
+    /**
+     * Removes every task container; used on emulator shutdown. An attempt still creating its container removes it
+     * itself as soon as the create returns, and this waits a bounded time for those attempts to finish.
+     */
     void stopAll() {
         shuttingDown = true;
         for (Attempt attempt : List.copyOf(active.values())) {
             String containerId = attempt.containerId;
             if (containerId != null) {
                 lifecycleManager.forceRemove(containerId, null);
+            }
+        }
+        Instant limit = Instant.now().plus(SHUTDOWN_DRAIN);
+        while (!active.isEmpty() && Instant.now().isBefore(limit)) {
+            if (!sleep(POLL_INTERVAL_MILLIS)) {
+                break;
+            }
+        }
+        if (!active.isEmpty()) {
+            LOG.warnf("Cloud Run job task attempts still running at shutdown attempts=%s", active.keySet());
+        }
+    }
+
+    /**
+     * Removes the task containers of this emulator (same {@code floci_emulator} and {@code floci_namespace}
+     * labels) left behind by a previous process that did not shut down cleanly. Job task containers are never
+     * adopted: every execution that was running is failed by startup reconciliation, so any such container found
+     * at startup is an orphan.
+     */
+    void removeOrphanedContainers() {
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
+        labels.put("floci_service", "cloudrun");
+        List<com.github.dockerjava.api.model.Container> containers;
+        try {
+            containers = lifecycleManager.runDockerApi("list orphaned Cloud Run job task containers",
+                    () -> lifecycleManager.getDockerClient().listContainersCmd()
+                            .withShowAll(true)
+                            .withLabelFilter(labels)
+                            .exec());
+        } catch (RuntimeException e) {
+            LOG.warnf("Could not list orphaned Cloud Run job task containers: %s", message(e));
+            return;
+        }
+        for (com.github.dockerjava.api.model.Container container : containers) {
+            String resource = container.getLabels() == null ? null : container.getLabels().get("floci_resource");
+            if (resource != null && TASK_RESOURCE.matcher(resource).matches()) {
+                LOG.infof("Removing orphaned Cloud Run job task container=%s task=%s", container.getId(), resource);
+                lifecycleManager.forceRemove(container.getId(), null);
             }
         }
     }
@@ -108,10 +159,8 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
         return env;
     }
 
-    private void run(Attempt handle, Execution execution, Task task, int attempt, Events events) {
-        String key = task.getName() + "#" + attempt;
+    private void run(String key, Attempt handle, Execution execution, Task task, int attempt, Events events) {
         String taskId = CloudRunRuntimeService.lastSegment(task.getName());
-        active.put(key, handle);
         List<CloudRunRuntimeVolumeMount> mounts = List.of();
         String containerId = null;
         ResultCallback.Adapter<Frame> logs = null;
@@ -132,11 +181,17 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
                 ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
                 containerId = info.containerId();
                 handle.containerId = containerId;
-                LOG.infof("Cloud Run job task started task=%s attempt=%d container=%s",
-                        task.getName(), attempt, containerId);
-                events.taskStarted(task.getIndex(), attempt);
-                logs = attachLogs(containerId, taskId, attempt);
-                outcome = awaitExit(containerId, CloudRunJobTemplates.duration(task.getTimeout()), handle);
+                if (shuttingDown) {
+                    LOG.infof("Removing Cloud Run job task container created during shutdown task=%s container=%s",
+                            task.getName(), containerId);
+                    outcome = new TaskOutcome.Stopped();
+                } else {
+                    LOG.infof("Cloud Run job task started task=%s attempt=%d container=%s",
+                            task.getName(), attempt, containerId);
+                    events.taskStarted(task.getIndex(), attempt);
+                    logs = attachLogs(containerId, taskId, attempt);
+                    outcome = awaitExit(containerId, CloudRunJobTemplates.duration(task.getTimeout()), handle);
+                }
             }
         } catch (RuntimeException e) {
             LOG.warnf(e, "Cloud Run job task attempt failed to run task=%s attempt=%d", task.getName(), attempt);

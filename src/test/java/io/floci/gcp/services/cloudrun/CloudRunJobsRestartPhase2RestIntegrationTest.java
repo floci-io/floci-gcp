@@ -1,8 +1,10 @@
 package io.floci.gcp.services.cloudrun;
 
+import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -14,14 +16,21 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Starts the emulator on the persistent storage left by {@link CloudRunJobsRestartPhase1RestIntegrationTest} and
- * checks that the interrupted execution, its tasks and its run operation are failed with the restart message.
+ * checks startup reconciliation: the interrupted execution, its tasks and its run operation are failed with the
+ * restart message, the operations of the execution deleted while stopping complete as cancelled, and the orphaned
+ * task container is removed.
  */
 @QuarkusTest
 @TestProfile(CloudRunJobsRestartProfiles.Phase2AfterRestart.class)
 class CloudRunJobsRestartPhase2RestIntegrationTest {
+
+    @Inject
+    ContainerLifecycleManager lifecycleManager;
 
     @BeforeAll
     static void requirePhaseOne() {
@@ -74,6 +83,25 @@ class CloudRunJobsRestartPhase2RestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("latestCreatedExecution.completionStatus", equalTo("EXECUTION_FAILED"));
+
+        for (String deletedOperation : List.of(marker.get(2), marker.get(3))) {
+            given()
+                    .when().get("/v2/" + deletedOperation)
+                    .then()
+                    .statusCode(200)
+                    .body("done", equalTo(true))
+                    .body("error", nullValue())
+                    .body("response.cancelledCount", equalTo(1))
+                    .body("response.conditions.find { it.type == 'Completed' }.message", equalTo("Cancelled by user."))
+                    .body("response.conditions.find { it.type == 'Completed' }.executionReason",
+                            equalTo("CANCELLED"));
+        }
+
+        assertTrue(lifecycleManager.getDockerClient().listContainersCmd()
+                .withShowAll(true)
+                .withIdFilter(List.of(marker.get(4)))
+                .exec()
+                .isEmpty(), "orphaned task container is removed");
     }
 
     private static void sleep() {

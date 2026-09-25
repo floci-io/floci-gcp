@@ -88,6 +88,17 @@ class CloudRunJobsRestIntegrationTest {
                 .body("error.code", equalTo(409))
                 .body("error.status", equalTo("ALREADY_EXISTS"))
                 .body("error.message", equalTo("Resource 'dup' already exists."));
+
+        api()
+                .contentType("application/json")
+                .queryParam("jobId", "dup")
+                .queryParam("validateOnly", true)
+                .body(BUSYBOX_JOB)
+                .when().post(jobsPath(project))
+                .then()
+                .statusCode(409)
+                .body("error.status", equalTo("ALREADY_EXISTS"))
+                .body("error.message", equalTo("Resource 'dup' already exists."));
     }
 
     @Test
@@ -579,14 +590,31 @@ class CloudRunJobsRestIntegrationTest {
     void unknownExecutionAndTaskAreNotFound() {
         String project = "jobs-it-missing";
         createJob(project, "exists", BUSYBOX_JOB);
+        String executionMissing = "Resource 'nope' of kind 'EXECUTION' in region 'us-central1' in project '"
+                + project + "' does not exist.";
+        String jobMissing = "Resource 'absent' of kind 'JOB' in region 'us-central1' in project '" + project
+                + "' does not exist.";
         api().when().get(jobPath(project, "exists") + "/executions/nope").then().statusCode(404)
-                .body("error.status", equalTo("NOT_FOUND"));
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo(executionMissing));
         api().contentType("application/json").body("{}")
-                .when().post(jobPath(project, "exists") + "/executions/nope:cancel").then().statusCode(404);
-        api().when().delete(jobPath(project, "exists") + "/executions/nope").then().statusCode(404);
-        api().when().get(jobPath(project, "exists") + "/executions/nope/tasks/nope-task0").then().statusCode(404);
+                .when().post(jobPath(project, "exists") + "/executions/nope:cancel").then().statusCode(404)
+                .body("error.message", equalTo(executionMissing));
+        api().when().delete(jobPath(project, "exists") + "/executions/nope").then().statusCode(404)
+                .body("error.message", equalTo(executionMissing));
+        api().when().get(jobPath(project, "exists") + "/executions/nope/tasks/nope-task0").then().statusCode(404)
+                .body("error.message", equalTo("Resource 'nope-task0' of kind 'TASK' in region 'us-central1'"
+                        + " in project '" + project + "' does not exist."));
         api().contentType("application/json").body("{}")
-                .when().post(jobPath(project, "absent") + ":run").then().statusCode(404);
+                .when().post(jobPath(project, "absent") + ":run").then().statusCode(404)
+                .body("error.message", equalTo(jobMissing));
+        api().when().get(jobPath(project, "absent")).then().statusCode(404)
+                .body("error.message", equalTo(jobMissing));
+        api().contentType("application/json").body(BUSYBOX_JOB)
+                .when().patch(jobPath(project, "absent")).then().statusCode(404)
+                .body("error.message", equalTo(jobMissing));
+        api().when().delete(jobPath(project, "absent")).then().statusCode(404)
+                .body("error.message", equalTo(jobMissing));
     }
 
     @Test

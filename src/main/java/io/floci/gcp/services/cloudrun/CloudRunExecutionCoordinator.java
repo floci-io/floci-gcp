@@ -487,7 +487,11 @@ final class CloudRunExecutionCoordinator {
                         status(Code.DEADLINE_EXCEEDED_VALUE, "Task " + taskId
                                 + " failed with exit code: 0 and message: " + CloudRunJobTemplates.TIMEOUT_MESSAGE),
                         null);
-                case TaskOutcome.Stopped ignored -> cancelTask(index, now);
+                case TaskOutcome.Stopped ignored -> attemptFailed(index, now,
+                        status(Code.INTERNAL_VALUE, CloudRunJobTemplates.CONTAINER_VANISHED_MESSAGE), null,
+                        status(Code.INTERNAL_VALUE, "Task " + taskId + " failed with message: "
+                                + CloudRunJobTemplates.CONTAINER_VANISHED_MESSAGE),
+                        null);
                 case TaskOutcome.StartFailed startFailed -> {
                     Status status = status(Code.INTERNAL_VALUE, startFailed.message());
                     finishTask(index, TaskState.FAILED, status, null, startFailed.message(), now);
@@ -518,7 +522,7 @@ final class CloudRunExecutionCoordinator {
 
     private void onCancel(CompletableFuture<String> ack) {
         if (deleted) {
-            ack.completeExceptionally(GcpException.notFound("Execution not found: " + name));
+            ack.completeExceptionally(CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_EXECUTION, name));
             return;
         }
         if (terminal) {
@@ -529,7 +533,7 @@ final class CloudRunExecutionCoordinator {
         }
         Instant now = clock.instant();
         execution.setGeneration(execution.getGeneration() + 1).setUpdateTime(ts(now));
-        userCancelled = true;
+        markUserCancelled();
         stopAll(now);
         save();
         String operation = sink.startOperation(snapshot());
@@ -540,7 +544,8 @@ final class CloudRunExecutionCoordinator {
 
     private void onDelete(Delete command) {
         if (deleted) {
-            command.ack().completeExceptionally(GcpException.notFound("Execution not found: " + name));
+            command.ack().completeExceptionally(CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_EXECUTION,
+                    name));
             return;
         }
         Instant now = clock.instant();
@@ -549,7 +554,7 @@ final class CloudRunExecutionCoordinator {
                 .setDeleteTime(ts(now))
                 .setExpireTime(ts(now.plusSeconds(CloudRunJobTemplates.EXPIRE_AFTER_DELETE_SECONDS)));
         if (!terminal) {
-            userCancelled = true;
+            markUserCancelled();
             stopAll(now);
         }
         Execution snapshot = snapshot();
@@ -604,6 +609,16 @@ final class CloudRunExecutionCoordinator {
         stopAll(clock.instant());
         save();
         maybeFinish();
+    }
+
+    /**
+     * A cancel or delete terminates the execution as cancelled unless a stop is already in progress for another
+     * reason (the run deadline): the first termination reason is kept.
+     */
+    private void markUserCancelled() {
+        if (!stopping) {
+            userCancelled = true;
+        }
     }
 
     private void stopAll(Instant now) {

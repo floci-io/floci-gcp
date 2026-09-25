@@ -35,7 +35,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class IamService {
@@ -195,6 +197,76 @@ public class IamService {
         }
     }
 
+    public <T> T withPolicyLock(String resource, Supplier<T> action) {
+        return withPolicyLocks(List.of(resource), action);
+    }
+
+    /** Acquires the policy-lock stripes in canonical order before running {@code action}. */
+    public <T> T withPolicyLocks(List<String> resources, Supplier<T> action) {
+        List<Object> locks = resources.stream()
+                .map(IamService::policyKey)
+                .map(IamService::policyLockIndex)
+                .distinct()
+                .sorted()
+                .map(index -> POLICY_LOCKS[index])
+                .toList();
+        return withPolicyLocks(locks, 0, action);
+    }
+
+    private static <T> T withPolicyLocks(List<Object> locks, int index, Supplier<T> action) {
+        if (index == locks.size()) {
+            return action.get();
+        }
+        synchronized (locks.get(index)) {
+            return withPolicyLocks(locks, index + 1, action);
+        }
+    }
+
+    /**
+     * Creates a resource and establishes its initial policy as one lifecycle
+     * transition. Any policy left by an older holder of the same resource name
+     * is removed before the new resource becomes observable to policy readers.
+     * If the policy durability boundary fails, the resource callback is rolled
+     * back and the previous policy state is restored before the failure escapes.
+     */
+    public <T> T createResourceAndPolicy(String resource, StoredPolicy initialPolicy,
+            Supplier<T> createResource, Consumer<T> rollbackResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            Optional<StoredPolicy> previousPolicy = policyStore.get(key);
+            T created = createResource.get();
+            try {
+                policyStore.delete(key);
+                if (initialPolicy != null) {
+                    setPolicy(resource, initialPolicy);
+                }
+                policyStore.checkpoint();
+                return created;
+            } catch (RuntimeException | Error failure) {
+                rollbackFailedCreation(key, previousPolicy, created, rollbackResource, failure);
+                throw failure;
+            }
+        }
+    }
+
+    private <T> void rollbackFailedCreation(String key, Optional<StoredPolicy> previousPolicy,
+            T created, Consumer<T> rollbackResource, Throwable failure) {
+        try {
+            rollbackResource.accept(created);
+        } catch (RuntimeException | Error rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+        }
+        try {
+            if (previousPolicy.isPresent()) {
+                policyStore.put(key, previousPolicy.get());
+            } else {
+                policyStore.delete(key);
+            }
+        } catch (RuntimeException | Error policyRollbackFailure) {
+            failure.addSuppressed(policyRollbackFailure);
+        }
+    }
+
     public void deletePolicy(String resource) {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
@@ -217,6 +289,19 @@ public class IamService {
             deleteResource.run();
             policyStore.delete(key);
             policyStore.flush();
+        }
+    }
+
+    /** Deletes the policy only when the owning service actually deletes the resource. */
+    public boolean deleteResourceAndPolicyIf(String resource, BooleanSupplier deleteResource) {
+        String key = policyKey(resource);
+        synchronized (policyLock(key)) {
+            if (!deleteResource.getAsBoolean()) {
+                return false;
+            }
+            policyStore.delete(key);
+            policyStore.flush();
+            return true;
         }
     }
 
@@ -282,7 +367,11 @@ public class IamService {
     }
 
     private static Object policyLock(String key) {
-        return POLICY_LOCKS[Math.floorMod(key.hashCode(), POLICY_LOCKS.length)];
+        return POLICY_LOCKS[policyLockIndex(key)];
+    }
+
+    private static int policyLockIndex(String key) {
+        return Math.floorMod(key.hashCode(), POLICY_LOCKS.length);
     }
 
     private static StoredPolicy emptyPolicy() {

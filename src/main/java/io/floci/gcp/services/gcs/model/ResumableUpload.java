@@ -13,8 +13,11 @@ import java.util.Map;
  * time the session was created or advanced by a chunk. It exists so abandoned sessions can be
  * evicted instead of holding their buffered bytes for the lifetime of the process; nothing on
  * the wire derives from it.
+ *
+ * <p>{@code overwriteAuthorized} is the capability established when the session is opened. It
+ * avoids retaining a bearer token while allowing the session URI to authorize later chunks.
  */
 public record ResumableUpload(String bucket, String objectName, String contentType,
         Map<String, String> customerEncryption, Map<String, String> metadata,
         GcsObjectMeta systemMetadata, GcsObjectPreconditions preconditions,
-        byte[] data, Long totalSize, long lastTouchedMillis) {}
+        byte[] data, Long totalSize, long lastTouchedMillis, boolean overwriteAuthorized) {}

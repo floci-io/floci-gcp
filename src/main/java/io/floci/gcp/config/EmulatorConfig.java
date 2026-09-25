@@ -311,6 +311,8 @@ public interface EmulatorConfig {
 
         @WithDefault("disabled")
         IamAuthorizationMode authorizationMode();
+
+        Optional<String> bootstrapAdminMember();
     }
 
     enum IamAuthorizationMode {

@@ -5,12 +5,11 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
-import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
-import io.floci.gcp.services.gcs.model.ResumableUpload;
+import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -36,14 +35,16 @@ public class GcsUploadController {
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
 	private final GcsAuthorizationService authorizationService;
+    private final GcsIamAuthorizationService iamAuthorizationService;
 
     @Inject
 	public GcsUploadController(GcsService service, EmulatorConfig config, ObjectMapper objectMapper,
-			GcsAuthorizationService authorizationService) {
+            GcsAuthorizationService authorizationService, GcsIamAuthorizationService iamAuthorizationService) {
         this.service = service;
         this.config = config;
         this.objectMapper = objectMapper;
 		this.authorizationService = authorizationService;
+        this.iamAuthorizationService = iamAuthorizationService;
     }
 
     @POST
@@ -91,25 +92,6 @@ public class GcsUploadController {
     }
 
     private Response resumableChunk(String uploadId, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
-        ResumableUpload upload = service.findResumableUpload(uploadId);
-        String bucket;
-        String objectName;
-        if (upload != null) {
-            bucket = upload.bucket();
-            objectName = upload.objectName();
-        } else {
-            // The active session is dropped only after the completed one is recorded, so
-            // reading the completed map after this miss cannot land in a gap.
-            CompletedResumableUpload completed = service.completedResumableUpload(uploadId);
-            if (completed == null) {
-                throw GcpException.notFound("Resumable upload not found: " + uploadId);
-            }
-            bucket = completed.bucket();
-            objectName = completed.objectName();
-        }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
-
         String contentRange = headers.getHeaderString("Content-Range");
         GcsContentRange range = contentRange != null && !contentRange.isBlank()
                 ? parseContentRange(contentRange, body.length)
@@ -263,16 +245,21 @@ public class GcsUploadController {
         if (objectContentType == null) {
             objectContentType = extractPartHeader(rawParts[1], "content-type");
         }
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, objectName);
-        var userMetadata = extractUserMetadata(metadata);
+        Map<String, String> userMetadata = extractUserMetadata(metadata);
         // The metadata part wins over the query string when both carry a field.
         GcsObjectMeta system = mergeSystemMetadata(systemMetadata, metadata);
         byte[] dataBytes = extractPartBody(rawParts[1]).getBytes(ISO);
-        GcsObjectMeta meta = service.putObject(bucket, objectName, objectContentType, dataBytes,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, system, preconditions,
-                requestBaseUrl(headers, uriInfo));
-        return Response.ok(meta).build();
+        String resolvedObjectName = objectName;
+        String resolvedObjectContentType = objectContentType;
+        return iamAuthorizationService.authorizeObjectCreate(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, resolvedObjectName,
+                requireOverwritePermission -> {
+                    GcsObjectMeta meta = service.putObject(
+                            bucket, resolvedObjectName, resolvedObjectContentType, dataBytes,
+                            GcsCustomerEncryption.fromHeaders(headers), userMetadata, system, preconditions,
+                            requestBaseUrl(headers, uriInfo), requireOverwritePermission);
+                    return Response.ok(meta).build();
+                });
     }
 
     private Response handleStartResumable(String bucket, String nameParam, HttpHeaders headers, UriInfo uriInfo, byte[] body,
@@ -310,25 +297,33 @@ public class GcsUploadController {
             contentType = "application/octet-stream";
         }
 
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
-        String uploadId = service.startResumableUpload(bucket, name, contentType,
-                GcsCustomerEncryption.fromHeaders(headers), userMetadata, systemMetadata, preconditions);
-        String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
-                + "/o?uploadType=resumable&upload_id=" + uploadId;
-
-        return Response.ok().header("Location", location).build();
+        String resolvedName = name;
+        String resolvedContentType = contentType;
+        Map<String, String> resolvedUserMetadata = userMetadata;
+        GcsObjectMeta resolvedSystemMetadata = systemMetadata;
+        return iamAuthorizationService.authorizeObjectCreate(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, resolvedName,
+                requireOverwritePermission -> {
+                    String uploadId = service.startResumableUpload(bucket, resolvedName, resolvedContentType,
+                            GcsCustomerEncryption.fromHeaders(headers), resolvedUserMetadata,
+                            resolvedSystemMetadata, preconditions, requireOverwritePermission);
+                    String location = requestBaseUrl(headers, uriInfo) + "/upload/storage/v1/b/" + bucket
+                            + "/o?uploadType=resumable&upload_id=" + uploadId;
+                    return Response.ok().header("Location", location).build();
+                });
     }
 
     private Response handleMedia(String bucket, String name, HttpHeaders headers, UriInfo uriInfo, byte[] body,
             GcsObjectPreconditions preconditions, GcsObjectMeta systemMetadata) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
-        authorizationService.requireObjectWrite(
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name);
-        GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
-                GcsCustomerEncryption.fromHeaders(headers), null, systemMetadata, preconditions,
-                requestBaseUrl(headers, uriInfo));
-        return Response.ok(meta).build();
+        return iamAuthorizationService.authorizeObjectCreate(
+                headers.getHeaderString(HttpHeaders.AUTHORIZATION), bucket, name,
+                requireOverwritePermission -> {
+                    GcsObjectMeta meta = service.putObject(bucket, name, contentType, body,
+                            GcsCustomerEncryption.fromHeaders(headers), null, systemMetadata, preconditions,
+                            requestBaseUrl(headers, uriInfo), requireOverwritePermission);
+                    return Response.ok(meta).build();
+                });
     }
 
     private static String mediaType(String contentType) {

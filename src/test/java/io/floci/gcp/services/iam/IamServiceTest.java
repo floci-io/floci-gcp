@@ -1,15 +1,28 @@
 package io.floci.gcp.services.iam;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -215,5 +228,137 @@ class IamServiceTest {
 
         assertDoesNotThrow(() -> service.getPolicy("projects/p1/gadgets/g1"));
         assertDoesNotThrow(() -> service.getPolicy("projects/p1/widgets/w1/sub/s1"));
+    }
+
+    @Test
+    void deleteSerializesPolicyCleanupAgainstAConcurrentWriter() throws Exception {
+        String resource = "buckets/concurrent-bucket";
+        AtomicBoolean exists = new AtomicBoolean(true);
+        service.registerPolicyResourceResolver("buckets/*", ignored -> {
+            if (!exists.get()) {
+                throw GcpException.notFound("Bucket not found");
+            }
+        });
+        StoredPolicy initial = new StoredPolicy();
+        initial.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
+        service.setPolicy(resource, initial);
+
+        CountDownLatch resourceDeleted = new CountDownLatch(1);
+        CountDownLatch allowDeleteToFinish = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> deletion = executor.submit(() -> service.deleteResourceAndPolicy(resource, () -> {
+                exists.set(false);
+                resourceDeleted.countDown();
+                await(allowDeleteToFinish);
+            }));
+            assertTrue(resourceDeleted.await(5, TimeUnit.SECONDS));
+
+            StoredPolicy concurrent = new StoredPolicy();
+            concurrent.setBindings(List.of(Map.of(
+                    "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
+            Future<?> writer = executor.submit(() -> service.setPolicy(resource, concurrent));
+            assertThrows(TimeoutException.class, () -> writer.get(100, TimeUnit.MILLISECONDS));
+
+            allowDeleteToFinish.countDown();
+            deletion.get(5, TimeUnit.SECONDS);
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> writer.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(GcpException.class, error.getCause());
+            assertEquals(404, ((GcpException) error.getCause()).getHttpStatus());
+        } finally {
+            allowDeleteToFinish.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void createClearsPolicyLeftByAnOlderResourceWithTheSameName() {
+        String resource = "buckets/recreated-bucket";
+        StoredPolicy stale = new StoredPolicy();
+        stale.setBindings(List.of(Map.of("role", "roles/storage.admin", "members", List.of("allUsers"))));
+        service.setPolicy(resource, stale);
+
+        String created = service.createResourceAndPolicy(
+                resource, null, () -> "created", ignored -> { });
+
+        assertEquals("created", created);
+        assertTrue(service.getPolicy(resource).getBindings().isEmpty());
+    }
+
+    @Test
+    void createCheckpointsInitialPolicyInHybridStorage(@TempDir Path tempDir) {
+        Path policyPath = tempDir.resolve("iam-policies.json");
+        TypeReference<Map<String, StoredPolicy>> policyType = new TypeReference<>() {};
+        HybridStorage<String, StoredPolicy> policyStore = new HybridStorage<>(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, StoredPolicy> restoredStore = new HybridStorage<>(
+                policyPath, policyType, TimeUnit.HOURS.toMillis(1));
+        try {
+            IamService durableService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);
+            StoredPolicy initialPolicy = new StoredPolicy();
+            initialPolicy.setBindings(List.of(Map.of(
+                    "role", "roles/storage.admin",
+                    "members", List.of("serviceAccount:creator@example.test"))));
+
+            durableService.createResourceAndPolicy(
+                    "buckets/durable-bucket", initialPolicy, () -> "created", ignored -> { });
+
+            restoredStore.load();
+            IamService restoredService = new IamService(
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), restoredStore);
+            assertEquals("roles/storage.admin",
+                    restoredService.getPolicy("buckets/durable-bucket").getBindings().get(0).get("role"));
+        } finally {
+            restoredStore.shutdown();
+            policyStore.shutdown();
+        }
+    }
+
+    @Test
+    void failedCreateCheckpointRollsBackResourceAndRestoresPreviousPolicy() {
+        String resource = "buckets/checkpoint-failure";
+        FailingCheckpointStorage policyStore = new FailingCheckpointStorage();
+        IamService durableService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), policyStore);
+        StoredPolicy previousPolicy = new StoredPolicy();
+        previousPolicy.setBindings(List.of(Map.of(
+                "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
+        durableService.setPolicy(resource, previousPolicy);
+        StoredPolicy initialPolicy = new StoredPolicy();
+        initialPolicy.setBindings(List.of(Map.of(
+                "role", "roles/storage.admin", "members", List.of("serviceAccount:creator@example.test"))));
+        AtomicBoolean resourceExists = new AtomicBoolean();
+
+        assertThrows(StorageException.class, () -> durableService.createResourceAndPolicy(
+                resource,
+                initialPolicy,
+                () -> {
+                    resourceExists.set(true);
+                    return "created";
+                },
+                ignored -> resourceExists.set(false)));
+
+        assertFalse(resourceExists.get());
+        assertEquals("roles/storage.objectViewer",
+                durableService.getPolicy(resource).getBindings().get(0).get("role"));
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while awaiting test latch", e);
+        }
+    }
+
+    private static final class FailingCheckpointStorage extends InMemoryStorage<String, StoredPolicy> {
+        @Override
+        public void checkpoint() {
+            throw new StorageException("checkpoint failed", new IllegalStateException("test failure"));
+        }
     }
 }

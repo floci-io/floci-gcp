@@ -37,6 +37,7 @@ class CloudKmsServiceTest {
         service = new CloudKmsService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>());
     }
 

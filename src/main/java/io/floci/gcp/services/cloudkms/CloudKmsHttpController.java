@@ -11,6 +11,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKey;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKeyVersion;
+import io.floci.gcp.services.cloudkms.model.StoredImportJob;
 import io.floci.gcp.services.cloudkms.model.StoredKeyRing;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -110,9 +111,10 @@ public class CloudKmsHttpController {
             @QueryParam("skipInitialVersionCreation") @DefaultValue("false") boolean skip, Map<String, Object> body) {
         try {
             String purpose = body != null ? (String) body.get("purpose") : null;
+            boolean importOnly = body != null && Boolean.TRUE.equals(body.get("importOnly"));
             StoredCryptoKey stored = service.createCryptoKey(
                     keyRingName(project, location, keyRing), cryptoKeyId, purpose, versionTemplateAlgorithm(body), skip,
-                    cryptoKeyFields(body));
+                    cryptoKeyFields(body), importOnly);
             return Response.ok(toCryptoKeyJson(stored)).build();
         } catch (GcpException e) {
             return error(e);
@@ -187,6 +189,28 @@ public class CloudKmsHttpController {
         try {
             StoredCryptoKeyVersion v = service.createCryptoKeyVersion(
                     cryptoKeyName(project, location, keyRing, cryptoKey));
+            return Response.ok(toVersionJson(v)).build();
+        } catch (GcpException e) {
+            return error(e);
+        }
+    }
+
+    @POST
+    @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions:import")
+    public Response importCryptoKeyVersion(@PathParam("project") String project, @PathParam("location") String location,
+            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, Map<String, Object> body) {
+        try {
+            if (body != null && body.get("cryptoKeyVersion") instanceof String existing && !existing.isEmpty()) {
+                throw GcpException.unimplemented("Re-importing into an existing CryptoKeyVersion is not supported");
+            }
+            String algorithm = body != null ? (String) body.get("algorithm") : null;
+            String importJob = body != null ? (String) body.get("importJob") : null;
+            byte[] wrappedKey = decodeField(body, "wrappedKey");
+            if (wrappedKey.length == 0) {
+                wrappedKey = decodeField(body, "rsaAesWrappedKey");
+            }
+            StoredCryptoKeyVersion v = service.importCryptoKeyVersion(
+                    cryptoKeyName(project, location, keyRing, cryptoKey), algorithm, importJob, wrappedKey);
             return Response.ok(toVersionJson(v)).build();
         } catch (GcpException e) {
             return error(e);
@@ -279,6 +303,49 @@ public class CloudKmsHttpController {
             response.put("pemCrc32c", String.valueOf(crc32c(pem.getBytes(StandardCharsets.UTF_8))));
             response.put("protectionLevel", "SOFTWARE");
             return Response.ok(response).build();
+        } catch (GcpException e) {
+            return error(e);
+        }
+    }
+
+    // ── ImportJobs ───────────────────────────────────────────────────────────
+
+    @POST
+    @Path("/{location}/keyRings/{keyRing}/importJobs")
+    public Response createImportJob(@PathParam("project") String project, @PathParam("location") String location,
+            @PathParam("keyRing") String keyRing, @QueryParam("importJobId") String importJobId,
+            Map<String, Object> body) {
+        try {
+            String importMethod = body != null ? (String) body.get("importMethod") : null;
+            String protectionLevel = body != null ? (String) body.get("protectionLevel") : null;
+            StoredImportJob stored = service.createImportJob(
+                    keyRingName(project, location, keyRing), importJobId, importMethod, protectionLevel);
+            return Response.ok(toImportJobJson(stored)).build();
+        } catch (GcpException e) {
+            return error(e);
+        }
+    }
+
+    @GET
+    @Path("/{location}/keyRings/{keyRing}/importJobs")
+    public Response listImportJobs(@PathParam("project") String project, @PathParam("location") String location,
+            @PathParam("keyRing") String keyRing) {
+        try {
+            List<Map<String, Object>> list = service.listImportJobs(keyRingName(project, location, keyRing)).stream()
+                    .map(CloudKmsHttpController::toImportJobJson).collect(Collectors.toList());
+            return Response.ok(Map.of("importJobs", list)).build();
+        } catch (GcpException e) {
+            return error(e);
+        }
+    }
+
+    @GET
+    @Path("/{location}/keyRings/{keyRing}/importJobs/{importJob}")
+    public Response getImportJob(@PathParam("project") String project, @PathParam("location") String location,
+            @PathParam("keyRing") String keyRing, @PathParam("importJob") String importJob) {
+        try {
+            return Response.ok(toImportJobJson(service.getImportJob(
+                    keyRingName(project, location, keyRing) + "/importJobs/" + importJob))).build();
         } catch (GcpException e) {
             return error(e);
         }
@@ -476,6 +543,9 @@ public class CloudKmsHttpController {
         versionTemplate.put("protectionLevel", "SOFTWARE");
         versionTemplate.put("algorithm", stored.getAlgorithm());
         json.put("versionTemplate", versionTemplate);
+        if (stored.isImportOnly()) {
+            json.put("importOnly", true);
+        }
         if (stored.getLabels() != null && !stored.getLabels().isEmpty()) {
             json.put("labels", stored.getLabels());
         }
@@ -506,6 +576,28 @@ public class CloudKmsHttpController {
         if (v.getDestroyTime() != null) {
             json.put("destroyTime", v.getDestroyTime());
         }
+        if (v.getImportJob() != null) {
+            json.put("importJob", v.getImportJob());
+        }
+        if (v.getImportTime() != null) {
+            json.put("importTime", v.getImportTime());
+        }
+        if (v.getImportFailureReason() != null) {
+            json.put("importFailureReason", v.getImportFailureReason());
+        }
+        return json;
+    }
+
+    private static Map<String, Object> toImportJobJson(StoredImportJob job) {
+        Map<String, Object> json = new LinkedHashMap<>();
+        json.put("name", job.getName());
+        json.put("importMethod", job.getImportMethod());
+        json.put("protectionLevel", job.getProtectionLevel());
+        json.put("createTime", job.getCreateTime());
+        json.put("generateTime", job.getGenerateTime());
+        json.put("expireTime", job.getExpireTime());
+        json.put("state", CloudKmsService.importJobState(job));
+        json.put("publicKey", Map.of("pem", KmsCrypto.toPem(job.getPublicKeyBase64())));
         return json;
     }
 

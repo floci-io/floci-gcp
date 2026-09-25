@@ -183,12 +183,42 @@ Requests may include `*_crc32c` checksums (e.g. `plaintext_crc32c`); when presen
 verifies them and sets the corresponding `verified_*_crc32c` response flag (a mismatch yields
 `INVALID_ARGUMENT`). Responses always populate output checksums such as `ciphertext_crc32c`.
 
+## Importing Keys
+
+Bring-your-own-key imports follow the
+[GCP import flow](https://cloud.google.com/kms/docs/importing-a-key): create an `ImportJob`, wrap
+the key material with its public key, and import it into a `CryptoKey`, usually one created with
+`import_only` and `skip_initial_version_creation`.
+
+| Import method | Wrapped key format |
+|---|---|
+| `RSA_OAEP_3072_SHA1_AES_256`, `RSA_OAEP_4096_SHA1_AES_256` | RSA-OAEP (SHA-1, MGF1 SHA-1) of an ephemeral AES-256 key, followed by the target key wrapped with AES-KWP (RFC 5649) |
+| `RSA_OAEP_3072_SHA256_AES_256`, `RSA_OAEP_4096_SHA256_AES_256` | Same, with SHA-256 for OAEP and MGF1 |
+| `RSA_OAEP_3072_SHA256`, `RSA_OAEP_4096_SHA256` | The target key encrypted directly with RSA-OAEP (SHA-256) |
+
+Target key material is the raw 32 bytes for `GOOGLE_SYMMETRIC_ENCRYPTION` and a PKCS#8 DER
+private key for the asymmetric algorithms listed above. The public key of an imported asymmetric
+version is derived from the private key.
+
+Behavior to be aware of:
+
+- Import jobs are `ACTIVE` as soon as they are created (no `PENDING_GENERATION` phase) and
+  `EXPIRED` three days later; no attestation is returned for `HSM` jobs.
+- Imports complete synchronously. Wrapped material that cannot be unwrapped, or that does not fit
+  the requested algorithm, produces a version in `IMPORT_FAILED` with `import_failure_reason` set
+  rather than an error.
+- The first successfully imported version of an `ENCRYPT_DECRYPT` key with no primary becomes
+  the primary.
+- `CreateCryptoKeyVersion` on an `import_only` key fails with `FAILED_PRECONDITION`.
+- Re-importing into an existing version (`crypto_key_version`) is not supported.
+
 ## Supported Operations
 
 - `CreateKeyRing`, `GetKeyRing`, `ListKeyRings`
 - `CreateCryptoKey`, `GetCryptoKey`, `ListCryptoKeys`, `UpdateCryptoKey`, `UpdateCryptoKeyPrimaryVersion`
 - `CreateCryptoKeyVersion`, `GetCryptoKeyVersion`, `ListCryptoKeyVersions`, `UpdateCryptoKeyVersion`
 - `DestroyCryptoKeyVersion`, `RestoreCryptoKeyVersion`
+- `CreateImportJob`, `GetImportJob`, `ListImportJobs`, `ImportCryptoKeyVersion`
 - `Encrypt`, `Decrypt`
 - `GetPublicKey`, `AsymmetricSign`, `AsymmetricDecrypt`
 - `MacSign`, `MacVerify`
@@ -196,5 +226,5 @@ verifies them and sets the corresponding `verified_*_crc32c` response flag (a mi
 
 ## Not Yet Supported
 
-`RawEncrypt`/`RawDecrypt`, import jobs, RSA-PSS signing, post-quantum
+`RawEncrypt`/`RawDecrypt`, re-importing key versions, RSA-PSS signing, post-quantum
 algorithms, HSM/EXTERNAL protection levels, and IAM policy storage.

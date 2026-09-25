@@ -13,6 +13,7 @@ public class StoredCryptoKey {
     private String createTime;
     private Integer primaryVersion;
     private int nextVersionNumber;
+    private boolean importOnly;
     private Map<String, String> labels;
     private String rotationPeriod;
     private String nextRotationTime;
@@ -45,6 +46,9 @@ public class StoredCryptoKey {
 
     public int getNextVersionNumber() { return nextVersionNumber; }
     public void setNextVersionNumber(int nextVersionNumber) { this.nextVersionNumber = nextVersionNumber; }
+
+    public boolean isImportOnly() { return importOnly; }
+    public void setImportOnly(boolean importOnly) { this.importOnly = importOnly; }
 
     public Map<String, String> getLabels() { return labels; }
     public void setLabels(Map<String, String> labels) { this.labels = labels; }

@@ -16,13 +16,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
@@ -254,6 +259,101 @@ class KmsTest {
                 CryptoKey.newBuilder().setPurpose(CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT).build());
         assertThat(plain.getDestroyScheduledDuration().getSeconds()).isEqualTo(2_592_000);
         assertThat(plain.hasRotationPeriod()).isFalse();
+    }
+
+    @Test
+    @Order(11)
+    void importJobWrapsSymmetricKeyForImportOnlyKey() throws Exception {
+        ImportJob job = client.createImportJob(keyRing(), TestFixtures.uniqueName("job"),
+                ImportJob.newBuilder()
+                        .setImportMethod(ImportJob.ImportMethod.RSA_OAEP_3072_SHA1_AES_256)
+                        .setProtectionLevel(ProtectionLevel.SOFTWARE)
+                        .build());
+        assertThat(job.getState()).isEqualTo(ImportJob.ImportJobState.ACTIVE);
+        assertThat(client.getImportJob(job.getName()).getPublicKey().getPem()).startsWith("-----BEGIN PUBLIC KEY-----");
+
+        CryptoKey key = client.createCryptoKey(CreateCryptoKeyRequest.newBuilder()
+                .setParent(keyRing().toString())
+                .setCryptoKeyId(TestFixtures.uniqueName("imported-sym"))
+                .setCryptoKey(CryptoKey.newBuilder()
+                        .setPurpose(CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT)
+                        .setImportOnly(true))
+                .setSkipInitialVersionCreation(true)
+                .build());
+        assertThat(key.getImportOnly()).isTrue();
+
+        byte[] aesKey = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        CryptoKeyVersion version = client.importCryptoKeyVersion(ImportCryptoKeyVersionRequest.newBuilder()
+                .setParent(key.getName())
+                .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.GOOGLE_SYMMETRIC_ENCRYPTION)
+                .setImportJob(job.getName())
+                .setWrappedKey(ByteString.copyFrom(rsaAesWrap(job, aesKey)))
+                .build());
+        assertThat(version.getState()).isEqualTo(CryptoKeyVersion.CryptoKeyVersionState.ENABLED);
+        assertThat(version.getImportJob()).isEqualTo(job.getName());
+
+        CryptoKeyName name = CryptoKeyName.parse(key.getName());
+        ByteString plaintext = ByteString.copyFromUtf8("imported-key-payload");
+        DecryptResponse dec = client.decrypt(name, client.encrypt(name, plaintext).getCiphertext());
+        assertThat(dec.getPlaintext()).isEqualTo(plaintext);
+    }
+
+    @Test
+    @Order(12)
+    void importedEcKeySignsForOriginalPublicKey() throws Exception {
+        ImportJob job = client.createImportJob(keyRing(), TestFixtures.uniqueName("job"),
+                ImportJob.newBuilder()
+                        .setImportMethod(ImportJob.ImportMethod.RSA_OAEP_4096_SHA256_AES_256)
+                        .setProtectionLevel(ProtectionLevel.SOFTWARE)
+                        .build());
+        CryptoKey key = client.createCryptoKey(CreateCryptoKeyRequest.newBuilder()
+                .setParent(keyRing().toString())
+                .setCryptoKeyId(TestFixtures.uniqueName("imported-ec"))
+                .setCryptoKey(CryptoKey.newBuilder()
+                        .setPurpose(CryptoKey.CryptoKeyPurpose.ASYMMETRIC_SIGN)
+                        .setImportOnly(true)
+                        .setVersionTemplate(CryptoKeyVersionTemplate.newBuilder()
+                                .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.EC_SIGN_P256_SHA256)))
+                .setSkipInitialVersionCreation(true)
+                .build());
+
+        KeyPairGenerator gen = KeyPairGenerator.getInstance("EC");
+        gen.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair pair = gen.generateKeyPair();
+        CryptoKeyVersion version = client.importCryptoKeyVersion(ImportCryptoKeyVersionRequest.newBuilder()
+                .setParent(key.getName())
+                .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.EC_SIGN_P256_SHA256)
+                .setImportJob(job.getName())
+                .setWrappedKey(ByteString.copyFrom(rsaAesWrap(job, pair.getPrivate().getEncoded())))
+                .build());
+        assertThat(version.getState()).isEqualTo(CryptoKeyVersion.CryptoKeyVersionState.ENABLED);
+
+        byte[] data = "signed-by-imported-key".getBytes();
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
+        AsymmetricSignResponse signed = client.asymmetricSign(CryptoKeyVersionName.parse(version.getName()),
+                Digest.newBuilder().setSha256(ByteString.copyFrom(digest)).build());
+        Signature verifier = Signature.getInstance("SHA256withECDSA");
+        verifier.initVerify(pair.getPublic());
+        verifier.update(data);
+        assertThat(verifier.verify(signed.getSignature().toByteArray())).isTrue();
+    }
+
+    /** Client-side wrapping for the {@code *_AES_256} import methods, as the GCP import docs describe it. */
+    private static byte[] rsaAesWrap(ImportJob job, byte[] targetKey) throws Exception {
+        boolean sha1 = job.getImportMethod().name().contains("_SHA1_");
+        MGF1ParameterSpec mgf1 = sha1 ? MGF1ParameterSpec.SHA1 : MGF1ParameterSpec.SHA256;
+        byte[] ephemeral = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        rsa.init(Cipher.ENCRYPT_MODE, parsePem(job.getPublicKey().getPem(), "RSA"),
+                new OAEPParameterSpec(sha1 ? "SHA-1" : "SHA-256", "MGF1", mgf1, PSource.PSpecified.DEFAULT));
+        byte[] wrappedEphemeral = rsa.doFinal(ephemeral);
+        Cipher kwp = Cipher.getInstance("AES/KWP/NoPadding");
+        kwp.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(ephemeral, "AES"));
+        byte[] wrappedTarget = kwp.doFinal(targetKey);
+        byte[] out = new byte[wrappedEphemeral.length + wrappedTarget.length];
+        System.arraycopy(wrappedEphemeral, 0, out, 0, wrappedEphemeral.length);
+        System.arraycopy(wrappedTarget, 0, out, wrappedEphemeral.length, wrappedTarget.length);
+        return out;
     }
 
     private static PublicKey parsePem(String pem, String algorithm) throws Exception {

@@ -12,6 +12,9 @@ public class StoredCryptoKeyVersion {
     private String createTime;
     private String generateTime;
     private String destroyTime;
+    private String importJob;
+    private String importTime;
+    private String importFailureReason;
 
     /** Base64 of the raw AES key (symmetric) or PKCS8 private key (asymmetric). */
     private String keyMaterialBase64;
@@ -50,6 +53,15 @@ public class StoredCryptoKeyVersion {
 
     public String getDestroyTime() { return destroyTime; }
     public void setDestroyTime(String destroyTime) { this.destroyTime = destroyTime; }
+
+    public String getImportJob() { return importJob; }
+    public void setImportJob(String importJob) { this.importJob = importJob; }
+
+    public String getImportTime() { return importTime; }
+    public void setImportTime(String importTime) { this.importTime = importTime; }
+
+    public String getImportFailureReason() { return importFailureReason; }
+    public void setImportFailureReason(String importFailureReason) { this.importFailureReason = importFailureReason; }
 
     public String getKeyMaterialBase64() { return keyMaterialBase64; }
     public void setKeyMaterialBase64(String keyMaterialBase64) { this.keyMaterialBase64 = keyMaterialBase64; }

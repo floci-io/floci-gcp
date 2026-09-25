@@ -1,6 +1,10 @@
 package io.floci.gcp.services.cloudkms;
 
 import io.floci.gcp.core.common.GcpException;
+import org.bouncycastle.asn1.ASN1BitString;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x9.ECNamedCurveTable;
+import org.bouncycastle.asn1.x9.X9ECParameters;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -10,16 +14,25 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigInteger;
 import java.security.KeyFactory;
 import java.security.KeyPair;
+import java.security.GeneralSecurityException;
 import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.PublicKey;
 import java.security.Signature;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECPoint;
+import java.security.spec.ECPublicKeySpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.RSAPublicKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
@@ -36,6 +49,9 @@ import java.util.Set;
 final class KmsCrypto {
 
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int AES_256_KEY_BYTES = 32;
+    private static final String UNWRAP_FAILED = "wrapped key could not be unwrapped with the import job's key";
+    private static final X9ECParameters P256 = ECNamedCurveTable.getByName("secp256r1");
     private static final int GCM_IV_BYTES = 12;
     private static final int GCM_TAG_BITS = 128;
 
@@ -99,6 +115,135 @@ final class KmsCrypto {
         return new GeneratedKey(
                 Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()),
                 Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
+    }
+
+    // ── Key import ───────────────────────────────────────────────────────────
+
+    /**
+     * Wrapping parameters of each {@code ImportJob.ImportMethod}: the RSA modulus size, the OAEP
+     * digest (also used for MGF1), and whether the target key is AES-KWP wrapped under an ephemeral
+     * AES-256 key (the {@code *_AES_256} methods) or RSA-OAEP encrypted directly.
+     */
+    record ImportMethod(int rsaBits, String oaepDigest, MGF1ParameterSpec mgf1, boolean aesKeyWrap) {
+
+        static ImportMethod of(String importMethod) {
+            return switch (importMethod) {
+                case "RSA_OAEP_3072_SHA1_AES_256" -> new ImportMethod(3072, "SHA-1", MGF1ParameterSpec.SHA1, true);
+                case "RSA_OAEP_4096_SHA1_AES_256" -> new ImportMethod(4096, "SHA-1", MGF1ParameterSpec.SHA1, true);
+                case "RSA_OAEP_3072_SHA256_AES_256" -> new ImportMethod(3072, "SHA-256", MGF1ParameterSpec.SHA256, true);
+                case "RSA_OAEP_4096_SHA256_AES_256" -> new ImportMethod(4096, "SHA-256", MGF1ParameterSpec.SHA256, true);
+                case "RSA_OAEP_3072_SHA256" -> new ImportMethod(3072, "SHA-256", MGF1ParameterSpec.SHA256, false);
+                case "RSA_OAEP_4096_SHA256" -> new ImportMethod(4096, "SHA-256", MGF1ParameterSpec.SHA256, false);
+                default -> throw GcpException.invalidArgument("Unsupported import method: " + importMethod);
+            };
+        }
+    }
+
+    static GeneratedKey generateWrappingKey(String importMethod) {
+        ImportMethod method = ImportMethod.of(importMethod);
+        try {
+            KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
+            gen.initialize(method.rsaBits());
+            return encodePair(gen.generateKeyPair());
+        } catch (Exception e) {
+            throw GcpException.internal("Wrapping key generation failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Recovers the target key material from {@code wrappedKey}. For the {@code *_AES_256} methods
+     * that is {@code RSA-OAEP(ephemeral AES-256 key) || AES-KWP(ephemeral key, target key)}
+     * (RFC 5649); for the others the target key is RSA-OAEP encrypted directly.
+     *
+     * @throws IllegalArgumentException with the same message for every failure
+     */
+    static byte[] unwrapImportedKey(String importMethod, String wrappingPrivateKeyBase64, byte[] wrappedKey) {
+        ImportMethod method = ImportMethod.of(importMethod);
+        int rsaBytes = method.rsaBits() / 8;
+        try {
+            PrivateKey wrappingKey = KeyFactory.getInstance("RSA")
+                    .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(wrappingPrivateKeyBase64)));
+            Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPPadding");
+            rsa.init(Cipher.DECRYPT_MODE, wrappingKey, new OAEPParameterSpec(
+                    method.oaepDigest(), "MGF1", method.mgf1(), PSource.PSpecified.DEFAULT));
+            if (!method.aesKeyWrap()) {
+                return rsa.doFinal(wrappedKey);
+            }
+            if (wrappedKey.length <= rsaBytes) {
+                throw new GeneralSecurityException("wrapped key too short");
+            }
+            byte[] aesKey = rsa.doFinal(Arrays.copyOfRange(wrappedKey, 0, rsaBytes));
+            if (aesKey.length != AES_256_KEY_BYTES) {
+                throw new GeneralSecurityException("ephemeral key is not AES-256");
+            }
+            Cipher kwp = Cipher.getInstance("AES/KWP/NoPadding");
+            kwp.init(Cipher.DECRYPT_MODE, new SecretKeySpec(aesKey, "AES"));
+            return kwp.doFinal(Arrays.copyOfRange(wrappedKey, rsaBytes, wrappedKey.length));
+        } catch (Exception e) {
+            // One reason for every failure: telling a bad RSA-OAEP layer apart from a bad AES-KWP
+            // layer would be a decryption oracle on the job's wrapping key.
+            throw new IllegalArgumentException(UNWRAP_FAILED, e);
+        }
+    }
+
+    /**
+     * Validates imported key material against {@code algorithm} and returns it in the stored form:
+     * raw AES bytes for symmetric keys, PKCS8 private plus derived X.509 public for asymmetric.
+     *
+     * @throws IllegalArgumentException when the material does not fit the algorithm
+     */
+    static GeneratedKey importKey(String algorithm, byte[] material) {
+        try {
+            return switch (algorithm) {
+                case "GOOGLE_SYMMETRIC_ENCRYPTION" -> {
+                    if (material.length != AES_256_KEY_BYTES) {
+                        throw new IllegalArgumentException(
+                                "expected a 32-byte AES-256 key, got " + material.length + " bytes");
+                    }
+                    yield new GeneratedKey(Base64.getEncoder().encodeToString(material), null);
+                }
+                case "RSA_SIGN_PKCS1_2048_SHA256", "RSA_DECRYPT_OAEP_2048_SHA256" -> {
+                    KeyFactory factory = KeyFactory.getInstance("RSA");
+                    if (!(factory.generatePrivate(new PKCS8EncodedKeySpec(material)) instanceof RSAPrivateCrtKey key)) {
+                        throw new IllegalArgumentException("expected a PKCS#8 RSA private key with CRT parameters");
+                    }
+                    if (key.getModulus().bitLength() != 2048) {
+                        throw new IllegalArgumentException(
+                                "expected a 2048-bit RSA key, got " + key.getModulus().bitLength() + " bits");
+                    }
+                    PublicKey publicKey = factory.generatePublic(
+                            new RSAPublicKeySpec(key.getModulus(), key.getPublicExponent()));
+                    yield new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()),
+                            Base64.getEncoder().encodeToString(publicKey.getEncoded()));
+                }
+                case "EC_SIGN_P256_SHA256" -> {
+                    KeyFactory factory = KeyFactory.getInstance("EC");
+                    if (!(factory.generatePrivate(new PKCS8EncodedKeySpec(material)) instanceof ECPrivateKey key)
+                            || !P256.getN().equals(key.getParams().getOrder())) {
+                        throw new IllegalArgumentException("expected a PKCS#8 EC private key on curve P-256");
+                    }
+                    BigInteger d = key.getS();
+                    // BouncyCastle ECPoint and ECPrivateKey are qualified: they clash with the imported
+                    // java.security.spec.ECPoint and java.security.interfaces.ECPrivateKey.
+                    org.bouncycastle.math.ec.ECPoint q = P256.getG().multiply(d).normalize();
+                    ASN1BitString embedded = org.bouncycastle.asn1.sec.ECPrivateKey
+                            .getInstance(PrivateKeyInfo.getInstance(material).parsePrivateKey()).getPublicKey();
+                    if (embedded != null && !P256.getCurve().decodePoint(embedded.getOctets()).equals(q)) {
+                        throw new IllegalArgumentException("embedded public key does not match the private key");
+                    }
+                    PublicKey publicKey = factory.generatePublic(new ECPublicKeySpec(
+                            new ECPoint(q.getAffineXCoord().toBigInteger(), q.getAffineYCoord().toBigInteger()),
+                            key.getParams()));
+                    yield new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()),
+                            Base64.getEncoder().encodeToString(publicKey.getEncoded()));
+                }
+                default -> throw GcpException.invalidArgument("Unsupported algorithm for import: " + algorithm);
+            };
+        } catch (GcpException | IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("key material is not a valid " + algorithm + " key", e);
+        }
     }
 
     // ── Symmetric (AES-256-GCM) ──────────────────────────────────────────────

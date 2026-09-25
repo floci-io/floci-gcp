@@ -6,6 +6,7 @@ import com.google.cloud.kms.v1.AsymmetricSignRequest;
 import com.google.cloud.kms.v1.AsymmetricSignResponse;
 import com.google.cloud.kms.v1.CreateCryptoKeyRequest;
 import com.google.cloud.kms.v1.CreateCryptoKeyVersionRequest;
+import com.google.cloud.kms.v1.CreateImportJobRequest;
 import com.google.cloud.kms.v1.CreateKeyRingRequest;
 import com.google.cloud.kms.v1.CryptoKey;
 import com.google.cloud.kms.v1.CryptoKeyVersion;
@@ -20,14 +21,19 @@ import com.google.cloud.kms.v1.GenerateRandomBytesRequest;
 import com.google.cloud.kms.v1.GenerateRandomBytesResponse;
 import com.google.cloud.kms.v1.GetCryptoKeyRequest;
 import com.google.cloud.kms.v1.GetCryptoKeyVersionRequest;
+import com.google.cloud.kms.v1.GetImportJobRequest;
 import com.google.cloud.kms.v1.GetKeyRingRequest;
 import com.google.cloud.kms.v1.GetPublicKeyRequest;
+import com.google.cloud.kms.v1.ImportCryptoKeyVersionRequest;
+import com.google.cloud.kms.v1.ImportJob;
 import com.google.cloud.kms.v1.KeyManagementServiceGrpc;
 import com.google.cloud.kms.v1.KeyRing;
 import com.google.cloud.kms.v1.ListCryptoKeyVersionsRequest;
 import com.google.cloud.kms.v1.ListCryptoKeyVersionsResponse;
 import com.google.cloud.kms.v1.ListCryptoKeysRequest;
 import com.google.cloud.kms.v1.ListCryptoKeysResponse;
+import com.google.cloud.kms.v1.ListImportJobsRequest;
+import com.google.cloud.kms.v1.ListImportJobsResponse;
 import com.google.cloud.kms.v1.ListKeyRingsRequest;
 import com.google.cloud.kms.v1.ListKeyRingsResponse;
 import com.google.cloud.kms.v1.MacSignRequest;
@@ -49,8 +55,11 @@ import io.floci.gcp.core.common.GcpGrpcController;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKey;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKeyVersion;
+import io.floci.gcp.services.cloudkms.model.StoredImportJob;
 import io.floci.gcp.services.cloudkms.model.StoredKeyRing;
 import io.grpc.stub.StreamObserver;
+import io.vertx.core.Context;
+import io.vertx.core.Vertx;
 import org.jboss.logging.Logger;
 
 import java.security.MessageDigest;
@@ -58,6 +67,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.Set;
 import java.util.zip.CRC32C;
 
@@ -124,7 +134,7 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
             String algorithm = input.getVersionTemplate().getAlgorithm().name();
             StoredCryptoKey stored = service.createCryptoKey(request.getParent(), request.getCryptoKeyId(),
                     input.getPurpose().name(), algorithm, request.getSkipInitialVersionCreation(),
-                    cryptoKeyFields(input));
+                    cryptoKeyFields(input), input.getImportOnly());
             responseObserver.onNext(toProto(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -269,6 +279,64 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
             StreamObserver<CryptoKeyVersion> responseObserver) {
         try {
             responseObserver.onNext(toProto(service.restoreCryptoKeyVersion(request.getName())));
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
+    @Override
+    public void importCryptoKeyVersion(ImportCryptoKeyVersionRequest request,
+            StreamObserver<CryptoKeyVersion> responseObserver) {
+        LOG.infof("importCryptoKeyVersion parent=%s importJob=%s", request.getParent(), request.getImportJob());
+        try {
+            if (!request.getCryptoKeyVersion().isEmpty()) {
+                throw GcpException.unimplemented("Re-importing into an existing CryptoKeyVersion is not supported");
+            }
+            ByteString wrappedKey = request.getWrappedKey().isEmpty() ? request.getRsaAesWrappedKey() : request.getWrappedKey();
+            StoredCryptoKeyVersion stored = service.importCryptoKeyVersion(request.getParent(),
+                    request.getAlgorithm().name(), request.getImportJob(), wrappedKey.toByteArray());
+            responseObserver.onNext(toProto(stored));
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
+    // ── ImportJobs ───────────────────────────────────────────────────────────
+
+    @Override
+    public void createImportJob(CreateImportJobRequest request, StreamObserver<ImportJob> responseObserver) {
+        LOG.infof("createImportJob parent=%s importJobId=%s", request.getParent(), request.getImportJobId());
+        ImportJob input = request.getImportJob();
+        // Generating a 3072/4096-bit wrapping key takes up to ~1.5 s: keep it off the event loop.
+        runBlocking(responseObserver, () -> toProto(service.createImportJob(request.getParent(),
+                request.getImportJobId(), input.getImportMethod().name(), input.getProtectionLevel().name())));
+    }
+
+    @Override
+    public void getImportJob(GetImportJobRequest request, StreamObserver<ImportJob> responseObserver) {
+        try {
+            responseObserver.onNext(toProto(service.getImportJob(request.getName())));
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
+    @Override
+    public void listImportJobs(ListImportJobsRequest request, StreamObserver<ListImportJobsResponse> responseObserver) {
+        try {
+            List<StoredImportJob> all = service.listImportJobs(request.getParent());
+            PageToken.Page<StoredImportJob> page = PageToken.paginate(all, request.getPageSize(), request.getPageToken());
+            ListImportJobsResponse.Builder response = ListImportJobsResponse.newBuilder().setTotalSize(all.size());
+            for (StoredImportJob job : page.items()) {
+                response.addImportJobs(toProto(job));
+            }
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
+            }
+            responseObserver.onNext(response.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             GcpGrpcController.grpcError(responseObserver, e);
@@ -440,6 +508,31 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         }
     }
 
+    /**
+     * Runs {@code work} on a worker thread and answers on the calling Vert.x context. Without a
+     * context (no Vert.x caller) it runs inline.
+     */
+    private static <T> void runBlocking(StreamObserver<T> responseObserver, Callable<T> work) {
+        Context context = Vertx.currentContext();
+        if (context == null) {
+            try {
+                responseObserver.onNext(work.call());
+                responseObserver.onCompleted();
+            } catch (Exception e) {
+                GcpGrpcController.grpcError(responseObserver, e);
+            }
+            return;
+        }
+        context.executeBlocking(work, false).onComplete(result -> {
+            if (result.succeeded()) {
+                responseObserver.onNext(result.result());
+                responseObserver.onCompleted();
+            } else {
+                GcpGrpcController.grpcError(responseObserver, result.cause());
+            }
+        });
+    }
+
     // ── proto mapping ────────────────────────────────────────────────────────
 
     private static CloudKmsService.CryptoKeyFields cryptoKeyFields(CryptoKey input) {
@@ -487,7 +580,8 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
                 .setVersionTemplate(CryptoKeyVersionTemplate.newBuilder()
                         .setProtectionLevel(ProtectionLevel.SOFTWARE)
                         .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.valueOf(stored.getAlgorithm()))
-                        .build());
+                        .build())
+                .setImportOnly(stored.isImportOnly());
         if (stored.getLabels() != null && !stored.getLabels().isEmpty()) {
             builder.putAllLabels(stored.getLabels());
         }
@@ -519,7 +613,31 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         if (stored.getDestroyTime() != null) {
             builder.setDestroyTime(toTimestamp(stored.getDestroyTime()));
         }
+        if (stored.getImportJob() != null) {
+            builder.setImportJob(stored.getImportJob());
+        }
+        if (stored.getImportTime() != null) {
+            builder.setImportTime(toTimestamp(stored.getImportTime()));
+        }
+        if (stored.getImportFailureReason() != null) {
+            builder.setImportFailureReason(stored.getImportFailureReason());
+        }
         return builder.build();
+    }
+
+    private static ImportJob toProto(StoredImportJob stored) {
+        return ImportJob.newBuilder()
+                .setName(stored.getName())
+                .setImportMethod(ImportJob.ImportMethod.valueOf(stored.getImportMethod()))
+                .setProtectionLevel(ProtectionLevel.valueOf(stored.getProtectionLevel()))
+                .setCreateTime(toTimestamp(stored.getCreateTime()))
+                .setGenerateTime(toTimestamp(stored.getGenerateTime()))
+                .setExpireTime(toTimestamp(stored.getExpireTime()))
+                .setState(ImportJob.ImportJobState.valueOf(CloudKmsService.importJobState(stored)))
+                .setPublicKey(ImportJob.WrappingPublicKey.newBuilder()
+                        .setPem(KmsCrypto.toPem(stored.getPublicKeyBase64()))
+                        .build())
+                .build();
     }
 
     private static Timestamp toTimestamp(String isoTime) {

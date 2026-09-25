@@ -353,3 +353,40 @@ resource "google_cloud_run_v2_job" "compat" {
 output "cloud_run_job_name" {
   value = google_cloud_run_v2_job.compat.name
 }
+
+# ── Cloud Run Worker Pool ─────────────────────────────────────────────────────
+variable "worker_pool_label" {
+  type    = string
+  default = "compat-test"
+}
+
+variable "worker_pool_instances" {
+  type    = number
+  default = 1
+}
+
+resource "google_cloud_run_v2_worker_pool" "compat" {
+  name                = "floci-compat-wp-tofu"
+  location            = var.region
+  deletion_protection = false
+
+  labels = {
+    env = var.worker_pool_label
+  }
+
+  scaling {
+    manual_instance_count = var.worker_pool_instances
+  }
+
+  template {
+    containers {
+      image   = "busybox:latest"
+      command = ["sh", "-c"]
+      args    = ["trap 'exit 0' TERM; while true; do sleep 1; done"]
+    }
+  }
+}
+
+output "cloud_run_worker_pool_name" {
+  value = google_cloud_run_v2_worker_pool.compat.name
+}

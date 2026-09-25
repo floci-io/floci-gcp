@@ -148,6 +148,8 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | Image of the DuckDB sidecar that executes GoogleSQL queries |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck at this URL instead of starting a container |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_CALLBACK_URL` | _(derived)_ | Base URL the sidecar reads staged rows back from. Only needed when `DUCK_URL` points at a sidecar that cannot reach floci-gcp through the resolved docker host |
+| `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable media upload for a load job is dropped (defaults to the seven-day resumable upload window) |
+| `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | Interval between sweeps for expired BigQuery upload sessions; `0` disables the sweeper |
 
 ### GKE (Kubernetes Engine)
 

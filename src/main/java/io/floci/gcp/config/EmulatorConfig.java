@@ -213,6 +213,18 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /**
+         * Idle time after which an unfinished resumable media upload for a load job is dropped
+         * along with its buffered bytes. Defaults to the seven-day window of Google's resumable
+         * upload protocol; lower it on long-lived instances to reclaim abandoned uploads sooner.
+         */
+        @WithDefault("604800")
+        long uploadSessionIdleTimeoutSeconds();
+
+        /** Interval between sweeps for expired upload sessions. Zero or less disables the sweeper. */
+        @WithDefault("3600")
+        long uploadSessionSweepIntervalSeconds();
+
         BigQueryDuckConfig duck();
     }
 

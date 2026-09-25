@@ -39,6 +39,12 @@ public class StoredJob {
     private String ddlOperationPerformed;
     private TableReference ddlTargetTable;
     private DatasetReference ddlTargetDataset;
+    /** QUERY (default) or LOAD. */
+    private String jobType;
+    /** The job's {@code configuration.load}, echoed back on reads. */
+    private Map<String, Object> loadConfiguration;
+    /** {@code JobStatistics3}: inputFiles, inputFileBytes, outputRows, outputBytes, badRecords. */
+    private Map<String, String> loadStatistics;
 
     public String getJobId() { return jobId; }
     public void setJobId(String jobId) { this.jobId = jobId; }
@@ -99,6 +105,15 @@ public class StoredJob {
 
     public DatasetReference getDdlTargetDataset() { return ddlTargetDataset; }
     public void setDdlTargetDataset(DatasetReference ddlTargetDataset) { this.ddlTargetDataset = ddlTargetDataset; }
+
+    public String getJobType() { return jobType != null ? jobType : "QUERY"; }
+    public void setJobType(String jobType) { this.jobType = jobType; }
+
+    public Map<String, Object> getLoadConfiguration() { return loadConfiguration; }
+    public void setLoadConfiguration(Map<String, Object> loadConfiguration) { this.loadConfiguration = loadConfiguration; }
+
+    public Map<String, String> getLoadStatistics() { return loadStatistics; }
+    public void setLoadStatistics(Map<String, String> loadStatistics) { this.loadStatistics = loadStatistics; }
 
     public boolean failed() {
         return errorReason != null;

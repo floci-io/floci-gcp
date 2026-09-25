@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Runs GoogleSQL on the floci-duck sidecar. Each query:
@@ -160,6 +161,185 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             tableRows.add(row);
         }
         return new DmlResult(affected, inserted, updated, deleted, tableRows, staging.bytesProcessed());
+    }
+
+    // ── Load jobs ─────────────────────────────────────────────────────────────
+
+    private static final Pattern GENERIC_CSV_COLUMN = Pattern.compile("column\\d+");
+
+    @Override
+    public Result readFiles(LoadSource source) {
+        String flociEndpoint = flociEndpoint();
+        StringBuilder urls = new StringBuilder("[");
+        for (int i = 0; i < source.fileIds().size(); i++) {
+            if (i > 0) {
+                urls.append(", ");
+            }
+            urls.append(DuckTypes.quoteLiteral(flociEndpoint + "/_floci-gcp/bigquery/projects/"
+                    + encode(source.projectId()) + "/load-files/" + source.fileIds().get(i)));
+        }
+        urls.append(']');
+
+        String sql;
+        List<TableFieldSchema> schema = source.schema();
+        switch (source.format()) {
+            case "CSV" -> sql = schema != null ? csvWithSchema(urls.toString(), source, schema)
+                    : "SELECT * FROM read_csv(" + urls + csvOptions(source) + headerOptions(source)
+                    + ", auto_detect = true)";
+            case "NEWLINE_DELIMITED_JSON" -> sql = "SELECT * FROM read_json(" + urls
+                    + ", format = 'newline_delimited'" + (source.ignoreBadRecords() ? ", ignore_errors = true" : "")
+                    + ")";
+            case "PARQUET" -> sql = "SELECT * FROM read_parquet(" + urls + ")";
+            default -> throw loadError("Unsupported source format " + source.format());
+        }
+
+        DuckClient.DuckResult result;
+        try {
+            result = client.query(sql, "SET TimeZone = 'UTC';", flociEndpoint);
+        } catch (DuckClient.DuckSqlException e) {
+            throw loadError("Error while reading data, error message: " + e.getMessage());
+        }
+        if (result.columns() == null) {
+            throw GcpException.failedPrecondition("Load jobs need a floci-duck image that reports column types;"
+                    + " update " + config.services().bigquery().duck().defaultImage());
+        }
+
+        boolean autodetected = schema == null && !source.format().equals("PARQUET");
+        boolean genericNames = source.format().equals("CSV") && autodetected
+                && result.columns().stream().allMatch(c -> GENERIC_CSV_COLUMN.matcher(c.name()).matches());
+        List<String> sourceNames = new ArrayList<>();
+        List<Column> columns = new ArrayList<>();
+        for (int i = 0; i < result.columns().size(); i++) {
+            DuckClient.DuckColumn duckColumn = result.columns().get(i);
+            DuckTypes.DuckType type = DuckTypes.parse(duckColumn.type());
+            TableFieldSchema field = fieldFor(schema, duckColumn.name(), i);
+            if (field == null) {
+                field = DuckTypes.toField(duckColumn.name(), type);
+                if (autodetected && "DATETIME".equals(field.getType())) {
+                    field.setType("TIMESTAMP"); // auto-detection infers TIMESTAMP, DATE and TIME, never DATETIME
+                }
+                field.setName(genericNames ? genericName(field, i) : sanitize(duckColumn.name()));
+            }
+            sourceNames.add(duckColumn.name());
+            columns.add(new Column(field.getName(), type, field, DuckTypes.projection(type)));
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>(result.rows().size());
+        for (Map<String, Object> typedRow : result.rows()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (int i = 0; i < columns.size(); i++) {
+                Column column = columns.get(i);
+                row.put(column.name(), DuckTypes.decodeTyped(typedRow.get(sourceNames.get(i)), column.type(),
+                        column.field()));
+            }
+            rows.add(row);
+        }
+        return new Result(schemaOf(columns), rows, "LOAD", 0);
+    }
+
+    /** CSV with a known schema: every column is read with its staging type, then converted. */
+    private static String csvWithSchema(String urls, LoadSource source, List<TableFieldSchema> schema) {
+        StringBuilder columns = new StringBuilder();
+        StringBuilder projection = new StringBuilder();
+        List<String> keepEmpty = new ArrayList<>();
+        for (int i = 0; i < schema.size(); i++) {
+            TableFieldSchema field = schema.get(i);
+            if ("RECORD".equals(field.getType()) || "REPEATED".equals(field.getMode())) {
+                throw loadError("CSV load jobs cannot load nested or repeated field " + field.getName());
+            }
+            String column = DuckTypes.quoteIdentifier(field.getName());
+            boolean text = DuckTypes.stagedAsText(field);
+            if (i > 0) {
+                columns.append(", ");
+                projection.append(", ");
+            }
+            columns.append(DuckTypes.quoteLiteral(field.getName())).append(": ")
+                    .append(DuckTypes.quoteLiteral(text ? "VARCHAR" : DuckTypes.duckType(field)));
+            projection.append(text ? DuckTypes.convertStagedText(field, column) + " AS " + column : column);
+            if ("STRING".equals(field.getType())) {
+                keepEmpty.add(DuckTypes.quoteLiteral(field.getName()));
+            }
+        }
+        String nulls = source.nullMarker() != null
+                ? ", nullstr = " + DuckTypes.quoteLiteral(source.nullMarker())
+                // Without a null marker, an empty STRING value stays an empty string.
+                : keepEmpty.isEmpty() ? "" : ", force_not_null = [" + String.join(", ", keepEmpty) + "]";
+        int skip = source.skipLeadingRows() != null ? source.skipLeadingRows() : 0;
+        return "SELECT " + projection + " FROM read_csv(" + urls + csvOptions(source) + ", header = false, skip = "
+                + skip + ", columns = {" + columns + "}" + nulls + ")";
+    }
+
+    private static String csvOptions(LoadSource source) {
+        StringBuilder options = new StringBuilder();
+        String delimiter = source.fieldDelimiter();
+        if (delimiter != null && !delimiter.isEmpty()) {
+            if (delimiter.equals("\\t") || delimiter.equalsIgnoreCase("tab")) {
+                delimiter = "\t";
+            }
+            options.append(", delim = ").append(DuckTypes.quoteLiteral(delimiter));
+        }
+        if (source.quote() != null) {
+            String quote = source.quote().isEmpty() ? "" : source.quote().substring(0, 1);
+            options.append(", quote = ").append(DuckTypes.quoteLiteral(quote))
+                    .append(", escape = ").append(DuckTypes.quoteLiteral(quote));
+        }
+        if (source.allowJaggedRows()) {
+            options.append(", null_padding = true");
+        }
+        if (source.ignoreBadRecords()) {
+            options.append(", ignore_errors = true");
+        }
+        if (source.encoding() != null && source.encoding().equalsIgnoreCase("ISO-8859-1")) {
+            options.append(", encoding = 'latin-1'");
+        }
+        return options.toString();
+    }
+
+    /**
+     * skipLeadingRows with auto-detection: unset detects a header in the first row, 0 means
+     * no header, N skips N-1 rows and detects a header in row N.
+     */
+    private static String headerOptions(LoadSource source) {
+        Integer skip = source.skipLeadingRows();
+        if (skip == null) {
+            return "";
+        }
+        if (skip == 0) {
+            return ", header = false";
+        }
+        return ", skip = " + (skip - 1);
+    }
+
+    private static TableFieldSchema fieldFor(List<TableFieldSchema> schema, String name, int index) {
+        if (schema == null) {
+            return null;
+        }
+        return schema.stream().filter(f -> f.getName().equalsIgnoreCase(name)).findFirst()
+                .orElse(index < schema.size() ? schema.get(index) : null);
+    }
+
+    /** Auto-detected columns of a header-less CSV get generic names such as {@code string_field_0}. */
+    private static String genericName(TableFieldSchema field, int index) {
+        String type = switch (field.getType()) {
+            case "INTEGER" -> "int64";
+            case "FLOAT" -> "double";
+            case "BOOLEAN" -> "bool";
+            default -> field.getType().toLowerCase(Locale.ROOT);
+        };
+        return type + "_field_" + index;
+    }
+
+    /** "spaces will be replaced with underscores": header names are made valid column names. */
+    private static String sanitize(String name) {
+        String cleaned = name.trim().replaceAll("[^A-Za-z0-9_]", "_");
+        if (cleaned.isEmpty() || Character.isDigit(cleaned.charAt(0))) {
+            cleaned = "_" + cleaned;
+        }
+        return cleaned;
+    }
+
+    private static GcpException loadError(String message) {
+        return GcpException.invalidArgument(message).withReason("invalid");
     }
 
     private static List<Map<String, Object>> decodeRows(List<Map<String, Object>> typedRows, List<Column> columns) {

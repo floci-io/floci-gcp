@@ -7,27 +7,38 @@ import com.google.cloud.bigquery.DatasetInfo;
 import com.google.cloud.bigquery.Field;
 import com.google.cloud.bigquery.FieldValue;
 import com.google.cloud.bigquery.FieldValueList;
+import com.google.cloud.bigquery.FormatOptions;
 import com.google.cloud.bigquery.InsertAllRequest;
 import com.google.cloud.bigquery.InsertAllResponse;
 import com.google.cloud.bigquery.Job;
+import com.google.cloud.bigquery.JobId;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.JobStatistics;
+import com.google.cloud.bigquery.LoadJobConfiguration;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.QueryParameterValue;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.TableDataWriteChannel;
 import com.google.cloud.bigquery.TableDefinition;
 import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigquery.TableInfo;
 import com.google.cloud.bigquery.TableResult;
+import com.google.cloud.bigquery.WriteChannelConfiguration;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.BucketInfo;
+import com.google.cloud.storage.Storage;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -404,6 +415,59 @@ class BigQueryTest {
         assertThatThrownBy(duplicate::waitFor)
                 .isInstanceOfSatisfying(BigQueryException.class,
                         e -> assertThat(e.getError().getReason()).isEqualTo("duplicate"));
+    }
+
+    @Test
+    @Order(18)
+    void loadCsvFromCloudStorage() throws InterruptedException {
+        Storage storage = TestFixtures.storageClient();
+        String bucket = TestFixtures.uniqueName("bq-load");
+        storage.create(BucketInfo.of(bucket));
+        storage.create(BlobInfo.newBuilder(bucket, "cities/part-0.csv").build(),
+                "city,population\nLima,10000000\nQuito,2800000\n".getBytes(StandardCharsets.UTF_8));
+        storage.create(BlobInfo.newBuilder(bucket, "cities/part-1.csv").build(),
+                "city,population\nBogota,7900000\n".getBytes(StandardCharsets.UTF_8));
+
+        TableId cities = TableId.of(DATASET, "cities");
+        Job job = bigquery.create(JobInfo.of(LoadJobConfiguration
+                .newBuilder(cities, "gs://" + bucket + "/cities/part-*.csv",
+                        FormatOptions.csv())
+                .setAutodetect(true)
+                .build())).waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        JobStatistics.LoadStatistics stats = job.getStatistics();
+        assertThat(stats.getOutputRows()).isEqualTo(3L);
+        assertThat(stats.getInputFiles()).isEqualTo(2L);
+
+        Schema schema = bigquery.getTable(cities).getDefinition().getSchema();
+        assertThat(schema.getFields().get("population").getType().getStandardType())
+                .isEqualTo(StandardSQLTypeName.INT64);
+        TableResult biggest = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT city FROM `" + PROJECT_ID + "." + DATASET + ".cities` ORDER BY population DESC LIMIT 1")
+                .build());
+        assertThat(biggest.iterateAll().iterator().next().get("city").getStringValue()).isEqualTo("Lima");
+    }
+
+    @Test
+    @Order(19)
+    void loadThroughAResumableUpload() throws Exception {
+        TableId target = TableId.of(DATASET, "uploaded");
+        WriteChannelConfiguration config = WriteChannelConfiguration
+                .newBuilder(target)
+                .setFormatOptions(FormatOptions.json())
+                .setSchema(Schema.of(Field.of("name", StandardSQLTypeName.STRING),
+                        Field.of("score", StandardSQLTypeName.FLOAT64)))
+                .build();
+        JobId jobId = JobId.of(TestFixtures.uniqueName("upload"));
+        TableDataWriteChannel writer = bigquery.writer(jobId, config);
+        try (OutputStream out = Channels.newOutputStream(writer)) {
+            out.write("{\"name\": \"ana\", \"score\": 9.5}\n{\"name\": \"bo\", \"score\": 7}\n"
+                    .getBytes(StandardCharsets.UTF_8));
+        }
+        Job job = writer.getJob().waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        assertThat(((JobStatistics.LoadStatistics) job.getStatistics()).getOutputRows()).isEqualTo(2L);
+        assertThat(bigquery.getTable(target).getNumRows().longValue()).isEqualTo(2L);
     }
 
     @Test

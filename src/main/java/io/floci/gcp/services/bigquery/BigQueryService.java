@@ -1,6 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -8,6 +9,8 @@ import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.gcs.GcsService;
+import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.bigquery.model.Dataset;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
@@ -25,6 +28,8 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -32,7 +37,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * BigQuery: datasets/tables metadata, streaming inserts ({@code insertAll}), row reads and
@@ -53,12 +60,17 @@ public class BigQueryService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final BigQuerySqlEngine engine;
+    private final GcsService gcsService;
+    private final BigQueryLoadFiles loadFiles;
 
     @Inject
     public BigQueryService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, DuckSqlEngine duckEngine) {
+            StorageFactory storageFactory, DuckSqlEngine duckEngine, GcsService gcsService,
+            BigQueryLoadFiles loadFiles) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.gcsService = gcsService;
+        this.loadFiles = loadFiles;
         this.engine = config.services().bigquery().mock() ? new InMemorySqlEngine() : duckEngine;
         this.datasetStore = storageFactory.create("bigquery-datasets", "bigquery-datasets.json",
                 new TypeReference<Map<String, Dataset>>() {});
@@ -83,6 +95,8 @@ public class BigQueryService {
             StorageBackend<String, StoredJob> jobStore,
             BigQuerySqlEngine engine) {
         this.engine = engine;
+        this.gcsService = null;
+        this.loadFiles = new BigQueryLoadFiles();
         this.datasetStore = datasetStore;
         this.tableStore = tableStore;
         this.dataStore = dataStore;
@@ -96,7 +110,8 @@ public class BigQueryService {
                 .enabled(config.services().bigquery().enabled())
                 .storageKey("bigquery")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(BigQueryController.class, BigQueryInternalController.class)
+                .resourceClasses(BigQueryController.class, BigQueryInternalController.class,
+                        BigQueryUploadController.class)
                 .build());
     }
 
@@ -781,7 +796,14 @@ public class BigQueryService {
      * WRITE_TRUNCATE_DATA / WRITE_APPEND.
      */
     private void writeDestination(String projectId, QueryOptions options, BigQuerySqlEngine.Result result) {
-        TableReference destination = options.destinationTable();
+        writeRows(projectId, options.destinationTable(),
+                options.writeDisposition() != null ? options.writeDisposition() : "WRITE_EMPTY",
+                options.createDisposition(), options.schemaUpdateOptions(), result);
+    }
+
+    /** Writes rows into a destination table following BigQuery's create and write dispositions. */
+    private void writeRows(String projectId, TableReference destination, String write, String createDisposition,
+                           List<String> schemaUpdateOptions, BigQuerySqlEngine.Result result) {
         if (destination.getProjectId() != null && !destination.getProjectId().equals(projectId)) {
             throw QueryEngine.invalidQuery("Cross-project destination tables are not supported by the floci"
                     + " BigQuery emulator");
@@ -796,8 +818,7 @@ public class BigQueryService {
                 destination.getTableId());
         getDataset(projectId, target.datasetId());
         Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
-        String write = options.writeDisposition() != null ? options.writeDisposition() : "WRITE_EMPTY";
-        String create = options.createDisposition() != null ? options.createDisposition() : "CREATE_IF_NEEDED";
+        String create = createDisposition != null ? createDisposition : "CREATE_IF_NEEDED";
 
         if (existing.isEmpty()) {
             if ("CREATE_NEVER".equals(create)) {
@@ -813,7 +834,7 @@ public class BigQueryService {
             throw QueryEngine.invalidQuery("Cannot write query results to view " + qualified(projectId, target));
         }
         List<Map<String, Object>> current = storedRows(projectId, target.datasetId(), target.tableId());
-        boolean relaxed = options.schemaUpdateOptions().stream()
+        boolean relaxed = schemaUpdateOptions.stream()
                 .anyMatch(option -> "ALLOW_FIELD_RELAXATION".equalsIgnoreCase(option));
         switch (write) {
             case "WRITE_TRUNCATE" -> {
@@ -970,6 +991,227 @@ public class BigQueryService {
                 return storedRows(projectId, datasetId, tableId);
             }
         };
+    }
+
+    // ── Load jobs ────────────────────────────────────────────────────────────────
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Set<String> LOAD_FORMATS = Set.of("CSV", "NEWLINE_DELIMITED_JSON", "PARQUET");
+
+    /**
+     * Runs a load job synchronously. Data comes from {@code sourceUris} in floci's GCS or, for
+     * media uploads, from {@code uploadedData}. Configuration errors are HTTP 400s; data and
+     * destination errors are recorded in the DONE job's status, as BigQuery reports them.
+     */
+    @SuppressWarnings("unchecked")
+    public StoredJob load(String projectId, String location, String jobId, Map<String, Object> loadConfig,
+                          byte[] uploadedData) {
+        Map<String, Object> config = loadConfig != null ? new LinkedHashMap<>(loadConfig) : new LinkedHashMap<>();
+        if (!(config.get("destinationTable") instanceof Map<?, ?> destinationMap)) {
+            throw GcpException.invalidArgument("Required parameter is missing: destinationTable").withReason("invalid");
+        }
+        Map<String, Object> destination = new LinkedHashMap<>((Map<String, Object>) destinationMap);
+        destination.putIfAbsent("projectId", projectId);
+        config.put("destinationTable", destination);
+        List<String> sourceUris = config.get("sourceUris") instanceof List<?> list
+                ? list.stream().map(String::valueOf).toList() : List.of();
+        if (uploadedData == null && sourceUris.isEmpty()) {
+            throw GcpException.invalidArgument("Required parameter is missing: sourceUris").withReason("invalid");
+        }
+
+        StoredJob job = new StoredJob();
+        job.setJobId(reserveJobId(projectId, jobId));
+        job.setProjectId(projectId);
+        job.setLocation(location != null && !location.isBlank() ? location : "US");
+        job.setJobType("LOAD");
+        job.setLoadConfiguration(config);
+        job.setState("DONE");
+        job.setCreationTime(nowMillis());
+
+        List<String> fileIds = new ArrayList<>();
+        try {
+            synchronized (writeLock) {
+                runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job);
+            }
+        } catch (GcpException e) {
+            job.setErrorReason(loadErrorReason(e));
+            job.setErrorMessage(e.getMessage());
+        } catch (RuntimeException e) {
+            // The job id is already reserved, so the job has to be stored whatever went wrong.
+            // Returning 500 here would leave jobs.get answering 404 for a job the client holds.
+            LOG.warnf(e, "load job %s failed", job.getJobId());
+            job.setErrorReason("invalid");
+            job.setErrorMessage(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        } finally {
+            loadFiles.release(fileIds);
+        }
+        jobStore.put(job.getJobId(), job);
+        return job;
+    }
+
+    /**
+     * A load job never reports {@code invalidQuery}: that reason is for "an invalid query", while
+     * {@code invalid} covers "any type of invalid input other than an invalid query, such as ...
+     * an invalid table schema". The destination checks the load path shares with query
+     * destination tables raise {@code invalidQuery}, so it is mapped here.
+     */
+    private static String loadErrorReason(GcpException e) {
+        if (e.getReason() == null) {
+            return errorReason(e);
+        }
+        return "invalidQuery".equals(e.getReason()) ? "invalid" : e.getReason();
+    }
+
+    private static String errorReason(GcpException e) {
+        return switch (e.getHttpStatus()) {
+            case 404 -> "notFound";
+            case 409 -> "duplicate";
+            default -> "invalid";
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private void runLoad(String projectId, Map<String, Object> config, Map<String, Object> destination,
+                         List<String> sourceUris, byte[] uploadedData, List<String> fileIds, StoredJob job) {
+        String format = config.get("sourceFormat") instanceof String f ? f.toUpperCase(Locale.ROOT) : "CSV";
+        if (!LOAD_FORMATS.contains(format)) {
+            throw GcpException.invalidArgument("Source format " + format + " is not supported by the floci BigQuery"
+                    + " emulator; use CSV, NEWLINE_DELIMITED_JSON or PARQUET").withReason("invalid");
+        }
+        TableReference destinationRef = new TableReference((String) destination.get("projectId"),
+                (String) destination.get("datasetId"), (String) destination.get("tableId"));
+        if (destinationRef.getProjectId() != null && !destinationRef.getProjectId().equals(projectId)) {
+            throw GcpException.invalidArgument("Cross-project load destinations are not supported by the floci"
+                    + " BigQuery emulator").withReason("invalid");
+        }
+        getDataset(projectId, destinationRef.getDatasetId());
+
+        List<byte[]> files = uploadedData != null ? List.of(uploadedData) : readSourceUris(sourceUris);
+        long inputBytes = 0;
+        for (byte[] file : files) {
+            inputBytes += file.length;
+            fileIds.add(loadFiles.register(file));
+        }
+
+        Optional<Table> existing = tableStore.get(tableKey(destinationRef.getDatasetId(), destinationRef.getTableId()));
+        boolean autodetect = Boolean.TRUE.equals(config.get("autodetect"));
+        List<TableFieldSchema> schema = null;
+        if (config.get("schema") instanceof Map<?, ?> schemaMap) {
+            TableSchema explicit = JSON.convertValue(schemaMap, TableSchema.class);
+            schema = RowCodec.normalizeSchema(explicit).getFields();
+        } else if (!autodetect && existing.isPresent() && existing.get().getSchema() != null
+                && existing.get().getSchema().getFields() != null && !existing.get().getSchema().getFields().isEmpty()) {
+            schema = existing.get().getSchema().getFields();
+        } else if (!autodetect && !format.equals("PARQUET")) {
+            throw GcpException.invalidArgument("No schema specified on job or table.").withReason("invalid");
+        }
+
+        int maxBadRecords = config.get("maxBadRecords") instanceof Number n ? n.intValue() : 0;
+        boolean ignoreUnknownValues = Boolean.TRUE.equals(config.get("ignoreUnknownValues"));
+        BigQuerySqlEngine.Result result;
+        long badRecords = 0;
+        if (format.equals("NEWLINE_DELIMITED_JSON") && schema != null) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (byte[] file : files) {
+                for (String line : new String(file, StandardCharsets.UTF_8).split("\\r?\\n")) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    try {
+                        Map<String, Object> json = JSON.readValue(line, Map.class);
+                        if (!RowCodec.normalizeRow(new TableSchema(schema), json, ignoreUnknownValues, row).isEmpty()) {
+                            badRecords++;
+                            continue;
+                        }
+                    } catch (IOException e) {
+                        badRecords++;
+                        continue;
+                    }
+                    rows.add(row);
+                }
+            }
+            if (badRecords > maxBadRecords) {
+                throw GcpException.invalidArgument("Error while reading data, error message: JSON table encountered"
+                        + " too many errors, giving up. Rows: " + (rows.size() + badRecords) + "; errors: " + badRecords
+                        + ".").withReason("invalid");
+            }
+            result = new BigQuerySqlEngine.Result(new TableSchema(schema), rows, "LOAD", 0);
+        } else {
+            Integer skip = config.get("skipLeadingRows") instanceof Number n ? n.intValue() : null;
+            result = engine.readFiles(new BigQuerySqlEngine.LoadSource(projectId, format, fileIds,
+                    format.equals("PARQUET") && config.get("schema") == null ? null : schema, skip,
+                    (String) config.get("fieldDelimiter"), (String) config.get("quote"),
+                    Boolean.TRUE.equals(config.get("allowJaggedRows")), maxBadRecords > 0,
+                    (String) config.get("nullMarker"), (String) config.get("encoding")));
+        }
+
+        String write = config.get("writeDisposition") instanceof String w ? w : "WRITE_APPEND";
+        List<String> schemaUpdateOptions = config.get("schemaUpdateOptions") instanceof List<?> list
+                ? list.stream().filter(String.class::isInstance).map(String.class::cast).toList()
+                : List.of();
+        writeRows(projectId, destinationRef, write, (String) config.get("createDisposition"), schemaUpdateOptions,
+                result);
+
+        long outputBytes = 0;
+        for (Map<String, Object> row : result.rows()) {
+            try {
+                outputBytes += JSON.writeValueAsBytes(row).length;
+            } catch (IOException e) {
+                throw GcpException.internal("Could not size loaded rows: " + e.getMessage());
+            }
+        }
+        Map<String, String> stats = new LinkedHashMap<>();
+        stats.put("inputFiles", String.valueOf(files.size()));
+        stats.put("inputFileBytes", String.valueOf(inputBytes));
+        stats.put("outputRows", String.valueOf(result.rows().size()));
+        stats.put("outputBytes", String.valueOf(outputBytes));
+        stats.put("badRecords", String.valueOf(badRecords));
+        job.setLoadStatistics(stats);
+    }
+
+    /** Reads {@code gs://bucket/object} URIs from floci's GCS; one {@code *} wildcard after the bucket. */
+    private List<byte[]> readSourceUris(List<String> uris) {
+        if (gcsService == null || (serviceRegistry != null && !serviceRegistry.isEnabled("gcs"))) {
+            throw GcpException.invalidArgument("Loading from gs:// URIs needs the Cloud Storage service to be enabled")
+                    .withReason("invalid");
+        }
+        List<byte[]> files = new ArrayList<>();
+        for (String uri : uris) {
+            if (!uri.startsWith("gs://") || uri.indexOf('/', 5) < 0) {
+                throw GcpException.invalidArgument("Invalid source URI " + uri
+                        + "; the floci BigQuery emulator loads from gs://bucket/object").withReason("invalid");
+            }
+            String bucket = uri.substring(5, uri.indexOf('/', 5));
+            String object = uri.substring(uri.indexOf('/', 5) + 1);
+            if (object.chars().filter(c -> c == '*').count() > 1) {
+                throw GcpException.invalidArgument("Source URI " + uri + " may contain only one '*' wildcard")
+                        .withReason("invalid");
+            }
+            List<String> names;
+            if (object.contains("*")) {
+                Pattern pattern = Pattern.compile(
+                        Pattern.quote(object).replace("*", "\\E.*\\Q"));
+                names = gcsService.listObjects(bucket).stream().map(GcsObjectMeta::getName)
+                        .filter(name -> pattern.matcher(name).matches()).sorted().toList();
+            } else {
+                names = List.of(object);
+            }
+            if (names.isEmpty()) {
+                throw GcpException.notFound("Not found: URI " + uri);
+            }
+            for (String name : names) {
+                try {
+                    files.add(gcsService.getObjectData(bucket, name));
+                } catch (GcpException e) {
+                    if (e.getHttpStatus() != 404) {
+                        throw e;
+                    }
+                    throw GcpException.notFound("Not found: URI gs://" + bucket + "/" + name);
+                }
+            }
+        }
+        return files;
     }
 
     /** Persists a failed query job (used by {@code jobs.insert}, which must not throw for SQL errors). */

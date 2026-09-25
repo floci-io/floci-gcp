@@ -1,6 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
 import io.floci.gcp.services.bigquery.model.Table;
+import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 
 import java.util.List;
@@ -34,7 +35,18 @@ interface BigQuerySqlEngine {
     record DmlResult(long affectedRows, long insertedRows, long updatedRows, long deletedRows,
                      List<Map<String, Object>> tableRows, long totalBytesProcessed) {}
 
+    /**
+     * Source files of a load job, already staged in {@link BigQueryLoadFiles}. {@code schema} is
+     * null for auto-detection (CSV, JSON) or when the file carries its own schema (Parquet).
+     */
+    record LoadSource(String projectId, String format, List<String> fileIds, List<TableFieldSchema> schema,
+                      Integer skipLeadingRows, String fieldDelimiter, String quote, boolean allowJaggedRows,
+                      boolean ignoreBadRecords, String nullMarker, String encoding) {}
+
     Result execute(Request request, Tables tables);
+
+    /** Reads load-job source files into rows (stored representation) and their schema. */
+    Result readFiles(LoadSource source);
 
     DmlResult executeDml(Request request, Tables tables);
 }

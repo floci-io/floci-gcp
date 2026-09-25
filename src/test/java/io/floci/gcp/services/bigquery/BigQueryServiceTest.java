@@ -775,4 +775,85 @@ class BigQueryServiceTest {
         assertEquals("invalidQuery", e.getReason());
         assertTrue(e.getMessage().contains("DuckDB"));
     }
+
+    // ── Load jobs (newline-delimited JSON with a schema runs without the SQL engine) ──
+
+    private static Map<String, Object> loadConfig(String table, Object... extra) {
+        Map<String, Object> config = new java.util.LinkedHashMap<>();
+        config.put("destinationTable", Map.of("datasetId", DATASET, "tableId", table));
+        config.put("sourceFormat", "NEWLINE_DELIMITED_JSON");
+        for (int i = 0; i < extra.length; i += 2) {
+            config.put((String) extra[i], extra[i + 1]);
+        }
+        return config;
+    }
+
+    private static final Map<String, Object> PEOPLE_SCHEMA = Map.of("fields", List.of(
+            Map.of("name", "name", "type", "STRING"), Map.of("name", "age", "type", "INT64")));
+
+    private static byte[] ndjson(String... lines) {
+        return String.join("\n", lines).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void loadJobAppendsNewlineDelimitedJson() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        StoredJob first = service.load(PROJECT, null, null, loadConfig("people", "schema", PEOPLE_SCHEMA),
+                ndjson("{\"name\": \"ana\", \"age\": 30}", "", "{\"name\": \"bo\", \"age\": \"41\"}"));
+        assertFalse(first.failed(), first.getErrorMessage());
+        assertEquals("LOAD", first.getJobType());
+        assertEquals("2", first.getLoadStatistics().get("outputRows"));
+        assertEquals("1", first.getLoadStatistics().get("inputFiles"));
+        assertEquals("0", first.getLoadStatistics().get("badRecords"));
+        assertEquals("INTEGER", service.getTable(PROJECT, DATASET, "people").getSchema().getFields().get(1).getType());
+
+        // WRITE_APPEND is the default for loads, and the existing table's schema is reused.
+        StoredJob second = service.load(PROJECT, null, null, loadConfig("people"), ndjson("{\"name\": \"cy\"}"));
+        assertFalse(second.failed(), second.getErrorMessage());
+        assertEquals(3, service.listTableData(PROJECT, DATASET, "people").rows().size());
+
+        StoredJob truncate = service.load(PROJECT, null, null,
+                loadConfig("people", "writeDisposition", "WRITE_TRUNCATE"), ndjson("{\"name\": \"dee\"}"));
+        assertFalse(truncate.failed());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "people").rows().size());
+    }
+
+    @Test
+    void loadJobCountsBadRecordsAgainstMaxBadRecords() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        byte[] data = ndjson("{\"name\": \"ana\", \"age\": 30}", "{\"name\": \"x\", \"age\": \"old\"}", "not json");
+        StoredJob strict = service.load(PROJECT, null, null, loadConfig("t", "schema", PEOPLE_SCHEMA), data);
+        assertTrue(strict.failed());
+        assertEquals("invalid", strict.getErrorReason());
+        assertTrue(strict.getErrorMessage().contains("errors: 2"), strict.getErrorMessage());
+
+        StoredJob lenient = service.load(PROJECT, null, null,
+                loadConfig("t", "schema", PEOPLE_SCHEMA, "maxBadRecords", 2), data);
+        assertFalse(lenient.failed(), lenient.getErrorMessage());
+        assertEquals("2", lenient.getLoadStatistics().get("badRecords"));
+        assertEquals("1", lenient.getLoadStatistics().get("outputRows"));
+    }
+
+    @Test
+    void loadJobErrorsLandInTheJobStatus() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        StoredJob noSchema = service.load(PROJECT, null, null, loadConfig("fresh"), ndjson("{\"a\": 1}"));
+        assertEquals("No schema specified on job or table.", noSchema.getErrorMessage());
+
+        StoredJob csv = service.load(PROJECT, null, null,
+                loadConfig("fresh", "sourceFormat", "CSV", "autodetect", true), "a,b\n1,2".getBytes());
+        assertTrue(csv.failed());
+        assertTrue(csv.getErrorMessage().contains("DuckDB"), csv.getErrorMessage());
+
+        StoredJob gcs = service.load(PROJECT, null, null,
+                loadConfig("fresh", "sourceUris", List.of("gs://bucket/data.json"), "schema", PEOPLE_SCHEMA), null);
+        assertTrue(gcs.failed());
+
+        StoredJob avro = service.load(PROJECT, null, null, loadConfig("fresh", "sourceFormat", "AVRO"), new byte[1]);
+        assertTrue(avro.getErrorMessage().contains("AVRO"));
+
+        GcpException missing = assertThrows(GcpException.class, () -> service.load(PROJECT, null, null,
+                Map.of("sourceFormat", "CSV"), new byte[1]));
+        assertEquals(400, missing.getHttpStatus());
+    }
 }

@@ -113,6 +113,8 @@ floci-gcp:
     bigquery:
       enabled: true
       mock: false                     # true runs a built-in SQL subset, no container
+      upload-session-idle-timeout-seconds: 604800   # resumable load-job uploads, seven-day window
+      upload-session-sweep-interval-seconds: 3600   # 0 disables the sweeper
       duck:
         default-image: "floci/floci-duck:latest"
         url:                          # point at an already running floci-duck

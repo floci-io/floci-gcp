@@ -290,13 +290,17 @@ public class BigQueryController {
     @Consumes(MediaType.APPLICATION_JSON)
     public Response insertJob(@PathParam("projectId") String projectId, Job body) {
         Map<String, Object> configuration = body != null ? body.getConfiguration() : null;
+        String location = body != null && body.getJobReference() != null ? body.getJobReference().getLocation() : null;
+        String jobId = body != null && body.getJobReference() != null ? body.getJobReference().getJobId() : null;
+        Map<String, Object> loadConfig = configuration != null ? asMap(configuration.get("load")) : null;
+        if (loadConfig != null) {
+            return Response.ok(buildJob(service.load(projectId, location, jobId, loadConfig, null))).build();
+        }
         Map<String, Object> queryConfig = configuration != null ? asMap(configuration.get("query")) : null;
         if (queryConfig == null || queryConfig.get("query") == null) {
             throw GcpException.invalidArgument(
-                    "Only QUERY jobs are supported by the floci BigQuery emulator");
+                    "Only QUERY and LOAD jobs are supported by the floci BigQuery emulator");
         }
-        String location = body.getJobReference() != null ? body.getJobReference().getLocation() : null;
-        String jobId = body.getJobReference() != null ? body.getJobReference().getJobId() : null;
         boolean dryRun = Boolean.TRUE.equals(configuration.get("dryRun"));
         BigQueryService.QueryOptions options = queryOptions(queryConfig, dryRun);
 
@@ -473,7 +477,7 @@ public class BigQueryController {
         return resp;
     }
 
-    private static Job buildJob(StoredJob sj) {
+    static Job buildJob(StoredJob sj) {
         Job job = new Job();
         // A dry run reserves no job id, and real BigQuery creates no job for one, so there is
         // nothing to name here. Concatenating a null id would emit the literal string "null".
@@ -481,6 +485,9 @@ public class BigQueryController {
             job.setId(sj.getProjectId() + ":" + sj.getLocation() + "." + sj.getJobId());
         }
         job.setJobReference(new JobReference(sj.getProjectId(), sj.getJobId(), sj.getLocation()));
+        if ("LOAD".equals(sj.getJobType())) {
+            return buildLoadJob(sj, job);
+        }
 
         Map<String, Object> queryConfig = new LinkedHashMap<>();
         queryConfig.put("query", sj.getQuery());
@@ -540,6 +547,34 @@ public class BigQueryController {
             job.setStatistics(statistics);
         }
         return job;
+    }
+
+    private static Job buildLoadJob(StoredJob sj, Job job) {
+        Map<String, Object> configuration = new LinkedHashMap<>();
+        configuration.put("jobType", "LOAD");
+        configuration.put("load", sj.getLoadConfiguration());
+        job.setConfiguration(configuration);
+        job.setStatus(status(sj, null));
+        Map<String, Object> statistics = new LinkedHashMap<>();
+        statistics.put("creationTime", sj.getCreationTime());
+        statistics.put("startTime", sj.getCreationTime());
+        statistics.put("endTime", sj.getCreationTime());
+        if (sj.getLoadStatistics() != null) {
+            statistics.put("load", sj.getLoadStatistics());
+        }
+        job.setStatistics(statistics);
+        return job;
+    }
+
+    private static JobStatus status(StoredJob sj, String location) {
+        JobStatus status = new JobStatus();
+        status.setState(sj.getState());
+        if (sj.failed()) {
+            ErrorProto error = new ErrorProto(sj.getErrorReason(), location, sj.getErrorMessage());
+            status.setErrorResult(error);
+            status.setErrors(List.of(error));
+        }
+        return status;
     }
 
     /**

@@ -131,6 +131,17 @@ public class CloudRunController {
                 serviceName(project, location, serviceId) + "/revisions/" + revisionId)));
     }
 
+    @DELETE
+    @Path("/services/{serviceId}/revisions/{revisionId}")
+    public Response deleteRevision(@PathParam("project") String project,
+                                   @PathParam("location") String location,
+                                   @PathParam("serviceId") String serviceId,
+                                   @PathParam("revisionId") String revisionId,
+                                   @QueryParam("validateOnly") @DefaultValue("false") boolean validateOnly) {
+        return json(ProtoJson.print(service.deleteRevision(
+                serviceName(project, location, serviceId), revisionId, validateOnly)));
+    }
+
     private static Response json(String json) {
         return Response.ok(json, MediaType.APPLICATION_JSON).build();
     }

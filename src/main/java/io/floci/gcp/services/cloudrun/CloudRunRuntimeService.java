@@ -217,26 +217,46 @@ public class CloudRunRuntimeService {
                             int containerPort,
                             String containerName,
                             List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
+        Map<String, String> injectedEnv = new LinkedHashMap<>();
+        injectedEnv.put("PORT", Integer.toString(containerPort));
+        injectedEnv.put("K_SERVICE", lastSegment(service.getName()));
+        injectedEnv.put("K_REVISION", lastSegment(revision.getName()));
+        injectedEnv.put("K_CONFIGURATION", lastSegment(service.getName()));
+        return buildWorkloadSpec(project, location, revision.getName(), containerName, container, injectedEnv,
+                containerPort, gcsVolumeMounts);
+    }
+
+    /**
+     * Builds the Docker spec for any Cloud Run workload container. {@code injectedEnv} is applied after the
+     * container's own env, so emulator-provided variables win. {@code publishedPort} is null for workloads
+     * that expose no port (job tasks, worker pool instances).
+     */
+    ContainerSpec buildWorkloadSpec(String project, String location,
+                                    String resourceName,
+                                    String containerName,
+                                    com.google.cloud.run.v2.Container container,
+                                    Map<String, String> injectedEnv,
+                                    Integer publishedPort,
+                                    List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
         Map<String, String> env = new LinkedHashMap<>();
         for (EnvVar envVar : container.getEnvList()) {
             env.put(envVar.getName(), envVar.getValue());
         }
-        env.put("PORT", Integer.toString(containerPort));
-        env.put("K_SERVICE", lastSegment(service.getName()));
-        env.put("K_REVISION", lastSegment(revision.getName()));
-        env.put("K_CONFIGURATION", lastSegment(service.getName()));
+        env.putAll(injectedEnv);
 
         ContainerBuilder.Builder builder = containerBuilder.newContainer(container.getImage())
-                .withName(containerName)
-                .withDynamicPort(containerPort)
-                .withDockerNetwork(Optional.empty())
+                .withName(containerName);
+        if (publishedPort != null) {
+            builder.withDynamicPort(publishedPort);
+        }
+        builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(Map.of(
                         "floci_service", "cloudrun",
                         "floci_project", project,
                         "floci_location", location,
-                        "floci_resource", revision.getName()));
+                        "floci_resource", resourceName));
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
@@ -286,11 +306,19 @@ public class CloudRunRuntimeService {
     }
 
     static void validateSupported(Revision revision) {
-        if (revision.getContainersCount() != 1) {
+        validateSupported(revision.getContainersList(), revision.getVolumesList());
+    }
+
+    /**
+     * Docker-mode constraints shared by every Cloud Run workload (services, job tasks, worker pools,
+     * instances): exactly one container, GCS volumes only, at most one port.
+     */
+    static void validateSupported(List<com.google.cloud.run.v2.Container> containers, List<Volume> volumeList) {
+        if (containers.size() != 1) {
             throw GcpException.invalidArgument("Cloud Run execution supports exactly one container");
         }
         Map<String, Volume> volumes = new HashMap<>();
-        for (Volume volume : revision.getVolumesList()) {
+        for (Volume volume : volumeList) {
             if (volume.getName().isBlank()) {
                 throw GcpException.invalidArgument("Cloud Run execution volume name is required");
             }
@@ -305,7 +333,7 @@ public class CloudRunRuntimeService {
             }
             volumes.put(volume.getName(), volume);
         }
-        com.google.cloud.run.v2.Container container = revision.getContainers(0);
+        com.google.cloud.run.v2.Container container = containers.get(0);
         if (container.getImage().isBlank()) {
             throw GcpException.invalidArgument("Cloud Run execution requires a container image");
         }
@@ -362,6 +390,15 @@ public class CloudRunRuntimeService {
 
     List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(Revision revision,
                                                             com.google.cloud.run.v2.Container container) {
+        return prepareGcsVolumeMounts(revision.getName(), revision.getVolumesList(), container);
+    }
+
+    /**
+     * Materializes the GCS volumes referenced by {@code container} for the workload {@code resourceName}.
+     * Release them with {@link #releaseGcsVolumeMounts(List)} once the container is gone.
+     */
+    List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(String resourceName, List<Volume> volumeList,
+                                                            com.google.cloud.run.v2.Container container) {
         if (container.getVolumeMountsCount() == 0) {
             return List.of();
         }
@@ -370,7 +407,7 @@ public class CloudRunRuntimeService {
         }
 
         Map<String, Volume> volumes = new HashMap<>();
-        for (Volume volume : revision.getVolumesList()) {
+        for (Volume volume : volumeList) {
             volumes.put(volume.getName(), volume);
         }
 
@@ -384,7 +421,7 @@ public class CloudRunRuntimeService {
                 MaterializedGcsVolume source = materialized.get(key);
                 if (source == null) {
                     source = materializeGcsVolume(volume.getGcs().getBucket(), objectPrefix,
-                            volume.getGcs().getReadOnly(), revision.getName(), volume.getName());
+                            volume.getGcs().getReadOnly(), resourceName, volume.getName());
                     materialized.put(key, source);
                 }
                 mounts.add(new CloudRunRuntimeVolumeMount(source.bucket(), source.objectPrefix(), source.volumeName(),
@@ -425,6 +462,13 @@ public class CloudRunRuntimeService {
                             .exec();
                     return null;
                 }));
+    }
+
+    /**
+     * Writes writable GCS volumes back to the bucket and removes the materialized copies.
+     */
+    void releaseGcsVolumeMounts(List<CloudRunRuntimeVolumeMount> mounts) {
+        cleanupGcsVolumeMounts(mounts);
     }
 
     private void cleanupGcsVolumeMounts(List<CloudRunRuntimeVolumeMount> mounts) {
@@ -886,11 +930,22 @@ public class CloudRunRuntimeService {
         return ContainerStorageHelper.dockerName(config, name);
     }
 
-    private static String sanitize(String value) {
+    /**
+     * Docker container name for a Cloud Run workload, built from sanitized name parts.
+     */
+    String workloadContainerName(String... parts) {
+        StringBuilder name = new StringBuilder("cloudrun");
+        for (String part : parts) {
+            name.append('-').append(sanitize(part));
+        }
+        return ContainerStorageHelper.dockerName(config, name.toString());
+    }
+
+    static String sanitize(String value) {
         return value.replaceAll("[^A-Za-z0-9_.-]", "-");
     }
 
-    private static String lastSegment(String name) {
+    static String lastSegment(String name) {
         int slash = name.lastIndexOf('/');
         return slash < 0 ? name : name.substring(slash + 1);
     }

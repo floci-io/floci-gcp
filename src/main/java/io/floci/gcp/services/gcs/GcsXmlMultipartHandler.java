@@ -76,10 +76,9 @@ public class GcsXmlMultipartHandler {
                 }
                 case "DELETE" -> { service.abort(bucket, object, id); return Response.noContent().build(); }
                 case "GET" -> {
-                    GcsMultipartUpload upload = service.get(bucket, object, id);
                     int marker = number(Optional.ofNullable(query.getFirst("part-number-marker")).orElse("0"), 0, 10000);
                     int max = number(Optional.ofNullable(query.getFirst("max-parts")).orElse("1000"), 1, 1000);
-                    List<GcsMultipartUpload.Part> parts = upload.parts.values().stream().filter(p -> p.number() > marker).toList();
+                    List<GcsMultipartUpload.Part> parts = service.listParts(bucket, object, id, marker);
                     List<GcsMultipartUpload.Part> page = parts.subList(0, Math.min(parts.size(), max));
                     XmlBuilder response = new XmlBuilder().start("ListPartsResult", NS).elem("Bucket", bucket).elem("Key", object).elem("UploadId", id)
                             .elem("PartNumberMarker", marker).elem("MaxParts", max).elem("IsTruncated", parts.size() > max);

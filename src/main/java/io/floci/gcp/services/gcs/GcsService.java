@@ -9,12 +9,14 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.CompletedResumableUpload;
 import io.floci.gcp.services.gcs.model.GcsBucket;
+import io.floci.gcp.services.gcs.model.GcsMultipartUpload;
 import io.floci.gcp.services.gcs.model.GcsComposeSource;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
@@ -57,6 +59,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32C;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class GcsService {
@@ -71,6 +74,8 @@ public class GcsService {
     private final StorageBackend<String, byte[]> objectDataStore;
     private final StorageBackend<String, StoredAcl> aclStore;
     private final StorageBackend<String, StoredNotification> notificationStore;
+    private final StorageBackend<String, GcsMultipartUpload> multipartUploadStore;
+    private final Object multipartLock = new Object();
     private final ConcurrentHashMap<String, ResumableUpload> resumableUploads = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, GcsRewriteSession> rewriteSessions = new ConcurrentHashMap<>();
     private final Map<String, CompletedResumableUpload> completedResumableUploads = Collections.synchronizedMap(
@@ -121,6 +126,8 @@ public class GcsService {
         this.generationSequence = new AtomicLong(maxGeneration(objectMetaStore));
         this.aclStore = storageFactory.createGlobal("gcs-acls", "gcs-acls.json",
                 new TypeReference<Map<String, StoredAcl>>() {});
+        this.multipartUploadStore = storageFactory.createGlobal("gcs-multipart", "gcs-multipart.json",
+                new TypeReference<Map<String, GcsMultipartUpload>>() {});
         this.notificationStore = storageFactory.createGlobal("gcs-notifications", "gcs-notifications.json",
                 new TypeReference<Map<String, StoredNotification>>() {});
     }
@@ -138,6 +145,16 @@ public class GcsService {
             StorageBackend<String, byte[]> objectDataStore,
             StorageBackend<String, StoredAcl> aclStore,
             String defaultProjectId) {
+        this(bucketStore, objectMetaStore, objectDataStore, aclStore, new InMemoryStorage<>(), defaultProjectId);
+    }
+
+    GcsService(StorageBackend<String, GcsBucket> bucketStore,
+            StorageBackend<String, GcsObjectMeta> objectMetaStore,
+            StorageBackend<String, byte[]> objectDataStore,
+            StorageBackend<String, StoredAcl> aclStore,
+            StorageBackend<String, GcsMultipartUpload> multipartUploadStore,
+            String defaultProjectId) {
+        this.multipartUploadStore = multipartUploadStore;
         this.bucketStore = bucketStore;
         this.objectMetaStore = objectMetaStore;
         this.objectDataStore = objectDataStore;
@@ -416,7 +433,7 @@ public class GcsService {
     }
 
     public boolean deleteBucketIfEmpty(String name) {
-        synchronized (bucketLock(name)) {
+        return withMultipartBucketLock(name, () -> {
             if (bucketStore.get(name).isEmpty()) {
                 LOG.warnf("deleteBucket failed: bucket not found name=%s", name);
                 throw GcpException.notFound("Bucket not found: " + name);
@@ -425,8 +442,31 @@ public class GcsService {
                 return false;
             }
             purgeSoftDeletedObjects(name);
+            for (GcsMultipartUpload upload : multipartUploadStore.scan(key -> true)) {
+                if (name.equals(upload.bucket)) {
+                    multipartUploadStore.delete(upload.id);
+                }
+            }
+            multipartUploadStore.checkpoint();
             bucketStore.delete(name);
             return true;
+        });
+    }
+
+    StorageBackend<String, GcsMultipartUpload> multipartUploads() {
+        return multipartUploadStore;
+    }
+
+    /**
+     * Bucket deletion and multipart mutations share the order bucket -> multipart -> object.
+     * An upload cannot be created or completed across deletion of its bucket; the multipart
+     * monitor also prevents checkpoints from observing another upload's parts mid-mutation.
+     */
+    <T> T withMultipartBucketLock(String bucket, Supplier<T> action) {
+        synchronized (bucketLock(bucket)) {
+            synchronized (multipartLock) {
+                return action.get();
+            }
         }
     }
 

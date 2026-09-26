@@ -229,6 +229,102 @@ setup() {
     assert_output --partial 'floci-compat-run-replaced'
 }
 
+# ── Cloud Run Job Spot Checks ────────────────────────────────────────────────
+
+@test "Terraform: Cloud Run job created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job"
+    assert_success
+    assert_output --partial '"terminalCondition":{"type":"Ready","state":"CONDITION_SUCCEEDED"'
+    assert_output --partial '"taskCount":1'
+    assert_output --partial '"timeout":"60s"'
+}
+
+@test "Terraform: Cloud Run job plans no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "Terraform: Cloud Run job update uses provider patch path" {
+    run terraform apply \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="job_label=compat-updated" \
+        -var="job_task_count=2" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job")
+    [[ "$result" == *'"env":"compat-updated"'* ]]
+    [[ "$result" == *'"taskCount":2'* ]]
+    [[ "$result" == *'"generation":"2"'* ]]
+}
+
+@test "Terraform: Cloud Run job destroy removes the job" {
+    run terraform destroy \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job"
+    assert_failure
+}
+
+# ── Cloud Run Worker Pool Spot Checks ────────────────────────────────────────
+
+@test "Terraform: Cloud Run worker pool created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/workerPools/floci-compat-wp"
+    assert_success
+    assert_output --partial '"latestReadyRevision"'
+    assert_output --partial 'floci-compat-wp/revisions/floci-compat-wp-00001-'
+    assert_output --partial '"manualInstanceCount":1'
+}
+
+@test "Terraform: Cloud Run worker pool plans no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_cloud_run_v2_worker_pool.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "Terraform: Cloud Run worker pool update uses provider patch path" {
+    run terraform apply \
+        -target=google_cloud_run_v2_worker_pool.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="worker_pool_label=compat-updated" \
+        -var="worker_pool_instances=0" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/workerPools/floci-compat-wp")
+    [[ "$result" == *'"env":"compat-updated"'* ]]
+    [[ "$result" == *'"manualInstanceCount":0'* ]]
+    [[ "$result" == *'floci-compat-wp/revisions/floci-compat-wp-00001-'* ]]
+}
+
+@test "Terraform: Cloud Run worker pool destroy removes pool and revisions" {
+    run terraform destroy \
+        -target=google_cloud_run_v2_worker_pool.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/workerPools/floci-compat-wp"
+    assert_failure
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/workerPools/floci-compat-wp/revisions"
+    assert_success
+    assert_output '{}'
+}
+
 # ── Cloud SQL Spot Checks ────────────────────────────────────────────────────
 
 @test "Terraform: Cloud SQL PostgreSQL instance created" {

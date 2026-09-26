@@ -17,6 +17,7 @@ import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -31,9 +32,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -44,6 +48,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 @ApplicationScoped
@@ -195,6 +200,22 @@ public class CloudRunRuntimeService {
         }
     }
 
+    Optional<CloudRunRuntimeInstance> runtimeRecord(String key) {
+        return runtimeStore.get(key);
+    }
+
+    void saveRuntimeRecord(String key, CloudRunRuntimeInstance instance) {
+        runtimeStore.put(key, instance);
+    }
+
+    List<CloudRunRuntimeInstance> runtimeRecords(Predicate<String> keyFilter) {
+        return List.copyOf(runtimeStore.keys()).stream()
+                .filter(keyFilter)
+                .map(runtimeStore::get)
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
     void markFailed(String revisionName, String message) {
         runtimeStore.get(revisionName)
                 .map(instance -> instance.withStatus("FAILED", message))
@@ -217,26 +238,46 @@ public class CloudRunRuntimeService {
                             int containerPort,
                             String containerName,
                             List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
+        Map<String, String> injectedEnv = new LinkedHashMap<>();
+        injectedEnv.put("PORT", Integer.toString(containerPort));
+        injectedEnv.put("K_SERVICE", lastSegment(service.getName()));
+        injectedEnv.put("K_REVISION", lastSegment(revision.getName()));
+        injectedEnv.put("K_CONFIGURATION", lastSegment(service.getName()));
+        return buildWorkloadSpec(project, location, revision.getName(), containerName, container, injectedEnv,
+                containerPort, gcsVolumeMounts);
+    }
+
+    /**
+     * Builds the Docker spec for any Cloud Run workload container. {@code injectedEnv} is applied after the
+     * container's own env, so emulator-provided variables win. {@code publishedPort} is null for workloads
+     * that expose no port (job tasks, worker pool instances).
+     */
+    ContainerSpec buildWorkloadSpec(String project, String location,
+                                    String resourceName,
+                                    String containerName,
+                                    com.google.cloud.run.v2.Container container,
+                                    Map<String, String> injectedEnv,
+                                    Integer publishedPort,
+                                    List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
         Map<String, String> env = new LinkedHashMap<>();
         for (EnvVar envVar : container.getEnvList()) {
             env.put(envVar.getName(), envVar.getValue());
         }
-        env.put("PORT", Integer.toString(containerPort));
-        env.put("K_SERVICE", lastSegment(service.getName()));
-        env.put("K_REVISION", lastSegment(revision.getName()));
-        env.put("K_CONFIGURATION", lastSegment(service.getName()));
+        env.putAll(injectedEnv);
 
         ContainerBuilder.Builder builder = containerBuilder.newContainer(container.getImage())
-                .withName(containerName)
-                .withDynamicPort(containerPort)
-                .withDockerNetwork(Optional.empty())
+                .withName(containerName);
+        if (publishedPort != null) {
+            builder.withDynamicPort(publishedPort);
+        }
+        builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(Map.of(
                         "floci_service", "cloudrun",
                         "floci_project", project,
                         "floci_location", location,
-                        "floci_resource", revision.getName()));
+                        "floci_resource", resourceName));
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
@@ -286,11 +327,19 @@ public class CloudRunRuntimeService {
     }
 
     static void validateSupported(Revision revision) {
-        if (revision.getContainersCount() != 1) {
+        validateSupported(revision.getContainersList(), revision.getVolumesList());
+    }
+
+    /**
+     * Docker-mode constraints shared by every Cloud Run workload (services, job tasks, worker pools,
+     * instances): exactly one container, GCS volumes only, at most one port.
+     */
+    static void validateSupported(List<com.google.cloud.run.v2.Container> containers, List<Volume> volumeList) {
+        if (containers.size() != 1) {
             throw GcpException.invalidArgument("Cloud Run execution supports exactly one container");
         }
         Map<String, Volume> volumes = new HashMap<>();
-        for (Volume volume : revision.getVolumesList()) {
+        for (Volume volume : volumeList) {
             if (volume.getName().isBlank()) {
                 throw GcpException.invalidArgument("Cloud Run execution volume name is required");
             }
@@ -305,7 +354,7 @@ public class CloudRunRuntimeService {
             }
             volumes.put(volume.getName(), volume);
         }
-        com.google.cloud.run.v2.Container container = revision.getContainers(0);
+        com.google.cloud.run.v2.Container container = containers.get(0);
         if (container.getImage().isBlank()) {
             throw GcpException.invalidArgument("Cloud Run execution requires a container image");
         }
@@ -362,6 +411,35 @@ public class CloudRunRuntimeService {
 
     List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(Revision revision,
                                                             com.google.cloud.run.v2.Container container) {
+        return prepareGcsVolumeMounts(revision.getName(), revision.getVolumesList(), container);
+    }
+
+    /**
+     * Materializes the GCS volumes referenced by {@code container} for the workload {@code resourceName}.
+     * Release them with {@link #releaseGcsVolumeMounts(List)} once the container is gone.
+     */
+    List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(String resourceName, List<Volume> volumeList,
+                                                            com.google.cloud.run.v2.Container container) {
+        return prepareGcsVolumeMounts(resourceName, volumeList, container, null);
+    }
+
+    /**
+     * Like {@link #prepareGcsVolumeMounts(String, List, com.google.cloud.run.v2.Container)}, but also records, for
+     * every materialized volume, the generation and MD5 of each object copied into it. Release the result with
+     * {@link #releaseMergingGcsVolumeMounts(GcsVolumeMounts)}, which merges the volume back into the bucket instead
+     * of mirroring it, so several workloads writing the same bucket prefix concurrently keep each other's changes.
+     */
+    GcsVolumeMounts prepareMergingGcsVolumeMounts(String resourceName, List<Volume> volumeList,
+                                                  com.google.cloud.run.v2.Container container) {
+        Map<String, Map<String, GcsSnapshotObject>> snapshots = new HashMap<>();
+        List<CloudRunRuntimeVolumeMount> mounts = prepareGcsVolumeMounts(resourceName, volumeList, container,
+                snapshots);
+        return new GcsVolumeMounts(mounts, Map.copyOf(snapshots));
+    }
+
+    private List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(
+            String resourceName, List<Volume> volumeList, com.google.cloud.run.v2.Container container,
+            Map<String, Map<String, GcsSnapshotObject>> snapshots) {
         if (container.getVolumeMountsCount() == 0) {
             return List.of();
         }
@@ -370,7 +448,7 @@ public class CloudRunRuntimeService {
         }
 
         Map<String, Volume> volumes = new HashMap<>();
-        for (Volume volume : revision.getVolumesList()) {
+        for (Volume volume : volumeList) {
             volumes.put(volume.getName(), volume);
         }
 
@@ -383,9 +461,13 @@ public class CloudRunRuntimeService {
                 String key = volume.getName() + "\0" + objectPrefix;
                 MaterializedGcsVolume source = materialized.get(key);
                 if (source == null) {
+                    Map<String, GcsSnapshotObject> snapshot = snapshots == null ? null : new HashMap<>();
                     source = materializeGcsVolume(volume.getGcs().getBucket(), objectPrefix,
-                            volume.getGcs().getReadOnly(), revision.getName(), volume.getName());
+                            volume.getGcs().getReadOnly(), resourceName, volume.getName(), snapshot);
                     materialized.put(key, source);
+                    if (snapshots != null) {
+                        snapshots.put(source.volumeName(), Map.copyOf(snapshot));
+                    }
                 }
                 mounts.add(new CloudRunRuntimeVolumeMount(source.bucket(), source.objectPrefix(), source.volumeName(),
                         null, null, volumeMount.getMountPath(), source.readOnly()));
@@ -399,14 +481,15 @@ public class CloudRunRuntimeService {
     }
 
     private MaterializedGcsVolume materializeGcsVolume(String bucket, String objectPrefix, boolean readOnly,
-                                                       String revisionName, String volumeName) {
+                                                       String revisionName, String volumeName,
+                                                       Map<String, GcsSnapshotObject> snapshot) {
         String dockerVolumeName = ContainerStorageHelper.dockerName(config,
                 "cloudrun-gcs-" + sanitize(lastSegment(revisionName))
                         + "-" + sanitize(volumeName) + "-" + UUID.randomUUID());
         try {
             gcsService.getBucket(bucket);
             lifecycleManager.ensureVolume(dockerVolumeName);
-            copyGcsSnapshotToVolume(bucket, objectPrefix, dockerVolumeName);
+            copyGcsSnapshotToVolume(bucket, objectPrefix, dockerVolumeName, snapshot);
             return new MaterializedGcsVolume(bucket, objectPrefix, dockerVolumeName, readOnly);
         } catch (RuntimeException e) {
             lifecycleManager.removeVolume(dockerVolumeName);
@@ -414,8 +497,9 @@ public class CloudRunRuntimeService {
         }
     }
 
-    private void copyGcsSnapshotToVolume(String bucket, String objectPrefix, String volumeName) {
-        byte[] tar = gcsVolumeTar(bucket, objectPrefix);
+    private void copyGcsSnapshotToVolume(String bucket, String objectPrefix, String volumeName,
+                                         Map<String, GcsSnapshotObject> snapshot) {
+        byte[] tar = gcsVolumeTar(bucket, objectPrefix, snapshot);
         withGcsVolumeHelper(volumeName, helperId -> lifecycleManager.runDockerApi(
                 "copy GCS snapshot to Docker volume " + volumeName, () -> {
                     lifecycleManager.getDockerClient()
@@ -425,6 +509,84 @@ public class CloudRunRuntimeService {
                             .exec();
                     return null;
                 }));
+    }
+
+    /**
+     * Writes writable GCS volumes back to the bucket and removes the materialized copies.
+     */
+    void releaseGcsVolumeMounts(List<CloudRunRuntimeVolumeMount> mounts) {
+        cleanupGcsVolumeMounts(mounts);
+    }
+
+    /**
+     * Merges writable volumes prepared by {@link #prepareMergingGcsVolumeMounts} back into their buckets and removes
+     * the materialized copies. See {@link #mergeWritableGcsVolumeFiles} for the merge rules. Every materialized
+     * copy is removed even when a merge fails, in which case the remaining volumes are still merged and the
+     * returned message describes the failures.
+     *
+     * @return the reason some writable volume could not be written back, or empty when every merge succeeded
+     */
+    Optional<String> releaseMergingGcsVolumeMounts(GcsVolumeMounts volumes) {
+        if (volumes == null || volumes.mounts().isEmpty()) {
+            return Optional.empty();
+        }
+        List<String> failures = new ArrayList<>();
+        Set<String> syncedVolumes = new HashSet<>();
+        try {
+            for (CloudRunRuntimeVolumeMount mount : volumes.mounts()) {
+                if (!mount.readOnly() && mount.volumeName() != null && !mount.volumeName().isBlank()
+                        && syncedVolumes.add(mount.volumeName())) {
+                    try {
+                        mergeWritableGcsVolumeFiles(mount, copyVolumeFiles(mount.volumeName()),
+                                volumes.snapshots().getOrDefault(mount.volumeName(), Map.of()));
+                    } catch (Exception e) {
+                        LOG.warnf(e, "Cloud Run GCS volume merge failed bucket=%s volume=%s",
+                                mount.bucket(), mount.volumeName());
+                        failures.add("bucket " + mount.bucket() + ": "
+                                + (e.getMessage() == null ? e.toString() : e.getMessage()));
+                    }
+                }
+            }
+        } finally {
+            deleteMaterializedGcsVolumes(volumes.mounts());
+        }
+        return failures.isEmpty() ? Optional.empty() : Optional.of(String.join("; ", failures));
+    }
+
+    /**
+     * Writes the files of one writable volume back to its bucket prefix without touching changes made by others
+     * since the volume was materialized: a file is uploaded only when it is new or its content differs from the
+     * snapshot, and an object is deleted only when it was in the snapshot, is missing from {@code files}, and its
+     * bucket generation still equals the snapshot generation. Objects created by other writers are never deleted.
+     */
+    void mergeWritableGcsVolumeFiles(CloudRunRuntimeVolumeMount mount, Map<String, byte[]> files,
+                                     Map<String, GcsSnapshotObject> snapshot) {
+        if (gcsService == null) {
+            return;
+        }
+        Set<String> diskObjects = new HashSet<>();
+        for (Map.Entry<String, byte[]> file : files.entrySet()) {
+            String objectName = prefixedObjectName(mount.objectPrefix(), file.getKey());
+            diskObjects.add(objectName);
+            GcsSnapshotObject before = snapshot.get(objectName);
+            if (before != null && before.md5().equals(md5(file.getValue()))) {
+                continue;
+            }
+            gcsService.putObject(mount.bucket(), objectName, "application/octet-stream", file.getValue(),
+                    config.effectiveBaseUrl());
+        }
+        for (Map.Entry<String, GcsSnapshotObject> object : snapshot.entrySet()) {
+            if (diskObjects.contains(object.getKey())) {
+                continue;
+            }
+            try {
+                gcsService.deleteObject(mount.bucket(), object.getKey(), new GcsObjectPreconditions(
+                        Long.parseLong(object.getValue().generation()), null, null, null));
+            } catch (GcpException e) {
+                LOG.debugf("Keeping GCS object changed since the volume snapshot bucket=%s object=%s: %s",
+                        mount.bucket(), object.getKey(), e.getMessage());
+            }
+        }
     }
 
     private void cleanupGcsVolumeMounts(List<CloudRunRuntimeVolumeMount> mounts) {
@@ -538,7 +700,13 @@ public class CloudRunRuntimeService {
         }
     }
 
-    private byte[] gcsVolumeTar(String bucket, String objectPrefix) {
+    /**
+     * Builds the tar archive of the objects under {@code objectPrefix}. When {@code snapshot} is not null, records
+     * the generation and MD5 of every file object archived. The generation is read before the bytes, so a
+     * concurrent overwrite can only make the recorded generation older than the archived content, which makes a
+     * later merge keep the object rather than delete it.
+     */
+    byte[] gcsVolumeTar(String bucket, String objectPrefix, Map<String, GcsSnapshotObject> snapshot) {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             for (GcsObjectMeta object : gcsService.listObjects(bucket)) {
@@ -548,8 +716,10 @@ public class CloudRunRuntimeService {
                 }
                 if (object.getName().endsWith("/")) {
                     writeTarEntry(out, entryName.get(), new byte[0], true);
-                } else {
+                } else if (snapshot == null) {
                     writeTarEntry(out, entryName.get(), gcsService.getObjectData(bucket, object.getName()), false);
+                } else {
+                    writeSnapshotTarEntry(out, bucket, object.getName(), entryName.get(), snapshot);
                 }
             }
             out.write(new byte[TAR_BLOCK_SIZE * 2]);
@@ -557,6 +727,34 @@ public class CloudRunRuntimeService {
         } catch (IOException e) {
             throw GcpException.internal("Cloud Run execution could not prepare GCS volume archive: "
                     + e.getMessage());
+        }
+    }
+
+    private void writeSnapshotTarEntry(ByteArrayOutputStream out, String bucket, String objectName, String entryName,
+                                       Map<String, GcsSnapshotObject> snapshot) throws IOException {
+        byte[] data;
+        String generation;
+        try {
+            generation = gcsService.getObjectMeta(bucket, objectName).getGeneration();
+            data = gcsService.getObjectData(bucket, objectName);
+        } catch (GcpException e) {
+            if (e.getHttpStatus() != 404) {
+                throw e;
+            }
+            LOG.debugf("GCS object deleted while materializing volume bucket=%s object=%s", bucket, objectName);
+            return;
+        }
+        writeTarEntry(out, entryName, data, false);
+        if (generation != null) {
+            snapshot.put(objectName, new GcsSnapshotObject(generation, md5(data)));
+        }
+    }
+
+    private static String md5(byte[] data) {
+        try {
+            return Base64.getEncoder().encodeToString(MessageDigest.getInstance("MD5").digest(data));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 is not available", e);
         }
     }
 
@@ -839,6 +1037,15 @@ public class CloudRunRuntimeService {
 
     private record MaterializedGcsVolume(String bucket, String objectPrefix, String volumeName, boolean readOnly) {}
 
+    /** Materialized GCS volume mounts and, per Docker volume name, the objects copied into that volume. */
+    record GcsVolumeMounts(List<CloudRunRuntimeVolumeMount> mounts,
+                           Map<String, Map<String, GcsSnapshotObject>> snapshots) {
+        static final GcsVolumeMounts EMPTY = new GcsVolumeMounts(List.of(), Map.of());
+    }
+
+    /** The generation and base64 MD5 of an object as copied into a materialized volume. */
+    record GcsSnapshotObject(String generation, String md5) {}
+
     private record TarName(String name, String prefix) {}
 
     @FunctionalInterface
@@ -853,7 +1060,7 @@ public class CloudRunRuntimeService {
         return config.services().cloudrun().execution().requestTimeout();
     }
 
-    private void waitForReady(ContainerLifecycleManager.EndpointInfo endpoint, Duration timeout) {
+    void waitForReady(ContainerLifecycleManager.EndpointInfo endpoint, Duration timeout) {
         long deadline = System.nanoTime() + timeout.toNanos();
         RuntimeException last = null;
         while (System.nanoTime() < deadline) {
@@ -886,11 +1093,22 @@ public class CloudRunRuntimeService {
         return ContainerStorageHelper.dockerName(config, name);
     }
 
-    private static String sanitize(String value) {
+    /**
+     * Docker container name for a Cloud Run workload, built from sanitized name parts.
+     */
+    String workloadContainerName(String... parts) {
+        StringBuilder name = new StringBuilder("cloudrun");
+        for (String part : parts) {
+            name.append('-').append(sanitize(part));
+        }
+        return ContainerStorageHelper.dockerName(config, name.toString());
+    }
+
+    static String sanitize(String value) {
         return value.replaceAll("[^A-Za-z0-9_.-]", "-");
     }
 
-    private static String lastSegment(String name) {
+    static String lastSegment(String name) {
         int slash = name.lastIndexOf('/');
         return slash < 0 ? name : name.substring(slash + 1);
     }

@@ -33,6 +33,7 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -50,8 +51,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
+// com.google.cloud.run.v2.Service stays fully qualified in this file: a bare Service would read as this class.
 @ApplicationScoped
 public class CloudRunService {
 
@@ -65,6 +67,7 @@ public class CloudRunService {
     private final EmulatorConfig config;
     private final CloudRunRuntimeService runtimeService;
     private final CloudRunUrlService urlService;
+    private final Predicate<String> instanceExists;
     private final ExecutorService operationExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors()),
             runnable -> {
@@ -93,7 +96,8 @@ public class CloudRunService {
                            ServiceRegistry serviceRegistry,
                            EmulatorConfig config,
                            CloudRunRuntimeService runtimeService,
-                           CloudRunUrlService urlService) {
+                           CloudRunUrlService urlService,
+                           Instance<CloudRunInstancesService> instancesService) {
         this.serviceStore = storageFactory.createGlobal("cloudrun-services", "cloudrun-services.json",
                 new TypeReference<Map<String, String>>() {});
         this.revisionStore = storageFactory.createGlobal("cloudrun-revisions", "cloudrun-revisions.json",
@@ -104,6 +108,7 @@ public class CloudRunService {
         this.config = config;
         this.runtimeService = runtimeService;
         this.urlService = urlService;
+        this.instanceExists = name -> instancesService.get().instanceExists(name);
     }
 
     CloudRunService(StorageBackend<String, String> serviceStore,
@@ -138,6 +143,7 @@ public class CloudRunService {
         this.config = config;
         this.runtimeService = runtimeService;
         this.urlService = urlService;
+        this.instanceExists = name -> false;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -146,7 +152,9 @@ public class CloudRunService {
                 .storageKey("cloudrun")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
-                        CloudRunUrlRoutingFilter.class)
+                        CloudRunUrlRoutingFilter.class, CloudRunJobsController.class,
+                        CloudRunWorkerPoolsController.class,
+                        CloudRunInstancesController.class, CloudRunInstanceInvocationController.class)
                 .build());
     }
 
@@ -170,6 +178,9 @@ public class CloudRunService {
         String name = parent + "/services/" + id;
         if (serviceStore.get(name).isPresent()) {
             throw GcpException.alreadyExists("Cloud Run service already exists: " + name);
+        }
+        if (instanceExists.test(parent + "/instances/" + id)) {
+            throw GcpException.alreadyExists("Resource '" + id + "' already exists.");
         }
 
         Timestamp now = timestampNow();
@@ -202,7 +213,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parent, service);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         com.google.cloud.run.v2.Service storedService = service;
         Revision storedRevision = revision;
         submitOperation(guard,
@@ -216,6 +227,10 @@ public class CloudRunService {
         return serviceStore.get(name)
                 .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build())
                 .orElseThrow(() -> GcpException.notFound("Cloud Run service not found: " + name));
+    }
+
+    public boolean serviceExists(String name) {
+        return serviceStore.get(name).isPresent();
     }
 
     public ListServicesResponse listServices(String project, String location, int pageSize, String pageToken) {
@@ -249,7 +264,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parentFromName(name), deleted);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         submitOperation(guard,
                 () -> deleteRuntime(guard, name, deleted),
                 () -> guard.fail(Status.newBuilder()
@@ -300,7 +315,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parentFromName(name), updated);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         Revision storedRevision = revision;
         com.google.cloud.run.v2.Service storedService = updated;
         submitOperation(guard,
@@ -363,6 +378,41 @@ public class CloudRunService {
             response.setNextPageToken(page.nextPageToken());
         }
         return response.build();
+    }
+
+    public Operation deleteRevision(String serviceName, String revisionId, boolean validateOnly) {
+        String revisionName = serviceName + "/revisions/" + revisionId;
+        Revision existing = getRevision(revisionName);
+        Optional<com.google.cloud.run.v2.Service> service = serviceStore.get(serviceName)
+                .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build());
+        if (service.isPresent() && servesRevision(service.get(), revisionName)) {
+            throw GcpException.failedPrecondition("Revision \"" + revisionId
+                    + "\" cannot be directly deleted because it is actively serving.");
+        }
+        Timestamp now = timestampNow();
+        Revision deleted = existing.toBuilder()
+                .setGeneration(existing.getGeneration() + 1)
+                .setObservedGeneration(existing.getGeneration() + 1)
+                .setUpdateTime(now)
+                .setDeleteTime(now)
+                .setExpireTime(now.toBuilder().setSeconds(now.getSeconds() + Duration.ofDays(30).toSeconds()))
+                .build();
+        LOG.infof("delete Cloud Run revision name=%s validateOnly=%s", revisionName, validateOnly);
+        if (validateOnly) {
+            return operations.doneTransient(parentFromName(serviceName), deleted, deleted);
+        }
+        revisionStore.delete(revisionName);
+        return operations.done(parentFromName(serviceName), deleted, deleted);
+    }
+
+    private static boolean servesRevision(com.google.cloud.run.v2.Service service, String revisionName) {
+        String revisionId = GcpResourceNames.lastSegment(revisionName);
+        if (revisionName.equals(service.getLatestReadyRevision())) {
+            return true;
+        }
+        return service.getTrafficStatusesList().stream()
+                .map(TrafficTargetStatus::getRevision)
+                .anyMatch(revision -> revision.equals(revisionName) || revision.equals(revisionId));
     }
 
     public Policy getIamPolicy(String resource) {
@@ -442,7 +492,7 @@ public class CloudRunService {
         return builder.build();
     }
 
-    private void startRuntime(String project, String location, OperationGuard guard,
+    private void startRuntime(String project, String location, CloudRunOperationGuard guard,
                               com.google.cloud.run.v2.Service service, Revision revision) {
         try {
             runtimeService.initialize();
@@ -484,7 +534,7 @@ public class CloudRunService {
         }
     }
 
-    private void deleteRuntime(OperationGuard guard, String name, com.google.cloud.run.v2.Service deleted) {
+    private void deleteRuntime(CloudRunOperationGuard guard, String name, com.google.cloud.run.v2.Service deleted) {
         List<CloudRunRuntimeInstance> instances = runtimeService.serviceInstances(name);
         try {
             deleteMetadata(name);
@@ -505,7 +555,7 @@ public class CloudRunService {
         runCleanupWithTimeout("runtime cleanup service=" + name, () -> runtimeService.stopInstances(instances));
     }
 
-    private void submitOperation(OperationGuard guard, Runnable work, Runnable onTimeout) {
+    private void submitOperation(CloudRunOperationGuard guard, Runnable work, Runnable onTimeout) {
         Future<?> future = operationExecutor.submit(work);
         Duration timeout = operationTimeout();
         operationTimeouts.schedule(() -> {
@@ -521,7 +571,7 @@ public class CloudRunService {
         }, timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private void failRuntimeStart(OperationGuard guard,
+    private void failRuntimeStart(CloudRunOperationGuard guard,
                                   com.google.cloud.run.v2.Service service,
                                   Revision revision,
                                   String message,
@@ -840,33 +890,4 @@ public class CloudRunService {
     }
 
     public record InvocationRoute(String project, String location, String serviceId) {}
-
-    private final class OperationGuard {
-        private final String operationName;
-        private final AtomicBoolean terminal = new AtomicBoolean(false);
-
-        private OperationGuard(String operationName) {
-            this.operationName = operationName;
-        }
-
-        private String operationName() {
-            return operationName;
-        }
-
-        private boolean isTerminal() {
-            return terminal.get();
-        }
-
-        private void complete(com.google.protobuf.Message response, com.google.protobuf.Message metadata) {
-            if (terminal.compareAndSet(false, true)) {
-                operations.complete(operationName, response, metadata);
-            }
-        }
-
-        private void fail(Status error, com.google.protobuf.Message metadata) {
-            if (terminal.compareAndSet(false, true)) {
-                operations.fail(operationName, error, metadata);
-            }
-        }
-    }
 }

@@ -100,6 +100,7 @@ floci-gcp:
         operation-timeout: 300s
         cleanup-timeout: 15s
         url-host-suffix:              # Optional; defaults to hostname, then localhost.floci.io
+        max-worker-instances: 1       # Cap on running containers per worker pool
     cloudfunctions:
       enabled: true
     monitoring:

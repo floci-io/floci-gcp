@@ -313,3 +313,80 @@ resource "google_bigquery_table" "events" {
     { name = "kind", type = "STRING", mode = "NULLABLE" }
   ])
 }
+
+# ── Cloud Run Job ─────────────────────────────────────────────────────────────
+variable "job_label" {
+  type    = string
+  default = "compat-test"
+}
+
+variable "job_task_count" {
+  type    = number
+  default = 1
+}
+
+resource "google_cloud_run_v2_job" "compat" {
+  name                = "floci-compat-job-tofu"
+  location            = var.region
+  deletion_protection = false
+
+  labels = {
+    env = var.job_label
+  }
+
+  template {
+    task_count = var.job_task_count
+
+    template {
+      max_retries = 0
+      timeout     = "60s"
+
+      containers {
+        image   = "busybox:latest"
+        command = ["sh", "-c"]
+        args    = ["echo task $CLOUD_RUN_TASK_INDEX of $CLOUD_RUN_TASK_COUNT"]
+      }
+    }
+  }
+}
+
+output "cloud_run_job_name" {
+  value = google_cloud_run_v2_job.compat.name
+}
+
+# ── Cloud Run Worker Pool ─────────────────────────────────────────────────────
+variable "worker_pool_label" {
+  type    = string
+  default = "compat-test"
+}
+
+variable "worker_pool_instances" {
+  type    = number
+  default = 1
+}
+
+resource "google_cloud_run_v2_worker_pool" "compat" {
+  name                = "floci-compat-wp-tofu"
+  location            = var.region
+  deletion_protection = false
+
+  labels = {
+    env = var.worker_pool_label
+  }
+
+  scaling {
+    manual_instance_count = var.worker_pool_instances
+  }
+
+  template {
+    containers {
+      image   = "busybox:latest"
+      command = ["sh", "-c"]
+      args    = ["trap 'exit 0' TERM; while true; do sleep 1; done"]
+    }
+  }
+}
+
+output "cloud_run_worker_pool_name" {
+  value = google_cloud_run_v2_worker_pool.compat.name
+}

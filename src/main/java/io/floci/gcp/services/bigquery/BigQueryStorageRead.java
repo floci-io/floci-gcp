@@ -21,6 +21,7 @@ import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -76,16 +77,20 @@ public class BigQueryStorageRead {
     private final EmulatorConfig config;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
 
+    private final Vertx vertx;
+
     @Inject
-    public BigQueryStorageRead(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config) {
+    public BigQueryStorageRead(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config,
+                               Vertx vertx) {
         this.service = service;
         this.grpcServerManager = grpcServerManager;
         this.config = config;
+        this.vertx = vertx;
     }
 
     void onStart(@Observes StartupEvent event) {
         if (config.services().bigquery().enabled()) {
-            grpcServerManager.bind(new BigQueryReadController(this));
+            grpcServerManager.bind(new BigQueryReadController(this, vertx));
         }
     }
 

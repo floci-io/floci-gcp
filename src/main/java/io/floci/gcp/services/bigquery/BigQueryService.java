@@ -447,7 +447,16 @@ public class BigQueryService {
 
     /** Appends rows already normalized against the table schema. */
     void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows) {
-        if (rows.isEmpty()) {
+        appendRows(projectId, datasetId, tableId, rows, Map.of());
+    }
+
+    /**
+     * Appends rows and, in the same write, records {@code streamRows}: for each Storage Write
+     * stream, how many of its rows the table now holds in total.
+     */
+    void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows,
+                    Map<String, Long> streamRows) {
+        if (rows.isEmpty() && streamRows.isEmpty()) {
             return;
         }
         String key = tableKey(datasetId, tableId);
@@ -458,11 +467,19 @@ public class BigQueryService {
             synchronized (stored) {
                 stored.addAll(rows);
             }
+            data.getStreamRows().putAll(streamRows);
             dataStore.put(key, data);
             table.setNumRows(String.valueOf(data.getRows().size()));
             table.setLastModifiedTime(nowMillis());
             tableStore.put(key, table);
         }
+    }
+
+    /** How many of a Storage Write stream's rows the table holds, or 0. */
+    long streamRowsApplied(String projectId, String datasetId, String tableId, String streamName) {
+        getTable(projectId, datasetId, tableId);
+        return dataStore.get(tableKey(datasetId, tableId))
+                .map(data -> data.getStreamRows().getOrDefault(streamName, 0L)).orElse(0L);
     }
 
     /** Encoded rows plus totals for {@code tabledata.list}. */
@@ -973,6 +990,8 @@ public class BigQueryService {
         Table table = getTable(projectId, target.datasetId(), target.tableId());
         StoredTableData data = new StoredTableData();
         data.setRows(new ArrayList<>(rows));
+        // DML rewrites the rows but not what Storage Write streams already delivered.
+        dataStore.get(key).ifPresent(previous -> data.setStreamRows(previous.getStreamRows()));
         dataStore.put(key, data);
         table.setNumRows(String.valueOf(rows.size()));
         table.setLastModifiedTime(nowMillis());

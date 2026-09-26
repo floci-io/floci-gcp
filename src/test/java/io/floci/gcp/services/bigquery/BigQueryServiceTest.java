@@ -856,4 +856,20 @@ class BigQueryServiceTest {
                 Map.of("sourceFormat", "CSV"), new byte[1]));
         assertEquals(400, missing.getHttpStatus());
     }
+
+    @Test
+    void appendRowsRecordsStreamCountsInTheSameWrite() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        String stream = "projects/" + PROJECT + "/datasets/" + DATASET + "/tables/" + TABLE + "/streams/s1";
+
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "a")), Map.of(stream, 1L));
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "b"), Map.of("name", "c")),
+                Map.of(stream, 3L));
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "d")));
+
+        assertEquals(3L, service.streamRowsApplied(PROJECT, DATASET, TABLE, stream));
+        assertEquals(0L, service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "x"));
+        assertEquals(4, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
 }

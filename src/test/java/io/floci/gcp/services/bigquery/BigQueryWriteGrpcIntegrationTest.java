@@ -492,21 +492,113 @@ class BigQueryWriteGrpcIntegrationTest {
         }
         int before = tableRows().size();
 
-        storageWrite.forgetLiveStreams();
+        storageWrite.clear();
 
         try (Connection connection = new Connection()) {
             AppendRowsResponse appended = connection.send(request(stream.getName(), ROW, row("kept3", 3L)));
             assertEquals(2, appended.getAppendResult().getOffset().getValue(), "offset carried over");
         }
-        storageWrite.forgetLiveStreams();
+        storageWrite.clear();
         write.finalizeWriteStream(FinalizeWriteStreamRequest.newBuilder().setName(stream.getName()).build());
-        storageWrite.forgetLiveStreams();
+        storageWrite.clear();
         assertTrue(write.batchCommitWriteStreams(BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
                 .addWriteStreams(stream.getName()).build()).hasCommitTime());
         assertEquals(before + 3, tableRows().size());
 
-        storageWrite.forgetLiveStreams();
+        storageWrite.clear();
         assertTrue(write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(stream.getName()).build())
                 .hasCommitTime());
+    }
+
+    private WriteStream createStream(WriteStream.Type type) {
+        return write.createWriteStream(CreateWriteStreamRequest.newBuilder().setParent(TABLE)
+                .setWriteStream(WriteStream.newBuilder().setType(type)).build());
+    }
+
+    @Test
+    @Order(12)
+    void aCommittedAppendRetriedAfterACrashIsNotAppliedTwice() throws Exception {
+        WriteStream stream = createStream(WriteStream.Type.COMMITTED);
+        try (Connection connection = new Connection()) {
+            connection.send(request(stream.getName(), ROW, row("x0", 0L)).setOffset(Int64Value.of(0)));
+            storageWrite.suppressPersistForTest(true);
+            try {
+                connection.send(request(null, null, row("x1", 1L)).setOffset(Int64Value.of(1)));
+            } finally {
+                storageWrite.suppressPersistForTest(false);
+            }
+        }
+        int before = tableRows().size();
+        storageWrite.clear();
+        try (Connection connection = new Connection()) {
+            AppendRowsResponse retry = connection.send(request(stream.getName(), ROW, row("x1", 1L))
+                    .setOffset(Int64Value.of(1)));
+            assertEquals(StorageError.StorageErrorCode.OFFSET_ALREADY_EXISTS, storageError(retry).getCode());
+        }
+        assertEquals(before, tableRows().size());
+    }
+
+    @Test
+    @Order(13)
+    void aPendingCommitRetriedAfterACrashIsNotAppliedTwice() throws Exception {
+        String name = finalizedPendingStream("crash");
+        int before = tableRows().size();
+        BatchCommitWriteStreamsRequest commit = BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
+                .addWriteStreams(name).build();
+        storageWrite.suppressPersistForTest(true);
+        try {
+            assertTrue(write.batchCommitWriteStreams(commit).hasCommitTime());
+        } finally {
+            storageWrite.suppressPersistForTest(false);
+        }
+        storageWrite.clear();
+        assertEquals(StorageError.StorageErrorCode.STREAM_ALREADY_COMMITTED,
+                write.batchCommitWriteStreams(commit).getStreamErrors(0).getCode());
+        assertEquals(before + 2, tableRows().size());
+    }
+
+    @Test
+    @Order(14)
+    void aBufferedFlushRetriedAfterACrashIsNotAppliedTwice() throws Exception {
+        WriteStream stream = createStream(WriteStream.Type.BUFFERED);
+        try (Connection connection = new Connection()) {
+            connection.send(request(stream.getName(), ROW, row("f1", 1L), row("f2", 2L), row("f3", 3L)));
+        }
+        int before = tableRows().size();
+        FlushRowsRequest flush = FlushRowsRequest.newBuilder().setWriteStream(stream.getName())
+                .setOffset(Int64Value.of(1)).build();
+        storageWrite.suppressPersistForTest(true);
+        try {
+            write.flushRows(flush);
+        } finally {
+            storageWrite.suppressPersistForTest(false);
+        }
+        storageWrite.clear();
+        write.flushRows(flush);
+        assertEquals(before + 2, tableRows().size());
+        write.flushRows(FlushRowsRequest.newBuilder().setWriteStream(stream.getName())
+                .setOffset(Int64Value.of(2)).build());
+        assertEquals(before + 3, tableRows().size(), "the unflushed row is still held");
+    }
+
+    @Test
+    @Order(15)
+    void aResetDropsLiveStreamsEvenWhenTheTableIsRecreated() throws Exception {
+        WriteStream stream = createStream(WriteStream.Type.PENDING);
+        try (Connection connection = new Connection()) {
+            connection.send(request(stream.getName(), ROW, row("old", 1L)));
+        }
+        given().when().post("/_floci-gcp/state/reset").then().statusCode(200);
+        seed();
+
+        try (Connection connection = new Connection()) {
+            AppendRowsResponse append = connection.send(request(stream.getName(), ROW, row("stale", 2L)));
+            assertEquals(StorageError.StorageErrorCode.STREAM_NOT_FOUND, storageError(append).getCode());
+        }
+        assertEquals(StorageError.StorageErrorCode.STREAM_NOT_FOUND, write.batchCommitWriteStreams(
+                BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE).addWriteStreams(stream.getName())
+                        .build()).getStreamErrors(0).getCode());
+        List<List<Object>> rows = tableRows();
+        assertTrue(rows == null || rows.isEmpty(), "no pre-reset rows reach the recreated table");
     }
 }

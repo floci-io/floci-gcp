@@ -23,6 +23,7 @@ import com.google.protobuf.Int64Value;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.Resettable;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
@@ -48,7 +49,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,7 +59,10 @@ import java.util.regex.Pattern;
  * acknowledged; PENDING streams hold their rows until {@code BatchCommitWriteStreams}, and
  * BUFFERED streams until {@code FlushRows}. Stream state, uncommitted rows included, is written
  * through to a {@link StorageFactory} store on every change, so it follows the configured storage
- * mode; the in-memory map only holds the live objects whose monitors guard each stream.
+ * mode; the in-memory map only holds the live objects whose monitors guard each stream. Each
+ * stream row reaches the table once: the table data records, in the same write as the rows, how
+ * many of each stream's rows it holds, and a stream reloaded after a crash is reconciled against
+ * that count, so a retried append, flush or commit is not applied twice.
  *
  * <p>{@code StorageError} and {@code RowError} are nested message fields of RPC responses that
  * quarkus-grpc did not register for native-image reflection. The native binary failed on
@@ -69,7 +73,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 @RegisterForReflection(targets = {StorageError.class, StorageError.Builder.class,
         RowError.class, RowError.Builder.class})
-public class BigQueryStorageWrite {
+public class BigQueryStorageWrite implements Resettable {
 
     static final String DEFAULT_STREAM = "_default";
 
@@ -174,6 +178,7 @@ public class BigQueryStorageWrite {
     private final EmulatorConfig config;
     private final StorageBackend<String, StoredWriteStream> streamStore;
     private final Map<String, Stream> streams = new ConcurrentHashMap<>();
+    private volatile boolean persistSuppressed;
 
     @Inject
     public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config,
@@ -280,8 +285,8 @@ public class BigQueryStorageWrite {
         List<Stream> ordered = new ArrayList<>(pending);
         ordered.sort(Comparator.comparing(stream -> stream.name));
         Instant now = Instant.now();
-        errors = commit(ordered, 0, now, rows ->
-                service.appendRows(table.projectId(), table.datasetId(), table.tableId(), rows));
+        errors = commit(ordered, 0, now, (rows, applied) ->
+                service.appendRows(table.projectId(), table.datasetId(), table.tableId(), rows, applied));
         if (!errors.isEmpty()) {
             return BatchCommitWriteStreamsResponse.newBuilder().addAllStreamErrors(errors).build();
         }
@@ -296,7 +301,7 @@ public class BigQueryStorageWrite {
      * commits of one stream exactly one succeeds, and a failed check commits nothing.
      */
     private List<StorageError> commit(List<Stream> ordered, int index, Instant now,
-                                      Consumer<List<Map<String, Object>>> write) {
+                                      BiConsumer<List<Map<String, Object>>, Map<String, Long>> write) {
         if (index == ordered.size()) {
             List<StorageError> errors = new ArrayList<>();
             for (Stream stream : ordered) {
@@ -312,10 +317,12 @@ public class BigQueryStorageWrite {
                 return errors;
             }
             List<Map<String, Object>> rows = new ArrayList<>();
+            Map<String, Long> applied = new LinkedHashMap<>();
             for (Stream stream : ordered) {
                 rows.addAll(stream.uncommitted);
+                applied.put(stream.name, stream.rowCount);
             }
-            write.accept(rows);
+            write.accept(rows, applied);
             for (Stream stream : ordered) {
                 stream.committed = now;
                 stream.uncommitted.clear();
@@ -346,7 +353,7 @@ public class BigQueryStorageWrite {
             if (offset >= stream.flushed) {
                 List<Map<String, Object>> rows = stream.uncommitted.subList(0, (int) (offset + 1 - stream.flushed));
                 service.appendRows(stream.table.projectId(), stream.table.datasetId(), stream.table.tableId(),
-                        new ArrayList<>(rows));
+                        new ArrayList<>(rows), Map.of(stream.name, offset + 1));
                 rows.clear();
                 stream.flushed = offset + 1;
                 persist(stream);
@@ -431,7 +438,8 @@ public class BigQueryStorageWrite {
                         + ", expected offset " + offset + ", received " + received);
             }
             if (stream.type == WriteStream.Type.COMMITTED) {
-                service.appendRows(table.projectId(), table.datasetId(), table.tableId(), rows);
+                service.appendRows(table.projectId(), table.datasetId(), table.tableId(), rows,
+                        Map.of(streamName, stream.rowCount + rows.size()));
             } else {
                 stream.uncommitted.addAll(rows);
             }
@@ -486,17 +494,68 @@ public class BigQueryStorageWrite {
      * one live object per name, so every caller synchronizes on the same monitor.
      */
     private Stream lookup(String name) {
-        return streams.computeIfAbsent(name, key -> streamStore.get(key).map(Stream::from).orElse(null));
+        return streams.computeIfAbsent(name, key -> streamStore.get(key).map(this::reconcile).orElse(null));
     }
 
-    /** Drops the live stream objects, as a restart does; the next lookup reloads them from the store. */
-    void forgetLiveStreams() {
+    /**
+     * Brings a reloaded stream in line with what its table already holds. The rows and the count
+     * are written together, but the stream is saved afterwards, so a crash in between leaves the
+     * stored stream behind the table; this moves it forward instead of letting a retry re-apply.
+     */
+    private Stream reconcile(StoredWriteStream stored) {
+        Stream stream = Stream.from(stored);
+        long applied;
+        Table table;
+        try {
+            table = service.getTable(stream.table.projectId(), stream.table.datasetId(), stream.table.tableId());
+            applied = service.streamRowsApplied(stream.table.projectId(), stream.table.datasetId(),
+                    stream.table.tableId(), stream.name);
+        } catch (GcpException e) {
+            return stream;
+        }
+        boolean changed = false;
+        if (stream.type == WriteStream.Type.COMMITTED && applied > stream.rowCount) {
+            stream.rowCount = applied;
+            changed = true;
+        } else if (stream.type == WriteStream.Type.BUFFERED && applied > stream.flushed) {
+            int landed = (int) Math.min(applied - stream.flushed, stream.uncommitted.size());
+            stream.uncommitted.subList(0, landed).clear();
+            stream.flushed = applied;
+            changed = true;
+        } else if (stream.type == WriteStream.Type.PENDING && applied > 0 && stream.committed == null) {
+            stream.committed = table.getLastModifiedTime() != null
+                    ? Instant.ofEpochMilli(Long.parseLong(table.getLastModifiedTime())) : Instant.now();
+            stream.uncommitted.clear();
+            changed = true;
+        }
+        if (changed) {
+            streamStore.put(stream.name, stream.toStored());
+        }
+        return stream;
+    }
+
+    /** Drops the live stream objects on an emulator reset; the store itself is cleared by StorageFactory. */
+    @Override
+    public void clear() {
         streams.clear();
     }
 
-    /** Writes the stream through to the store; callers hold its monitor. */
+    /**
+     * Test hook: while set, stream changes are not saved, which stands in for a crash between the
+     * table write and the stream write.
+     */
+    void suppressPersistForTest(boolean suppress) {
+        persistSuppressed = suppress;
+    }
+
+    /**
+     * Writes the stream through to the store; callers hold its monitor. A stream dropped from the
+     * live map by a reset is not written back, so it cannot resurrect in the cleared store.
+     */
     private void persist(Stream stream) {
-        streamStore.put(stream.name, stream.toStored());
+        if (!persistSuppressed && streams.get(stream.name) == stream) {
+            streamStore.put(stream.name, stream.toStored());
+        }
     }
 
     private Stream stream(String name) {

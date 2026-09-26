@@ -272,7 +272,9 @@ Not supported: `arrow_rows` (returns `UNIMPLEMENTED`; send `proto_rows`), column
 (`DEFAULT_VALUE` missing values are `NULL`, since table schemas carry no default expressions),
 `RANGE` columns, and partition decorators. Stream state, including rows not yet committed or
 flushed, is kept in the configured storage mode, so with persistent storage a PENDING or BUFFERED
-stream survives a restart. The emulator's gRPC request limit is 4 MiB, below
+stream survives a restart. The table also records how many of each stream's rows it holds, in the
+same write as the rows, so an append, flush or commit retried after a crash is not applied twice.
+`POST /_floci-gcp/state/reset` drops every write stream. The emulator's gRPC request limit is 4 MiB, below
 BigQuery's 10 MB `AppendRows` limit.
 
 ## Load jobs

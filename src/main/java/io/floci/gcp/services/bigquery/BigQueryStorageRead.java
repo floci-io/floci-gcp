@@ -35,8 +35,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * BigQuery Storage Read API ({@code google.cloud.bigquery.storage.v1.BigQueryRead}). A read session
@@ -53,11 +55,12 @@ public class BigQueryStorageRead {
     private static final Duration SESSION_LIFETIME = Duration.ofHours(6);
     private static final int AVRO_ROWS_PER_BLOCK = 1000;
     /**
-     * Sessions hold a full snapshot of what they read, so the number kept per project is bounded;
-     * creating one past the bound drops that project's oldest. Real BigQuery keeps every session
-     * until it expires.
+     * Sessions hold a full snapshot of what they read, so the number kept is bounded: creating one
+     * past a project's bound drops that project's oldest, and past the overall bound drops the
+     * oldest of the project holding the most. Real BigQuery keeps every session until it expires.
      */
     static final int MAX_SESSIONS_PER_PROJECT = 256;
+    static final int MAX_SESSIONS = 1024;
     /** Keywords that would turn a row restriction into more than a predicate over one table. */
     private static final Set<String> RESTRICTION_KEYWORDS = Set.of("SELECT", "UNION", "INTERSECT", "EXCEPT", "WITH");
 
@@ -252,18 +255,41 @@ public class BigQueryStorageRead {
     }
 
     private void evictOldest(String projectId) {
-        String prefix = "projects/" + projectId + "/";
+        evict(sessions, Session::createTime, projectId, MAX_SESSIONS_PER_PROJECT, MAX_SESSIONS);
+    }
+
+    /**
+     * Drops {@code projectId}'s oldest sessions while it holds more than {@code perProject}, then,
+     * while all projects together hold more than {@code total}, the oldest session of the project
+     * holding the most. Ties fall on the creating project, then on the project whose oldest session
+     * is newest, so projects that spread their sessions thin lose them before long-lived ones.
+     */
+    static <V> void evict(Map<String, V> sessions, Function<V, Instant> createTime, String projectId,
+                          int perProject, int total) {
+        Comparator<Map.Entry<String, V>> byAge = Comparator.comparing(e -> createTime.apply(e.getValue()));
         while (true) {
-            List<Map.Entry<String, Session>> owned = sessions.entrySet().stream()
-                    .filter(e -> e.getKey().startsWith(prefix))
-                    .toList();
-            if (owned.size() <= MAX_SESSIONS_PER_PROJECT) {
-                return;
+            Map<String, List<Map.Entry<String, V>>> byProject = sessions.entrySet().stream()
+                    .collect(Collectors.groupingBy(e -> sessionProject(e.getKey())));
+            List<Map.Entry<String, V>> victims = byProject.getOrDefault(projectId, List.of());
+            if (victims.size() <= perProject) {
+                if (sessions.size() <= total) {
+                    return;
+                }
+                victims = byProject.entrySet().stream()
+                        .max(Comparator.<Map.Entry<String, List<Map.Entry<String, V>>>>comparingInt(
+                                        p -> p.getValue().size())
+                                .thenComparing(p -> p.getKey().equals(projectId))
+                                .thenComparing(p -> p.getValue().stream().min(byAge).orElseThrow(), byAge))
+                        .orElseThrow()
+                        .getValue();
             }
-            owned.stream()
-                    .min(Comparator.comparing((Map.Entry<String, Session> e) -> e.getValue().createTime()))
-                    .ifPresent(oldest -> sessions.remove(oldest.getKey(), oldest.getValue()));
+            Map.Entry<String, V> oldest = victims.stream().min(byAge).orElseThrow();
+            sessions.remove(oldest.getKey(), oldest.getValue());
         }
+    }
+
+    private static String sessionProject(String sessionName) {
+        return sessionName.substring("projects/".length(), sessionName.indexOf('/', "projects/".length()));
     }
 
     /** Selected top-level fields in table order; nested selections are not emulated. */

@@ -301,6 +301,37 @@ class CloudRunInstancesServiceTest {
     }
 
     @Test
+    void nestedMaskPatchMergesAndRestartsOnlyWhenContainersChange() throws Exception {
+        when(runtime.start(anyString(), anyString(), any(Instance.class), anyString())).thenReturn(started());
+        CloudRunInstancesService service = dockerService();
+        awaitComplete(service.createInstance("p1", "us-central1", "inst",
+                "{\"containers\":[{\"image\":\"busybox\"}],"
+                        + "\"vpcAccess\":{\"connector\":\"a\",\"egress\":\"ALL_TRAFFIC\"}}", false));
+
+        Operation nested = service.updateInstance(NAME, "{\"vpcAccess\":{\"connector\":\"b\"}}",
+                "vpcAccess.connector", false, false);
+        assertTrue(nested.getDone());
+        Instance merged = service.getInstance(NAME);
+        assertEquals("b", merged.getVpcAccess().getConnector());
+        assertEquals("ALL_TRAFFIC", merged.getVpcAccess().getEgress().name());
+        verify(runtime, times(1)).start(anyString(), anyString(), any(Instance.class), anyString());
+
+        Operation mixed = service.updateInstance(NAME,
+                "{\"containers\":[{\"image\":\"nginx\"}],\"vpcAccess\":{\"connector\":\"c\"}}",
+                "containers,vpcAccess.connector", false, false);
+        assertFalse(mixed.getDone());
+        Instance restarted = awaitComplete(mixed);
+        assertEquals("nginx", restarted.getContainers(0).getImage());
+        assertEquals("c", restarted.getVpcAccess().getConnector());
+        assertEquals("ALL_TRAFFIC", restarted.getVpcAccess().getEgress().name());
+        verify(runtime, times(2)).start(anyString(), anyString(), any(Instance.class), anyString());
+
+        GcpException repeatedPath = assertThrows(GcpException.class, () -> service.updateInstance(NAME,
+                "{}", "containers.image", false, false));
+        assertEquals("Invalid update mask path: containers.image", repeatedPath.getMessage());
+    }
+
+    @Test
     void dockerModeRejectsUnsupportedTemplatesWithServicesMessages() {
         CloudRunInstancesService service = dockerService();
 

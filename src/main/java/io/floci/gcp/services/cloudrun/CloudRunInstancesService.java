@@ -14,6 +14,7 @@ import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.longrunning.Operation;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.FieldMaskUtil;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
@@ -167,6 +168,10 @@ public class CloudRunInstancesService implements ContainerTeardown {
         return find(name).orElseThrow(() -> notFound(name));
     }
 
+    public boolean instanceExists(String name) {
+        return instanceStore.get(name).isPresent();
+    }
+
     public ListInstancesResponse listInstances(String project, String location, int pageSize, String pageToken) {
         String prefix = parent(project, location) + "/instances/";
         List<Instance> instances = instanceStore.scan(key -> key.startsWith(prefix)).stream()
@@ -198,8 +203,15 @@ public class CloudRunInstancesService implements ContainerTeardown {
             Instance existing = found.get();
             Timestamp now = timestampNow();
             Instance.Builder builder = existing.toBuilder();
-            for (String field : updateFields(requested, updateMask)) {
+            UpdatePaths paths = updatePaths(requested, updateMask);
+            for (String field : paths.replacedFields()) {
                 copyField(requested, builder, Instance.getDescriptor().findFieldByName(field));
+            }
+            if (!paths.mergedPaths().isEmpty()) {
+                FieldMaskUtil.merge(FieldMaskUtil.fromStringList(paths.mergedPaths()), requested, builder,
+                        new FieldMaskUtil.MergeOptions()
+                                .setReplaceMessageFields(true)
+                                .setReplaceRepeatedFields(true));
             }
             applyDefaults(builder);
             builder.setGeneration(existing.getGeneration() + 1)
@@ -410,7 +422,7 @@ public class CloudRunInstancesService implements ContainerTeardown {
         }
         Timestamp now = timestampNow();
         Instance.Builder builder = Instance.newBuilder();
-        for (String field : updateFields(requested, null)) {
+        for (String field : updatePaths(requested, null).replacedFields()) {
             copyField(requested, builder, Instance.getDescriptor().findFieldByName(field));
         }
         applyDefaults(builder);
@@ -593,12 +605,15 @@ public class CloudRunInstancesService implements ContainerTeardown {
     }
 
     /**
-     * Top-level Instance fields a PATCH replaces. With an update mask, the masked user-settable fields
-     * (output-only paths are ignored); without one, every user-settable field populated in the body.
+     * What a PATCH writes. {@code replacedFields} are top-level Instance fields replaced as a whole: with an
+     * update mask, the masked user-settable top-level fields (output-only paths are ignored); without one,
+     * every user-settable field populated in the body. {@code mergedPaths} are nested snake_case mask paths
+     * inside a user-settable singular message field, applied with field mask merge semantics so sibling
+     * fields are kept. Map and repeated fields can only be masked as a whole.
      */
-    static List<String> updateFields(Instance requested, String updateMask) {
+    static UpdatePaths updatePaths(Instance requested, String updateMask) {
         if (updateMask == null || updateMask.isBlank()) {
-            return UPDATABLE_FIELDS.stream()
+            List<String> fields = UPDATABLE_FIELDS.stream()
                     .filter(field -> {
                         FieldDescriptor descriptor = Instance.getDescriptor().findFieldByName(field);
                         return descriptor.isRepeated() ? requested.getRepeatedFieldCount(descriptor) > 0
@@ -606,18 +621,36 @@ public class CloudRunInstancesService implements ContainerTeardown {
                     })
                     .sorted()
                     .toList();
+            return new UpdatePaths(fields, List.of());
         }
         Set<String> fields = new LinkedHashSet<>();
+        Set<String> nested = new LinkedHashSet<>();
         for (String path : Arrays.stream(updateMask.split(",")).map(String::trim).filter(p -> !p.isBlank()).toList()) {
-            String field = snakeCase(path.contains(".") ? path.substring(0, path.indexOf('.')) : path);
-            if (Instance.getDescriptor().findFieldByName(field) == null) {
+            List<String> segments = Arrays.stream(path.split("\\.", -1))
+                    .map(CloudRunInstancesService::snakeCase)
+                    .toList();
+            String field = segments.getFirst();
+            String normalized = String.join(".", segments);
+            if (Instance.getDescriptor().findFieldByName(field) == null
+                    || !FieldMaskUtil.isValid(Instance.class, normalized)) {
                 throw GcpException.invalidArgument("Invalid update mask path: " + path);
             }
-            if (UPDATABLE_FIELDS.contains(field)) {
+            if (!UPDATABLE_FIELDS.contains(field)) {
+                continue;
+            }
+            if (segments.size() == 1) {
                 fields.add(field);
+            } else {
+                nested.add(normalized);
             }
         }
-        return List.copyOf(fields);
+        List<String> merged = nested.stream()
+                .filter(path -> !fields.contains(path.substring(0, path.indexOf('.'))))
+                .toList();
+        return new UpdatePaths(List.copyOf(fields), merged);
+    }
+
+    record UpdatePaths(List<String> replacedFields, List<String> mergedPaths) {
     }
 
     private static void copyField(Instance source, Instance.Builder target, FieldDescriptor descriptor) {

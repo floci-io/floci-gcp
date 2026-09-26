@@ -46,6 +46,11 @@
     <dependencies>
         <!-- GCP Client Libraries -->
         <dependency>
+            <groupId>com.google.apis</groupId>
+            <artifactId>google-api-services-cloudresourcemanager</artifactId>
+            <version>v1-rev20260820-2.0.0</version>
+        </dependency>
+        <dependency>
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-pubsub</artifactId>
         </dependency>

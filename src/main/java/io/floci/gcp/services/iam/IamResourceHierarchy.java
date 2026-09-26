@@ -9,6 +9,9 @@ import java.util.List;
 public class IamResourceHierarchy {
 
     public List<String> policyResourcesFor(IamResource resource) {
-        return List.of(resource.policyResource());
+        if (resource.projectResource() == null || resource.projectResource().equals(resource.policyResource())) {
+            return List.of(resource.policyResource());
+        }
+        return List.of(resource.policyResource(), resource.projectResource());
     }
 }

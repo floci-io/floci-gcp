@@ -1,18 +1,96 @@
 # IAM
 
-floci-gcp emulates Google Cloud IAM over REST JSON using the real GCP IAM API.
+floci-gcp emulates Google Cloud IAM over REST JSON and the shared IAM policy gRPC mixin.
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | Enable/disable IAM |
-| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | IAM allow-policy evaluation mode. `disabled` preserves current no-auth behavior; `enforce` is reserved for the forthcoming supported evaluation surface |
+| `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | Set to `enforce` to evaluate allow policies for the supported services below |
 
-`authorization-mode` defaults to `disabled`. IAM policy storage and policy-shaped
-responses remain available in that mode, but they do not restrict requests. The
-setting is introduced ahead of the evaluator; this slice does not enforce
-policies even when it is configured as `enforce`.
+## Opt-in enforcement
+
+Set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, or
+`floci-gcp.services.iam.authorization-mode: enforce` in YAML. The default is
+`disabled`: stored policies do not restrict requests. Startup logs always report
+which mode is active and the supported service list.
+
+| Surface | IAM enforcement in `enforce` mode |
+|---|---|
+| Resource Manager v1 project metadata and project policies | REST JSON; project policies also use the shared IAM gRPC mixin |
+| Pub/Sub | **Not IAM-enforced.** Service enforcement is deferred |
+| Secret Manager | **Not IAM-enforced.** Service enforcement is deferred |
+| GCS | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
+| IAM service-account/key management, IAM Credentials, Cloud Run, all other services | **Not IAM-enforced**, including any policies those services store |
+
+Only valid **Floci-issued service-account tokens** activate IAM evaluation. Mint
+one through the existing IAM Credentials `generateAccessToken` endpoint and pass
+it as `Authorization: Bearer TOKEN` or through your SDK credentials provider.
+For plaintext gRPC, Google credentials may refuse an insecure channel before the
+request reaches the emulator; use a fixed authorization header with the SDK's
+no-credentials provider, or use the emulator's TLS transport.
+Anonymous requests and external credentials retain the existing bypass, including
+in `enforce` mode. Use anonymous setup requests to create resources and seed
+policies, then use the issued token for permission assertions. In enforce mode, an unknown or
+expired Floci-issued token receives `UNAUTHENTICATED`; a recognized caller without
+a matching grant receives `403 PERMISSION_DENIED` over REST or
+`PERMISSION_DENIED` over gRPC. Downscoped tokens are rejected on the enforced
+non-GCS services; they cannot expand their CAB into other services.
+
+This is a local permission-testing tool, **not an authentication/security boundary**.
+Token minting and impersonation remain unrestricted. A test using anonymous or
+external credentials can still pass without exercising IAM.
+
+The framework supports child-to-project inheritance and multiple required permission
+checks for future adapters. This version registers only project resources; project
+bindings do not authorize or restrict Pub/Sub, Secret Manager, or GCS operations.
+`testIamPermissions` evaluates each requested permission for the same caller and
+resource; missing resources keep the existing empty-result behavior. Disabled
+mode and bypass callers retain the existing permission echo.
+
+### Supported roles and conditions
+
+The finite catalog includes the implemented-operation permissions from:
+
+- `roles/browser` and `roles/resourcemanager.projectIamAdmin`.
+- `roles/owner`, `roles/editor`, and `roles/viewer`, restricted to the declared
+  project permissions. Editor/viewer permit project metadata and policy reads,
+  but not project policy writes.
+
+The existing GCS role catalog remains available to the evaluator but does not
+activate GCS IAM enforcement. Unsupported roles in an applicable policy produce
+`FAILED_PRECONDITION` naming the role and policy, even if another binding would
+grant access. Missing resource/operation mappings on an enforcing adapter also
+produce a named `FAILED_PRECONDITION`. The shared `google.iam.v1.IAMPolicy`
+gRPC mixin also rejects resource kinds without a registered mapping for recognized
+callers in enforce mode, including Pub/Sub policy calls routed through that mixin.
+Use anonymous setup calls for those policies until their adapters are added. Unsupported CEL expressions produce
+`INVALID_ARGUMENT`; they are not silently treated as a policy denial.
+
+Version 3 bindings use the existing restricted IAM Conditions profile, including
+resource service/type/name, string comparisons and prefixes, logical operators,
+and request-time comparison. The CEL standard library is not enabled.
+The catalog and condition profile are subsets of Google Cloud IAM.
+
+### Remaining limitations
+
+- Organization/folder inheritance, deny policies, principal access boundaries,
+  custom roles, group/domain membership expansion, workforce/workload identities,
+  and organization policy constraints are not implemented.
+- Resource names are evaluated as requested. Project ID/number aliases are not
+  canonicalized to equivalent numeric resource names.
+- Only declared operation permissions are checked. Dependent service-agent,
+  `actAs`, push-authentication, BigQuery/Storage export, CMEK, and other cross-service
+  grants are not validated. This emulator cannot prove those configurations work
+  in GCP.
+- Policy reads and business mutations are separate operations. There is no atomic
+  policy-change/resource-mutation transaction; this is not a revocation-timing test.
+- The emulator does not validate that a role is grantable on the policy resource.
+  Unsupported permissions in a known role are absent from the catalog.
+
+See [Adding an enforcing service](../iam-enforcement.md) for the shared extension
+contract, test requirements, and upstream evidence.
 
 ## Quick Start
 

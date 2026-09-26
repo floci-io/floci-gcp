@@ -77,8 +77,11 @@ public final class IamPolicyNormalizer {
         String expression = requiredString(rawCondition.get("expression"),
                 "policy binding condition expression");
         Object descriptionValue = rawCondition.get("description");
-        String description = descriptionValue == null ? null
-                : requiredString(descriptionValue, "policy binding condition description");
+        String description = switch (descriptionValue) {
+            case null -> null;
+            case String text -> text;
+            default -> throw invalidPolicy("policy binding condition description must be a string");
+        };
         return new IamCondition(title, expression, description);
     }
 

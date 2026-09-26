@@ -1,14 +1,22 @@
 package io.floci.gcp.services.iam;
 
+import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-/** The finite predefined-role subset supported by the IAM evaluation milestone. */
+/** Finite predefined-role catalog with service-owned permission contributions. */
 @ApplicationScoped
 public class IamRoleCatalog {
+
+    private static final Logger LOG = Logger.getLogger(IamRoleCatalog.class);
 
     private static final Set<String> OBJECT_VIEWER = Set.of("storage.objects.get", "storage.objects.list");
     private static final Set<String> OBJECT_CREATOR = Set.of("storage.objects.create");
@@ -31,6 +39,28 @@ public class IamRoleCatalog {
                 "roles/storage.admin", STORAGE_ADMIN));
     }
 
+    @Inject
+    public IamRoleCatalog(IamAuthorizationRegistry registry) {
+        Map<String, Set<String>> permissions = new LinkedHashMap<>(new IamRoleCatalog().permissionsByRole);
+        for (IamAuthorizationAdapter adapter : registry.adapters()) {
+            adapter.roles().forEach((role, grants) -> {
+                if (permissions.putIfAbsent(role, Set.copyOf(grants)) != null) {
+                    throw new IllegalStateException("Duplicate IAM role: " + role);
+                }
+            });
+        }
+        for (IamAuthorizationAdapter adapter : registry.adapters()) {
+            adapter.basicRoles().forEach((role, grants) -> permissions.merge(role, Set.copyOf(grants),
+                    (existing, additional) -> Stream.concat(existing.stream(), additional.stream())
+                            .collect(Collectors.toUnmodifiableSet())));
+        }
+        permissionsByRole = Map.copyOf(permissions);
+    }
+
+    public boolean contains(String role) {
+        return permissionsByRole.containsKey(role);
+    }
+
     IamRoleCatalog(Map<String, Set<String>> permissionsByRole) {
         Map<String, Set<String>> copiedPermissions = new LinkedHashMap<>();
         permissionsByRole.forEach((role, permissions) -> copiedPermissions.put(role, Set.copyOf(permissions)));
@@ -38,6 +68,10 @@ public class IamRoleCatalog {
     }
 
     public boolean grants(String role, String permission) {
-        return permissionsByRole.getOrDefault(role, Set.of()).contains(permission);
+        if (!contains(role)) {
+            LOG.warnf("IAM evaluator does not support role=%s", role);
+            return false;
+        }
+        return permissionsByRole.get(role).contains(permission);
     }
 }

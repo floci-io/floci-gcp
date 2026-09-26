@@ -19,7 +19,7 @@ class IamAuthorizationModeConfigTest {
     EmulatorConfig config;
 
     @Test
-    void acceptsEnforceAuthorizationModeWithoutChangingRequestBehavior() {
+    void acceptsEnforceAuthorizationMode() {
         assertEquals(EmulatorConfig.IamAuthorizationMode.ENFORCE,
                 config.services().iam().authorizationMode());
     }

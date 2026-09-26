@@ -496,6 +496,74 @@ class CloudRunJobsRestIntegrationTest {
     }
 
     @Test
+    void executionTokensThatCannotNameAnExecutionAreInvalid() {
+        String project = "jobs-it-bad-tokens";
+        String slash = """
+                {"startExecutionToken":"a/b","template":{"template":{"containers":[{"image":"busybox"}]}}}
+                """;
+        String tooLong = """
+                {"runExecutionToken":"%s","template":{"template":{"containers":[{"image":"busybox"}]}}}
+                """.formatted("t".repeat(60));
+
+        for (boolean validateOnly : List.of(false, true)) {
+            api()
+                    .contentType("application/json")
+                    .queryParam("jobId", "tok")
+                    .queryParam("validateOnly", validateOnly)
+                    .body(slash)
+                    .when().post(jobsPath(project))
+                    .then()
+                    .statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", equalTo("Invalid startExecutionToken 'a/b': the execution ID 'tok-a/b'"
+                            + " must consist of lowercase letters, digits and hyphens, and must start and end with"
+                            + " a letter or digit."));
+        }
+        api()
+                .contentType("application/json")
+                .queryParam("allowMissing", true)
+                .body(tooLong)
+                .when().patch(jobPath(project, "tok"))
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.message", equalTo("Invalid runExecutionToken '" + "t".repeat(60)
+                        + "': the job name and the token must together be fewer than 63 characters."));
+        api().when().get(jobPath(project, "tok")).then().statusCode(404);
+
+        createJob(project, "tok", BUSYBOX_JOB);
+        api()
+                .contentType("application/json")
+                .body(slash)
+                .when().patch(jobPath(project, "tok"))
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        api()
+                .contentType("application/json")
+                .queryParam("validateOnly", true)
+                .body(tooLong)
+                .when().patch(jobPath(project, "tok"))
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        api()
+                .contentType("application/json")
+                .body("""
+                        {"runExecutionToken":"%s","template":{"template":{"containers":[{"image":"busybox"}]}}}
+                        """.formatted("t".repeat(59)))
+                .when().patch(jobPath(project, "tok"))
+                .then()
+                .statusCode(200)
+                .body("response.latestCreatedExecution.name", equalTo("tok-" + "t".repeat(59)));
+        api()
+                .when().get(jobPath(project, "tok"))
+                .then()
+                .statusCode(200)
+                .body("executionCount", equalTo(1));
+    }
+
+    @Test
     void deletingExecutionsAndJobsIsImmediate() {
         String project = "jobs-it-delete";
         createJob(project, "gone", """

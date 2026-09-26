@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.random.RandomGenerator;
+import java.util.regex.Pattern;
 
 // java.time.Duration is written fully qualified: it collides with the imported com.google.protobuf.Duration.
 
@@ -53,6 +54,8 @@ final class CloudRunJobTemplates {
 
     private static final String RANDOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final int EXECUTION_SUFFIX_LENGTH = 5;
+    private static final int MAX_JOB_ID_AND_TOKEN_LENGTH = 63;
+    private static final Pattern EXECUTION_ID = Pattern.compile("[a-z0-9]([-a-z0-9]*[a-z0-9])?");
 
     private CloudRunJobTemplates() {}
 
@@ -130,6 +133,28 @@ final class CloudRunJobTemplates {
 
     static String tokenExecutionId(String jobId, String token) {
         return jobId + "-" + token;
+    }
+
+    /**
+     * Rejects a start or run execution token that cannot name an execution. The length rule is the one documented
+     * on {@code Job.start_execution_token} in job.proto: the job name and the token together must be fewer than
+     * {@value #MAX_JOB_ID_AND_TOKEN_LENGTH} characters. The resulting execution ID must also be a single lowercase
+     * resource-name segment. An empty token is not set and is accepted.
+     */
+    static void validateExecutionToken(String field, String jobId, String token) {
+        if (token.isEmpty()) {
+            return;
+        }
+        if (jobId.length() + token.length() >= MAX_JOB_ID_AND_TOKEN_LENGTH) {
+            throw GcpException.invalidArgument("Invalid " + field + " '" + token + "': the job name and the token"
+                    + " must together be fewer than " + MAX_JOB_ID_AND_TOKEN_LENGTH + " characters.");
+        }
+        String executionId = tokenExecutionId(jobId, token);
+        if (!EXECUTION_ID.matcher(executionId).matches()) {
+            throw GcpException.invalidArgument("Invalid " + field + " '" + token + "': the execution ID '"
+                    + executionId + "' must consist of lowercase letters, digits and hyphens, and must start and"
+                    + " end with a letter or digit.");
+        }
     }
 
     static String taskId(String executionId, int index) {

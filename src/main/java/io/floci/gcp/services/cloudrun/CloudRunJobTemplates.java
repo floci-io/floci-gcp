@@ -59,6 +59,12 @@ final class CloudRunJobTemplates {
 
     private CloudRunJobTemplates() {}
 
+    /** The attempt message for a task whose writable GCS volumes could not be written back. */
+    static String writeBackFailedMessage(String detail) {
+        String trimmed = detail.endsWith(".") ? detail.substring(0, detail.length() - 1) : detail;
+        return "The task's GCS volume could not be written back: " + trimmed + ".";
+    }
+
     /**
      * The GCP NOT_FOUND message for a job, execution or task under
      * {@code projects/{project}/locations/{location}/...}.

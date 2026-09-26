@@ -503,26 +503,37 @@ public class CloudRunRuntimeService {
 
     /**
      * Merges writable volumes prepared by {@link #prepareMergingGcsVolumeMounts} back into their buckets and removes
-     * the materialized copies. See {@link #mergeWritableGcsVolumeFiles} for the merge rules.
+     * the materialized copies. See {@link #mergeWritableGcsVolumeFiles} for the merge rules. Every materialized
+     * copy is removed even when a merge fails, in which case the remaining volumes are still merged and the
+     * returned message describes the failures.
+     *
+     * @return the reason some writable volume could not be written back, or empty when every merge succeeded
      */
-    void releaseMergingGcsVolumeMounts(GcsVolumeMounts volumes) {
+    Optional<String> releaseMergingGcsVolumeMounts(GcsVolumeMounts volumes) {
         if (volumes == null || volumes.mounts().isEmpty()) {
-            return;
+            return Optional.empty();
         }
+        List<String> failures = new ArrayList<>();
         Set<String> syncedVolumes = new HashSet<>();
-        for (CloudRunRuntimeVolumeMount mount : volumes.mounts()) {
-            if (!mount.readOnly() && mount.volumeName() != null && !mount.volumeName().isBlank()
-                    && syncedVolumes.add(mount.volumeName())) {
-                try {
-                    mergeWritableGcsVolumeFiles(mount, copyVolumeFiles(mount.volumeName()),
-                            volumes.snapshots().getOrDefault(mount.volumeName(), Map.of()));
-                } catch (Exception e) {
-                    LOG.warnf(e, "Cloud Run GCS volume merge failed bucket=%s volume=%s",
-                            mount.bucket(), mount.volumeName());
+        try {
+            for (CloudRunRuntimeVolumeMount mount : volumes.mounts()) {
+                if (!mount.readOnly() && mount.volumeName() != null && !mount.volumeName().isBlank()
+                        && syncedVolumes.add(mount.volumeName())) {
+                    try {
+                        mergeWritableGcsVolumeFiles(mount, copyVolumeFiles(mount.volumeName()),
+                                volumes.snapshots().getOrDefault(mount.volumeName(), Map.of()));
+                    } catch (Exception e) {
+                        LOG.warnf(e, "Cloud Run GCS volume merge failed bucket=%s volume=%s",
+                                mount.bucket(), mount.volumeName());
+                        failures.add("bucket " + mount.bucket() + ": "
+                                + (e.getMessage() == null ? e.toString() : e.getMessage()));
+                    }
                 }
             }
+        } finally {
+            deleteMaterializedGcsVolumes(volumes.mounts());
         }
-        deleteMaterializedGcsVolumes(volumes.mounts());
+        return failures.isEmpty() ? Optional.empty() : Optional.of(String.join("; ", failures));
     }
 
     /**

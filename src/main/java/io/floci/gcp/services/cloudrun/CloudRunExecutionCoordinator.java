@@ -71,6 +71,9 @@ final class CloudRunExecutionCoordinator {
         record Stopped() implements TaskOutcome {}
 
         record StartFailed(String message) implements TaskOutcome {}
+
+        /** The container exited 0 but its writable GCS volumes could not be written back to the bucket. */
+        record WriteBackFailed(String message) implements TaskOutcome {}
     }
 
     /** Persistence and operation side effects, invoked only from the coordinator thread. */
@@ -492,6 +495,12 @@ final class CloudRunExecutionCoordinator {
                         status(Code.INTERNAL_VALUE, "Task " + taskId + " failed with message: "
                                 + CloudRunJobTemplates.CONTAINER_VANISHED_MESSAGE),
                         null);
+                case TaskOutcome.WriteBackFailed writeBackFailed -> {
+                    String message = CloudRunJobTemplates.writeBackFailedMessage(writeBackFailed.message());
+                    attemptFailed(index, now, status(Code.INTERNAL_VALUE, message), null,
+                            status(Code.INTERNAL_VALUE, "Task " + taskId + " failed with message: " + message),
+                            null);
+                }
                 case TaskOutcome.StartFailed startFailed -> {
                     Status status = status(Code.INTERNAL_VALUE, startFailed.message());
                     finishTask(index, TaskState.FAILED, status, null, startFailed.message(), now);

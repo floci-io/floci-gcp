@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -164,6 +165,7 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
         String containerId = null;
         ResultCallback.Adapter<Frame> logs = null;
         TaskOutcome outcome;
+        Optional<String> writeBackFailure;
         try {
             if (handle.stopRequested || shuttingDown) {
                 outcome = new TaskOutcome.Stopped();
@@ -204,11 +206,29 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
             if (containerId != null) {
                 lifecycleManager.forceRemove(containerId, logs);
             }
-            runtimeService.releaseMergingGcsVolumeMounts(volumes);
+            writeBackFailure = runtimeService.releaseMergingGcsVolumeMounts(volumes);
             active.remove(key);
         }
+        outcome = afterWriteBack(outcome, writeBackFailure, task.getName(), attempt);
         LOG.infof("Cloud Run job task finished task=%s attempt=%d outcome=%s", task.getName(), attempt, outcome);
         events.taskFinished(task.getIndex(), attempt, outcome);
+    }
+
+    /**
+     * Turns a successful exit into a retryable {@link TaskOutcome.WriteBackFailed} when the task's GCS output could
+     * not be written back. Any other outcome already fails or cancels the attempt and keeps its own reason.
+     */
+    static TaskOutcome afterWriteBack(TaskOutcome outcome, Optional<String> writeBackFailure, String taskName,
+                                      int attempt) {
+        if (writeBackFailure.isEmpty()) {
+            return outcome;
+        }
+        if (outcome instanceof TaskOutcome.Exited exited && exited.exitCode() == 0) {
+            return new TaskOutcome.WriteBackFailed(writeBackFailure.get());
+        }
+        LOG.warnf("Cloud Run job task GCS write-back failed after the attempt already ended task=%s attempt=%d "
+                + "outcome=%s: %s", taskName, attempt, outcome, writeBackFailure.get());
+        return outcome;
     }
 
     private TaskOutcome awaitExit(String containerId, Duration timeout, Attempt handle) {

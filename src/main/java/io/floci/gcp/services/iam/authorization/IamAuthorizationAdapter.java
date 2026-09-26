@@ -2,6 +2,7 @@ package io.floci.gcp.services.iam.authorization;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.iam.IamPolicy;
 import io.floci.gcp.services.iam.IamResource;
 
 import java.util.List;
@@ -31,6 +32,11 @@ public interface IamAuthorizationAdapter {
     Optional<IamResource> resource(String name);
 
     Map<String, Set<String>> roles();
+
+    /** Service-specific binding constraints, applied on writes and before evaluation without I/O. */
+    default void validatePolicy(String resource, IamPolicy policy) {
+        // Adapters without additional binding constraints use the shared structural validation.
+    }
 
     /** Exact supported-service slices of the basic roles, never inferred from permission suffixes. */
     default Map<String, Set<String>> basicRoles() {

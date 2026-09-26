@@ -51,6 +51,8 @@ import static org.junit.jupiter.api.Assertions.*;
 abstract class IamEnforcementContract {
     @Inject
     CredentialTokenService tokens;
+    @Inject
+    IamService policies;
     @TestHTTPResource
     URI endpoint;
 
@@ -103,6 +105,71 @@ abstract class IamEnforcementContract {
                             .body(Map.of("policy", policy("roles/owner", null))).post("/v1/" + target + ":setIamPolicy")
                     : request().header("Authorization", credential).get("/v1/" + target);
             restDenied(response);
+        }
+    }
+
+    static Stream<Arguments> publicBindingCases() {
+        return Stream.of("allUsers", "allAuthenticatedUsers").flatMap(member -> Stream.of(false, true)
+                .map(grpc -> Arguments.of(member, grpc)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("publicBindingCases")
+    void projectPolicyWritesRejectPublicMembersWithoutChangingStoredPolicy(String publicMember, boolean grpc) {
+        grant(project, "roles/browser", null);
+        if (grpc) {
+            Runnable write = () -> IAMPolicyGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .setIamPolicy(SetIamPolicyRequest.newBuilder().setResource(project)
+                            .setPolicy(Policy.newBuilder().addBindings(Binding.newBuilder()
+                                    .setRole("roles/browser").addMembers(publicMember))).build());
+            if (enforced()) {
+                StatusRuntimeException error = assertThrows(StatusRuntimeException.class, write::run);
+                assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+                assertTrue(error.getMessage().contains(publicMember));
+            } else {
+                write.run();
+            }
+        } else {
+            Response response = request().contentType("application/json")
+                    .body(Map.of("policy", Map.of("bindings", List.of(
+                            Map.of("role", "roles/browser", "members", List.of(publicMember))))))
+                    .post("/v1/" + project + ":setIamPolicy");
+            response.then().statusCode(enforced() ? 400 : 200);
+            if (enforced()) {
+                response.then().body("error.status", equalTo("INVALID_ARGUMENT"))
+                        .body("error.message", containsString(publicMember));
+            }
+        }
+        assertEquals(enforced() ? member : publicMember, grpcRead(channel, project).getBindings(0).getMembers(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allUsers", "allAuthenticatedUsers"})
+    void legacyPublicProjectBindingsCannotGrantAccessOrPermissions(String publicMember) {
+        grant(project, "roles/browser", null);
+        // Simulate a policy persisted while enforcement was disabled in the memory-backed fixture.
+        policies.policyForEvaluation(project).setBindings(List.of(
+                Map.of("role", "roles/browser", "members", List.of(publicMember))));
+        Response read = request().header("Authorization", credential).get("/v1/" + project);
+        Response permissions = request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of("permissions", List.of("resourcemanager.projects.get")))
+                .post("/v1/" + project + ":testIamPermissions");
+        Runnable grpcPermissions = () -> IAMPolicyGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
+                .testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(project)
+                        .addPermissions("resourcemanager.projects.get").build());
+        if (enforced()) {
+            read.then().statusCode(400).body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", containsString(publicMember));
+            permissions.then().statusCode(400).body("error.status", equalTo("INVALID_ARGUMENT"));
+            assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                    () -> grpcRead(authenticated, project)).getStatus().getCode());
+            assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                    grpcPermissions::run).getStatus().getCode());
+        } else {
+            read.then().statusCode(200);
+            permissions.then().statusCode(200);
+            grpcRead(authenticated, project);
+            grpcPermissions.run();
         }
     }
 

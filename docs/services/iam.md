@@ -103,6 +103,11 @@ The finite catalog includes the implemented-operation permissions from:
   project permissions. Editor/viewer permit project metadata and policy reads,
   but not project policy writes.
 
+In enforce mode, project policies cannot contain `allUsers` or
+`allAuthenticatedUsers`. Such bindings produce `INVALID_ARGUMENT` on policy writes
+and when evaluating previously stored project policies. Disabled mode retains
+permissive policy storage.
+
 The finite catalog also contains `roles/storage.objectViewer`,
 `roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
 `roles/storage.admin` for the explicitly enforced bucket and object permissions.
@@ -112,7 +117,7 @@ not block evaluation. Missing resource/operation mappings on an enforcing adapte
 also produce a named `FAILED_PRECONDITION`. The shared `google.iam.v1.IAMPolicy`
 gRPC mixin also rejects resource kinds without a registered mapping for recognized
 callers in enforce mode, including Pub/Sub policy calls routed through that mixin.
-Use anonymous setup calls for those policies until their adapters are added. Unsupported CEL expressions produce
+Those policy APIs support anonymous setup calls. Unsupported CEL expressions produce
 `INVALID_ARGUMENT`; they are not silently treated as a policy denial.
 
 Version 3 bindings use the existing restricted IAM Conditions profile, including

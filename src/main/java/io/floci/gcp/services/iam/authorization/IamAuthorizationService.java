@@ -13,6 +13,7 @@ import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.IamResourceHierarchy;
 import io.floci.gcp.services.iam.IamRoleCatalog;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.quarkus.arc.Arc;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -94,6 +95,13 @@ public class IamAuthorizationService {
         }
     }
 
+    public void validatePolicyWrite(String resource, StoredPolicy policy) {
+        if (enabled()) {
+            registry.resource(resource).ifPresent(adapter ->
+                    adapter.validatePolicy(resource, IamPolicyNormalizer.normalize(policy)));
+        }
+    }
+
     public List<String> testPermissions(String resource, List<String> requested) {
         String authorization = currentAuthorization();
         if (!enabled() || registry.resource(resource).isEmpty()) {
@@ -127,6 +135,7 @@ public class IamAuthorizationService {
         Map<String, IamPolicy> result = new LinkedHashMap<>();
         for (String key : hierarchy.policyResourcesFor(resource)) {
             IamPolicy policy = IamPolicyNormalizer.normalize(policies.policyForEvaluation(key));
+            registry.resource(key).ifPresent(adapter -> adapter.validatePolicy(key, policy));
             for (IamBinding binding : policy.bindings()) {
                 if (!roles.contains(binding.role())) {
                     throw GcpException.failedPrecondition("IAM enforcement does not support role "

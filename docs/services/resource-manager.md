@@ -11,9 +11,9 @@ reads and policy reads/writes for Floci-issued service-account tokens.
 `testIamPermissions` evaluates the caller. Project policies also use the shared
 IAM gRPC mixin. Project metadata has no gRPC endpoint.
 
-The reusable framework supports project inheritance for future service adapters.
-Pub/Sub and Secret Manager enforcement will be added separately; project bindings
-do not restrict their operations in this version.
+Service adapters can use the shared framework to inherit project policies.
+Pub/Sub and Secret Manager do not support IAM enforcement; project bindings
+do not restrict their operations.
 
 Default `disabled` mode stores policies without restricting requests. Anonymous
 and external credentials bypass IAM in both modes. Project grants do not enforce

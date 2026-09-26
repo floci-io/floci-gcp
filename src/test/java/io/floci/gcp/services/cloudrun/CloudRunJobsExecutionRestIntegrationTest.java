@@ -142,6 +142,50 @@ class CloudRunJobsExecutionRestIntegrationTest {
     }
 
     @Test
+    void parallelTasksWritingTheSameBucketKeepEachOthersOutputs() {
+        String project = "jobs-exec-merge";
+        String bucket = "jobs-exec-merge-out";
+        given()
+                .contentType("application/json")
+                .body("{\"name\":\"" + bucket + "\",\"location\":\"US\"}")
+                .when().post("/storage/v1/b?project=" + project)
+                .then()
+                .statusCode(200);
+        for (String object : List.of("seed.txt", "remove-me.txt")) {
+            given()
+                    .contentType("text/plain")
+                    .body("seeded")
+                    .when().post("/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + object)
+                    .then()
+                    .statusCode(200);
+        }
+        createJob(project, "merge", """
+                {"template":{"taskCount":3,"template":{
+                  "volumes":[{"name":"out","gcs":{"bucket":"%s"}}],
+                  "containers":[{"image":"busybox","command":["sh","-c"],
+                    "args":["sleep 2; echo $CLOUD_RUN_TASK_INDEX > /out/task-$CLOUD_RUN_TASK_INDEX.txt; if [ \\"$CLOUD_RUN_TASK_INDEX\\" = 0 ]; then rm /out/remove-me.txt; fi"],
+                    "volumeMounts":[{"name":"out","mountPath":"/out"}]}]}}}
+                """.formatted(bucket));
+
+        Response operation = waitOperation(runJobOperation(project, "merge"));
+        operation.then()
+                .statusCode(200)
+                .body("done", equalTo(true))
+                .body("error", nullValue())
+                .body("response.parallelism", equalTo(3))
+                .body("response.succeededCount", equalTo(3));
+
+        for (int index = 0; index < 3; index++) {
+            assertEquals(index + "\n", objectText(bucket, "task-" + index + ".txt"));
+        }
+        assertEquals("seeded", objectText(bucket, "seed.txt"));
+        given()
+                .when().get("/storage/v1/b/" + bucket + "/o/remove-me.txt")
+                .then()
+                .statusCode(404);
+    }
+
+    @Test
     void failsRunOperationWithCode10AfterRetriesAndFinishesOtherTasks() {
         String project = "jobs-exec-fail";
         createJob(project, "failing", """

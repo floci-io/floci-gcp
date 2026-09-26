@@ -21,6 +21,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import io.floci.gcp.services.gcs.GcsService;
+import io.floci.gcp.services.gcs.GcsServiceFixtures;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,9 +31,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -162,6 +165,57 @@ class CloudRunRuntimeServiceTest {
                 eq("http://localhost:4588"));
         verify(gcsService).deleteObject("site-bucket", "old.txt");
         assertFalse(Files.exists(root));
+    }
+
+    @Test
+    void mergingWriteBackKeepsObjectsWrittenByConcurrentAttempts() {
+        GcsService gcsService = GcsServiceFixtures.inMemory("p1");
+        gcsService.createBucket("out-bucket", "p1", "http://localhost:4588", Map.of());
+        String seedGeneration = gcsService.putObject("out-bucket", "seed.txt", "text/plain", bytes("seed"),
+                "http://localhost:4588").getGeneration();
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config, gcsService);
+        Map<String, CloudRunRuntimeService.GcsSnapshotObject> first = new HashMap<>();
+        Map<String, CloudRunRuntimeService.GcsSnapshotObject> second = new HashMap<>();
+        service.gcsVolumeTar("out-bucket", "", first);
+        service.gcsVolumeTar("out-bucket", "", second);
+
+        service.mergeWritableGcsVolumeFiles(writableMount("out-bucket", "", "task0"),
+                Map.of("seed.txt", bytes("seed"), "task-0.txt", bytes("zero")), first);
+        service.mergeWritableGcsVolumeFiles(writableMount("out-bucket", "", "task1"),
+                Map.of("seed.txt", bytes("seed"), "task-1.txt", bytes("one")), second);
+
+        assertEquals(List.of("seed.txt", "task-0.txt", "task-1.txt"), objectNames(gcsService, "out-bucket"));
+        assertEquals("zero", text(gcsService, "out-bucket", "task-0.txt"));
+        assertEquals("one", text(gcsService, "out-bucket", "task-1.txt"));
+        assertEquals(seedGeneration, gcsService.getObjectMeta("out-bucket", "seed.txt").getGeneration(),
+                "an unchanged file is not uploaded again");
+    }
+
+    @Test
+    void mergingWriteBackDeletesOnlySnapshotObjectsNobodyChanged() {
+        GcsService gcsService = GcsServiceFixtures.inMemory("p1");
+        gcsService.createBucket("out-bucket", "p1", "http://localhost:4588", Map.of());
+        for (String name : List.of("out/removed.txt", "out/overwritten.txt", "out/edited.txt", "other.txt")) {
+            gcsService.putObject("out-bucket", name, "text/plain", bytes("old"), "http://localhost:4588");
+        }
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config, gcsService);
+        Map<String, CloudRunRuntimeService.GcsSnapshotObject> snapshot = new HashMap<>();
+        service.gcsVolumeTar("out-bucket", "out", snapshot);
+        assertEquals(Set.of("out/removed.txt", "out/overwritten.txt", "out/edited.txt"), snapshot.keySet());
+        gcsService.putObject("out-bucket", "out/overwritten.txt", "text/plain", bytes("concurrent"),
+                "http://localhost:4588");
+        gcsService.putObject("out-bucket", "out/created.txt", "text/plain", bytes("concurrent"),
+                "http://localhost:4588");
+
+        service.mergeWritableGcsVolumeFiles(writableMount("out-bucket", "out", "task0"),
+                Map.of("edited.txt", bytes("new")), snapshot);
+
+        assertEquals(List.of("other.txt", "out/created.txt", "out/edited.txt", "out/overwritten.txt"),
+                objectNames(gcsService, "out-bucket"));
+        assertEquals("new", text(gcsService, "out-bucket", "out/edited.txt"));
+        assertEquals("concurrent", text(gcsService, "out-bucket", "out/overwritten.txt"));
     }
 
     @Test
@@ -355,6 +409,22 @@ class CloudRunRuntimeServiceTest {
         when(dockerHostResolver.isLinuxHost()).thenReturn(false);
         EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
         return new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
+    }
+
+    private static CloudRunRuntimeVolumeMount writableMount(String bucket, String objectPrefix, String volume) {
+        return new CloudRunRuntimeVolumeMount(bucket, objectPrefix, volume, null, null, "/out", false);
+    }
+
+    private static byte[] bytes(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String text(GcsService gcsService, String bucket, String object) {
+        return new String(gcsService.getObjectData(bucket, object), StandardCharsets.UTF_8);
+    }
+
+    private static List<String> objectNames(GcsService gcsService, String bucket) {
+        return gcsService.listObjects(bucket).stream().map(GcsObjectMeta::getName).sorted().toList();
     }
 
     private static GcsObjectMeta object(String name) {

@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -475,11 +476,15 @@ public class BigQueryService {
         }
     }
 
-    /** How many of a Storage Write stream's rows the table holds, or 0. */
-    long streamRowsApplied(String projectId, String datasetId, String tableId, String streamName) {
+    /**
+     * How many of a Storage Write stream's rows the table holds, or empty when no write of that
+     * stream ever reached the table. Present with 0 means a stream committed with no rows.
+     */
+    OptionalLong streamRowsApplied(String projectId, String datasetId, String tableId, String streamName) {
         getTable(projectId, datasetId, tableId);
-        return dataStore.get(tableKey(datasetId, tableId))
-                .map(data -> data.getStreamRows().getOrDefault(streamName, 0L)).orElse(0L);
+        Long applied = dataStore.get(tableKey(datasetId, tableId))
+                .map(data -> data.getStreamRows().get(streamName)).orElse(null);
+        return applied != null ? OptionalLong.of(applied) : OptionalLong.empty();
     }
 
     /** Encoded rows plus totals for {@code tabledata.list}. */

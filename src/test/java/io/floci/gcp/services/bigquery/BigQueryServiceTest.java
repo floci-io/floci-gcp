@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -868,8 +869,11 @@ class BigQueryServiceTest {
                 Map.of(stream, 3L));
         service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "d")));
 
-        assertEquals(3L, service.streamRowsApplied(PROJECT, DATASET, TABLE, stream));
-        assertEquals(0L, service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "x"));
+        assertEquals(OptionalLong.of(3L), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream));
+        assertEquals(OptionalLong.empty(), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "x"));
+
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(), Map.of(stream + "empty", 0L));
+        assertEquals(OptionalLong.of(0L), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "empty"));
         assertEquals(4, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
     }
 }

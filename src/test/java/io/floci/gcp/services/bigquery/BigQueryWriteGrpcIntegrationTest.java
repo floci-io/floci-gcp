@@ -559,6 +559,29 @@ class BigQueryWriteGrpcIntegrationTest {
 
     @Test
     @Order(14)
+    void anEmptyStreamInAnInterruptedBatchIsReconciledToo() throws Exception {
+        String full = finalizedPendingStream("mixed");
+        WriteStream empty = createStream(WriteStream.Type.PENDING);
+        write.finalizeWriteStream(FinalizeWriteStreamRequest.newBuilder().setName(empty.getName()).build());
+        BatchCommitWriteStreamsRequest commit = BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
+                .addWriteStreams(full).addWriteStreams(empty.getName()).build();
+        storageWrite.suppressPersistForTest(true);
+        try {
+            assertTrue(write.batchCommitWriteStreams(commit).hasCommitTime());
+        } finally {
+            storageWrite.suppressPersistForTest(false);
+        }
+        storageWrite.clear();
+        assertTrue(write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(empty.getName()).build())
+                .hasCommitTime(), "the empty stream is committed with the rest of its batch");
+        BatchCommitWriteStreamsResponse retry = write.batchCommitWriteStreams(commit);
+        assertEquals(2, retry.getStreamErrorsCount());
+        retry.getStreamErrorsList().forEach(error ->
+                assertEquals(StorageError.StorageErrorCode.STREAM_ALREADY_COMMITTED, error.getCode()));
+    }
+
+    @Test
+    @Order(15)
     void aBufferedFlushRetriedAfterACrashIsNotAppliedTwice() throws Exception {
         WriteStream stream = createStream(WriteStream.Type.BUFFERED);
         try (Connection connection = new Connection()) {
@@ -582,7 +605,7 @@ class BigQueryWriteGrpcIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void aResetDropsLiveStreamsEvenWhenTheTableIsRecreated() throws Exception {
         WriteStream stream = createStream(WriteStream.Type.PENDING);
         try (Connection connection = new Connection()) {

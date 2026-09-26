@@ -47,6 +47,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
@@ -504,15 +505,19 @@ public class BigQueryStorageWrite implements Resettable {
      */
     private Stream reconcile(StoredWriteStream stored) {
         Stream stream = Stream.from(stored);
-        long applied;
+        OptionalLong recorded;
         Table table;
         try {
             table = service.getTable(stream.table.projectId(), stream.table.datasetId(), stream.table.tableId());
-            applied = service.streamRowsApplied(stream.table.projectId(), stream.table.datasetId(),
+            recorded = service.streamRowsApplied(stream.table.projectId(), stream.table.datasetId(),
                     stream.table.tableId(), stream.name);
         } catch (GcpException e) {
             return stream;
         }
+        if (recorded.isEmpty()) {
+            return stream;
+        }
+        long applied = recorded.getAsLong();
         boolean changed = false;
         if (stream.type == WriteStream.Type.COMMITTED && applied > stream.rowCount) {
             stream.rowCount = applied;
@@ -522,7 +527,8 @@ public class BigQueryStorageWrite implements Resettable {
             stream.uncommitted.subList(0, landed).clear();
             stream.flushed = applied;
             changed = true;
-        } else if (stream.type == WriteStream.Type.PENDING && applied > 0 && stream.committed == null) {
+        } else if (stream.type == WriteStream.Type.PENDING && stream.committed == null) {
+            // Any record, even 0 rows, means the batch holding this stream reached the table.
             stream.committed = table.getLastModifiedTime() != null
                     ? Instant.ofEpochMilli(Long.parseLong(table.getLastModifiedTime())) : Instant.now();
             stream.uncommitted.clear();

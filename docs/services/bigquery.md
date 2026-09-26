@@ -2,8 +2,8 @@
 
 floci-gcp emulates the BigQuery v2 REST API (the surface the `google-cloud-bigquery` SDKs and
 the Discovery document define): datasets, tables with schemas, `tabledata.insertAll`,
-`tabledata.list`, and query jobs that run **GoogleSQL on an embedded DuckDB engine**. The
-Storage Read/Write gRPC API is not implemented yet.
+`tabledata.list`, and query jobs that run **GoogleSQL on an embedded DuckDB engine**, plus the
+**Storage Read API** over gRPC on the same port. The Storage Write API is not implemented yet.
 
 ## Configuration
 
@@ -170,6 +170,51 @@ columns BigQuery documents:
   and generated columns, policy tags) are present and `NULL`, `NO` or empty. `COLUMNS` omits
   `async_generation_status` and `data_policies`; `COLUMN_FIELD_PATHS` omits `data_policies`.
 - Other views (`JOBS`, `PARTITIONS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
+
+## Storage Read API
+
+`google.cloud.bigquery.storage.v1.BigQueryRead` is served over gRPC on the emulator port
+(`CreateReadSession`, `ReadRows`, `SplitReadStream`), which is what `to_dataframe()` /
+`to_arrow()` use in Python when `google-cloud-bigquery-storage` is installed, and what
+`BigQueryReadClient`, Spark and Beam connectors call. Point the client at the emulator with a
+plaintext channel, for example in Python:
+
+```python
+import grpc
+from google.cloud import bigquery_storage_v1
+from google.cloud.bigquery_storage_v1.services.big_query_read.transports import BigQueryReadGrpcTransport
+
+storage = bigquery_storage_v1.BigQueryReadClient(
+    transport=BigQueryReadGrpcTransport(channel=grpc.insecure_channel("localhost:4588")))
+df = client.query("SELECT ...").to_dataframe(bqstorage_client=storage)
+```
+
+When `google-cloud-bigquery-storage` is installed, the Python client's `to_dataframe()` and
+`to_arrow()` create a Storage Read client for Google's real endpoint unless you pass one:
+use `bqstorage_client=storage` as above, or `create_bqstorage_client=False` to read over REST.
+
+- **Formats**: `ARROW` (Arrow IPC schema and record batch messages, from the DuckDB engine) and
+  `AVRO` (Avro schema plus binary-encoded row blocks of up to 1000 rows). Types follow BigQuery's
+  mapping: `TIMESTAMP` is a UTC microsecond timestamp, `DATETIME` a timestamp without time zone,
+  `NUMERIC` `decimal(38, 9)`, `DATE` `date32`; in Avro, nullable columns are unions with `null`,
+  `NUMERIC` is `bytes`/`decimal(38, 9)`, `BIGNUMERIC` `decimal(77, 38)`, `TIMESTAMP`
+  `timestamp-micros`.
+- **Read options**: `selected_fields` (top-level fields, returned in table order) and
+  `row_restriction` (a GoogleSQL filter, run through the SQL engine). The restriction must be a
+  single predicate over the table being read: subqueries, `UNION`, other tables, `;` and comments
+  are rejected with `INVALID_ARGUMENT`.
+- A session snapshots the table when it is created and has **one stream**; `SplitReadStream`
+  returns an empty response ("the original stream can no longer be split"). `ReadRows` honors
+  `offset` (for `ARROW`, at record batch boundaries), sends the schema in its first response and
+  reports `row_count` and progress. Sessions expire after 6 hours. Each session holds a snapshot
+  in memory, so at most 256 are kept; creating one past that drops the oldest, whose stream then
+  returns `NOT_FOUND`.
+- Query results can be read from their anonymous destination table, as the SDKs do.
+- Tables are read from the project in `read_session.table`.
+
+Not supported: views, nested `selected_fields` (`struct.field`), `table_modifiers.snapshot_time`,
+Arrow buffer compression, `sample_percentage`, and `ARROW` in mock mode (use `AVRO`).
+`BIGNUMERIC` columns come back as `decimal(38, 9)` in Arrow.
 
 ## Load jobs
 

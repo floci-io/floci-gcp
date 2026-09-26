@@ -48,6 +48,9 @@ interface BigQuerySqlEngine {
 
     Result execute(Request request, Tables tables);
 
+    /** Runs a query and returns its result as Arrow IPC messages (Storage Read API, ARROW format). */
+    DuckClient.ArrowIpc executeArrow(Request request, Tables tables);
+
     /** Reads load-job source files into rows (stored representation) and their schema. */
     Result readFiles(LoadSource source);
 

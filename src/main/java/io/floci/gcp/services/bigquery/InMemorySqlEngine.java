@@ -1,5 +1,6 @@
 package io.floci.gcp.services.bigquery;
 
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.Table;
 
 import java.util.List;
@@ -31,6 +32,12 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
         QueryEngine.Result result = QueryEngine.evaluate(parsed, table.getSchema(),
                 tables.rows(datasetId, ref.tableId()));
         return new Result(result.schema(), request.dryRun() ? List.of() : result.rows(), "SELECT", 0);
+    }
+
+    @Override
+    public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
+        throw GcpException.failedPrecondition("ARROW read sessions need the DuckDB SQL"
+                + " engine; set floci-gcp.services.bigquery.mock to false or read with AVRO.");
     }
 
     @Override

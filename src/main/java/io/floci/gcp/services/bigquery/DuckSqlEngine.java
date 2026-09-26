@@ -85,6 +85,27 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     }
 
     @Override
+    public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
+        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
+                request.projectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
+        String flociEndpoint = flociEndpoint();
+        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(), tables,
+                flociEndpoint);
+        DuckClient.ArrowIpc arrow;
+        try {
+            arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
+        } catch (DuckClient.DuckSqlException e) {
+            throw SqlDialectTranslator.invalidQuery(e.getMessage());
+        }
+        if (arrow == null) {
+            throw GcpException.failedPrecondition("ARROW reads need a floci-duck image that returns Arrow IPC;"
+                    + " update " + config.services().bigquery().duck().defaultImage());
+        }
+        return arrow;
+    }
+
+    @Override
     public DmlResult executeDml(Request request, Tables tables) {
         SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(request.sql(),
                 request.projectId(), request.defaultDatasetId());

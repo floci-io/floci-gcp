@@ -20,6 +20,7 @@ default:
 
 test-all:
     just test-java
+    just test-ruby
     just test-python
     just test-node
     just test-go
@@ -122,10 +123,18 @@ setup-opentofu:
 
 # ── Combined setup ───────────────────────────────────────────────────────────
 
-setup: setup-java setup-python setup-node setup-go setup-rust
+setup: setup-java setup-ruby setup-python setup-node setup-go setup-rust
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 [working-directory: 'sdk-test-java']
 clean:
     mvn clean -q
+
+[working-directory: 'sdk-test-ruby']
+test-ruby:
+    RESULTS_DIR=results bundle exec ruby -Itest test/all.rb
+
+[working-directory: 'sdk-test-ruby']
+setup-ruby:
+    bundle install

@@ -30,6 +30,7 @@ just test-all-iac
 | Module | Language | Framework | Command |
 |---|---|---|---|
 | [`sdk-test-java`](sdk-test-java/) | Java 21 | JUnit 5 | `just test-java` |
+| [`sdk-test-ruby`](sdk-test-ruby/) | Ruby 3.4 | Minitest | `just test-ruby` |
 | [`sdk-test-python`](sdk-test-python/) | Python 3 | pytest | `just test-python` |
 | [`sdk-test-node`](sdk-test-node/) | Node.js / TypeScript | vitest | `just test-node` |
 | [`sdk-test-go`](sdk-test-go/) | Go | go test | `just test-go` |
@@ -57,6 +58,7 @@ Exact test counts change frequently. The checked-in suites currently cover:
 | Suite | Coverage |
 |---|---|
 | Java | GCS REST and gRPC, Pub/Sub, Secret Manager, Logging, KMS, Monitoring, Firestore, Datastore, IAM and IAM Credentials, STS, Managed Kafka, GKE, Cloud SQL, Cloud Run, Cloud Functions, Cloud Tasks, Cloud Scheduler, Eventarc, Service Usage, Firebase Auth, BigQuery, and TLS |
+| Ruby | GCS byte transfers, object inventory and pagination with locked official Google clients |
 | Python | GCS, Pub/Sub, Secret Manager, Logging, KMS, Firestore, Datastore, IAM, and Managed Kafka |
 | Node.js | GCS, Pub/Sub, Secret Manager, Logging, KMS, Firestore, Datastore, IAM, and Managed Kafka |
 | Go | GCS REST and gRPC, Pub/Sub, Secret Manager, Logging, KMS, Firestore, Datastore, IAM, and Managed Kafka |
@@ -81,6 +83,7 @@ Each IaC suite runs: `init`, `validate`, `plan`, `apply`, BATS spot-checks, then
 
 - **floci-gcp running** on `http://localhost:4588` (or set `FLOCI_GCP_ENDPOINT`)
 - **Java 21+** and **Maven**: for `sdk-test-java`
+- **Ruby 3.4** and **Bundler**: for `sdk-test-ruby`; `just setup-ruby` installs the locked gems and `just test-ruby` writes JUnit reports to `sdk-test-ruby/results`
 - **Python 3.9+**: for `sdk-test-python`
 - **Node.js 18+**: for `sdk-test-node`
 - **Go 1.21+**: for `sdk-test-go`

@@ -90,6 +90,7 @@ jobs:
       matrix:
         test:
           - sdk-test-java
+          - sdk-test-ruby
           - sdk-test-node
           - sdk-test-python
           - sdk-test-go
@@ -115,7 +116,9 @@ jobs:
       # below keep talking plain HTTP unchanged — which makes them a regression guard
       # for the protocol-sniffing proxy — while sdk-test-java's TlsTest exercises
       # HTTPS and gRPC-over-TLS. The extra 443 binding is disabled because the
-      # container runs as an unprivileged user.
+      # container runs as an unprivileged user. Quarkus binds its internal TLS
+      # listeners to loopback; accept the public Docker/service hostnames forwarded
+      # by the proxy instead of applying localhost-only Host validation in CI.
       - name: Start floci-gcp
         run: |
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
@@ -134,6 +137,7 @@ jobs:
             -e FLOCI_GCP_SERVICES_KAFKA_MOCK="$KAFKA_MOCK" \
             -e FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false \
             -e FLOCI_GCP_TLS_ENABLED=true \
+            -e QUARKUS_HTTP_HOST_VALIDATION_REQUIRE_LOCALHOST=false \
             -e FLOCI_GCP_TLS_HTTPS_PORT=0 \
             floci-gcp:test-native
 

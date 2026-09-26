@@ -1,12 +1,22 @@
 package io.floci.gcp.services.bigquery;
 
+import com.google.flatbuffers.FlatBufferBuilder;
 import com.google.protobuf.ByteString;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
+import org.apache.arrow.flatbuf.Buffer;
+import org.apache.arrow.flatbuf.FieldNode;
+import org.apache.arrow.flatbuf.Message;
+import org.apache.arrow.flatbuf.MessageHeader;
+import org.apache.arrow.flatbuf.MetadataVersion;
+import org.apache.arrow.flatbuf.RecordBatch;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -96,5 +106,61 @@ class BigQueryArrowRowsTest {
         assertTrue(assertThrows(GcpException.class,
                 () -> BigQueryArrowRows.bind(ByteString.copyFromUtf8("nope"), List.of())).getMessage()
                 .contains("Malformed"));
+    }
+
+    /**
+     * An encapsulated record batch message for one Utf8 column, built by hand so its metadata can
+     * disagree with its buffers: {@code nodeLength} values, offsets {@code 0} and {@code end}, and
+     * the bytes of {@code text} as the data.
+     */
+    private static ByteString utf8Batch(long length, long nodeLength, int end, String text) {
+        byte[] data = text.getBytes(StandardCharsets.UTF_8);
+        int dataLength = (data.length + 7) / 8 * 8;
+        ByteBuffer body = ByteBuffer.allocate(8 + dataLength).order(ByteOrder.LITTLE_ENDIAN);
+        body.putInt(0).putInt(end).put(data);
+
+        FlatBufferBuilder builder = new FlatBufferBuilder();
+        RecordBatch.startNodesVector(builder, 1);
+        FieldNode.createFieldNode(builder, nodeLength, 0);
+        int nodes = builder.endVector();
+        RecordBatch.startBuffersVector(builder, 3);
+        Buffer.createBuffer(builder, 8, dataLength);
+        Buffer.createBuffer(builder, 0, 8);
+        Buffer.createBuffer(builder, 0, 0);
+        int buffers = builder.endVector();
+        int batch = RecordBatch.createRecordBatch(builder, length, nodes, buffers, 0, 0);
+        builder.finish(Message.createMessage(builder, MetadataVersion.V5, MessageHeader.RecordBatch, batch,
+                body.capacity(), 0));
+        byte[] metadata = builder.sizedByteArray();
+        int metadataLength = (metadata.length + 7) / 8 * 8;
+        ByteBuffer message = ByteBuffer.allocate(8 + metadataLength + body.capacity()).order(ByteOrder.LITTLE_ENDIAN);
+        message.putInt(-1).putInt(metadataLength).put(metadata).position(8 + metadataLength);
+        message.put(body.array());
+        return ByteString.copyFrom(message.array());
+    }
+
+    private static BigQueryArrowRows.BoundSchema nameSchema() {
+        return BigQueryArrowRows.bind(fixture("schema-name.bin"), List.of(column("name", "STRING", null)));
+    }
+
+    @Test
+    void aHandBuiltBatchDecodes() {
+        BigQueryArrowRows.Batch batch = BigQueryArrowRows.decode(nameSchema(), utf8Batch(1, 1, 2, "hi"));
+        assertEquals(1, batch.size());
+        assertEquals(row("name", "hi"), batch.row(0));
+    }
+
+    @Test
+    void metadataThatDisagreesWithTheBuffersIsRejectedBeforeAnyRowIsRead() {
+        assertMalformed(utf8Batch(2_000_000_000L, 2_000_000_000L, 2, "hi"), "body can hold");
+        assertMalformed(utf8Batch(1, 5, 2, "hi"), "has 5 values, expected 1");
+        assertMalformed(utf8Batch(1, 1, 1_000_000_000, "hi"), "past the end of its values");
+        assertMalformed(utf8Batch(1, 1, -1, "hi"), "decreasing offsets");
+    }
+
+    private static void assertMalformed(ByteString batch, String reason) {
+        GcpException e = assertThrows(GcpException.class, () -> BigQueryArrowRows.decode(nameSchema(), batch));
+        assertTrue(e.getMessage().startsWith("Malformed Arrow record batch") && e.getMessage().contains(reason),
+                e.getMessage());
     }
 }

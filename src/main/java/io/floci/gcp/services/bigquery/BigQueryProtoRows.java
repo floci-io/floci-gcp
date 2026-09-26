@@ -234,7 +234,7 @@ final class BigQueryProtoRows {
             if (DURATION.equals(messageType)) {
                 long seconds = (Long) message.getField(message.getDescriptorForType().findFieldByName("seconds"));
                 int nanos = (Integer) message.getField(message.getDescriptorForType().findFieldByName("nanos"));
-                return interval(0, 0, Math.addExact(Math.multiplyExact(seconds, 1_000_000_000L), nanos));
+                return interval(0, 0, BigDecimal.valueOf(seconds).add(BigDecimal.valueOf(nanos, 9)));
             }
             raw = message.getField(message.getDescriptorForType().findFieldByName("value"));
         }
@@ -312,10 +312,12 @@ final class BigQueryProtoRows {
         return value.signum() == 0 ? "0" : value.stripTrailingZeros().toPlainString();
     }
 
-    /** Canonical INTERVAL text {@code Y-M D H:M:S[.F]}, each part carrying its own sign. */
-    static String interval(long months, long days, long nanos) {
+    /**
+     * Canonical INTERVAL text {@code Y-M D H:M:S[.F]}, each part carrying its own sign. The time
+     * part is exact seconds: BigQuery allows up to 87,840,000 hours, which overflows a nanosecond long.
+     */
+    static String interval(long months, long days, BigDecimal seconds) {
         String yearMonth = (months < 0 ? "-" : "") + Math.abs(months) / 12 + "-" + Math.abs(months) % 12;
-        BigDecimal seconds = BigDecimal.valueOf(nanos, 9);
         String sign = seconds.signum() < 0 ? "-" : "";
         seconds = seconds.abs();
         long whole = seconds.longValue();

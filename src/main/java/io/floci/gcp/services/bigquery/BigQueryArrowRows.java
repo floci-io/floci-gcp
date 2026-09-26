@@ -266,12 +266,19 @@ final class BigQueryArrowRows {
                 throw GcpException.invalidArgument(
                         "Compressed Arrow record batches are not supported by the floci BigQuery emulator");
             }
+            // Every value takes at least one bit of some buffer, so a length the body cannot hold
+            // is a lie; checking it first keeps a tiny request from claiming billions of rows.
+            if (batch.length() < 0 || batch.length() > 8L * encapsulated.body().capacity()) {
+                throw malformed("its length " + batch.length() + " exceeds what its "
+                        + encapsulated.body().capacity() + "-byte body can hold");
+            }
+            int length = (int) batch.length();
             Reader reader = new Reader(batch, encapsulated.body());
             List<Column> columns = new ArrayList<>();
             for (ArrowField field : schema.fields()) {
-                columns.add(reader.read(field));
+                columns.add(reader.read(field, length, true));
             }
-            return new Batch(schema.fields(), columns, Math.toIntExact(batch.length()));
+            return new Batch(schema.fields(), columns, length);
         } catch (RuntimeException e) {
             if (e instanceof GcpException) {
                 throw e;
@@ -301,7 +308,15 @@ final class BigQueryArrowRows {
         }
     }
 
-    /** Walks the batch's field nodes and buffers in schema order (depth first). */
+    private static GcpException malformed(String reason) {
+        return GcpException.invalidArgument("Malformed Arrow record batch: " + reason);
+    }
+
+    /**
+     * Walks the batch's field nodes and buffers in schema order (depth first), checking each
+     * node's length and each buffer's size against it, so reading a value can never run past a
+     * buffer or allocate more than the request carried.
+     */
     private static final class Reader {
         private final RecordBatch batch;
         private final ByteBuffer body;
@@ -313,9 +328,23 @@ final class BigQueryArrowRows {
             this.body = body;
         }
 
-        Column read(ArrowField field) {
+        /** Reads a node of exactly {@code length} values, or, for a list's items, at least that many. */
+        Column read(ArrowField field, int length, boolean exact) {
             FieldNode fieldNode = batch.nodes(node++);
+            String name = field.column().getName();
+            if (exact ? fieldNode.length() != length : fieldNode.length() < length) {
+                throw malformed("field " + name + " has " + fieldNode.length() + " values, expected "
+                        + (exact ? "" : "at least ") + length);
+            }
+            if (fieldNode.length() > 8L * body.capacity()) {
+                throw malformed("field " + name + " claims " + fieldNode.length() + " values, more than its "
+                        + body.capacity() + "-byte body can hold");
+            }
+            int count = (int) fieldNode.length();
             ByteBuffer validity = nextBuffer();
+            if (fieldNode.nullCount() > 0) {
+                requireBytes(validity, (count + 7L) / 8, name, "validity");
+            }
             ByteBuffer offsets = null;
             ByteBuffer data = null;
             List<Column> children = new ArrayList<>();
@@ -323,15 +352,73 @@ final class BigQueryArrowRows {
                 case Type.Utf8, Type.Binary -> {
                     offsets = nextBuffer();
                     data = nextBuffer();
+                    requireOffsets(offsets, count, data.capacity(), name);
                 }
                 case Type.List -> {
                     offsets = nextBuffer();
-                    children.add(read(field.children().get(0)));
+                    int items = requireOffsets(offsets, count, Integer.MAX_VALUE, name);
+                    children.add(read(field.children().get(0), items, false));
                 }
-                case Type.Struct_ -> field.children().forEach(child -> children.add(read(child)));
-                default -> data = nextBuffer();
+                case Type.Struct_ -> {
+                    for (ArrowField child : field.children()) {
+                        children.add(read(child, count, true));
+                    }
+                }
+                default -> {
+                    data = nextBuffer();
+                    requireBytes(data, dataBytes(field, count), name, "data");
+                }
             }
             return new Column(field, fieldNode.nullCount() > 0 ? validity : null, offsets, data, children);
+        }
+
+        /** Bytes a fixed-width buffer needs for {@code count} values, as {@link Column#value} reads them. */
+        private static long dataBytes(ArrowField field, long count) {
+            return switch (field.type()) {
+                case Type.Bool -> (count + 7) / 8;
+                case Type.Int -> count * switch (field.bitWidth()) {
+                    case 8 -> 1;
+                    case 16 -> 2;
+                    case 32 -> 4;
+                    default -> 8;
+                };
+                case Type.FloatingPoint -> count * (field.unit() == Precision.SINGLE ? 4 : 8);
+                case Type.Date -> count * 4;
+                case Type.Decimal -> count * (field.bitWidth() / 8);
+                case Type.Interval -> count * switch (field.unit()) {
+                    case IntervalUnit.YEAR_MONTH -> 4;
+                    case IntervalUnit.DAY_TIME -> 8;
+                    default -> 16;
+                };
+                default -> count * 8;
+            };
+        }
+
+        private static void requireBytes(ByteBuffer buffer, long bytes, String name, String kind) {
+            if (buffer.capacity() < bytes) {
+                throw malformed("field " + name + " has a " + buffer.capacity() + "-byte " + kind
+                        + " buffer; its values need " + bytes);
+            }
+        }
+
+        /** Checks {@code count + 1} offsets are non-decreasing and within {@code limit}; returns the last. */
+        private static int requireOffsets(ByteBuffer offsets, int count, int limit, String name) {
+            requireBytes(offsets, (count + 1L) * 4, name, "offsets");
+            int previous = offsets.getInt(0);
+            if (previous < 0) {
+                throw malformed("field " + name + " has a negative offset");
+            }
+            for (int i = 1; i <= count; i++) {
+                int next = offsets.getInt(i * 4);
+                if (next < previous) {
+                    throw malformed("field " + name + " has decreasing offsets");
+                }
+                previous = next;
+            }
+            if (previous > limit) {
+                throw malformed("field " + name + " has offsets past the end of its values");
+            }
+            return previous;
         }
 
         private ByteBuffer nextBuffer() {
@@ -410,11 +497,11 @@ final class BigQueryArrowRows {
 
         private String interval(int i) {
             return switch (field.unit()) {
-                case IntervalUnit.YEAR_MONTH -> BigQueryProtoRows.interval(data.getInt(i * 4), 0, 0);
+                case IntervalUnit.YEAR_MONTH -> BigQueryProtoRows.interval(data.getInt(i * 4), 0, BigDecimal.ZERO);
                 case IntervalUnit.DAY_TIME -> BigQueryProtoRows.interval(0, data.getInt(i * 8),
-                        data.getInt(i * 8 + 4) * 1_000_000L);
+                        BigDecimal.valueOf(data.getInt(i * 8 + 4), 3));
                 default -> BigQueryProtoRows.interval(data.getInt(i * 16), data.getInt(i * 16 + 4),
-                        data.getLong(i * 16 + 8));
+                        BigDecimal.valueOf(data.getLong(i * 16 + 8), 9));
             };
         }
 

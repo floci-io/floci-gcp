@@ -219,6 +219,43 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void mergingReleaseReportsAFailedUploadAndStillRemovesEveryVolume() {
+        GcsService gcsService = mock(GcsService.class);
+        when(gcsService.putObject(eq("fail-bucket"), anyString(), anyString(), any(byte[].class), anyString()))
+                .thenThrow(GcpException.internal("upload failed"));
+        doReturn(Map.of("out.txt", bytes("output"))).when(lifecycleManager).runDockerApi(anyString(), any());
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config, gcsService);
+        CloudRunRuntimeService.GcsVolumeMounts volumes = new CloudRunRuntimeService.GcsVolumeMounts(List.of(
+                writableMount("fail-bucket", "", "vol-fail"),
+                writableMount("ok-bucket", "", "vol-ok"),
+                new CloudRunRuntimeVolumeMount("ro-bucket", "", "vol-ro", null, null, "/in", true)), Map.of());
+
+        Optional<String> failure = service.releaseMergingGcsVolumeMounts(volumes);
+
+        assertEquals(Optional.of("bucket fail-bucket: upload failed"), failure);
+        verify(gcsService).putObject(eq("ok-bucket"), eq("out.txt"), anyString(),
+                argThat(data -> Arrays.equals(data, bytes("output"))), eq("http://localhost:4588"));
+        verify(lifecycleManager).removeVolume("vol-fail");
+        verify(lifecycleManager).removeVolume("vol-ok");
+        verify(lifecycleManager).removeVolume("vol-ro");
+    }
+
+    @Test
+    void mergingReleaseReportsNothingWhenEveryWriteBackSucceeds() {
+        GcsService gcsService = mock(GcsService.class);
+        doReturn(Map.of("out.txt", bytes("output"))).when(lifecycleManager).runDockerApi(anyString(), any());
+        CloudRunRuntimeService service = new CloudRunRuntimeService(new InMemoryStorage<>(), containerBuilder(),
+                lifecycleManager, config, gcsService);
+
+        Optional<String> failure = service.releaseMergingGcsVolumeMounts(new CloudRunRuntimeService.GcsVolumeMounts(
+                List.of(writableMount("ok-bucket", "", "vol-ok")), Map.of()));
+
+        assertTrue(failure.isEmpty());
+        verify(lifecycleManager).removeVolume("vol-ok");
+    }
+
+    @Test
     void unsupportedContainerShapesFailBeforeDocker() {
         Service service = Service.newBuilder()
                 .setName("projects/p1/locations/us-central1/services/svc")

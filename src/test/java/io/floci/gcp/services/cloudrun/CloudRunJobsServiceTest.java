@@ -390,6 +390,51 @@ class CloudRunJobsServiceTest {
     }
 
     @Test
+    void successfulExitWhoseGcsWriteBackFailsIsRetriedAndFailsTheExecution() throws Exception {
+        Harness harness = new Harness(execution(1, 1, 1), null);
+        harness.coordinator.begin();
+        harness.coordinator.start();
+        harness.await(() -> harness.runner.launches.size() == 1);
+
+        harness.runner.finish(0, 0, CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.Exited(0),
+                Optional.of("bucket out-bucket: upload failed"), "task0", 0));
+        harness.await(() -> harness.runner.launches.size() == 2);
+        assertEquals(1, harness.runner.launches.get(1).attempt);
+        harness.runner.finish(0, 1, CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.Exited(0),
+                Optional.of("bucket out-bucket: upload failed"), "task0", 1));
+
+        Execution result = harness.coordinator.finished().get(5, TimeUnit.SECONDS);
+        assertEquals(1, result.getFailedCount());
+        assertEquals(0, result.getSucceededCount());
+        assertEquals(1, result.getRetriedCount());
+        assertEquals(Condition.State.CONDITION_FAILED, completed(result).getState());
+        Status error = harness.sink.finishedError.get(5, TimeUnit.SECONDS).orElseThrow();
+        assertEquals(13, error.getCode());
+        assertEquals("Task job-abcde-task0 failed with message: The task's GCS volume could not be written back: "
+                + "bucket out-bucket: upload failed.", error.getMessage());
+        Task task = harness.sink.tasks.get(0);
+        assertEquals(13, task.getLastAttemptResult().getStatus().getCode());
+        assertEquals("The task's GCS volume could not be written back: bucket out-bucket: upload failed.",
+                task.getLastAttemptResult().getStatus().getMessage());
+    }
+
+    @Test
+    void failedGcsWriteBackKeepsAnAlreadyFailedOrStoppedOutcome() {
+        Optional<String> failure = Optional.of("bucket out-bucket: upload failed");
+
+        assertEquals(new TaskOutcome.Exited(0),
+                CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.Exited(0), Optional.empty(), "task0", 0));
+        assertEquals(new TaskOutcome.Exited(3),
+                CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.Exited(3), failure, "task0", 0));
+        assertEquals(new TaskOutcome.TimedOut(),
+                CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.TimedOut(), failure, "task0", 0));
+        assertEquals(new TaskOutcome.Stopped(),
+                CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.Stopped(), failure, "task0", 0));
+        assertEquals(new TaskOutcome.StartFailed("boom"),
+                CloudRunJobsRuntime.afterWriteBack(new TaskOutcome.StartFailed("boom"), failure, "task0", 0));
+    }
+
+    @Test
     void cancelDuringADeadlineStopKeepsTheDeadlineFailure() throws Exception {
         Harness harness = new Harness(execution(1, 1, 0), java.time.Duration.ofMillis(200));
         harness.coordinator.begin();

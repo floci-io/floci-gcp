@@ -227,6 +227,52 @@ setup() {
     assert_output --partial 'floci-compat-run-tofu-replaced'
 }
 
+# ── Cloud Run Job Spot Checks ────────────────────────────────────────────────
+
+@test "OpenTofu: Cloud Run job created" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job-tofu"
+    assert_success
+    assert_output --partial '"terminalCondition":{"type":"Ready","state":"CONDITION_SUCCEEDED"'
+    assert_output --partial '"taskCount":1'
+    assert_output --partial '"timeout":"60s"'
+}
+
+@test "OpenTofu: Cloud Run job plans no changes after apply" {
+    run tofu plan -detailed-exitcode \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "OpenTofu: Cloud Run job update uses provider patch path" {
+    run tofu apply \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -var="job_label=compat-updated" \
+        -var="job_task_count=2" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    result=$(gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job-tofu")
+    [[ "$result" == *'"env":"compat-updated"'* ]]
+    [[ "$result" == *'"taskCount":2'* ]]
+    [[ "$result" == *'"generation":"2"'* ]]
+}
+
+@test "OpenTofu: Cloud Run job destroy removes the job" {
+    run tofu destroy \
+        -target=google_cloud_run_v2_job.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" \
+        -var="project=${FLOCI_PROJECT}" \
+        -input=false -auto-approve -no-color
+    assert_success
+
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/locations/us-central1/jobs/floci-compat-job-tofu"
+    assert_failure
+}
+
 # ── Cloud SQL Spot Checks ────────────────────────────────────────────────────
 
 @test "OpenTofu: Cloud SQL PostgreSQL instance created" {

@@ -72,10 +72,95 @@ ServicesSettings settings = ServicesSettings.newHttpJsonBuilder()
 ## Not Implemented
 
 - Source builds and buildpacks
-- Jobs
 - WorkerPools
 - Traffic splitting
 - Autoscaling and scale-to-zero
 - Sidecars, non-GCS volumes, secrets, startup probes
 - Cloud Functions execution
 - IAM invocation enforcement
+
+## Jobs
+
+Jobs run batch work to completion. floci-gcp implements the Cloud Run Admin API v2 `jobs` resource with its `executions` and `tasks` over REST JSON. gcloud is not supported: `gcloud run jobs` uses the v1 Knative API, which floci-gcp does not serve for Cloud Run.
+
+### Supported API Surface
+
+| Operation | Path |
+|---|---|
+| Create job | `POST /v2/projects/{project}/locations/{location}/jobs?jobId={id}` |
+| List jobs | `GET /v2/projects/{project}/locations/{location}/jobs` |
+| Get job | `GET /v2/projects/{project}/locations/{location}/jobs/{job}` |
+| Update job | `PATCH /v2/projects/{project}/locations/{location}/jobs/{job}` |
+| Delete job | `DELETE /v2/projects/{project}/locations/{location}/jobs/{job}` |
+| Run job | `POST /v2/projects/{project}/locations/{location}/jobs/{job}:run` |
+| Get IAM policy | `GET /v2/projects/{project}/locations/{location}/jobs/{job}:getIamPolicy` |
+| Set IAM policy | `POST /v2/projects/{project}/locations/{location}/jobs/{job}:setIamPolicy` |
+| Test IAM permissions | `POST /v2/projects/{project}/locations/{location}/jobs/{job}:testIamPermissions` |
+| List executions | `GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions` |
+| Get execution | `GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}` |
+| Delete execution | `DELETE /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}` |
+| Cancel execution | `POST /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}:cancel` |
+| List tasks | `GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}/tasks` |
+| Get task | `GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}/tasks/{task}` |
+
+`{job}` may be `-` when listing executions, and `{job}` and `{execution}` may each be `-` when listing tasks. Lists page with `pageSize` and `pageToken`. Jobs are listed by name, executions newest first, tasks by execution and index.
+
+Create accepts `jobId` and `validateOnly`. Update replaces the job with the request body (there is no `updateMask`) and accepts `validateOnly` and `allowMissing`; a patch that changes nothing keeps the generation. Delete accepts `validateOnly` and `etag`. Run and cancel take `validateOnly`, `etag` and, for run, `overrides` in the request body. `validateOnly` returns a completed operation and stores nothing.
+
+### Defaults and Naming
+
+A created job gets `launchStage: GA`, `template.taskCount: 1`, `template.template.maxRetries: 3`, `template.template.timeout: 600s`, `template.template.executionEnvironment: EXECUTION_ENVIRONMENT_GEN2`, and container resource limits `cpu: 1000m` and `memory: 512Mi`. `client` and `clientVersion` are preserved. The job reports `generation`, `observedGeneration`, `executionCount`, `latestCreatedExecution` (name, create and completion time, completion status, delete time) and a `Ready` terminal condition with an empty `conditions` list. A duplicate `jobId` fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`, also with `validateOnly=true`. A missing job, execution or task fails with `404 NOT_FOUND` and `Resource '{id}' of kind 'JOB' in region '{location}' in project '{project}' does not exist.` (kind `EXECUTION` or `TASK` respectively).
+
+Executions are named `{job}-{5 lowercase alphanumerics}` and tasks `{execution}-task{index}`. `parallelism` defaults to the task count; a larger value is accepted as given. `startExecutionToken` and `runExecutionToken` on create or update start an execution named `{job}-{token}` when the token differs from the stored one; the operation completes when the execution is created (start token) or finished (run token), and re-sending the same token starts nothing. A token is rejected with `400 INVALID_ARGUMENT` when the job ID and the token together are 63 characters or more, or when `{job}-{token}` is not lowercase letters, digits and hyphens starting and ending with a letter or digit.
+
+`jobs:run` overrides replace `taskCount` and `timeout` for that execution. A container override is matched by `name`; when no container has that name and the template has a single container the override applies to it, otherwise the request fails with `400 INVALID_ARGUMENT`. Override `args` replace the container args, `env` merges by name, and `clearArgs` removes the args. The effective template is stored on the execution.
+
+### Execution Semantics
+
+`jobs:run` returns a long-running operation whose metadata and response are the Execution. It is not bounded by `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT`; a run is bounded by the task timeout plus the cleanup grace, over every retry and every wave of `parallelism`, plus the startup timeout for image preparation. The operation outcome follows GCP:
+
+| Outcome | Operation |
+|---|---|
+| Every task succeeded | `response` is the Execution |
+| A task exited non-zero on its last attempt | `error {code: 10, message: "Task {task} failed with exit code: {n} and message: The container exited with an error."}` |
+| A task timed out on its last attempt | `error {code: 4, message: "Task {task} failed with exit code: 0 and message: The configured timeout was reached."}` |
+| A task container disappeared on its last attempt without a stop request | `error {code: 13, message: "Task {task} failed with message: The task container stopped unexpectedly."}` |
+| The execution was cancelled, deleted or its job deleted | `response` is the Execution, whose `Completed` condition is `CONDITION_FAILED` with `Cancelled by user.` |
+
+Executions carry the `Started`, `Completed`, `ContainerReady` and `ResourcesAvailable` conditions with the GCP messages and measured durations, and `runningCount`, `succeededCount`, `failedCount`, `cancelledCount` and `retriedCount`. An execution is failed only after every task is terminal. Each task reports `retried` and `lastAttemptResult`: `status: {}` on success, `{code: 10, message: "The container exited with an error."}` with `exitCode` for a non-zero exit, `{code: 4, message: "The configured timeout was reached."}` for a timeout, `{code: 13, message: "The task container stopped unexpectedly."}` for a container that was removed or lost outside the emulator's control, and `{code: 1, message: "Cancelled by user."}` for a cancelled task. An unexpectedly stopped container is a failed attempt and is retried like a non-zero exit.
+
+Cancelling a running execution stops its containers and never starts its pending tasks; the cancel operation completes with the Execution. Cancelling an execution that is not running fails with `400 FAILED_PRECONDITION` and `Execution '{id}' cannot be cancelled because it is not running.` Deleting a running execution cancels it first. A cancel or delete that arrives while the run bound is already stopping the execution does not replace that failure. Deleting a job cancels its running executions and removes the job, its executions and its tasks. Until that cleanup finishes, creating or upserting a job with the same name fails with `409 ABORTED` and `Job '{id}' is being deleted.` Several executions of one job may run at the same time.
+
+In mock mode (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true`) `jobs:run` creates the execution and its tasks already succeeded, with exit code 0 and timestamps set, and the operation is done with the Execution.
+
+In execution mode each task attempt runs as a fresh Docker container. At most `parallelism` containers run at once and tasks start in index order. Non-zero exits and timeouts are retried up to `maxRetries` with `CLOUD_RUN_TASK_ATTEMPT` incremented. The per-attempt timeout sends SIGTERM and kills the container after `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT`. Container stdout and stderr are written to the emulator log at debug level (category `io.floci.gcp.services.cloudrun.CloudRunJobsRuntime`), and the container is removed once its exit code is captured. GCS volumes are materialized per attempt as for services, and writable volumes are written back before the attempt's outcome is recorded. Unlike services, the write-back merges instead of mirroring, so parallel tasks writing the same bucket keep each other's outputs: a file is uploaded only when it is new or its content changed since the attempt's snapshot, and an object is deleted only when the attempt removed it and its generation is unchanged since the snapshot. When two attempts change the same object, the last write-back wins. If the write-back of an attempt that exited 0 fails, the attempt is a failed attempt and is retried, then fails with code 13 and `The task's GCS volume could not be written back: {detail}.`; the materialized volumes are removed either way. Execution mode applies the same template constraints as services, with the same messages: one container, GCS volumes only, at most one port, an image, no env `valueSource`.
+
+Each task container receives:
+
+| Variable | Value |
+|---|---|
+| `CLOUD_RUN_JOB` | Job ID |
+| `CLOUD_RUN_EXECUTION` | Execution ID |
+| `CLOUD_RUN_TASK_INDEX` | Task index, from 0 |
+| `CLOUD_RUN_TASK_ATTEMPT` | Attempt number, from 0 |
+| `CLOUD_RUN_TASK_COUNT` | Task count of the execution |
+
+`PORT` and the `K_*` variables are not set for job tasks.
+
+Every change to an execution and its tasks is applied by a single per-execution coordinator, so task exits, cancel, execution delete, job delete and startup reconciliation cannot interleave. When the emulator stops, running task containers are removed. On the next start with persistent storage, executions and tasks that were still running are marked failed with `The emulator restarted before the execution completed.` (tasks: `The emulator restarted before the task completed.`), and their pending run operations fail with code 10. The run, delete and job operations of an execution that was deleted while its containers were still stopping complete with the cancelled Execution, as the delete path does. Job task containers left behind by an emulator process that did not stop cleanly (same `floci_emulator` and `floci_namespace` labels) are removed at startup.
+
+### Deviations from GCP
+
+- `etag` is accepted on delete, run and cancel but never validated, which matches the observed GCP behavior.
+- Deletion is immediate. There is no soft delete or 30-day retention, and `showDeleted` is accepted and ignored; `deleteTime` and `expireTime` appear only on the delete operation's Execution or Job.
+- `validateOnly` returns a completed operation that cannot be fetched later. GCP returns an unfinished operation name that also cannot be fetched.
+- `serviceAccount` is not defaulted, as for services; GCP fills in the project's default compute service account.
+- Container images are stored as given, and unnamed job containers stay unnamed; GCP resolves the execution image to a digest.
+- Executions do not emit the GCP `Retry` condition or `logUri`.
+- The `TASK` kind in the task `404` message was not observed on GCP; the job and execution messages were.
+- The execution token character rule is inferred from the execution naming; only the length limit is documented in `job.proto`.
+- Recreating a job while its executions are still being cleaned up fails with `409 ABORTED`; the GCP behavior was not observed.
+- A task container that stops without a stop request (removed outside the emulator) fails its attempt with code 13; GCP has no equivalent observable case.
+- IAM policies use the same codec as services, so the initial `ACAB` etag is returned as the base64 of its UTF-8 bytes.
+- gcloud is not supported.
+

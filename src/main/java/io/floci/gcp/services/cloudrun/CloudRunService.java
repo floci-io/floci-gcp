@@ -50,7 +50,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 @ApplicationScoped
 public class CloudRunService {
@@ -146,7 +145,7 @@ public class CloudRunService {
                 .storageKey("cloudrun")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudRunController.class, CloudRunInvocationController.class,
-                        CloudRunUrlRoutingFilter.class)
+                        CloudRunUrlRoutingFilter.class, CloudRunJobsController.class)
                 .build());
     }
 
@@ -202,7 +201,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parent, service);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         com.google.cloud.run.v2.Service storedService = service;
         Revision storedRevision = revision;
         submitOperation(guard,
@@ -249,7 +248,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parentFromName(name), deleted);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         submitOperation(guard,
                 () -> deleteRuntime(guard, name, deleted),
                 () -> guard.fail(Status.newBuilder()
@@ -300,7 +299,7 @@ public class CloudRunService {
         }
 
         Operation operation = operations.pending(parentFromName(name), updated);
-        OperationGuard guard = new OperationGuard(operation.getName());
+        CloudRunOperationGuard guard = new CloudRunOperationGuard(operations, operation.getName());
         Revision storedRevision = revision;
         com.google.cloud.run.v2.Service storedService = updated;
         submitOperation(guard,
@@ -442,7 +441,7 @@ public class CloudRunService {
         return builder.build();
     }
 
-    private void startRuntime(String project, String location, OperationGuard guard,
+    private void startRuntime(String project, String location, CloudRunOperationGuard guard,
                               com.google.cloud.run.v2.Service service, Revision revision) {
         try {
             runtimeService.initialize();
@@ -484,7 +483,7 @@ public class CloudRunService {
         }
     }
 
-    private void deleteRuntime(OperationGuard guard, String name, com.google.cloud.run.v2.Service deleted) {
+    private void deleteRuntime(CloudRunOperationGuard guard, String name, com.google.cloud.run.v2.Service deleted) {
         List<CloudRunRuntimeInstance> instances = runtimeService.serviceInstances(name);
         try {
             deleteMetadata(name);
@@ -505,7 +504,7 @@ public class CloudRunService {
         runCleanupWithTimeout("runtime cleanup service=" + name, () -> runtimeService.stopInstances(instances));
     }
 
-    private void submitOperation(OperationGuard guard, Runnable work, Runnable onTimeout) {
+    private void submitOperation(CloudRunOperationGuard guard, Runnable work, Runnable onTimeout) {
         Future<?> future = operationExecutor.submit(work);
         Duration timeout = operationTimeout();
         operationTimeouts.schedule(() -> {
@@ -521,7 +520,7 @@ public class CloudRunService {
         }, timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private void failRuntimeStart(OperationGuard guard,
+    private void failRuntimeStart(CloudRunOperationGuard guard,
                                   com.google.cloud.run.v2.Service service,
                                   Revision revision,
                                   String message,
@@ -840,33 +839,4 @@ public class CloudRunService {
     }
 
     public record InvocationRoute(String project, String location, String serviceId) {}
-
-    private final class OperationGuard {
-        private final String operationName;
-        private final AtomicBoolean terminal = new AtomicBoolean(false);
-
-        private OperationGuard(String operationName) {
-            this.operationName = operationName;
-        }
-
-        private String operationName() {
-            return operationName;
-        }
-
-        private boolean isTerminal() {
-            return terminal.get();
-        }
-
-        private void complete(com.google.protobuf.Message response, com.google.protobuf.Message metadata) {
-            if (terminal.compareAndSet(false, true)) {
-                operations.complete(operationName, response, metadata);
-            }
-        }
-
-        private void fail(Status error, com.google.protobuf.Message metadata) {
-            if (terminal.compareAndSet(false, true)) {
-                operations.fail(operationName, error, metadata);
-            }
-        }
-    }
 }

@@ -16,7 +16,6 @@ import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.Events;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskOutcome;
-import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -161,7 +160,7 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
 
     private void run(String key, Attempt handle, Execution execution, Task task, int attempt, Events events) {
         String taskId = CloudRunRuntimeService.lastSegment(task.getName());
-        List<CloudRunRuntimeVolumeMount> mounts = List.of();
+        CloudRunRuntimeService.GcsVolumeMounts volumes = CloudRunRuntimeService.GcsVolumeMounts.EMPTY;
         String containerId = null;
         ResultCallback.Adapter<Frame> logs = null;
         TaskOutcome outcome;
@@ -173,11 +172,13 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
                 String project = parts[1];
                 String location = parts[3];
                 Container container = task.getContainers(0);
-                mounts = runtimeService.prepareGcsVolumeMounts(task.getName(), task.getVolumesList(), container);
+                volumes = runtimeService.prepareMergingGcsVolumeMounts(task.getName(), task.getVolumesList(),
+                        container);
                 String containerName = runtimeService.workloadContainerName(taskId, "attempt" + attempt,
                         UUID.randomUUID().toString().substring(0, 8));
                 ContainerSpec spec = runtimeService.buildWorkloadSpec(project, location, task.getName(),
-                        containerName, container, taskEnvironment(execution, task, attempt), null, mounts);
+                        containerName, container, taskEnvironment(execution, task, attempt), null,
+                        volumes.mounts());
                 ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
                 containerId = info.containerId();
                 handle.containerId = containerId;
@@ -203,7 +204,7 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
             if (containerId != null) {
                 lifecycleManager.forceRemove(containerId, logs);
             }
-            runtimeService.releaseGcsVolumeMounts(mounts);
+            runtimeService.releaseMergingGcsVolumeMounts(volumes);
             active.remove(key);
         }
         LOG.infof("Cloud Run job task finished task=%s attempt=%d outcome=%s", task.getName(), attempt, outcome);

@@ -1,5 +1,6 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.cloud.bigquery.storage.v1.AppendRowsRequest;
 import com.google.cloud.bigquery.storage.v1.AppendRowsResponse;
 import com.google.cloud.bigquery.storage.v1.BatchCommitWriteStreamsRequest;
@@ -10,8 +11,8 @@ import com.google.cloud.bigquery.storage.v1.FlushRowsRequest;
 import com.google.cloud.bigquery.storage.v1.FlushRowsResponse;
 import com.google.cloud.bigquery.storage.v1.GetWriteStreamRequest;
 import com.google.cloud.bigquery.storage.v1.RowError;
-import com.google.cloud.bigquery.storage.v1.StorageError;
 import com.google.cloud.bigquery.storage.v1.StorageError.StorageErrorCode;
+import com.google.cloud.bigquery.storage.v1.StorageError;
 import com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode;
 import com.google.cloud.bigquery.storage.v1.TableSchema;
 import com.google.cloud.bigquery.storage.v1.WriteStream;
@@ -22,9 +23,12 @@ import com.google.protobuf.Int64Value;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.bigquery.model.Dataset;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
+import io.floci.gcp.services.bigquery.model.StoredWriteStream;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.grpc.Status;
@@ -52,8 +56,9 @@ import java.util.regex.Pattern;
  * BigQuery Storage Write API ({@code google.cloud.bigquery.storage.v1.BigQueryWrite}). The
  * {@code _default} stream and COMMITTED streams append to the table as each request is
  * acknowledged; PENDING streams hold their rows until {@code BatchCommitWriteStreams}, and
- * BUFFERED streams until {@code FlushRows}. Stream state lives in memory, so uncommitted rows do
- * not survive a restart.
+ * BUFFERED streams until {@code FlushRows}. Stream state, uncommitted rows included, is written
+ * through to a {@link StorageFactory} store on every change, so it follows the configured storage
+ * mode; the in-memory map only holds the live objects whose monitors guard each stream.
  *
  * <p>{@code StorageError} and {@code RowError} are nested message fields of RPC responses that
  * quarkus-grpc did not register for native-image reflection. The native binary failed on
@@ -91,6 +96,36 @@ public class BigQueryStorageWrite {
             this.table = table;
             this.type = type;
             this.created = created;
+        }
+
+        static Stream from(StoredWriteStream stored) {
+            TableRef table = new TableRef(stored.getProjectId(), stored.getDatasetId(), stored.getTableId(),
+                    "projects/" + stored.getProjectId() + "/datasets/" + stored.getDatasetId()
+                            + "/tables/" + stored.getTableId());
+            Stream stream = new Stream(stored.getName(), table, WriteStream.Type.valueOf(stored.getType()),
+                    Instant.parse(stored.getCreated()));
+            stream.uncommitted.addAll(stored.getUncommitted());
+            stream.rowCount = stored.getRowCount();
+            stream.flushed = stored.getFlushed();
+            stream.finalized = stored.getFinalized() != null ? Instant.parse(stored.getFinalized()) : null;
+            stream.committed = stored.getCommitted() != null ? Instant.parse(stored.getCommitted()) : null;
+            return stream;
+        }
+
+        StoredWriteStream toStored() {
+            StoredWriteStream stored = new StoredWriteStream();
+            stored.setName(name);
+            stored.setProjectId(table.projectId());
+            stored.setDatasetId(table.datasetId());
+            stored.setTableId(table.tableId());
+            stored.setType(type.name());
+            stored.setCreated(created.toString());
+            stored.setFinalized(finalized != null ? finalized.toString() : null);
+            stored.setCommitted(committed != null ? committed.toString() : null);
+            stored.setRowCount(rowCount);
+            stored.setFlushed(flushed);
+            stored.setUncommitted(new ArrayList<>(uncommitted));
+            return stored;
         }
     }
 
@@ -137,13 +172,19 @@ public class BigQueryStorageWrite {
     private final BigQueryService service;
     private final GrpcServerManager grpcServerManager;
     private final EmulatorConfig config;
+    private final StorageBackend<String, StoredWriteStream> streamStore;
     private final Map<String, Stream> streams = new ConcurrentHashMap<>();
 
     @Inject
-    public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config) {
+    public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config,
+                                StorageFactory storageFactory) {
         this.service = service;
         this.grpcServerManager = grpcServerManager;
         this.config = config;
+        // Global, keyed by the full stream name: the name already carries the project, and gRPC
+        // calls do not pass through the REST project filter.
+        this.streamStore = storageFactory.createGlobal("bigquery-write-streams", "bigquery-write-streams.json",
+                new TypeReference<Map<String, StoredWriteStream>>() {});
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -177,7 +218,10 @@ public class BigQueryStorageWrite {
         if (type == WriteStream.Type.COMMITTED) {
             stream.committed = stream.created;
         }
-        streams.put(name, stream);
+        synchronized (stream) {
+            streams.put(name, stream);
+            persist(stream);
+        }
         return resource(stream, resource, WriteStreamView.FULL);
     }
 
@@ -204,6 +248,7 @@ public class BigQueryStorageWrite {
         synchronized (stream) {
             if (stream.finalized == null) {
                 stream.finalized = Instant.now();
+                persist(stream);
             }
             return FinalizeWriteStreamResponse.newBuilder().setRowCount(stream.rowCount).build();
         }
@@ -219,7 +264,7 @@ public class BigQueryStorageWrite {
         List<Stream> pending = new ArrayList<>();
         // A stream named twice is committed once: streams "cannot be committed multiple times".
         for (String name : new LinkedHashSet<>(request.getWriteStreamsList())) {
-            Stream stream = streams.get(name);
+            Stream stream = lookup(name);
             if (stream == null || !stream.table.name().equals(table.name())) {
                 errors.add(storageError(StorageErrorCode.STREAM_NOT_FOUND, name, "Stream is not found: " + name));
             } else if (stream.type != WriteStream.Type.PENDING) {
@@ -274,6 +319,7 @@ public class BigQueryStorageWrite {
             for (Stream stream : ordered) {
                 stream.committed = now;
                 stream.uncommitted.clear();
+                persist(stream);
             }
             return errors;
         }
@@ -303,6 +349,7 @@ public class BigQueryStorageWrite {
                         new ArrayList<>(rows));
                 rows.clear();
                 stream.flushed = offset + 1;
+                persist(stream);
             }
             return FlushRowsResponse.newBuilder().setOffset(offset).build();
         }
@@ -364,7 +411,7 @@ public class BigQueryStorageWrite {
                     .setAppendResult(AppendRowsResponse.AppendResult.getDefaultInstance())
                     .setWriteStream(streamName).build();
         }
-        Stream stream = streams.get(streamName);
+        Stream stream = lookup(streamName);
         if (stream == null) {
             throw new AppendException(Status.Code.NOT_FOUND, StorageErrorCode.STREAM_NOT_FOUND, streamName,
                     "Stream is not found: " + streamName);
@@ -389,6 +436,7 @@ public class BigQueryStorageWrite {
                 stream.uncommitted.addAll(rows);
             }
             stream.rowCount += rows.size();
+            persist(stream);
             return AppendRowsResponse.newBuilder()
                     .setAppendResult(AppendRowsResponse.AppendResult.newBuilder().setOffset(Int64Value.of(offset)))
                     .setWriteStream(streamName).build();
@@ -433,8 +481,26 @@ public class BigQueryStorageWrite {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * The live stream for a name, loading it from the store after a restart. computeIfAbsent keeps
+     * one live object per name, so every caller synchronizes on the same monitor.
+     */
+    private Stream lookup(String name) {
+        return streams.computeIfAbsent(name, key -> streamStore.get(key).map(Stream::from).orElse(null));
+    }
+
+    /** Drops the live stream objects, as a restart does; the next lookup reloads them from the store. */
+    void forgetLiveStreams() {
+        streams.clear();
+    }
+
+    /** Writes the stream through to the store; callers hold its monitor. */
+    private void persist(Stream stream) {
+        streamStore.put(stream.name, stream.toStored());
+    }
+
     private Stream stream(String name) {
-        Stream stream = streams.get(name);
+        Stream stream = lookup(name);
         if (stream == null) {
             streamName(name);
             throw GcpException.notFound("Stream is not found: " + name);

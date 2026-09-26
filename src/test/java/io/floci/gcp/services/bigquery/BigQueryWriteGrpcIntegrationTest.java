@@ -32,6 +32,7 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
@@ -91,6 +92,9 @@ class BigQueryWriteGrpcIntegrationTest {
 
     @TestHTTPResource
     URI endpoint;
+
+    @Inject
+    BigQueryStorageWrite storageWrite;
 
     private ManagedChannel channel;
     private BigQueryWriteGrpc.BigQueryWriteBlockingStub write;
@@ -476,5 +480,33 @@ class BigQueryWriteGrpcIntegrationTest {
             pool.shutdownNow();
         }
         assertEquals(before + 2, tableRows().size());
+    }
+
+    @Test
+    @Order(11)
+    void pendingStreamStateSurvivesLosingTheLiveStreams() throws Exception {
+        WriteStream stream = write.createWriteStream(CreateWriteStreamRequest.newBuilder().setParent(TABLE)
+                .setWriteStream(WriteStream.newBuilder().setType(WriteStream.Type.PENDING)).build());
+        try (Connection connection = new Connection()) {
+            connection.send(request(stream.getName(), ROW, row("kept1", 1L), row("kept2", 2L)));
+        }
+        int before = tableRows().size();
+
+        storageWrite.forgetLiveStreams();
+
+        try (Connection connection = new Connection()) {
+            AppendRowsResponse appended = connection.send(request(stream.getName(), ROW, row("kept3", 3L)));
+            assertEquals(2, appended.getAppendResult().getOffset().getValue(), "offset carried over");
+        }
+        storageWrite.forgetLiveStreams();
+        write.finalizeWriteStream(FinalizeWriteStreamRequest.newBuilder().setName(stream.getName()).build());
+        storageWrite.forgetLiveStreams();
+        assertTrue(write.batchCommitWriteStreams(BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
+                .addWriteStreams(stream.getName()).build()).hasCommitTime());
+        assertEquals(before + 3, tableRows().size());
+
+        storageWrite.forgetLiveStreams();
+        assertTrue(write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(stream.getName()).build())
+                .hasCommitTime());
     }
 }

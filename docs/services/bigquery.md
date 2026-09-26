@@ -270,8 +270,9 @@ try (JsonStreamWriter writer = JsonStreamWriter.newBuilder(
 
 Not supported: `arrow_rows` (returns `UNIMPLEMENTED`; send `proto_rows`), column default values
 (`DEFAULT_VALUE` missing values are `NULL`, since table schemas carry no default expressions),
-`RANGE` columns, and partition decorators. Stream state lives in memory, so rows that are not
-yet committed or flushed are lost on restart. The emulator's gRPC request limit is 4 MiB, below
+`RANGE` columns, and partition decorators. Stream state, including rows not yet committed or
+flushed, is kept in the configured storage mode, so with persistent storage a PENDING or BUFFERED
+stream survives a restart. The emulator's gRPC request limit is 4 MiB, below
 BigQuery's 10 MB `AppendRows` limit.
 
 ## Load jobs

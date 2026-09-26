@@ -8,36 +8,34 @@ import com.google.cloud.bigquery.storage.v1.ReadSession;
 import com.google.cloud.bigquery.storage.v1.SplitReadStreamRequest;
 import com.google.cloud.bigquery.storage.v1.SplitReadStreamResponse;
 import io.floci.gcp.core.common.GcpGrpcController;
-import io.floci.gcp.core.common.RequestContext;
 import io.grpc.stub.StreamObserver;
-import io.quarkus.arc.Arc;
-import io.quarkus.arc.ManagedContext;
-
-import java.util.function.Supplier;
+import io.vertx.core.Vertx;
 
 /**
- * gRPC endpoint of the BigQuery Storage Read API. Table storage is namespaced by project, and
- * gRPC calls do not pass through the REST project filter, so session creation runs with the
- * project of the table being read.
+ * gRPC endpoint of the BigQuery Storage Read API. Session creation runs with the project of the
+ * table being read, on a worker thread: its snapshot query waits on the SQL engine sidecar, which
+ * reads the staged rows back over HTTP from this server, so blocking the event loop that has to
+ * accept that callback would stall the call until its deadline.
  */
 public class BigQueryReadController extends BigQueryReadGrpc.BigQueryReadImplBase {
 
     private final BigQueryStorageRead read;
+    private final Vertx vertx;
 
-    public BigQueryReadController(BigQueryStorageRead read) {
+    public BigQueryReadController(BigQueryStorageRead read, Vertx vertx) {
         this.read = read;
+        this.vertx = vertx;
     }
 
     @Override
     public void createReadSession(CreateReadSessionRequest request, StreamObserver<ReadSession> observer) {
-        try {
-            ReadSession session = withProject(BigQueryStorageRead.projectOf(request),
-                    () -> read.createReadSession(request));
-            observer.onNext(session);
-            observer.onCompleted();
-        } catch (Throwable t) {
-            GcpGrpcController.grpcError(observer, t);
-        }
+        vertx.executeBlocking(() -> BigQueryGrpcContext.withProject(BigQueryStorageRead.projectOf(request),
+                        () -> read.createReadSession(request)), false)
+                .onSuccess(session -> {
+                    observer.onNext(session);
+                    observer.onCompleted();
+                })
+                .onFailure(t -> GcpGrpcController.grpcError(observer, t));
     }
 
     @Override
@@ -58,24 +56,6 @@ public class BigQueryReadController extends BigQueryReadGrpc.BigQueryReadImplBas
             observer.onCompleted();
         } catch (Throwable t) {
             GcpGrpcController.grpcError(observer, t);
-        }
-    }
-
-    private static <T> T withProject(String projectId, Supplier<T> action) {
-        ManagedContext context = Arc.container().requestContext();
-        boolean activated = !context.isActive();
-        if (activated) {
-            context.activate();
-        }
-        try {
-            if (projectId != null) {
-                Arc.container().instance(RequestContext.class).get().setProjectId(projectId);
-            }
-            return action.get();
-        } finally {
-            if (activated) {
-                context.terminate();
-            }
         }
     }
 }

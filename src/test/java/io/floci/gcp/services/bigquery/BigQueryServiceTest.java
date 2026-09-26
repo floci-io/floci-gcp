@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -855,5 +856,24 @@ class BigQueryServiceTest {
         GcpException missing = assertThrows(GcpException.class, () -> service.load(PROJECT, null, null,
                 Map.of("sourceFormat", "CSV"), new byte[1]));
         assertEquals(400, missing.getHttpStatus());
+    }
+
+    @Test
+    void appendRowsRecordsStreamCountsInTheSameWrite() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        String stream = "projects/" + PROJECT + "/datasets/" + DATASET + "/tables/" + TABLE + "/streams/s1";
+
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "a")), Map.of(stream, 1L));
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "b"), Map.of("name", "c")),
+                Map.of(stream, 3L));
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "d")));
+
+        assertEquals(OptionalLong.of(3L), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream));
+        assertEquals(OptionalLong.empty(), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "x"));
+
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(), Map.of(stream + "empty", 0L));
+        assertEquals(OptionalLong.of(0L), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "empty"));
+        assertEquals(4, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
     }
 }

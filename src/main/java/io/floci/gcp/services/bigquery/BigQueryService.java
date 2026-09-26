@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -111,7 +112,8 @@ public class BigQueryService {
                 .storageKey("bigquery")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(BigQueryController.class, BigQueryInternalController.class,
-                        BigQueryUploadController.class, BigQueryReadController.class)
+                        BigQueryUploadController.class, BigQueryReadController.class,
+                        BigQueryWriteController.class)
                 .build());
     }
 
@@ -413,7 +415,6 @@ public class BigQueryService {
     public List<Map<String, Object>> insertAll(String projectId, String datasetId, String tableId,
             List<InsertRow> rows, boolean skipInvalidRows, boolean ignoreUnknownValues) {
         Table table = getTable(projectId, datasetId, tableId);
-        String key = tableKey(datasetId, tableId);
 
         List<Map<String, Object>> insertErrors = new ArrayList<>();
         List<Map<String, Object>> accepted = new ArrayList<>();
@@ -439,22 +440,51 @@ public class BigQueryService {
             return insertErrors;
         }
 
-        if (!accepted.isEmpty()) {
-            synchronized (writeLock) {
-                StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
-                List<Map<String, Object>> stored = data.getRows();
-                synchronized (stored) {
-                    stored.addAll(accepted);
-                }
-                dataStore.put(key, data);
-                table.setNumRows(String.valueOf(data.getRows().size()));
-                table.setLastModifiedTime(nowMillis());
-                tableStore.put(key, table);
-            }
-        }
+        appendRows(projectId, datasetId, tableId, accepted);
         LOG.debugf("insertAll project=%s dataset=%s table=%s accepted=%d rejected=%d",
                 projectId, datasetId, tableId, accepted.size(), insertErrors.size());
         return insertErrors;
+    }
+
+    /** Appends rows already normalized against the table schema. */
+    void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows) {
+        appendRows(projectId, datasetId, tableId, rows, Map.of());
+    }
+
+    /**
+     * Appends rows and, in the same write, records {@code streamRows}: for each Storage Write
+     * stream, how many of its rows the table now holds in total.
+     */
+    void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows,
+                    Map<String, Long> streamRows) {
+        if (rows.isEmpty() && streamRows.isEmpty()) {
+            return;
+        }
+        String key = tableKey(datasetId, tableId);
+        synchronized (writeLock) {
+            Table table = getTable(projectId, datasetId, tableId);
+            StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
+            List<Map<String, Object>> stored = data.getRows();
+            synchronized (stored) {
+                stored.addAll(rows);
+            }
+            data.getStreamRows().putAll(streamRows);
+            dataStore.put(key, data);
+            table.setNumRows(String.valueOf(data.getRows().size()));
+            table.setLastModifiedTime(nowMillis());
+            tableStore.put(key, table);
+        }
+    }
+
+    /**
+     * How many of a Storage Write stream's rows the table holds, or empty when no write of that
+     * stream ever reached the table. Present with 0 means a stream committed with no rows.
+     */
+    OptionalLong streamRowsApplied(String projectId, String datasetId, String tableId, String streamName) {
+        getTable(projectId, datasetId, tableId);
+        Long applied = dataStore.get(tableKey(datasetId, tableId))
+                .map(data -> data.getStreamRows().get(streamName)).orElse(null);
+        return applied != null ? OptionalLong.of(applied) : OptionalLong.empty();
     }
 
     /** Encoded rows plus totals for {@code tabledata.list}. */
@@ -965,6 +995,8 @@ public class BigQueryService {
         Table table = getTable(projectId, target.datasetId(), target.tableId());
         StoredTableData data = new StoredTableData();
         data.setRows(new ArrayList<>(rows));
+        // DML rewrites the rows but not what Storage Write streams already delivered.
+        dataStore.get(key).ifPresent(previous -> data.setStreamRows(previous.getStreamRows()));
         dataStore.put(key, data);
         table.setNumRows(String.valueOf(rows.size()));
         table.setLastModifiedTime(nowMillis());

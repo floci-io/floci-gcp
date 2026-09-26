@@ -58,7 +58,10 @@ class BigQueryDuckStorageReadIntegrationTest {
                     System.getProperty("floci.duck.image", "floci/floci-duck:latest"),
                     "quarkus.http.test-port", "18592",
                     "floci-gcp.port", "18592",
-                    "floci-gcp.docker.resource-namespace", "bq-read-duck-it");
+                    "floci-gcp.docker.resource-namespace", "bq-read-duck-it",
+                    // One event loop, as a small native container can end up with: a session
+                    // query must not block the loop the sidecar's callback is accepted on.
+                    "quarkus.vertx.event-loops-pool-size", "1");
         }
     }
 

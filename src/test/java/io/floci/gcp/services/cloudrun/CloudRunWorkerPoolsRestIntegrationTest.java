@@ -445,6 +445,80 @@ class CloudRunWorkerPoolsRestIntegrationTest {
     }
 
     @Test
+    void nestedTemplateMaskKeepsSiblingTemplateFieldsAndCreatesRevision() {
+        String project = "wp-it-nested-mask";
+        String pool = poolPath(project, "wp");
+        String name = poolName(project, "wp");
+        given()
+                .contentType("application/json")
+                .queryParam("workerPoolId", "wp")
+                .body("""
+                        {"template":{"serviceAccount":"runner@wp-it-nested-mask.iam.gserviceaccount.com",
+                          "volumes":[{"name":"data","gcs":{"bucket":"wp-bucket"}}],
+                          "containers":[{"image":"docker.io/library/busybox","command":["sh","-c"],
+                            "args":["sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}
+                        """)
+                .when().post(parentPath(project) + "/workerPools")
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "template.containers")
+                .body("""
+                        {"template":{"containers":[{"image":"docker.io/library/busybox","command":["sh","-c"],
+                          "args":["sleep 3601"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}
+                        """)
+                .when().patch(pool)
+                .then()
+                .statusCode(200)
+                .body("response.template.serviceAccount",
+                        equalTo("runner@wp-it-nested-mask.iam.gserviceaccount.com"))
+                .body("response.template.volumes", hasSize(1))
+                .body("response.template.volumes[0].gcs.bucket", equalTo("wp-bucket"))
+                .body("response.template.containers[0].args", contains("sleep 3601"))
+                .body("response.latestCreatedRevision", matchesPattern(name + "/revisions/wp-00002-[a-z0-9]{3}"));
+
+        given()
+                .when().get(pool)
+                .then()
+                .statusCode(200)
+                .body("template.serviceAccount", equalTo("runner@wp-it-nested-mask.iam.gserviceaccount.com"))
+                .body("template.volumes[0].name", equalTo("data"));
+    }
+
+    @Test
+    void invalidOrOutputOnlyMaskPathsAreRejected() {
+        String project = "wp-it-bad-mask";
+        String pool = poolPath(project, "wp");
+        createPool(project, "wp");
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "template.bogusField")
+                .body("{}")
+                .when().patch(pool)
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.message", equalTo("Invalid update mask path: template.bogus_field"));
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "latestCreatedRevision")
+                .body("{}")
+                .when().patch(pool)
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.message", equalTo("Invalid update mask path: latest_created_revision"));
+        given()
+                .when().get(pool)
+                .then()
+                .statusCode(200)
+                .body("generation", equalTo("1"));
+    }
+
+    @Test
     void createIgnoresOutputOnlyFieldsFromTheRequest() {
         String project = "wp-it-output-only";
         given()

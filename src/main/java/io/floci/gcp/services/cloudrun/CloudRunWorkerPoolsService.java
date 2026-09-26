@@ -1,6 +1,8 @@
 package io.floci.gcp.services.cloudrun;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.api.FieldBehavior;
+import com.google.api.FieldBehaviorProto;
 import com.google.api.LaunchStage;
 import com.google.cloud.run.v2.Condition;
 import com.google.cloud.run.v2.Container;
@@ -19,7 +21,10 @@ import com.google.cloud.run.v2.WorkerPoolScaling;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.longrunning.Operation;
+import com.google.protobuf.Descriptors;
+import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.FieldMaskUtil;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
@@ -980,22 +985,54 @@ public class CloudRunWorkerPoolsService {
         if (replaceAll || masked(mask, "scaling")) {
             builder.setScaling(requested.hasScaling() ? requested.getScaling() : WorkerPoolScaling.getDefaultInstance());
         }
+        List<String> nested = mask.stream().filter(path -> path.contains(".")).toList();
+        if (!nested.isEmpty()) {
+            FieldMaskUtil.merge(FieldMask.newBuilder().addAllPaths(nested).build(), requested, builder,
+                    new FieldMaskUtil.MergeOptions()
+                            .setReplaceMessageFields(true)
+                            .setReplaceRepeatedFields(true)
+                            .setReplacePrimitiveFields(true));
+        }
         return builder.build();
+    }
+
+    private static void validateMaskPath(String path) {
+        if (!FieldMaskUtil.isValid(WorkerPool.class, path)) {
+            throw GcpException.invalidArgument("Invalid update mask path: " + path);
+        }
+        Descriptors.Descriptor descriptor = WorkerPool.getDescriptor();
+        for (String segment : path.split("\\.")) {
+            Descriptors.FieldDescriptor field = descriptor.findFieldByName(segment);
+            List<FieldBehavior> behaviors = field.getOptions().getExtension(FieldBehaviorProto.fieldBehavior);
+            if (behaviors.contains(FieldBehavior.OUTPUT_ONLY) || behaviors.contains(FieldBehavior.IDENTIFIER)
+                    || behaviors.contains(FieldBehavior.IMMUTABLE)) {
+                throw GcpException.invalidArgument("Invalid update mask path: " + path);
+            }
+            if (field.getJavaType() == Descriptors.FieldDescriptor.JavaType.MESSAGE) {
+                descriptor = field.getMessageType();
+            }
+        }
     }
 
     private static List<String> updateMaskPaths(String updateMask) {
         if (updateMask == null || updateMask.isBlank()) {
             return List.of();
         }
-        return Arrays.stream(updateMask.split(","))
+        List<String> paths = Arrays.stream(updateMask.split(","))
                 .map(String::trim)
                 .filter(path -> !path.isBlank())
-                .map(CloudRunWorkerPoolsService::snakeCase)
+                .map(path -> Arrays.stream(path.split("\\.", -1))
+                        .map(CloudRunWorkerPoolsService::snakeCase)
+                        .collect(Collectors.joining(".")))
                 .toList();
+        for (String path : paths) {
+            validateMaskPath(path);
+        }
+        return paths;
     }
 
     private static boolean masked(List<String> mask, String path) {
-        return mask.stream().anyMatch(entry -> entry.equals(path) || entry.startsWith(path + "."));
+        return mask.contains(path);
     }
 
     private static String snakeCase(String path) {

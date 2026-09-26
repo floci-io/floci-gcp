@@ -187,7 +187,7 @@ Worker pools run pull-based workloads (queue consumers, Kafka or Pub/Sub pullers
 | Get revision | `GET /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}` |
 | Delete revision | `DELETE /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}` |
 
-Create accepts `workerPoolId` and `validateOnly`. Update accepts `updateMask`, `validateOnly`, `allowMissing` (creates the pool when it does not exist) and `forceNewRevision`; without `updateMask` every updatable field is replaced from the body, which is what the Terraform provider sends. Delete accepts `validateOnly` and `etag`. List accepts `pageSize` and `pageToken`; `showDeleted` is accepted and ignored. Creating a pool whose ID already exists fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`.
+Create accepts `workerPoolId` and `validateOnly`. Update accepts `updateMask`, `validateOnly`, `allowMissing` (creates the pool when it does not exist) and `forceNewRevision`; without `updateMask` every updatable field is replaced from the body, which is what the Terraform provider sends. A top-level mask path such as `template` or `scaling` replaces that whole field; a nested path such as `template.containers` or `scaling.manualInstanceCount` replaces only that sub-field and keeps its siblings. Unknown, output-only and non-updatable paths fail with `400 INVALID_ARGUMENT` and `Invalid update mask path: {path}`. Delete accepts `validateOnly` and `etag`. List accepts `pageSize` and `pageToken`; `showDeleted` is accepted and ignored. Creating a pool whose ID already exists fails with `409 ALREADY_EXISTS` and `Resource '{id}' already exists.`.
 
 ### Resource Behavior
 

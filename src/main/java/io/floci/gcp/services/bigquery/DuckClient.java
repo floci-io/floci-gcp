@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -139,7 +140,7 @@ public class DuckClient {
         DuckResult followup = root.path("followup").isObject() ? result(root.path("followup")) : null;
         ArrowIpc arrow = null;
         if (root.path("arrow").isObject()) {
-            java.util.Base64.Decoder base64 = java.util.Base64.getDecoder();
+            Base64.Decoder base64 = Base64.getDecoder();
             List<ArrowBatch> batches = new ArrayList<>();
             for (JsonNode batch : root.path("arrow").path("batches")) {
                 batches.add(new ArrowBatch(base64.decode(batch.path("data").asText()),

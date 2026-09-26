@@ -18,7 +18,10 @@ class BigQueryStorageReadTest {
             "numeric_field BETWEEN 1.0 AND 5.0",
             "EXTRACT(YEAR FROM ts) = 2024 AND name IN ('a', 'b')",
             "name = 'select; -- (not a keyword)'",
-            "`order` = \"it\\\"s\""
+            "`order` = \"it\\\"s\"",
+            "name = '''hello ' SELECT world'''",
+            "name = \"\"\"a \" UNION b\"\"\"",
+            "name = r'''raw''' AND age = 7"
     })
     void predicatesPass(String restriction) {
         assertDoesNotThrow(() -> BigQueryStorageRead.checkRestrictionIsPredicate(restriction));
@@ -33,7 +36,8 @@ class BigQueryStorageReadTest {
             "age = 7 -- trailing",
             "age = 7 /* note */",
             "(age = 7",
-            "name = 'unterminated"
+            "name = 'unterminated",
+            "name = '''unterminated' SELECT 1"
     })
     void anythingBeyondOnePredicateIsRejected(String restriction) {
         assertThrows(GcpException.class, () -> BigQueryStorageRead.checkRestrictionIsPredicate(restriction));

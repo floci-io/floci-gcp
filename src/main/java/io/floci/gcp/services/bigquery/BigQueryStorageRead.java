@@ -53,10 +53,11 @@ public class BigQueryStorageRead {
     private static final Duration SESSION_LIFETIME = Duration.ofHours(6);
     private static final int AVRO_ROWS_PER_BLOCK = 1000;
     /**
-     * Sessions hold a full snapshot of what they read, so the number kept is bounded; creating one
-     * past the bound drops the oldest. Real BigQuery keeps every session until it expires.
+     * Sessions hold a full snapshot of what they read, so the number kept per project is bounded;
+     * creating one past the bound drops that project's oldest. Real BigQuery keeps every session
+     * until it expires.
      */
-    static final int MAX_SESSIONS = 256;
+    static final int MAX_SESSIONS_PER_PROJECT = 256;
     /** Keywords that would turn a row restriction into more than a predicate over one table. */
     private static final Set<String> RESTRICTION_KEYWORDS = Set.of("SELECT", "UNION", "INTERSECT", "EXCEPT", "WITH");
 
@@ -160,7 +161,7 @@ public class BigQueryStorageRead {
         evictExpired();
         sessions.put(sessionName, new Session(session, arrowBlocks, fields, avroRows, totalRows, createTime,
                 expireTime));
-        evictOldest();
+        evictOldest(projectId);
         return session;
     }
 
@@ -250,9 +251,16 @@ public class BigQueryStorageRead {
         sessions.values().removeIf(s -> now.isAfter(s.expireTime()));
     }
 
-    private void evictOldest() {
-        while (sessions.size() > MAX_SESSIONS) {
-            sessions.entrySet().stream()
+    private void evictOldest(String projectId) {
+        String prefix = "projects/" + projectId + "/";
+        while (true) {
+            List<Map.Entry<String, Session>> owned = sessions.entrySet().stream()
+                    .filter(e -> e.getKey().startsWith(prefix))
+                    .toList();
+            if (owned.size() <= MAX_SESSIONS_PER_PROJECT) {
+                return;
+            }
+            owned.stream()
                     .min(Comparator.comparing((Map.Entry<String, Session> e) -> e.getValue().createTime()))
                     .ifPresent(oldest -> sessions.remove(oldest.getKey(), oldest.getValue()));
         }
@@ -308,14 +316,16 @@ public class BigQueryStorageRead {
         while (i < restriction.length()) {
             char c = restriction.charAt(i);
             if (c == '\'' || c == '"' || c == '`') {
-                int end = i + 1;
-                while (end < restriction.length() && restriction.charAt(end) != c) {
+                String quote = c != '`' && restriction.startsWith(String.valueOf(c).repeat(3), i)
+                        ? String.valueOf(c).repeat(3) : String.valueOf(c);
+                int end = i + quote.length();
+                while (end < restriction.length() && !restriction.startsWith(quote, end)) {
                     end += restriction.charAt(end) == '\\' ? 2 : 1;
                 }
                 if (end >= restriction.length()) {
                     throw invalidRestriction(restriction, "it has an unterminated quote");
                 }
-                i = end + 1;
+                i = end + quote.length();
                 continue;
             }
             if (Character.isLetter(c) || c == '_') {

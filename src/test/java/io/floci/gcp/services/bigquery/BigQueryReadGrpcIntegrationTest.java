@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BigQueryReadGrpcIntegrationTest {
 
     private static final String PROJECT = "bq-read-it";
+    private static final String OTHER_PROJECT = "bq-read-it-other";
     private static final String TABLE = "projects/" + PROJECT + "/datasets/reads/tables/people";
 
     @TestHTTPResource
@@ -186,12 +187,28 @@ class BigQueryReadGrpcIntegrationTest {
 
     @Test
     @Order(7)
-    void creatingSessionsPastTheBoundDropsTheOldest() {
+    void creatingSessionsPastTheBoundDropsTheProjectsOldest() {
+        String otherBase = "/bigquery/v2/projects/" + OTHER_PROJECT;
+        given().contentType("application/json").body("{\"datasetReference\": {\"datasetId\": \"reads\"}}")
+                .when().post(otherBase + "/datasets").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "t"}, "schema": {"fields": [{"name": "age", "type": "INT64"}]}}
+                """).when().post(otherBase + "/datasets/reads/tables").then().statusCode(200);
+        given().contentType("application/json").body("{\"rows\": [{\"json\": {\"age\": 1}}]}")
+                .when().post(otherBase + "/datasets/reads/tables/t/insertAll").then().statusCode(200);
+        String otherProjects = read.createReadSession(CreateReadSessionRequest.newBuilder()
+                .setParent("projects/" + OTHER_PROJECT)
+                .setReadSession(ReadSession.newBuilder().setDataFormat(DataFormat.AVRO)
+                        .setTable("projects/" + OTHER_PROJECT + "/datasets/reads/tables/t"))
+                .build()).getStreams(0).getName();
+
         String oldest = session(DataFormat.AVRO, "age = 1").getStreams(0).getName();
-        for (int i = 0; i < BigQueryStorageRead.MAX_SESSIONS; i++) {
+        for (int i = 0; i < BigQueryStorageRead.MAX_SESSIONS_PER_PROJECT; i++) {
             session(DataFormat.AVRO, "age = 1");
         }
         assertEquals(Status.Code.NOT_FOUND,
                 assertThrows(StatusRuntimeException.class, () -> readAll(oldest, 0)).getStatus().getCode());
+        assertEquals(1, readAll(otherProjects, 0).stream().mapToLong(ReadRowsResponse::getRowCount).sum(),
+                "another project's session survives this project's evictions");
     }
 }

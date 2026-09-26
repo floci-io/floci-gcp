@@ -265,6 +265,88 @@ class CloudRunInstancesRestIntegrationTest {
     }
 
     @Test
+    void nestedUpdateMaskPathKeepsSiblingFieldsAndRejectsUnknownPaths() {
+        String project = "inst-it-nested-mask";
+        String name = instanceName(project, "floci-inst");
+        given()
+                .contentType("application/json")
+                .queryParam("instanceId", "floci-inst")
+                .body("""
+                        {"containers":[{"image":"docker.io/library/busybox"}],
+                         "vpcAccess":{"connector":"connector-a","egress":"ALL_TRAFFIC"}}
+                        """)
+                .when().post(parentPath(project) + "/instances")
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "vpcAccess.connector")
+                .body("{\"vpcAccess\":{\"connector\":\"connector-b\"}}")
+                .when().patch("/v2/" + name)
+                .then()
+                .statusCode(200)
+                .body("response.vpcAccess.connector", equalTo("connector-b"))
+                .body("response.vpcAccess.egress", equalTo("ALL_TRAFFIC"))
+                .body("response.generation", equalTo("2"));
+
+        given()
+                .contentType("application/json")
+                .queryParam("updateMask", "vpcAccess.bogus")
+                .body("{\"vpcAccess\":{\"connector\":\"connector-c\"}}")
+                .when().patch("/v2/" + name)
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.message", equalTo("Invalid update mask path: vpcAccess.bogus"));
+
+        given()
+                .when().get("/v2/" + name)
+                .then()
+                .statusCode(200)
+                .body("vpcAccess.connector", equalTo("connector-b"))
+                .body("vpcAccess.egress", equalTo("ALL_TRAFFIC"));
+    }
+
+    @Test
+    void serviceCreateRefusesTheIdOfAnExistingInstance() {
+        String project = "inst-it-svc-collision";
+        createInstance(project, "taken-name");
+
+        given()
+                .contentType("application/json")
+                .queryParam("serviceId", "taken-name")
+                .body("{\"template\":{\"containers\":[{\"image\":\"nginx\"}]}}")
+                .when().post(parentPath(project) + "/services")
+                .then()
+                .statusCode(409)
+                .body("error.code", equalTo(409))
+                .body("error.status", equalTo("ALREADY_EXISTS"))
+                .body("error.message", equalTo("Resource 'taken-name' already exists."));
+
+        given()
+                .when().get("/v2/projects/" + project + "/locations/" + LOCATION + "/services/taken-name")
+                .then()
+                .statusCode(404);
+
+        given()
+                .contentType("application/json")
+                .queryParam("serviceId", "other-name")
+                .body("{\"template\":{\"containers\":[{\"image\":\"nginx\"}]}}")
+                .when().post(parentPath(project) + "/services")
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .queryParam("serviceId", "taken-name")
+                .body("{\"template\":{\"containers\":[{\"image\":\"nginx\"}]}}")
+                .when().post("/v2/projects/" + project + "/locations/us-central1/services")
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
     void duplicateIdAndServiceCollisionReturnAlreadyExists() {
         String project = "inst-it-dup";
         createInstance(project, "floci-inst");

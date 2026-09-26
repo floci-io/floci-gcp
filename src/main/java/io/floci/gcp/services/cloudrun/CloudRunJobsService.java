@@ -97,6 +97,13 @@ public class CloudRunJobsService implements ContainerTeardown {
     private final ConcurrentHashMap<String, CloudRunExecutionCoordinator> coordinators = new ConcurrentHashMap<>();
     private final Set<CloudRunExecutionCoordinator> live = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> jobLocks = new ConcurrentHashMap<>();
+    /**
+     * Jobs whose record is deleted but whose executions are still being cleaned up. A name is added under the job
+     * monitor together with the record deletion and removed once cleanup ends, and create and upsert reject a name
+     * in this set under the same monitor, so a recreated job never shares execution names with the old job's
+     * cleanup.
+     */
+    private final Set<String> deletingJobs = ConcurrentHashMap.newKeySet();
 
     @Inject
     public CloudRunJobsService(StorageFactory storageFactory,
@@ -178,9 +185,11 @@ public class CloudRunJobsService implements ContainerTeardown {
         Timestamp now = now();
         Job job = populateJob(requested, name, now);
         validateTemplate(job.getTemplate());
+        validateExecutionTokens(job);
         LOG.infof("create Cloud Run job name=%s validateOnly=%s", name, validateOnly);
         Launch launch;
         synchronized (jobLock(name)) {
+            rejectIfDeleting(name);
             if (jobStore.get(name).isPresent()) {
                 throw GcpException.alreadyExists("Resource '" + id + "' already exists.");
             }
@@ -221,8 +230,10 @@ public class CloudRunJobsService implements ContainerTeardown {
                 if (!allowMissing) {
                     throw CloudRunJobTemplates.notFound(CloudRunJobTemplates.KIND_JOB, name);
                 }
+                rejectIfDeleting(name);
                 Job job = populateJob(requested, name, now);
                 validateTemplate(job.getTemplate());
+                validateExecutionTokens(job);
                 LOG.infof("upsert Cloud Run job name=%s validateOnly=%s", name, validateOnly);
                 if (validateOnly) {
                     return operations.doneTransient(parent, job, job);
@@ -232,6 +243,7 @@ public class CloudRunJobsService implements ContainerTeardown {
                 Job current = existing.get();
                 Job updated = applyUpdate(current, requested);
                 validateTemplate(updated.getTemplate());
+                validateExecutionTokens(updated);
                 boolean tokenChanged = tokenChanged(current, updated);
                 boolean specChanged = !spec(current).equals(spec(updated));
                 if (specChanged || tokenChanged) {
@@ -273,38 +285,43 @@ public class CloudRunJobsService implements ContainerTeardown {
             executionNames = List.copyOf(executionStore.keys()).stream()
                     .filter(key -> key.startsWith(prefix))
                     .toList();
+            deletingJobs.add(name);
         }
-        for (String executionName : executionNames) {
-            try {
-                awaitCommand(withCoordinator(executionName, coordinator -> coordinator.delete(false)));
-            } catch (GcpException e) {
-                if (e.getHttpStatus() != 404) {
-                    throw e;
+        try {
+            for (String executionName : executionNames) {
+                try {
+                    awaitCommand(withCoordinator(executionName, coordinator -> coordinator.delete(false)));
+                } catch (GcpException e) {
+                    if (e.getHttpStatus() != 404) {
+                        throw e;
+                    }
+                    LOG.debugf("Execution already deleted execution=%s", executionName);
                 }
-                LOG.debugf("Execution already deleted execution=%s", executionName);
             }
+        } finally {
+            deletingJobs.remove(name);
         }
         return operations.done(parentOf(name), deleted, deleted);
     }
 
     public Operation runJob(String name, String body) {
         RunJobRequest request = ProtoJson.merge(body, RunJobRequest.newBuilder()).build();
-        Job job = getJob(name);
-        ExecutionTemplate effective = request.hasOverrides()
-                ? CloudRunJobTemplates.applyOverrides(job.getTemplate(), request.getOverrides())
-                : job.getTemplate();
-        validateTemplate(effective);
         String parent = parentOf(name);
         Timestamp now = now();
         LOG.infof("run Cloud Run job name=%s validateOnly=%s", name, request.getValidateOnly());
         if (request.getValidateOnly()) {
+            Job job = getJob(name);
+            ExecutionTemplate effective = effectiveTemplate(job, request);
             Execution preview = newExecution(job, CloudRunJobTemplates.randomExecutionId(
                     CloudRunRuntimeService.lastSegment(name), ThreadLocalRandom.current()), effective, now);
             return operations.doneTransient(parent, preview, preview);
         }
         Launch launch;
         synchronized (jobLock(name)) {
+            // The job is read once, under the monitor that patches hold, so the execution always runs the
+            // template of the job it is recorded against: a concurrent patch lands entirely before or after it.
             Job current = getJob(name);
+            ExecutionTemplate effective = effectiveTemplate(current, request);
             Execution execution = newExecution(current, uniqueExecutionId(current), effective, now);
             Operation operation = operations.pending(parent, execution);
             Job stored = withExecution(current, execution);
@@ -726,6 +743,28 @@ public class CloudRunJobsService implements ContainerTeardown {
         int waves = Math.max(1, (execution.getTaskCount() + parallelism - 1) / parallelism);
         Duration perAttempt = timeout.plus(cleanupTimeout()).plus(ATTEMPT_OVERHEAD);
         return perAttempt.multipliedBy((long) attempts * waves).plus(startupTimeout());
+    }
+
+    /** The job template with the request's overrides applied, validated for Docker mode. Performs no I/O. */
+    private ExecutionTemplate effectiveTemplate(Job job, RunJobRequest request) {
+        ExecutionTemplate effective = request.hasOverrides()
+                ? CloudRunJobTemplates.applyOverrides(job.getTemplate(), request.getOverrides())
+                : job.getTemplate();
+        validateTemplate(effective);
+        return effective;
+    }
+
+    private static void validateExecutionTokens(Job job) {
+        String jobId = CloudRunRuntimeService.lastSegment(job.getName());
+        CloudRunJobTemplates.validateExecutionToken("startExecutionToken", jobId, job.getStartExecutionToken());
+        CloudRunJobTemplates.validateExecutionToken("runExecutionToken", jobId, job.getRunExecutionToken());
+    }
+
+    private void rejectIfDeleting(String jobName) {
+        if (deletingJobs.contains(jobName)) {
+            throw GcpException.aborted("Job '" + CloudRunRuntimeService.lastSegment(jobName)
+                    + "' is being deleted.");
+        }
     }
 
     private void validateTemplate(ExecutionTemplate template) {

@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -482,6 +484,42 @@ class CloudRunJobsServiceTest {
     }
 
     @Test
+    void recreatingAJobWhileItsExecutionsAreBeingCleanedUpIsAborted() throws Exception {
+        Stores stores = new Stores();
+        CloudRunJobsService service = stores.service(null, null);
+        String tokenBody = """
+                {"startExecutionToken":"first","template":{"template":{"containers":[{"image":"busybox"}]}}}
+                """;
+        service.createJob("p", "us-central1", "job", tokenBody, false);
+        String tokenExecution = JOB + "/executions/job-first";
+        assertTrue(stores.executions.get(tokenExecution).isPresent());
+        AtomicReference<Object> createDuringCleanup = new AtomicReference<>();
+        AtomicReference<Object> upsertDuringCleanup = new AtomicReference<>();
+        stores.executions.onFirstDelete = executionName -> {
+            createDuringCleanup.set(attempt(() -> service.createJob("p", "us-central1", "job", tokenBody, false)));
+            upsertDuringCleanup.set(attempt(() -> service.updateJob(JOB, tokenBody, false, true)));
+        };
+
+        service.deleteJob(JOB, false);
+
+        for (Object result : List.of(createDuringCleanup.get(), upsertDuringCleanup.get())) {
+            GcpException aborted = assertInstanceOf(GcpException.class, result, () -> "expected ABORTED: " + result);
+            assertEquals(409, aborted.getHttpStatus());
+            assertEquals("ABORTED", aborted.getGcpStatus());
+            assertEquals("Job 'job' is being deleted.", aborted.getMessage());
+        }
+        assertTrue(stores.jobs.get(JOB).isEmpty());
+        assertTrue(stores.executions.get(tokenExecution).isEmpty());
+
+        Operation recreated = service.createJob("p", "us-central1", "job", tokenBody, false);
+
+        assertTrue(recreated.getDone());
+        assertEquals("job-first", service.getJob(JOB).getLatestCreatedExecution().getName());
+        assertTrue(stores.executions.get(tokenExecution).isPresent(),
+                "the recreated job gets the execution its token requested");
+    }
+
+    @Test
     void notFoundMessagesMatchGcp() {
         assertEquals("Resource 'job' of kind 'JOB' in region 'us-central1' in project 'p' does not exist.",
                 CloudRunJobTemplates.notFoundMessage(CloudRunJobTemplates.KIND_JOB, JOB));
@@ -495,6 +533,14 @@ class CloudRunJobsServiceTest {
     private static final String JOB_BODY = """
             {"template":{"template":{"maxRetries":0,"containers":[{"image":"busybox"}]}}}
             """;
+
+    private static Object attempt(Supplier<Object> action) {
+        try {
+            return action.get();
+        } catch (RuntimeException e) {
+            return e;
+        }
+    }
 
     private static void awaitParked(Thread thread) {
         for (int i = 0; i < 500; i++) {
@@ -537,14 +583,33 @@ class CloudRunJobsServiceTest {
         }
 
         CloudRunJobsService service(EmulatorConfig config, CloudRunExecutionCoordinator.TaskRunner runner) {
-            return new CloudRunJobsService(jobs, executions, tasks, tombstones, operations, mock(IamService.class),
+            IamService iamService = mock(IamService.class);
+            doAnswer(invocation -> {
+                invocation.<Runnable>getArgument(1).run();
+                return null;
+            }).when(iamService).deleteResourceAndPolicy(anyString(), any());
+            return new CloudRunJobsService(jobs, executions, tasks, tombstones, operations, iamService,
                     config, runner, null, Clock.systemUTC());
         }
     }
 
-    /** Runs {@link #onFirstPut} once, right after the first execution record is written. */
+    /**
+     * Runs {@link #onFirstPut} once, right after the first execution record is written, and {@link #onFirstDelete}
+     * once, right after the first execution record is deleted.
+     */
     private static final class HookedStorage extends InMemoryStorage<String, String> {
         volatile Consumer<String> onFirstPut;
+        volatile Consumer<String> onFirstDelete;
+
+        @Override
+        public void delete(String key) {
+            super.delete(key);
+            Consumer<String> hook = onFirstDelete;
+            if (hook != null) {
+                onFirstDelete = null;
+                hook.accept(key);
+            }
+        }
 
         @Override
         public void put(String key, String value) {

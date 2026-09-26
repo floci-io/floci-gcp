@@ -44,6 +44,14 @@ public class StorageFactory {
     }
 
     /**
+     * Isolated storage for service test constructors without emulator configuration.
+     * Production service injection uses the configured create/createGlobal methods.
+     */
+    public static <K, V> StorageBackend<K, V> createInMemory() {
+        return new InMemoryStorage<>();
+    }
+
+    /**
      * Create a global (non-project-scoped) backend for services whose resources are
      * globally namespaced (e.g. GCS, where bucket names are globally unique).
      *

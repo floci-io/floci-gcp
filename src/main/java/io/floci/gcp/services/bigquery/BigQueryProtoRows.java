@@ -22,7 +22,9 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -315,7 +317,7 @@ final class BigQueryProtoRows {
         String sign = total.signum() < 0 ? "-" : "";
         total = total.abs();
         long whole = total.longValue();
-        String fraction = total.subtract(BigDecimal.valueOf(whole)).setScale(6, java.math.RoundingMode.DOWN)
+        String fraction = total.subtract(BigDecimal.valueOf(whole)).setScale(6, RoundingMode.DOWN)
                 .stripTrailingZeros().toPlainString();
         return "0-0 0 " + sign + (whole / 3600) + ":" + (whole / 60 % 60) + ":" + (whole % 60)
                 + (fraction.equals("0") ? "" : fraction.substring(1));
@@ -340,7 +342,7 @@ final class BigQueryProtoRows {
             return LocalDateTime.of(LocalDate.of((int) ((seconds & 0xFFFFC000000L) >> 26),
                             (int) ((seconds & 0x3C00000L) >> 22), (int) ((seconds & 0x3E0000L) >> 17)),
                     timeOfDay((int) (seconds & 0x1FFFFL), (int) (packed & 0xFFFFF)));
-        } catch (java.time.DateTimeException e) {
+        } catch (DateTimeException e) {
             throw new IllegalArgumentException("Invalid packed DATETIME value: " + packed);
         }
     }
@@ -348,7 +350,7 @@ final class BigQueryProtoRows {
     private static LocalTime timeOfDay(int seconds, int micros) {
         try {
             return LocalTime.of((seconds & 0x1F000) >> 12, (seconds & 0xFC0) >> 6, seconds & 0x3F, micros * 1000);
-        } catch (java.time.DateTimeException e) {
+        } catch (DateTimeException e) {
             throw new IllegalArgumentException("Invalid packed time of day: " + e.getMessage());
         }
     }

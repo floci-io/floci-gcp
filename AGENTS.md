@@ -107,7 +107,7 @@ Before changing resource lifecycles, parent deletion, concurrency, locking, or s
 
 | Protocol | Services | Transport | Implementation |
 |----------|----------|-----------|----------------|
-| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS, BigQuery (Storage Read API) | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass (Datastore implements `BindableService` directly) + `GcpGrpcController.grpcError` |
+| gRPC | Pub/Sub, Firestore, Datastore, Secret Manager, Cloud Tasks, Cloud Scheduler, Cloud KMS, Cloud Logging, Cloud Monitoring, IAM, GCS, BigQuery (Storage Read and Write APIs) | HTTP/2 + proto3 | Generated `*Grpc.*ImplBase` subclass (Datastore implements `BindableService` directly) + `GcpGrpcController.grpcError` |
 | REST JSON | 22 services under `src/main/java/io/floci/gcp/services/`; of the gRPC services above, only Firestore and Cloud Tasks have no JAX-RS controller | HTTP/1.1 or HTTP/2 | JAX-RS |
 | HTTP/protobuf | Datastore | HTTP/1.1 or HTTP/2 | JAX-RS, `application/x-protobuf` |
 | REST XML | GCS (object operations) | HTTP/1.1 or HTTP/2 | JAX-RS + `XmlBuilder` |

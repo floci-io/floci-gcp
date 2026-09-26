@@ -1,7 +1,9 @@
 package io.floci.gcp.services.bigquery;
 
 import com.google.cloud.bigquery.storage.v1.BigQueryReadGrpc;
+import com.google.cloud.bigquery.storage.v1.BigQueryWriteGrpc;
 import com.google.cloud.bigquery.storage.v1.CreateReadSessionRequest;
+import com.google.cloud.bigquery.storage.v1.CreateWriteStreamRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
@@ -38,7 +40,7 @@ class BigQueryDisabledRestIntegrationTest {
     }
 
     @Test
-    void disabledBigQueryDoesNotServeTheStorageReadApi() {
+    void disabledBigQueryDoesNotServeTheStorageApis() {
         ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort())
                 .usePlaintext().build();
         try {
@@ -46,6 +48,10 @@ class BigQueryDisabledRestIntegrationTest {
                     () -> BigQueryReadGrpc.newBlockingStub(channel).createReadSession(
                             CreateReadSessionRequest.newBuilder().setParent("projects/bq-disabled").build()));
             assertEquals(Status.Code.UNIMPLEMENTED, e.getStatus().getCode());
+            StatusRuntimeException write = assertThrows(StatusRuntimeException.class,
+                    () -> BigQueryWriteGrpc.newBlockingStub(channel).createWriteStream(
+                            CreateWriteStreamRequest.newBuilder().setParent("projects/bq-disabled").build()));
+            assertEquals(Status.Code.UNIMPLEMENTED, write.getStatus().getCode());
         } finally {
             channel.shutdownNow();
         }

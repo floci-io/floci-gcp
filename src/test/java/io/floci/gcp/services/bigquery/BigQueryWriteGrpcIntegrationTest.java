@@ -46,6 +46,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
@@ -422,5 +425,56 @@ class BigQueryWriteGrpcIntegrationTest {
                 () -> write.getWriteStream(GetWriteStreamRequest.newBuilder()
                         .setName(TABLE + "/streams/nope").build())).getStatus().getCode());
         assertNotNull(write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(TABLE + "/_default").build()));
+    }
+
+    private String finalizedPendingStream(String prefix) throws Exception {
+        WriteStream stream = write.createWriteStream(CreateWriteStreamRequest.newBuilder().setParent(TABLE)
+                .setWriteStream(WriteStream.newBuilder().setType(WriteStream.Type.PENDING)).build());
+        try (Connection connection = new Connection()) {
+            connection.send(request(stream.getName(), ROW, row(prefix + "1", 1L), row(prefix + "2", 2L)));
+        }
+        write.finalizeWriteStream(FinalizeWriteStreamRequest.newBuilder().setName(stream.getName()).build());
+        return stream.getName();
+    }
+
+    @Test
+    @Order(9)
+    void aStreamNamedTwiceIsCommittedOnce() throws Exception {
+        String name = finalizedPendingStream("dup");
+        int before = tableRows().size();
+        BatchCommitWriteStreamsResponse committed = write.batchCommitWriteStreams(BatchCommitWriteStreamsRequest
+                .newBuilder().setParent(TABLE).addWriteStreams(name).addWriteStreams(name).build());
+        assertTrue(committed.hasCommitTime());
+        assertEquals(before + 2, tableRows().size());
+    }
+
+    @Test
+    @Order(10)
+    void concurrentCommitsOfOneStreamCommitItOnce() throws Exception {
+        String name = finalizedPendingStream("race");
+        int before = tableRows().size();
+        BatchCommitWriteStreamsRequest commit = BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
+                .addWriteStreams(name).build();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<BatchCommitWriteStreamsResponse>> results = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                results.add(pool.submit(() -> write.batchCommitWriteStreams(commit)));
+            }
+            int succeeded = 0;
+            for (Future<BatchCommitWriteStreamsResponse> result : results) {
+                BatchCommitWriteStreamsResponse response = result.get(30, TimeUnit.SECONDS);
+                if (response.hasCommitTime()) {
+                    succeeded++;
+                } else {
+                    assertEquals(StorageError.StorageErrorCode.STREAM_ALREADY_COMMITTED,
+                            response.getStreamErrors(0).getCode());
+                }
+            }
+            assertEquals(1, succeeded);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(before + 2, tableRows().size());
     }
 }

@@ -5,6 +5,10 @@ import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.NoCredentials;
+import com.google.cloud.bigquery.storage.v1.BigQueryReadClient;
+import com.google.cloud.bigquery.storage.v1.BigQueryReadSettings;
+import com.google.cloud.bigquery.storage.v1.BigQueryWriteClient;
+import com.google.cloud.bigquery.storage.v1.BigQueryWriteSettings;
 import com.google.cloud.datastore.Datastore;
 import com.google.cloud.datastore.DatastoreOptions;
 import com.google.cloud.firestore.Firestore;
@@ -427,9 +431,9 @@ public final class TestFixtures {
     }
 
     /** Storage Write API client over plaintext gRPC on the emulator port. */
-    public static com.google.cloud.bigquery.storage.v1.BigQueryWriteClient bigQueryWriteClient() throws IOException {
-        return com.google.cloud.bigquery.storage.v1.BigQueryWriteClient.create(
-                com.google.cloud.bigquery.storage.v1.BigQueryWriteSettings.newBuilder()
+    public static BigQueryWriteClient bigQueryWriteClient() throws IOException {
+        return BigQueryWriteClient.create(
+                BigQueryWriteSettings.newBuilder()
                         .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
                                 .setEndpoint(grpcTarget())
                                 .setChannelConfigurator(builder -> builder.usePlaintext())
@@ -439,9 +443,9 @@ public final class TestFixtures {
     }
 
     /** Storage Read API client over plaintext gRPC on the emulator port. */
-    public static com.google.cloud.bigquery.storage.v1.BigQueryReadClient bigQueryReadClient() throws IOException {
-        return com.google.cloud.bigquery.storage.v1.BigQueryReadClient.create(
-                com.google.cloud.bigquery.storage.v1.BigQueryReadSettings.newBuilder()
+    public static BigQueryReadClient bigQueryReadClient() throws IOException {
+        return BigQueryReadClient.create(
+                BigQueryReadSettings.newBuilder()
                         .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
                                 .setEndpoint(grpcTarget())
                                 .setChannelConfigurator(builder -> builder.usePlaintext())

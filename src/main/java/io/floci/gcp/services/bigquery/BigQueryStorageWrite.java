@@ -20,6 +20,7 @@ import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.Timestamp;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.bigquery.model.Dataset;
@@ -37,11 +38,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -112,6 +115,7 @@ public class BigQueryStorageWrite {
         }
 
         AppendRowsResponse toResponse(String writeStream) {
+            // com.google.rpc.Status is qualified: io.grpc.Status is imported for the call status codes.
             com.google.rpc.Status.Builder status = com.google.rpc.Status.newBuilder()
                     .setCode(code.value()).setMessage(getMessage());
             if (storageCode != null) {
@@ -132,16 +136,20 @@ public class BigQueryStorageWrite {
 
     private final BigQueryService service;
     private final GrpcServerManager grpcServerManager;
+    private final EmulatorConfig config;
     private final Map<String, Stream> streams = new ConcurrentHashMap<>();
 
     @Inject
-    public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager) {
+    public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config) {
         this.service = service;
         this.grpcServerManager = grpcServerManager;
+        this.config = config;
     }
 
     void onStart(@Observes StartupEvent event) {
-        grpcServerManager.bind(new BigQueryWriteController(this));
+        if (config.services().bigquery().enabled()) {
+            grpcServerManager.bind(new BigQueryWriteController(this));
+        }
     }
 
     /** The project whose storage a table or stream name lives in. */
@@ -209,19 +217,14 @@ public class BigQueryStorageWrite {
         service.getTable(table.projectId(), table.datasetId(), table.tableId());
         List<StorageError> errors = new ArrayList<>();
         List<Stream> pending = new ArrayList<>();
-        for (String name : request.getWriteStreamsList()) {
+        // A stream named twice is committed once: streams "cannot be committed multiple times".
+        for (String name : new LinkedHashSet<>(request.getWriteStreamsList())) {
             Stream stream = streams.get(name);
             if (stream == null || !stream.table.name().equals(table.name())) {
                 errors.add(storageError(StorageErrorCode.STREAM_NOT_FOUND, name, "Stream is not found: " + name));
             } else if (stream.type != WriteStream.Type.PENDING) {
                 errors.add(storageError(StorageErrorCode.INVALID_STREAM_TYPE, name,
                         "Stream is not a PENDING stream: " + name));
-            } else if (stream.committed != null) {
-                errors.add(storageError(StorageErrorCode.STREAM_ALREADY_COMMITTED, name,
-                        "Stream is already committed: " + name));
-            } else if (stream.finalized == null) {
-                errors.add(storageError(StorageErrorCode.INVALID_STREAM_STATE, name,
-                        "Stream is not finalized: " + name));
             } else {
                 pending.add(stream);
             }
@@ -231,32 +234,51 @@ public class BigQueryStorageWrite {
         }
         List<Stream> ordered = new ArrayList<>(pending);
         ordered.sort(Comparator.comparing(stream -> stream.name));
-        List<Map<String, Object>> rows = new ArrayList<>();
         Instant now = Instant.now();
-        commit(ordered, 0, rows, now, () ->
+        errors = commit(ordered, 0, now, rows ->
                 service.appendRows(table.projectId(), table.datasetId(), table.tableId(), rows));
+        if (!errors.isEmpty()) {
+            return BatchCommitWriteStreamsResponse.newBuilder().addAllStreamErrors(errors).build();
+        }
         return BatchCommitWriteStreamsResponse.newBuilder().setCommitTime(timestamp(now)).build();
     }
 
     /**
-     * Takes every pending stream's monitor, in the caller's order, then drains them in one go.
-     * Recursion is how the locks are held together without a lock-ordering mistake: the streams
-     * arrive sorted by name, so two concurrent commits acquire them in the same order.
+     * Takes every pending stream's monitor, in the caller's order, then checks and drains them in
+     * one go. Recursion is how the locks are held together without a lock-ordering mistake: the
+     * streams arrive sorted by name, so two concurrent commits acquire them in the same order. The
+     * committed and finalized checks run only once every monitor is held, so of two concurrent
+     * commits of one stream exactly one succeeds, and a failed check commits nothing.
      */
-    private void commit(List<Stream> ordered, int index, List<Map<String, Object>> rows, Instant now,
-                        Runnable write) {
+    private List<StorageError> commit(List<Stream> ordered, int index, Instant now,
+                                      Consumer<List<Map<String, Object>>> write) {
         if (index == ordered.size()) {
-            write.run();
+            List<StorageError> errors = new ArrayList<>();
+            for (Stream stream : ordered) {
+                if (stream.committed != null) {
+                    errors.add(storageError(StorageErrorCode.STREAM_ALREADY_COMMITTED, stream.name,
+                            "Stream is already committed: " + stream.name));
+                } else if (stream.finalized == null) {
+                    errors.add(storageError(StorageErrorCode.INVALID_STREAM_STATE, stream.name,
+                            "Stream is not finalized: " + stream.name));
+                }
+            }
+            if (!errors.isEmpty()) {
+                return errors;
+            }
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Stream stream : ordered) {
+                rows.addAll(stream.uncommitted);
+            }
+            write.accept(rows);
             for (Stream stream : ordered) {
                 stream.committed = now;
                 stream.uncommitted.clear();
             }
-            return;
+            return errors;
         }
-        Stream stream = ordered.get(index);
-        synchronized (stream) {
-            rows.addAll(stream.uncommitted);
-            commit(ordered, index + 1, rows, now, write);
+        synchronized (ordered.get(index)) {
+            return commit(ordered, index + 1, now, write);
         }
     }
 
@@ -376,6 +398,7 @@ public class BigQueryStorageWrite {
     /** Decodes and validates every row; one bad row rejects the whole request with row errors. */
     private static List<Map<String, Object>> decodeRows(BigQueryProtoRows.Schema schema, AppendRowsRequest request,
                                                         List<TableFieldSchema> fields, String streamName) {
+        // The model TableSchema is qualified: the storage v1 TableSchema is imported for the wire.
         io.floci.gcp.services.bigquery.model.TableSchema tableSchema =
                 new io.floci.gcp.services.bigquery.model.TableSchema(fields);
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -472,6 +495,7 @@ public class BigQueryStorageWrite {
         return schema.build();
     }
 
+    // The storage v1 TableFieldSchema is qualified here and below: the model one is imported.
     private static com.google.cloud.bigquery.storage.v1.TableFieldSchema field(TableFieldSchema field) {
         com.google.cloud.bigquery.storage.v1.TableFieldSchema.Builder proto =
                 com.google.cloud.bigquery.storage.v1.TableFieldSchema.newBuilder()

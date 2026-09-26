@@ -79,6 +79,7 @@ nav:
     - Cloud Logging: services/logging.md
     - Cloud KMS: services/kms.md
     - IAM: services/iam.md
+    - Resource Manager: services/resource-manager.md
     - IAM Credentials: services/iam-credentials.md
     - Security Token Service (STS): services/sts.md
     - Managed Kafka: services/managed-kafka.md
@@ -93,4 +94,6 @@ nav:
     - Service Usage: services/service-usage.md
     - Firebase Auth: services/firebase-auth.md
     - BigQuery: services/bigquery.md
-  - Contributing: contributing.md
+  - Contributing:
+    - Overview: contributing.md
+    - IAM Enforcement Adapters: iam-enforcement.md

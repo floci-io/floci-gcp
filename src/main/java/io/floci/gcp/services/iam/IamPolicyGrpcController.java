@@ -16,9 +16,8 @@ import org.jboss.logging.Logger;
  * Dispatches on the resource name in the request, so one binding serves every
  * such service on the single emulator port.
  *
- * <p>Policies are stored and returned, never enforced. {@code testIamPermissions}
- * echoes the requested permissions for existing resources and returns an empty
- * set for missing ones, matching the real API's fail-open behavior.
+ * <p>The shared authorization interceptor protects supported resource kinds in enforce mode.
+ * testIamPermissions delegates to the same evaluator and preserves the missing-resource empty result.
  */
 public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
 

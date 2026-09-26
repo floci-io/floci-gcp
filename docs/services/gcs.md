@@ -6,6 +6,15 @@ floci-gcp emulates Google Cloud Storage using the real GCP wire protocols:
 - **REST XML**, object operations (upload, download, delete, list objects)
 - **REST JSON**, bucket and object management, IAM, ACLs, notifications, HMAC keys, and uploads
 
+## IAM enforcement scope
+
+GCS IAM allow policies are **not enforced**, even with
+`FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`. Bucket policy round-tripping
+and `testIamPermissions` retain their existing permissive behavior. Existing
+Credential Access Boundary checks for Floci-issued downscoped tokens remain active
+on their supported GCS paths. A bucket IAM grant is not evidence of a tested GCS
+permission boundary. See [IAM enforcement and limitations](iam.md#opt-in-enforcement).
+
 ## Configuration
 
 | Variable | Default | Description |

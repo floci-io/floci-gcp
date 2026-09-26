@@ -5,6 +5,7 @@ import com.google.protobuf.DescriptorProtos.EnumDescriptorProto;
 import com.google.protobuf.DescriptorProtos.EnumValueDescriptorProto;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Duration;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.Timestamp;
@@ -109,5 +110,25 @@ class BigQueryProtoRowsTest {
                 () -> BigQueryProtoRows.bind(uint64, List.of(column("n", "INTEGER"))));
         assertTrue(mismatch.getMessage().contains("proto field type uint64, BigQuery field type INTEGER"),
                 mismatch.getMessage());
+    }
+
+    @Test
+    void durationsKeepBigQuerysFullIntervalRange() {
+        DescriptorProto proto = DescriptorProto.newBuilder().setName("Row")
+                .addField(field("iv", 1, FieldDescriptorProto.Type.TYPE_MESSAGE)
+                        .setTypeName(".google.protobuf.Duration"))
+                .build();
+        BigQueryProtoRows.Schema schema = BigQueryProtoRows.bind(proto, List.of(column("iv", "INTERVAL")));
+        Descriptor descriptor = schema.descriptor();
+        // 87,840,000 hours is BigQuery's largest time part; in nanoseconds it overflows a long.
+        long maxSeconds = 87_840_000L * 3600;
+        for (Duration duration : List.of(Duration.newBuilder().setSeconds(maxSeconds).setNanos(500_000_000).build(),
+                Duration.newBuilder().setSeconds(-maxSeconds).setNanos(-500_000_000).build())) {
+            DynamicMessage row = DynamicMessage.newBuilder(descriptor)
+                    .setField(descriptor.findFieldByName("iv"), duration).build();
+            String sign = duration.getSeconds() < 0 ? "-" : "";
+            assertEquals("0-0 0 " + sign + "87840000:0:0.5",
+                    BigQueryProtoRows.decode(schema, row.toByteString()).get("iv"));
+        }
     }
 }

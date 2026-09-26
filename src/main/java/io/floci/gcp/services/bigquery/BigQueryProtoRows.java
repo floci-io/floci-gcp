@@ -234,7 +234,7 @@ final class BigQueryProtoRows {
             if (DURATION.equals(messageType)) {
                 long seconds = (Long) message.getField(message.getDescriptorForType().findFieldByName("seconds"));
                 int nanos = (Integer) message.getField(message.getDescriptorForType().findFieldByName("nanos"));
-                return interval(seconds, nanos);
+                return interval(0, 0, BigDecimal.valueOf(seconds).add(BigDecimal.valueOf(nanos, 9)));
             }
             raw = message.getField(message.getDescriptorForType().findFieldByName("value"));
         }
@@ -270,13 +270,13 @@ final class BigQueryProtoRows {
     }
 
     /** Canonical civil time: six fractional digits, omitted when zero. */
-    private static String time(LocalTime time) {
+    static String time(LocalTime time) {
         String seconds = TIME_SECONDS.format(time);
         int micros = time.getNano() / 1000;
         return micros == 0 ? seconds : seconds + String.format(".%06d", micros);
     }
 
-    private static String date(long days) {
+    static String date(long days) {
         if (days < MIN_DATE || days > MAX_DATE) {
             throw new IllegalArgumentException("Invalid date value: " + days
                     + "; the valid range is " + MIN_DATE + " to " + MAX_DATE);
@@ -308,18 +308,22 @@ final class BigQueryProtoRows {
         }
     }
 
-    private static String plain(BigDecimal value) {
+    static String plain(BigDecimal value) {
         return value.signum() == 0 ? "0" : value.stripTrailingZeros().toPlainString();
     }
 
-    private static String interval(long seconds, int nanos) {
-        BigDecimal total = BigDecimal.valueOf(seconds).add(BigDecimal.valueOf(nanos, 9));
-        String sign = total.signum() < 0 ? "-" : "";
-        total = total.abs();
-        long whole = total.longValue();
-        String fraction = total.subtract(BigDecimal.valueOf(whole)).setScale(6, RoundingMode.DOWN)
+    /**
+     * Canonical INTERVAL text {@code Y-M D H:M:S[.F]}, each part carrying its own sign. The time
+     * part is exact seconds: BigQuery allows up to 87,840,000 hours, which overflows a nanosecond long.
+     */
+    static String interval(long months, long days, BigDecimal seconds) {
+        String yearMonth = (months < 0 ? "-" : "") + Math.abs(months) / 12 + "-" + Math.abs(months) % 12;
+        String sign = seconds.signum() < 0 ? "-" : "";
+        seconds = seconds.abs();
+        long whole = seconds.longValue();
+        String fraction = seconds.subtract(BigDecimal.valueOf(whole)).setScale(6, RoundingMode.DOWN)
                 .stripTrailingZeros().toPlainString();
-        return "0-0 0 " + sign + (whole / 3600) + ":" + (whole / 60 % 60) + ":" + (whole % 60)
+        return yearMonth + " " + days + " " + sign + (whole / 3600) + ":" + (whole / 60 % 60) + ":" + (whole % 60)
                 + (fraction.equals("0") ? "" : fraction.substring(1));
     }
 

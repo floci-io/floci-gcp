@@ -176,7 +176,7 @@
                 <version>${surefire.version}</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
-                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true -Djdk.httpclient.allowRestrictedHeaders=host</argLine>
+                    <argLine>-Dsun.net.http.allowRestrictedHeaders=true -Djdk.httpclient.allowRestrictedHeaders=host --add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
                 </configuration>
                 <dependencies>
                     <dependency>

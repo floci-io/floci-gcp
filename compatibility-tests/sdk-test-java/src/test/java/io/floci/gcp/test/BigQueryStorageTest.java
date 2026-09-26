@@ -26,6 +26,24 @@ import com.google.cloud.bigquery.storage.v1.ReadRowsResponse;
 import com.google.cloud.bigquery.storage.v1.ReadSession;
 import com.google.cloud.bigquery.storage.v1.TableName;
 import com.google.cloud.bigquery.storage.v1.WriteStream;
+import com.google.api.gax.rpc.BidiStream;
+import com.google.cloud.bigquery.storage.v1.AppendRowsRequest;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Int64Value;
+import org.apache.arrow.vector.ipc.WriteChannel;
+import org.apache.arrow.vector.ipc.message.MessageSerializer;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.DateDayVector;
+import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.TimeStampMicroTZVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.VectorUnloader;
+import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.jupiter.api.AfterAll;
@@ -35,6 +53,10 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,7 +70,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code google-cloud-bigquerystorage} clients: {@code JsonStreamWriter} on the default stream
  * (which fetches the table schema with GetWriteStream and converts JSON to proto rows), a PENDING
  * stream committed with BatchCommitWriteStreams, offset checks, and a read session reading the
- * rows back.
+ * rows back, and Arrow record batches serialized by Arrow Java's {@code MessageSerializer}.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BigQueryStorageTest {
@@ -165,5 +187,64 @@ class BigQueryStorageTest {
             rows += response.getRowCount();
         }
         assertThat(rows).isEqualTo(4);
+    }
+
+    @Test
+    @Order(4)
+    void arrowRecordBatchesAppendThroughTheGapicClient() throws Exception {
+        org.apache.arrow.vector.types.pojo.Schema schema = new org.apache.arrow.vector.types.pojo.Schema(List.of(
+                org.apache.arrow.vector.types.pojo.Field.notNullable("name", new ArrowType.Utf8()),
+                org.apache.arrow.vector.types.pojo.Field.nullable("amount", new ArrowType.Decimal(38, 9, 128)),
+                org.apache.arrow.vector.types.pojo.Field.nullable("happened_at",
+                        new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC")),
+                org.apache.arrow.vector.types.pojo.Field.nullable("day", new ArrowType.Date(DateUnit.DAY))));
+        WriteStream stream = writeClient.createWriteStream(CreateWriteStreamRequest.newBuilder()
+                .setParent(TABLE_NAME)
+                .setWriteStream(WriteStream.newBuilder().setType(WriteStream.Type.COMMITTED))
+                .build());
+        try (BufferAllocator allocator = new RootAllocator();
+             VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            VarCharVector name = (VarCharVector) root.getVector("name");
+            DecimalVector amount = (DecimalVector) root.getVector("amount");
+            TimeStampMicroTZVector happenedAt = (TimeStampMicroTZVector) root.getVector("happened_at");
+            DateDayVector day = (DateDayVector) root.getVector("day");
+            root.allocateNew();
+            name.setSafe(0, "fay".getBytes(StandardCharsets.UTF_8));
+            amount.setSafe(0, new BigDecimal("7.250000000"));
+            happenedAt.setSafe(0, 1714979289123456L);
+            day.setSafe(0, 19849);
+            name.setSafe(1, "gus".getBytes(StandardCharsets.UTF_8));
+            amount.setNull(1);
+            happenedAt.setNull(1);
+            day.setNull(1);
+            root.setRowCount(2);
+            // What StreamWriter.append(ArrowRecordBatch) sends in newer client versions.
+            ByteArrayOutputStream serializedSchema = new ByteArrayOutputStream();
+            MessageSerializer.serialize(new WriteChannel(Channels.newChannel(serializedSchema)), schema);
+            ByteArrayOutputStream serializedBatch = new ByteArrayOutputStream();
+            try (ArrowRecordBatch batch = new VectorUnloader(root).getRecordBatch()) {
+                MessageSerializer.serialize(new WriteChannel(Channels.newChannel(serializedBatch)), batch);
+            }
+            BidiStream<AppendRowsRequest, AppendRowsResponse> append = writeClient.appendRowsCallable().call();
+            append.send(AppendRowsRequest.newBuilder()
+                    .setWriteStream(stream.getName())
+                    .setOffset(Int64Value.of(0))
+                    .setArrowRows(AppendRowsRequest.ArrowData.newBuilder()
+                            .setWriterSchema(com.google.cloud.bigquery.storage.v1.ArrowSchema.newBuilder()
+                                    .setSerializedSchema(ByteString.copyFrom(serializedSchema.toByteArray())))
+                            .setRows(com.google.cloud.bigquery.storage.v1.ArrowRecordBatch.newBuilder()
+                                    .setSerializedRecordBatch(ByteString.copyFrom(serializedBatch.toByteArray()))))
+                    .build());
+            AppendRowsResponse response = append.iterator().next();
+            append.closeSend();
+            assertThat(response.hasError()).as(response.toString()).isFalse();
+            assertThat(response.getAppendResult().getOffset().getValue()).isZero();
+        }
+        assertThat(names()).containsExactly("ada", "bob", "cid", "dee", "fay", "gus");
+        FieldValueList fay = bigquery.query(QueryJobConfiguration.of("SELECT amount, happened_at, day FROM `"
+                + DATASET + "." + TABLE + "` WHERE name = 'fay'")).iterateAll().iterator().next();
+        assertThat(fay.get("amount").getNumericValue()).isEqualByComparingTo("7.25");
+        assertThat(fay.get("happened_at").getTimestampValue()).isEqualTo(1714979289123456L);
+        assertThat(fay.get("day").getStringValue()).isEqualTo("2024-05-06");
     }
 }

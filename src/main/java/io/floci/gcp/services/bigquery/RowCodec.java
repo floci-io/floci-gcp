@@ -146,8 +146,16 @@ final class RowCodec {
         String type = field.getType();
         switch (type) {
             case "INTEGER" -> {
+                if (raw instanceof Long || raw instanceof Integer || raw instanceof Short || raw instanceof Byte) {
+                    return ((Number) raw).longValue();
+                }
                 if (raw instanceof Number n && n.doubleValue() == Math.floor(n.doubleValue())) {
-                    return n.longValue();
+                    try {
+                        // Exact, so a value outside INT64 is rejected rather than wrapped or clamped.
+                        return new BigDecimal(n.toString()).longValueExact();
+                    } catch (ArithmeticException | NumberFormatException ignored) {
+                        // falls through to the error below
+                    }
                 }
                 if (raw instanceof String s) {
                     try {

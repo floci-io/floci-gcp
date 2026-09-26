@@ -194,6 +194,9 @@ public class IamService {
                         "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
                                 + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
             }
+            if (authorization != null) {
+                authorization.get().validatePolicyWrite(resource, policy);
+            }
             policy.setEtag(newEtag());
             policyStore.put(key, policy);
             return policy;

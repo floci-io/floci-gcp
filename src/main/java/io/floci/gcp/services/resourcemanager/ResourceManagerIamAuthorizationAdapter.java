@@ -1,6 +1,9 @@
 package io.floci.gcp.services.resourcemanager;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.iam.IamBinding;
+import io.floci.gcp.services.iam.IamPolicy;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -56,6 +59,18 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
     @Override
     public Optional<IamResource> resource(String name) {
         return name.matches("projects/[^/:]+") ? Optional.of(IamResource.project(name)) : Optional.empty();
+    }
+
+    @Override
+    public void validatePolicy(String resource, IamPolicy policy) {
+        for (IamBinding binding : policy.bindings()) {
+            for (String member : binding.members()) {
+                if (member.equals("allUsers") || member.equals("allAuthenticatedUsers")) {
+                    throw GcpException.invalidArgument("Project IAM policy " + resource
+                            + " does not support member " + member);
+                }
+            }
+        }
     }
 
     @Override

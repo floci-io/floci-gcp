@@ -46,6 +46,11 @@
     <dependencies>
         <!-- GCP Client Libraries -->
         <dependency>
+            <groupId>com.google.api.grpc</groupId>
+            <artifactId>grpc-google-iam-v1</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.google.apis</groupId>
             <artifactId>google-api-services-cloudresourcemanager</artifactId>
             <version>v1-rev20260820-2.0.0</version>

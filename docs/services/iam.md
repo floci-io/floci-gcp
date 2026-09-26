@@ -19,8 +19,8 @@ which mode is active and the supported service list.
 | Surface | IAM enforcement in `enforce` mode |
 |---|---|
 | Resource Manager v1 project metadata and project policies | REST JSON; project policies also use the shared IAM gRPC mixin |
-| Pub/Sub | **Not IAM-enforced.** Service enforcement is deferred |
-| Secret Manager | **Not IAM-enforced.** Service enforcement is deferred |
+| Pub/Sub | **Not IAM-enforced.** |
+| Secret Manager | **Not IAM-enforced.** |
 | GCS | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | IAM service-account/key management, IAM Credentials, Cloud Run, all other services | **Not IAM-enforced**, including any policies those services store |
 
@@ -43,7 +43,7 @@ Token minting and impersonation remain unrestricted. A test using anonymous or
 external credentials can still pass without exercising IAM.
 
 The framework supports child-to-project inheritance and multiple required permission
-checks for future adapters. This version registers only project resources; project
+checks through service adapters. Only project resources are registered; project
 bindings do not authorize or restrict Pub/Sub, Secret Manager, or GCS operations.
 `testIamPermissions` evaluates each requested permission for the same caller and
 resource; missing resources keep the existing empty-result behavior. Disabled
@@ -58,6 +58,11 @@ The finite catalog includes the implemented-operation permissions from:
   project permissions. Editor/viewer permit project metadata and policy reads,
   but not project policy writes.
 
+In enforce mode, project policies cannot contain `allUsers` or
+`allAuthenticatedUsers`. Such bindings produce `INVALID_ARGUMENT` on policy writes
+and when evaluating previously stored project policies. Disabled mode retains
+permissive policy storage.
+
 The existing GCS role catalog remains available to the evaluator but does not
 activate GCS IAM enforcement. Unsupported roles in an applicable policy produce
 `FAILED_PRECONDITION` naming the role and policy, even if another binding would
@@ -65,7 +70,7 @@ grant access. Missing resource/operation mappings on an enforcing adapter also
 produce a named `FAILED_PRECONDITION`. The shared `google.iam.v1.IAMPolicy`
 gRPC mixin also rejects resource kinds without a registered mapping for recognized
 callers in enforce mode, including Pub/Sub policy calls routed through that mixin.
-Use anonymous setup calls for those policies until their adapters are added. Unsupported CEL expressions produce
+Those policy APIs support anonymous setup calls. Unsupported CEL expressions produce
 `INVALID_ARGUMENT`; they are not silently treated as a policy denial.
 
 Version 3 bindings use the existing restricted IAM Conditions profile, including

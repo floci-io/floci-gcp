@@ -1,6 +1,7 @@
 package io.floci.gcp.services.cloudrun;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.cloud.run.v2.Container;
 import com.google.cloud.run.v2.EnvVar;
 import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.Volume;
@@ -238,7 +239,7 @@ public class CloudRunRuntimeService {
     ContainerSpec buildWorkloadSpec(String project, String location,
                                     String resourceName,
                                     String containerName,
-                                    com.google.cloud.run.v2.Container container,
+                                    Container container,
                                     Map<String, String> injectedEnv,
                                     Integer publishedPort,
                                     List<CloudRunRuntimeVolumeMount> gcsVolumeMounts) {
@@ -317,7 +318,7 @@ public class CloudRunRuntimeService {
      * Docker-mode constraints shared by every Cloud Run workload (services, job tasks, worker pools,
      * instances): exactly one container, GCS volumes only, at most one port.
      */
-    static void validateSupported(List<com.google.cloud.run.v2.Container> containers, List<Volume> volumeList) {
+    static void validateSupported(List<Container> containers, List<Volume> volumeList) {
         if (containers.size() != 1) {
             throw GcpException.invalidArgument("Cloud Run execution supports exactly one container");
         }
@@ -337,7 +338,7 @@ public class CloudRunRuntimeService {
             }
             volumes.put(volume.getName(), volume);
         }
-        com.google.cloud.run.v2.Container container = containers.get(0);
+        Container container = containers.get(0);
         if (container.getImage().isBlank()) {
             throw GcpException.invalidArgument("Cloud Run execution requires a container image");
         }
@@ -402,18 +403,18 @@ public class CloudRunRuntimeService {
      * Release them with {@link #releaseGcsVolumeMounts(List)} once the container is gone.
      */
     List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(String resourceName, List<Volume> volumeList,
-                                                            com.google.cloud.run.v2.Container container) {
+                                                            Container container) {
         return prepareGcsVolumeMounts(resourceName, volumeList, container, null);
     }
 
     /**
-     * Like {@link #prepareGcsVolumeMounts(String, List, com.google.cloud.run.v2.Container)}, but also records, for
+     * Like {@link #prepareGcsVolumeMounts(String, List, Container)}, but also records, for
      * every materialized volume, the generation and MD5 of each object copied into it. Release the result with
      * {@link #releaseMergingGcsVolumeMounts(GcsVolumeMounts)}, which merges the volume back into the bucket instead
      * of mirroring it, so several workloads writing the same bucket prefix concurrently keep each other's changes.
      */
     GcsVolumeMounts prepareMergingGcsVolumeMounts(String resourceName, List<Volume> volumeList,
-                                                  com.google.cloud.run.v2.Container container) {
+                                                  Container container) {
         Map<String, Map<String, GcsSnapshotObject>> snapshots = new HashMap<>();
         List<CloudRunRuntimeVolumeMount> mounts = prepareGcsVolumeMounts(resourceName, volumeList, container,
                 snapshots);
@@ -421,7 +422,7 @@ public class CloudRunRuntimeService {
     }
 
     private List<CloudRunRuntimeVolumeMount> prepareGcsVolumeMounts(
-            String resourceName, List<Volume> volumeList, com.google.cloud.run.v2.Container container,
+            String resourceName, List<Volume> volumeList, Container container,
             Map<String, Map<String, GcsSnapshotObject>> snapshots) {
         if (container.getVolumeMountsCount() == 0) {
             return List.of();

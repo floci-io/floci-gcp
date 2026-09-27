@@ -5,6 +5,7 @@ import com.google.cloud.run.v2.Condition;
 import com.google.cloud.run.v2.ListRevisionsResponse;
 import com.google.cloud.run.v2.ListServicesResponse;
 import com.google.cloud.run.v2.Revision;
+import com.google.cloud.run.v2.Service;
 import com.google.cloud.run.v2.TrafficTarget;
 import com.google.cloud.run.v2.TrafficTargetAllocationType;
 import com.google.cloud.run.v2.TrafficTargetStatus;
@@ -368,8 +369,8 @@ public class CloudRunService {
     public Operation deleteRevision(String serviceName, String revisionId, boolean validateOnly) {
         String revisionName = serviceName + "/revisions/" + revisionId;
         Revision existing = getRevision(revisionName);
-        Optional<com.google.cloud.run.v2.Service> service = serviceStore.get(serviceName)
-                .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build());
+        Optional<Service> service = serviceStore.get(serviceName)
+                .map(json -> ProtoJson.merge(json, Service.newBuilder()).build());
         if (service.isPresent() && servesRevision(service.get(), revisionName)) {
             throw GcpException.failedPrecondition("Revision \"" + revisionId
                     + "\" cannot be directly deleted because it is actively serving.");
@@ -390,7 +391,7 @@ public class CloudRunService {
         return operations.done(parentFromName(serviceName), deleted, deleted);
     }
 
-    private static boolean servesRevision(com.google.cloud.run.v2.Service service, String revisionName) {
+    private static boolean servesRevision(Service service, String revisionName) {
         String revisionId = GcpResourceNames.lastSegment(revisionName);
         if (revisionName.equals(service.getLatestReadyRevision())) {
             return true;

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -493,6 +494,61 @@ class CloudRunJobsRestIntegrationTest {
                 .body("response.latestCreatedExecution.name", equalTo("runner-once"))
                 .body("response.latestCreatedExecution.completionStatus", equalTo("EXECUTION_SUCCEEDED"))
                 .body("response.runExecutionToken", equalTo("once"));
+    }
+
+    @Test
+    void switchingBackToAPreviouslyUsedExecutionTokenStartsNoNewExecution() {
+        String project = "jobs-it-token-reuse";
+        for (String field : List.of("startExecutionToken", "runExecutionToken")) {
+            String jobId = field.startsWith("start") ? "reuse-start" : "reuse-run";
+            String body = """
+                    {"%s":"%s","template":{"template":{"containers":[{"image":"busybox"}]}}}
+                    """;
+            api()
+                    .contentType("application/json")
+                    .queryParam("jobId", jobId)
+                    .body(body.formatted(field, "a"))
+                    .when().post(jobsPath(project))
+                    .then()
+                    .statusCode(200)
+                    .body("response.executionCount", equalTo(1))
+                    .body("response.latestCreatedExecution.name", equalTo(jobId + "-a"));
+            api()
+                    .contentType("application/json")
+                    .body(body.formatted(field, "b"))
+                    .when().patch(jobPath(project, jobId))
+                    .then()
+                    .statusCode(200)
+                    .body("response.executionCount", equalTo(2))
+                    .body("response.latestCreatedExecution.name", equalTo(jobId + "-b"));
+
+            api()
+                    .contentType("application/json")
+                    .body(body.formatted(field, "a"))
+                    .when().patch(jobPath(project, jobId))
+                    .then()
+                    .statusCode(200)
+                    .body("done", equalTo(true))
+                    .body("response." + field, equalTo("a"))
+                    .body("response.generation", equalTo("3"))
+                    .body("response.executionCount", equalTo(2))
+                    .body("response.latestCreatedExecution.name", equalTo(jobId + "-b"));
+            api()
+                    .when().get(jobPath(project, jobId))
+                    .then()
+                    .statusCode(200)
+                    .body(field, equalTo("a"))
+                    .body("executionCount", equalTo(2))
+                    .body("latestCreatedExecution.name", equalTo(jobId + "-b"));
+            api()
+                    .when().get(jobPath(project, jobId) + "/executions")
+                    .then()
+                    .statusCode(200)
+                    .body("executions", hasSize(2))
+                    .body("executions.name", containsInAnyOrder(
+                            jobPath(project, jobId).substring("/v2/".length()) + "/executions/" + jobId + "-a",
+                            jobPath(project, jobId).substring("/v2/".length()) + "/executions/" + jobId + "-b"));
+        }
     }
 
     @Test

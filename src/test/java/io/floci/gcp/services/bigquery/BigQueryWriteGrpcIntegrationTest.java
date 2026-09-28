@@ -10,6 +10,7 @@ import com.google.cloud.bigquery.storage.v1.BatchCommitWriteStreamsResponse;
 import com.google.cloud.bigquery.storage.v1.BigQueryWriteGrpc;
 import com.google.cloud.bigquery.storage.v1.CreateWriteStreamRequest;
 import com.google.cloud.bigquery.storage.v1.FinalizeWriteStreamRequest;
+import com.google.cloud.bigquery.storage.v1.FinalizeWriteStreamResponse;
 import com.google.cloud.bigquery.storage.v1.FlushRowsRequest;
 import com.google.cloud.bigquery.storage.v1.GetWriteStreamRequest;
 import com.google.cloud.bigquery.storage.v1.ProtoRows;
@@ -42,6 +43,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.util.ArrayList;
@@ -49,11 +52,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -513,6 +515,37 @@ class BigQueryWriteGrpcIntegrationTest {
         assertEquals(before + 2, tableRows().size());
     }
 
+    /**
+     * Runs a Storage Write call on its own thread, with the project context the controller sets.
+     * The calls go to the service directly: over gRPC, each connection's calls run on the event
+     * loop Vert.x assigned it, and two connections landing on one loop could never meet.
+     */
+    private static <T> FutureTask<T> call(String project, Supplier<T> action) {
+        FutureTask<T> task = new FutureTask<>(() -> BigQueryGrpcContext.withProject(project, action));
+        Thread thread = new Thread(task);
+        thread.setDaemon(true);
+        thread.start();
+        return task;
+    }
+
+    /** Waits until {@code count} threads are blocked entering {@code monitor}. */
+    private static void awaitBlockedOn(Object monitor, int count) throws InterruptedException {
+        ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (true) {
+            long blocked = Arrays.stream(threads.dumpAllThreads(true, false))
+                    .filter(info -> info.getThreadState() == Thread.State.BLOCKED && info.getLockInfo() != null
+                            && info.getLockInfo().getIdentityHashCode() == System.identityHashCode(monitor)
+                            && info.getLockInfo().getClassName().equals(monitor.getClass().getName()))
+                    .count();
+            if (blocked == count) {
+                return;
+            }
+            assertTrue(System.nanoTime() < deadline, blocked + " of " + count + " calls reached the stream monitor");
+            Thread.sleep(10);
+        }
+    }
+
     @Test
     @Order(10)
     void concurrentCommitsOfOneStreamCommitItOnce() throws Exception {
@@ -520,26 +553,26 @@ class BigQueryWriteGrpcIntegrationTest {
         int before = tableRows().size();
         BatchCommitWriteStreamsRequest commit = BatchCommitWriteStreamsRequest.newBuilder().setParent(TABLE)
                 .addWriteStreams(name).build();
-        ExecutorService pool = Executors.newFixedThreadPool(8);
-        try {
-            List<Future<BatchCommitWriteStreamsResponse>> results = new ArrayList<>();
-            for (int i = 0; i < 8; i++) {
-                results.add(pool.submit(() -> write.batchCommitWriteStreams(commit)));
+        Object monitor = storageWrite.monitorForTest(name);
+        List<FutureTask<BatchCommitWriteStreamsResponse>> results = new ArrayList<>();
+        // Both commits pass every check made before the monitor, then wait on it together.
+        synchronized (monitor) {
+            for (int i = 0; i < 2; i++) {
+                results.add(call(PROJECT, () -> storageWrite.batchCommitWriteStreams(commit)));
             }
-            int succeeded = 0;
-            for (Future<BatchCommitWriteStreamsResponse> result : results) {
-                BatchCommitWriteStreamsResponse response = result.get(30, TimeUnit.SECONDS);
-                if (response.hasCommitTime()) {
-                    succeeded++;
-                } else {
-                    assertEquals(StorageError.StorageErrorCode.STREAM_ALREADY_COMMITTED,
-                            response.getStreamErrors(0).getCode());
-                }
-            }
-            assertEquals(1, succeeded);
-        } finally {
-            pool.shutdownNow();
+            awaitBlockedOn(monitor, 2);
         }
+        int succeeded = 0;
+        for (FutureTask<BatchCommitWriteStreamsResponse> result : results) {
+            BatchCommitWriteStreamsResponse response = result.get(30, TimeUnit.SECONDS);
+            if (response.hasCommitTime()) {
+                succeeded++;
+            } else {
+                assertEquals(StorageError.StorageErrorCode.STREAM_ALREADY_COMMITTED,
+                        response.getStreamErrors(0).getCode());
+            }
+        }
+        assertEquals(1, succeeded);
         assertEquals(before + 2, tableRows().size());
     }
 
@@ -684,5 +717,25 @@ class BigQueryWriteGrpcIntegrationTest {
                         .build()).getStreamErrors(0).getCode());
         List<List<Object>> rows = tableRows();
         assertTrue(rows == null || rows.isEmpty(), "no pre-reset rows reach the recreated table");
+    }
+
+    @Test
+    @Order(17)
+    void aCallInFlightAcrossAResetDoesNotResurrectItsStream() throws Exception {
+        String name = createStream(WriteStream.Type.PENDING).getName();
+        Object monitor = storageWrite.monitorForTest(name);
+        FutureTask<FinalizeWriteStreamResponse> finalize;
+        // The finalize holds the stream from before the reset and saves it after.
+        synchronized (monitor) {
+            finalize = call(PROJECT, () -> storageWrite.finalizeWriteStream(name));
+            awaitBlockedOn(monitor, 1);
+            given().when().post("/_floci-gcp/state/reset").then().statusCode(200);
+        }
+        finalize.get(30, TimeUnit.SECONDS);
+        seed();
+
+        assertEquals(Status.Code.NOT_FOUND, assertThrows(StatusRuntimeException.class,
+                () -> write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(name).build()))
+                .getStatus().getCode());
     }
 }

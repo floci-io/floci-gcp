@@ -604,6 +604,14 @@ public class BigQueryStorageWrite implements Resettable {
     }
 
     /**
+     * Test hook: the live stream's monitor. Holding it parks every call that changes the stream,
+     * which lets a test line up competing calls deterministically.
+     */
+    Object monitorForTest(String name) {
+        return stream(name);
+    }
+
+    /**
      * Writes the stream through to the store; callers hold its monitor. A stream dropped from the
      * live map by a reset is not written back, so it cannot resurrect in the cleared store.
      */

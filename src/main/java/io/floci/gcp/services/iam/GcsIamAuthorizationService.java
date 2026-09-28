@@ -1,14 +1,14 @@
 package io.floci.gcp.services.iam;
 
-import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.gcs.GcsIamAuthorizationAdapter;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.Map;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -16,197 +16,175 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class GcsIamAuthorizationService {
 
-    private static final Logger LOG = Logger.getLogger(GcsIamAuthorizationService.class);
     private static final String DENIED_MESSAGE = "IAM policy does not allow this GCS operation";
 
     private final GcsAuthorizationService cabAuthorization;
-    private final EmulatorConfig config;
-    private final IamService iamService;
-    private final IamPrincipalResolver principalResolver;
-    private final IamPolicyEvaluator policyEvaluator;
+    private final IamAuthorizationService authorization;
+    private final GcsIamAuthorizationAdapter adapter;
 
     @Inject
-    public GcsIamAuthorizationService(GcsAuthorizationService cabAuthorization, EmulatorConfig config,
-            IamService iamService, IamPrincipalResolver principalResolver, IamPolicyEvaluator policyEvaluator) {
+    public GcsIamAuthorizationService(GcsAuthorizationService cabAuthorization,
+            IamAuthorizationService authorization, GcsIamAuthorizationAdapter adapter) {
         this.cabAuthorization = cabAuthorization;
-        this.config = config;
-        this.iamService = iamService;
-        this.principalResolver = principalResolver;
-        this.policyEvaluator = policyEvaluator;
+        this.authorization = authorization;
+        this.adapter = adapter;
     }
 
-    public void requireBucketPermission(String authorization, String bucket, String permission) {
-        cabAuthorization.rejectDownscopedToken(authorization);
-        requirePermission(authorization, permission, IamResource.gcsBucket(bucket));
+    public void requireBucketPermission(String authorizationHeader, String bucket, String permission) {
+        cabAuthorization.rejectDownscopedToken(authorizationHeader);
+        requireBucketIamPermission(authorizationHeader, bucket, permission);
     }
 
-    public void requireObjectRead(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectRead(authorization, bucket, object);
-        requirePermission(authorization, "storage.objects.get", IamResource.gcsObject(bucket, object));
+    public void requireObjectRead(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorizationHeader, bucket, object);
+        requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.get");
     }
 
-    public void requireObjectList(String authorization, String bucket, String prefix) {
-        cabAuthorization.requireObjectList(authorization, bucket, prefix);
-        requirePermission(authorization, "storage.objects.list", IamResource.gcsBucket(bucket));
+    public void requireObjectList(String authorizationHeader, String bucket, String prefix) {
+        cabAuthorization.requireObjectList(authorizationHeader, bucket, prefix);
+        requireBucketIamPermission(authorizationHeader, bucket, "storage.objects.list");
     }
 
-    public void requireObjectWrite(String authorization, String bucket, String object, String permission) {
-        cabAuthorization.requireObjectWrite(authorization, bucket, object);
-        requirePermission(authorization, permission, IamResource.gcsObject(bucket, object));
+    public void requireObjectWrite(String authorizationHeader, String bucket, String object, String permission) {
+        cabAuthorization.requireObjectWrite(authorizationHeader, bucket, object);
+        requireObjectIamPermission(authorizationHeader, bucket, object, permission);
     }
 
     /**
-     * Holds the policy lock around authorization and mutation. The replacement callback uses
-     * an immutable policy and principal snapshot, so it never acquires a policy lock from inside
-     * the storage critical section.
+     * Holds the applicable policy locks around authorization and mutation. The replacement
+     * callback uses an immutable permission snapshot, so it does not acquire policy locks from
+     * inside the storage critical section.
      */
-    public <T> T authorizeObjectCreate(String authorization, String bucket, String object,
+    public <T> T authorizeObjectCreate(String authorizationHeader, String bucket, String object,
             Function<OverwriteAuthorization, T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            requireObjectWrite(authorization, bucket, object, "storage.objects.create");
-            Runnable requireObjectDelete = deferredObjectDelete(authorization, bucket, object);
+            requireObjectWrite(authorizationHeader, bucket, object, "storage.objects.create");
+            Runnable requireObjectDelete = deferredObjectDelete(authorizationHeader, bucket, object);
             return mutation.apply(new OverwriteAuthorization(isAllowed(requireObjectDelete)));
         });
     }
 
-    public <T> T authorizeMultipartWrite(String authorization, String bucket, String object,
+    public <T> T authorizeMultipartWrite(String authorizationHeader, String bucket, String object,
             Supplier<T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            requireMultipartWrite(authorization, bucket, object);
+            requireMultipartWrite(authorizationHeader, bucket, object);
             return mutation.get();
         });
     }
 
-    public <T> T authorizeMultipartCompletion(String authorization, String bucket, String object,
+    public <T> T authorizeMultipartCompletion(String authorizationHeader, String bucket, String object,
             Function<Runnable, T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            requireMultipartWrite(authorization, bucket, object);
-            return mutation.apply(deferredObjectDelete(authorization, bucket, object));
+            requireMultipartWrite(authorizationHeader, bucket, object);
+            return mutation.apply(deferredObjectDelete(authorizationHeader, bucket, object));
         });
     }
 
-    public <T> T authorizeMultipartAbort(String authorization, String bucket, String object,
+    public <T> T authorizeMultipartAbort(String authorizationHeader, String bucket, String object,
             Supplier<T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            cabAuthorization.requireObjectDelete(authorization, bucket, object);
-            requirePermission(authorization, "storage.multipartUploads.abort",
-                    IamResource.gcsObject(bucket, object));
+            cabAuthorization.requireObjectDelete(authorizationHeader, bucket, object);
+            requireObjectIamPermission(
+                    authorizationHeader, bucket, object, "storage.multipartUploads.abort");
             return mutation.get();
         });
     }
 
-    public void requireMultipartList(String authorization, String bucket, String prefix) {
-        cabAuthorization.requireObjectList(authorization, bucket, prefix);
-        requirePermission(authorization, "storage.multipartUploads.list", IamResource.gcsBucket(bucket));
+    public void requireMultipartList(String authorizationHeader, String bucket, String prefix) {
+        cabAuthorization.requireObjectList(authorizationHeader, bucket, prefix);
+        requireBucketIamPermission(authorizationHeader, bucket, "storage.multipartUploads.list");
     }
 
-    public void requireMultipartListParts(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectRead(authorization, bucket, object);
-        requirePermission(authorization, "storage.multipartUploads.listParts",
-                IamResource.gcsObject(bucket, object));
+    public void requireMultipartListParts(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorizationHeader, bucket, object);
+        requireObjectIamPermission(
+                authorizationHeader, bucket, object, "storage.multipartUploads.listParts");
     }
 
-    private void requireMultipartWrite(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectWrite(authorization, bucket, object);
-        IamResource resource = IamResource.gcsObject(bucket, object);
-        requirePermission(authorization, "storage.multipartUploads.create", resource);
-        requirePermission(authorization, "storage.objects.create", resource);
+    private void requireMultipartWrite(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectWrite(authorizationHeader, bucket, object);
+        requireObjectIamPermission(
+                authorizationHeader, bucket, object, "storage.multipartUploads.create");
+        requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.create");
     }
 
-    public void requireObjectDelete(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectDelete(authorization, bucket, object);
-        requirePermission(authorization, "storage.objects.delete", IamResource.gcsObject(bucket, object));
+    public void requireObjectDelete(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectDelete(authorizationHeader, bucket, object);
+        requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.delete");
     }
 
-    public <T> T authorizeObjectRestore(String authorization, String bucket, String object,
+    public <T> T authorizeObjectRestore(String authorizationHeader, String bucket, String object,
             Function<Runnable, T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            cabAuthorization.requireObjectWrite(authorization, bucket, object);
-            IamResource resource = IamResource.gcsObject(bucket, object);
-            requirePermission(authorization, "storage.objects.restore", resource);
-            requirePermission(authorization, "storage.objects.create", resource);
-            return mutation.apply(deferredObjectDelete(authorization, bucket, object));
+            cabAuthorization.requireObjectWrite(authorizationHeader, bucket, object);
+            requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.restore");
+            requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.create");
+            return mutation.apply(deferredObjectDelete(authorizationHeader, bucket, object));
         });
     }
 
-    public <T> T authorizeObjectCompose(String authorization, String bucket, List<String> sources,
+    public <T> T authorizeObjectCompose(String authorizationHeader, String bucket, List<String> sources,
             String destination, Function<Runnable, T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
             for (String source : sources) {
-                requireObjectRead(authorization, bucket, source);
+                requireObjectRead(authorizationHeader, bucket, source);
             }
-            requireObjectWrite(authorization, bucket, destination, "storage.objects.create");
-            return mutation.apply(deferredObjectDelete(authorization, bucket, destination));
+            requireObjectWrite(
+                    authorizationHeader, bucket, destination, "storage.objects.create");
+            return mutation.apply(deferredObjectDelete(authorizationHeader, bucket, destination));
         });
     }
 
-    public <T> T authorizeObjectCopy(String authorization, String sourceBucket, String sourceObject,
+    public <T> T authorizeObjectCopy(String authorizationHeader, String sourceBucket, String sourceObject,
             String destinationBucket, String destinationObject, Function<Runnable, T> mutation) {
         return withObjectPolicyLocks(List.of(sourceBucket, destinationBucket), () -> {
-            requireObjectRead(authorization, sourceBucket, sourceObject);
-            requireObjectWrite(authorization, destinationBucket, destinationObject, "storage.objects.create");
+            requireObjectRead(authorizationHeader, sourceBucket, sourceObject);
+            requireObjectWrite(
+                    authorizationHeader, destinationBucket, destinationObject, "storage.objects.create");
             return mutation.apply(deferredObjectDelete(
-                    authorization, destinationBucket, destinationObject));
+                    authorizationHeader, destinationBucket, destinationObject));
         });
     }
 
-    public <T> T authorizeObjectMove(String authorization, String bucket, String sourceObject,
+    public <T> T authorizeObjectMove(String authorizationHeader, String bucket, String sourceObject,
             String destinationObject, Function<Runnable, T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {
-            requireObjectMoveSource(authorization, bucket, sourceObject);
-            requireObjectWrite(authorization, bucket, destinationObject, "storage.objects.create");
-            return mutation.apply(deferredObjectDelete(authorization, bucket, destinationObject));
+            requireObjectMoveSource(authorizationHeader, bucket, sourceObject);
+            requireObjectWrite(
+                    authorizationHeader, bucket, destinationObject, "storage.objects.create");
+            return mutation.apply(deferredObjectDelete(authorizationHeader, bucket, destinationObject));
         });
     }
 
-    private void requireObjectMoveSource(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectRead(authorization, bucket, object);
-        cabAuthorization.requireObjectDelete(authorization, bucket, object);
-        IamResource resource = IamResource.gcsObject(bucket, object);
-        if (isAllowed(() -> requirePermission(authorization, "storage.objects.move", resource))) {
-            return;
+    public List<String> testBucketPermissions(
+            String authorizationHeader, String bucket, List<String> permissions) {
+        cabAuthorization.rejectDownscopedToken(authorizationHeader);
+        if (!authorization.enabled()) {
+            return permissions;
         }
-        requirePermission(authorization, "storage.objects.get", resource);
-        requirePermission(authorization, "storage.objects.delete", resource);
+        IamResource resource = adapter.bucketResource(bucket);
+        return authorization.testPermissions(authorizationHeader, adapter, resource, permissions);
     }
 
-    private Runnable deferredObjectDelete(String authorization, String bucket, String object) {
-        cabAuthorization.requireObjectDelete(authorization, bucket, object);
-        IamResource resource = IamResource.gcsObject(bucket, object);
-        if (config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.DISABLED) {
+    private void requireObjectMoveSource(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorizationHeader, bucket, object);
+        cabAuthorization.requireObjectDelete(authorizationHeader, bucket, object);
+        if (isAllowed(() -> requireObjectIamPermission(
+                authorizationHeader, bucket, object, "storage.objects.move"))) {
+            return;
+        }
+        requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.get");
+        requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.delete");
+    }
+
+    private Runnable deferredObjectDelete(String authorizationHeader, String bucket, String object) {
+        cabAuthorization.requireObjectDelete(authorizationHeader, bucket, object);
+        if (!authorization.enabled()) {
             return () -> { };
         }
-
-        IamPrincipalResolver.Resolution resolution;
-        IamPolicy policy;
-        try {
-            resolution = principalResolver.resolve(authorization);
-            policy = IamPolicyNormalizer.normalize(iamService.getPolicy(resource.policyResource()));
-        } catch (GcpException e) {
-            if (e.getHttpStatus() == 401 || e.getHttpStatus() == 404) {
-                throw e;
-            }
-            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
-                    resource.policyResource(), "storage.objects.delete");
-            return deniedPermission();
-        } catch (RuntimeException e) {
-            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
-                    resource.policyResource(), "storage.objects.delete");
-            return deniedPermission();
-        }
-
-        return () -> {
-            try {
-                if (policyEvaluator.isAllowed(resolution.principal(), "storage.objects.delete", resource,
-                        Map.of(resource.policyResource(), policy))) {
-                    return;
-                }
-            } catch (RuntimeException e) {
-                LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
-                        resource.policyResource(), "storage.objects.delete");
-            }
-            throw GcpException.permissionDenied(DENIED_MESSAGE);
-        };
+        boolean allowed = isAllowed(() -> requireObjectIamPermission(
+                authorizationHeader, bucket, object, "storage.objects.delete"));
+        return allowed ? () -> { } : deniedPermission();
     }
 
     private static Runnable deniedPermission() {
@@ -219,43 +197,52 @@ public class GcsIamAuthorizationService {
         try {
             requirePermission.run();
             return true;
-        } catch (GcpException e) {
-            if (e.getHttpStatus() == 403) {
+        } catch (GcpException exception) {
+            if (exception.getHttpStatus() == 403) {
                 return false;
             }
-            throw e;
+            throw exception;
         }
     }
 
     private <T> T withObjectPolicyLocks(List<String> buckets, Supplier<T> action) {
-        return iamService.withPolicyLocks(
-                buckets.stream().map(bucket -> IamResource.gcsBucket(bucket).policyResource()).toList(),
-                action);
+        if (!authorization.enabled()) {
+            List<IamResource> resources = buckets.stream().map(IamResource::gcsBucket).toList();
+            return authorization.withPolicyLocks(resources, action);
+        }
+
+        while (true) {
+            List<IamResource> resources = buckets.stream().map(adapter::bucketResource).toList();
+            LockedResult<T> result = authorization.withPolicyLocks(resources, () -> {
+                List<IamResource> current = buckets.stream().map(adapter::bucketResource).toList();
+                if (!resources.equals(current)) {
+                    return new LockedResult<>(true, null);
+                }
+                return new LockedResult<>(false, action.get());
+            });
+            if (!result.retry()) {
+                return result.value();
+            }
+        }
     }
 
-    private void requirePermission(String authorization, String permission, IamResource resource) {
-        if (config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.DISABLED) {
+    private void requireBucketIamPermission(String authorizationHeader, String bucket, String permission) {
+        if (!authorization.enabled()) {
             return;
         }
+        IamResource resource = adapter.bucketResource(bucket);
+        authorization.authorize(
+                authorizationHeader, adapter, new IamPermissionCheck(permission, resource));
+    }
 
-        IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
-        try {
-            IamPolicy policy = IamPolicyNormalizer.normalize(iamService.getPolicy(resource.policyResource()));
-            if (policyEvaluator.isAllowed(resolution.principal(), permission, resource,
-                    Map.of(resource.policyResource(), policy))) {
-                return;
-            }
-        } catch (GcpException e) {
-            if (e.getHttpStatus() == 401 || e.getHttpStatus() == 404) {
-                throw e;
-            }
-            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
-                    resource.policyResource(), permission);
-        } catch (RuntimeException e) {
-            LOG.warnf(e, "IAM policy evaluation failed closed resource=%s permission=%s",
-                    resource.policyResource(), permission);
+    private void requireObjectIamPermission(
+            String authorizationHeader, String bucket, String object, String permission) {
+        if (!authorization.enabled()) {
+            return;
         }
-        throw GcpException.permissionDenied(DENIED_MESSAGE);
+        IamResource resource = adapter.objectResource(bucket, object);
+        authorization.authorize(
+                authorizationHeader, adapter, new IamPermissionCheck(permission, resource));
     }
 
     /** Opening-time authorization snapshot carried by a mutation into its storage lock. */
@@ -266,4 +253,6 @@ public class GcsIamAuthorizationService {
             }
         }
     }
+
+    private record LockedResult<T>(boolean retry, T value) {}
 }

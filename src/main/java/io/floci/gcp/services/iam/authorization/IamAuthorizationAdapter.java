@@ -33,6 +33,11 @@ public interface IamAuthorizationAdapter {
 
     Map<String, Set<String>> roles();
 
+    /** Whether this service evaluates policies for this credential class in enforce mode. */
+    default boolean requiresPolicyEvaluation(IamIdentityKind identityKind) {
+        return identityKind == IamIdentityKind.FLOCI_SERVICE_ACCOUNT;
+    }
+
     /** Service-specific binding constraints, applied on writes and before evaluation without I/O. */
     default void validatePolicy(String resource, IamPolicy policy) {
         // Adapters without additional binding constraints use the shared structural validation.

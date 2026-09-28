@@ -44,21 +44,37 @@ public record IamResource(String service, String type, String name, String polic
     }
 
     public static IamResource gcsBucket(String bucket) {
+        return gcsBucket(bucket, null);
+    }
+
+    public static IamResource gcsBucket(String bucket, String projectId) {
         requireBucket(bucket);
         return new IamResource(STORAGE_SERVICE, BUCKET_TYPE,
-                "projects/_/buckets/" + bucket, "buckets/" + bucket);
+                "projects/_/buckets/" + bucket, "buckets/" + bucket, gcsProjectName(projectId));
     }
 
     public static IamResource gcsObject(String bucket, String object) {
+        return gcsObject(bucket, object, null);
+    }
+
+    public static IamResource gcsObject(String bucket, String object, String projectId) {
         requireBucket(bucket);
         Objects.requireNonNull(object, "object");
         return new IamResource(STORAGE_SERVICE, OBJECT_TYPE,
-                "projects/_/buckets/" + bucket + "/objects/" + object, "buckets/" + bucket);
+                "projects/_/buckets/" + bucket + "/objects/" + object,
+                "buckets/" + bucket, gcsProjectName(projectId));
     }
 
     private static void requireBucket(String bucket) {
         if (bucket == null || bucket.isBlank()) {
             throw new IllegalArgumentException("bucket must not be blank");
         }
+    }
+
+    private static String gcsProjectName(String projectId) {
+        if (projectId == null || projectId.isBlank()) {
+            return null;
+        }
+        return projectId.startsWith("projects/") ? projectName(projectId) : "projects/" + projectId;
     }
 }

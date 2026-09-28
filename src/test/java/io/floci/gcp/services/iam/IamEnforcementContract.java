@@ -246,6 +246,23 @@ abstract class IamEnforcementContract {
     }
 
     @Test
+    void unknownRoleForAnotherPrincipalDoesNotBlockTheCaller() {
+        Map<String, Object> unrelated = Map.of(
+                "role", "roles/pubsub.publisher",
+                "members", List.of("serviceAccount:publisher@other.iam.gserviceaccount.com"));
+        Map<String, Object> callerGrant = Map.of(
+                "role", "roles/browser",
+                "members", List.of(member));
+        request().contentType("application/json")
+                .body(Map.of("policy", Map.of("version", 1,
+                        "bindings", List.of(unrelated, callerGrant))))
+                .post("/v1/" + project + ":setIamPolicy").then().statusCode(200);
+
+        request().header("Authorization", credential).get("/v1/" + project).then().statusCode(200);
+        grpcRead(authenticated, project);
+    }
+
+    @Test
     void unsupportedConditionsAreDiagnosable() {
         grant(project, "roles/browser", "resource.name.matches('.*')");
         Response response = request().header("Authorization", credential).get("/v1/" + project);

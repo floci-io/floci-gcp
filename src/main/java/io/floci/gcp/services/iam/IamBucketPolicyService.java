@@ -1,12 +1,10 @@
 package io.floci.gcp.services.iam;
 
-import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -15,28 +13,19 @@ import java.util.Map;
 @ApplicationScoped
 public class IamBucketPolicyService {
 
-    private static final Logger LOG = Logger.getLogger(IamBucketPolicyService.class);
-
     private final IamService iamService;
     private final GcsService gcsService;
     private final GcsIamAuthorizationService iamAuthorizationService;
-    private final EmulatorConfig config;
     private final IamConditionEvaluator conditionEvaluator;
-    private final IamPrincipalResolver principalResolver;
-    private final IamPolicyEvaluator policyEvaluator;
 
     @Inject
     public IamBucketPolicyService(IamService iamService, GcsService gcsService,
-            GcsIamAuthorizationService iamAuthorizationService, EmulatorConfig config,
-            IamConditionEvaluator conditionEvaluator, IamPrincipalResolver principalResolver,
-            IamPolicyEvaluator policyEvaluator) {
+            GcsIamAuthorizationService iamAuthorizationService,
+            IamConditionEvaluator conditionEvaluator) {
         this.iamService = iamService;
         this.gcsService = gcsService;
         this.iamAuthorizationService = iamAuthorizationService;
-        this.config = config;
         this.conditionEvaluator = conditionEvaluator;
-        this.principalResolver = principalResolver;
-        this.policyEvaluator = policyEvaluator;
     }
 
     public StoredPolicy getPolicy(String bucket) {
@@ -56,27 +45,7 @@ public class IamBucketPolicyService {
     }
 
     public List<String> testPermissions(String bucket, String authorization, List<String> requestedPermissions) {
-        gcsService.getBucket(bucket);
-        if (config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.DISABLED) {
-            return requestedPermissions;
-        }
-
-        IamPrincipalResolver.Resolution resolution = principalResolver.resolve(authorization);
-        if (resolution.downscoped()) {
-            return List.of();
-        }
-        IamPolicy policy;
-        try {
-            policy = IamPolicyNormalizer.normalize(getPolicy(bucket));
-        } catch (RuntimeException e) {
-            LOG.warnf(e, "IAM testPermissions failed closed for bucket=%s", bucket);
-            return List.of();
-        }
-        IamResource resource = IamResource.gcsBucket(bucket);
-        Map<String, IamPolicy> policies = Map.of(resource.policyResource(), policy);
-        return requestedPermissions.stream()
-                .filter(permission -> policyEvaluator.isAllowed(resolution.principal(), permission, resource, policies))
-                .toList();
+        return iamAuthorizationService.testBucketPermissions(authorization, bucket, requestedPermissions);
     }
 
     private void validateConditions(String bucket, IamPolicy policy) {

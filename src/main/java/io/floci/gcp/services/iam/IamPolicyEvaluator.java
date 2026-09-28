@@ -35,7 +35,7 @@ public class IamPolicyEvaluator {
                 continue;
             }
             for (IamBinding binding : policy.bindings()) {
-                if (isValidForEvaluation(policy, binding) && matches(principal, binding)
+                if (isValidForEvaluation(policy, binding) && matchesPrincipal(principal, binding)
                         && roleCatalog.grants(binding.role(), permission)
                         && (binding.condition() == null || conditionEvaluator.matches(binding.condition(), resource))) {
                     return true;
@@ -45,7 +45,7 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private static boolean matches(IamPrincipal principal, IamBinding binding) {
+    public static boolean matchesPrincipal(IamPrincipal principal, IamBinding binding) {
         return binding.members().contains("allUsers")
                 || (principal.isAuthenticated() && binding.members().contains("allAuthenticatedUsers"))
                 || (principal.member() != null && binding.members().contains(principal.member()));

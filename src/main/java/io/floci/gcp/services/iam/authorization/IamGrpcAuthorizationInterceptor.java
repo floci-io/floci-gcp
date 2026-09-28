@@ -61,26 +61,31 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                         String service = call.getMethodDescriptor().getServiceName();
                         Optional<IamAuthorizationAdapter> adapter = registry.grpc(service);
                         boolean mixin = IAM_POLICY_SERVICE.equals(service);
-                        if ((adapter.isPresent() || mixin) && authorization.get().enabled()
-                                && authorization.get().applies(credential)) {
+                        if ((adapter.isPresent() || mixin) && authorization.get().enabled()) {
                             if (!(message instanceof Message proto)) {
                                 throw GcpException.failedPrecondition("IAM requires a protobuf resource mapping: " + service);
                             }
                             JsonNode request = mapper.readTree(JsonFormat.printer().print(proto));
                             String method = call.getMethodDescriptor().getBareMethodName();
-                            IamOperation operation;
+                            IamOperation operation = null;
                             if (mixin) {
                                 String resource = request.path("resource").asText();
                                 adapter = registry.resource(resource);
                                 if (adapter.isEmpty()) {
-                                    // The mixin accepts arbitrary resource names; an unknown kind must not fail open.
-                                    throw GcpException.failedPrecondition("IAM enforcement has no resource mapping: " + resource);
+                                    if (authorization.get().applies(credential)) {
+                                        // The mixin accepts arbitrary resource names; an evaluated caller must not fail open.
+                                        throw GcpException.failedPrecondition(
+                                                "IAM enforcement has no resource mapping: " + resource);
+                                    }
+                                } else {
+                                    operation = new IamOperation(method, resource);
                                 }
-                                operation = new IamOperation(method, resource);
                             } else {
                                 operation = adapter.orElseThrow().grpcOperation(method, request);
                             }
-                            authorization.get().authorize(credential, adapter.orElseThrow(), operation);
+                            if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {
+                                authorization.get().authorize(credential, adapter.get(), operation);
+                            }
                         }
                         super.onMessage(message);
                     } catch (Exception e) {

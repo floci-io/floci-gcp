@@ -3,6 +3,11 @@ package io.floci.gcp.services.iam;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.gcs.GcsIamAuthorizationAdapter;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamIdentityKind;
+import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import org.junit.jupiter.api.Test;
 
@@ -17,13 +22,47 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GcsIamAuthorizationServiceTest {
+
+    @Test
+    void disabledModeDoesNotResolveBucketForPermissionCheck() {
+        GcsAuthorizationService cabAuthorization = mock(GcsAuthorizationService.class);
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
+        GcsIamAuthorizationService service = new GcsIamAuthorizationService(
+                cabAuthorization, authorization, adapter);
+
+        service.requireBucketPermission(null, "bucket", "storage.buckets.get");
+
+        verify(cabAuthorization).rejectDownscopedToken(null);
+        verify(adapter, never()).bucketResource("bucket");
+    }
+
+    @Test
+    void disabledModeReturnsRequestedPermissionsWithoutResolvingBucket() {
+        GcsAuthorizationService cabAuthorization = mock(GcsAuthorizationService.class);
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
+        GcsIamAuthorizationService service = new GcsIamAuthorizationService(
+                cabAuthorization, authorization, adapter);
+        List<String> requested = List.of("storage.buckets.get", "storage.objects.list");
+
+        List<String> granted = service.testBucketPermissions(null, "bucket", requested);
+
+        assertSame(requested, granted);
+        verify(cabAuthorization).rejectDownscopedToken(null);
+        verify(adapter, never()).bucketResource("bucket");
+    }
 
     @Test
     void movePermissionCanReplaceSourceReadAndDeletePermissions() {
@@ -144,13 +183,31 @@ class GcsIamAuthorizationServiceTest {
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.iam()).thenReturn(iamConfig);
         when(iamConfig.authorizationMode()).thenReturn(EmulatorConfig.IamAuthorizationMode.ENFORCE);
+
         IamPrincipalResolver principalResolver = mock(IamPrincipalResolver.class);
-        when(principalResolver.resolve(any())).thenReturn(
-                new IamPrincipalResolver.Resolution(IamPrincipal.anonymous(), false));
+        when(principalResolver.resolve(any())).thenReturn(new IamPrincipalResolver.Resolution(
+                IamPrincipal.anonymous(), IamIdentityKind.ANONYMOUS));
+        GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
+        when(adapter.requiresPolicyEvaluation(IamIdentityKind.ANONYMOUS)).thenReturn(true);
+        when(adapter.bucketResource(anyString())).thenAnswer(invocation ->
+                IamResource.gcsBucket(invocation.getArgument(0)));
+        when(adapter.objectResource(anyString(), anyString())).thenAnswer(invocation ->
+                IamResource.gcsObject(invocation.getArgument(0), invocation.getArgument(1)));
+
+        IamResourceHierarchy hierarchy = new IamResourceHierarchy();
+        IamAuthorizationRegistry registry = new IamAuthorizationRegistry(List.of(adapter));
+        IamAuthorizationService authorization = new IamAuthorizationService(
+                config,
+                principalResolver,
+                new IamPolicyEvaluator(roleCatalog, hierarchy, mock(IamConditionEvaluator.class)),
+                hierarchy,
+                roleCatalog,
+                mock(IamConditionEvaluator.class),
+                iamService,
+                registry,
+                mock(IamRequestIdentity.class));
         return new GcsIamAuthorizationService(
-                mock(GcsAuthorizationService.class), config, iamService, principalResolver,
-                new IamPolicyEvaluator(roleCatalog, new IamResourceHierarchy(),
-                        mock(IamConditionEvaluator.class)));
+                mock(GcsAuthorizationService.class), authorization, adapter);
     }
 
     private static StoredPolicy objectAdminPolicy() {

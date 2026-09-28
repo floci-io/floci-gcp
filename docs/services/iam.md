@@ -39,9 +39,9 @@ GCS bucket evaluation treats those callers as anonymous so `allUsers` policies
 work. In enforce mode, an unknown or expired Floci-issued token receives
 `UNAUTHENTICATED`; an evaluated caller without a matching grant receives
 `403 PERMISSION_DENIED` over REST or `PERMISSION_DENIED` over gRPC. GCS applies
-the Credential Access Boundary before IAM and retains the source principal for
-IAM evaluation of valid downscoped credentials. Downscoped tokens cannot expand
-their boundary into project or bucket management permissions.
+the Credential Access Boundary before IAM. Source-principal handoff is deferred,
+so downscoped credentials cannot use enforce mode or expand their boundary into
+project or bucket management permissions.
 
 This is a local permission-testing tool, **not an authentication/security boundary**.
 Token minting and impersonation remain unrestricted. A test using anonymous or
@@ -115,7 +115,7 @@ An unsupported role in a binding that applies to the caller produces
 `FAILED_PRECONDITION` naming the role and policy. Bindings for other callers do
 not block evaluation. Missing resource/operation mappings on an enforcing adapter
 also produce a named `FAILED_PRECONDITION`. The shared `google.iam.v1.IAMPolicy`
-gRPC mixin also rejects resource kinds without a registered mapping for recognized
+gRPC mixin enforces project policy resources and rejects resource kinds without a registered mapping for recognized
 callers in enforce mode, including Pub/Sub policy calls routed through that mixin.
 Those policy APIs support anonymous setup calls. Unsupported CEL expressions produce
 `INVALID_ARGUMENT`; they are not silently treated as a policy denial.

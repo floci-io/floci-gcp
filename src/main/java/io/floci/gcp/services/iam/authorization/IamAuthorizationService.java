@@ -24,6 +24,8 @@ import org.jboss.logging.Logger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
 
 /** Single decision point shared by every supported transport and testIamPermissions. */
 @ApplicationScoped
@@ -61,9 +63,10 @@ public class IamAuthorizationService {
     }
 
     void onStart(@Observes StartupEvent event) {
-        LOG.warnf("IAM authorization mode=%s; supported services=%s; Pub/Sub, Secret Manager, GCS and all other services are NOT IAM-enforced. "
-                        + "Anonymous and external-token requests bypass IAM; use Floci-issued service-account tokens. "
-                        + "Existing GCS Credential Access Boundary checks remain active.",
+        LOG.warnf("IAM authorization mode=%s; supported services=%s. "
+                        + "Identity handling is service-specific; GCS bucket policies evaluate anonymous callers. "
+                        + "Pub/Sub, Secret Manager, GCS objects and all other services are NOT IAM-enforced. "
+                        + "GCS Credential Access Boundary checks remain active.",
                 config.services().iam().authorizationMode(), registry.adapters().stream()
                         .map(IamAuthorizationAdapter::serviceName).sorted().toList());
     }
@@ -76,18 +79,45 @@ public class IamAuthorizationService {
         return resolution.downscoped() || resolution.principal().isAuthenticated();
     }
 
+    public boolean applies(String authorization, IamAuthorizationAdapter adapter) {
+        if (!enabled()) {
+            return false;
+        }
+        IamPrincipalResolver.Resolution resolution = principals.resolve(authorization);
+        return resolution.downscoped() || adapter.requiresPolicyEvaluation(resolution.kind());
+    }
+
     public void authorize(String authorization, IamAuthorizationAdapter adapter, IamOperation operation) {
+        authorize(authorization, adapter, adapter.checks(operation));
+    }
+
+    public void authorize(String authorization, IamAuthorizationAdapter adapter, IamPermissionCheck check) {
+        authorize(authorization, adapter, List.of(check));
+    }
+
+    /** Holds each target and ancestor policy lock while a service authorizes and mutates state. */
+    public <T> T withPolicyLocks(List<IamResource> resources, Supplier<T> action) {
+        List<String> policyResources = resources.stream()
+                .flatMap(resource -> hierarchy.policyResourcesFor(resource).stream())
+                .distinct()
+                .toList();
+        return policies.withPolicyLocks(policyResources, action);
+    }
+
+    private void authorize(String authorization, IamAuthorizationAdapter adapter,
+            List<IamPermissionCheck> checks) {
         if (!enabled()) {
             return;
         }
         IamPrincipalResolver.Resolution resolution = principals.resolve(authorization);
-        if (resolution.downscoped()) {
+        boolean evaluate = adapter.requiresPolicyEvaluation(resolution.kind());
+        if (resolution.downscoped() && !evaluate) {
             throw GcpException.permissionDenied("Downscoped tokens are only supported by the GCS Credential Access Boundary");
         }
-        if (!resolution.principal().isAuthenticated()) {
+        if (!evaluate) {
             return;
         }
-        for (IamPermissionCheck check : adapter.checks(operation)) {
+        for (IamPermissionCheck check : checks) {
             if (!allowed(resolution.principal(), check.permission(), check.resource())) {
                 throw GcpException.permissionDenied("Permission " + check.permission()
                         + " denied on " + check.resource().name());
@@ -104,18 +134,31 @@ public class IamAuthorizationService {
 
     public List<String> testPermissions(String resource, List<String> requested) {
         String authorization = currentAuthorization();
-        if (!enabled() || registry.resource(resource).isEmpty()) {
+        if (!enabled()) {
+            return requested;
+        }
+        Optional<IamAuthorizationAdapter> adapter = registry.resource(resource);
+        if (adapter.isEmpty()) {
+            return requested;
+        }
+        IamResource target = adapter.get().requireResource(resource);
+        return testPermissions(authorization, adapter.get(), target, requested);
+    }
+
+    public List<String> testPermissions(String authorization, IamAuthorizationAdapter adapter,
+            IamResource target, List<String> requested) {
+        if (!enabled()) {
             return requested;
         }
         IamPrincipalResolver.Resolution resolution = principals.resolve(authorization);
-        if (resolution.downscoped()) {
+        boolean evaluate = adapter.requiresPolicyEvaluation(resolution.kind());
+        if (resolution.downscoped() && !evaluate) {
             return List.of();
         }
-        if (!resolution.principal().isAuthenticated()) {
+        if (!evaluate) {
             return requested;
         }
-        IamResource target = registry.resource(resource).orElseThrow().requireResource(resource);
-        Map<String, IamPolicy> policyMap = loadPolicies(target);
+        Map<String, IamPolicy> policyMap = loadPolicies(resolution.principal(), target);
         return requested.stream().filter(permission -> evaluator.isAllowed(
                 resolution.principal(), permission, target, policyMap)).toList();
     }
@@ -128,15 +171,18 @@ public class IamAuthorizationService {
     }
 
     private boolean allowed(IamPrincipal principal, String permission, IamResource resource) {
-        return evaluator.isAllowed(principal, permission, resource, loadPolicies(resource));
+        return evaluator.isAllowed(principal, permission, resource, loadPolicies(principal, resource));
     }
 
-    private Map<String, IamPolicy> loadPolicies(IamResource resource) {
+    private Map<String, IamPolicy> loadPolicies(IamPrincipal principal, IamResource resource) {
         Map<String, IamPolicy> result = new LinkedHashMap<>();
         for (String key : hierarchy.policyResourcesFor(resource)) {
             IamPolicy policy = IamPolicyNormalizer.normalize(policies.policyForEvaluation(key));
             registry.resource(key).ifPresent(adapter -> adapter.validatePolicy(key, policy));
             for (IamBinding binding : policy.bindings()) {
+                if (!IamPolicyEvaluator.matchesPrincipal(principal, binding)) {
+                    continue;
+                }
                 if (!roles.contains(binding.role())) {
                     throw GcpException.failedPrecondition("IAM enforcement does not support role "
                             + binding.role() + " in policy " + key);

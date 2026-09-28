@@ -16,7 +16,8 @@ Pub/Sub and Secret Manager do not support IAM enforcement; project bindings
 do not restrict their operations.
 
 Default `disabled` mode stores policies without restricting requests. Anonymous
-and external credentials bypass IAM in both modes. Project grants do not enforce
-permissions on GCS or any other service outside the supported scope. Organization
+and external credentials bypass Resource Manager IAM in both modes. Project grants
+can authorize supported GCS bucket operations through inheritance, but do not enforce
+permissions on GCS objects, Pub/Sub, Secret Manager, or other unsupported services. Organization
 and folder inheritance and project ID/number alias equivalence are not implemented.
 See [IAM enforcement and limitations](iam.md#opt-in-enforcement).

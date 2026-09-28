@@ -5,6 +5,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.credentials.CredentialAccessBoundaryRule;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
+import io.floci.gcp.services.iam.authorization.IamIdentityKind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -38,13 +39,19 @@ class IamPrincipalResolverTest {
         IamPrincipalResolver.Resolution resolution = resolver.resolve("Bearer " + token.getTokenValue());
 
         assertEquals("serviceAccount:reader@example.test", resolution.principal().member());
+        assertEquals(IamIdentityKind.FLOCI_SERVICE_ACCOUNT, resolution.kind());
         assertFalse(resolution.downscoped());
     }
 
     @Test
-    void treatsMissingAndOrdinaryExternalTokensAsAnonymous() {
-        assertFalse(resolver.resolve(null).principal().isAuthenticated());
-        assertFalse(resolver.resolve("Bearer external-token").principal().isAuthenticated());
+    void distinguishesMissingAndOrdinaryExternalCredentials() {
+        IamPrincipalResolver.Resolution anonymous = resolver.resolve(null);
+        IamPrincipalResolver.Resolution external = resolver.resolve("Bearer external-token");
+
+        assertEquals(IamIdentityKind.ANONYMOUS, anonymous.kind());
+        assertEquals(IamIdentityKind.EXTERNAL, external.kind());
+        assertFalse(anonymous.principal().isAuthenticated());
+        assertFalse(external.principal().isAuthenticated());
     }
 
     @Test
@@ -56,6 +63,7 @@ class IamPrincipalResolverTest {
         IamPrincipalResolver.Resolution resolution = resolver.resolve("Bearer " + token.getTokenValue());
 
         assertTrue(resolution.downscoped());
+        assertEquals(IamIdentityKind.FLOCI_DOWNSCOPED, resolution.kind());
         assertFalse(resolution.principal().isAuthenticated());
     }
 

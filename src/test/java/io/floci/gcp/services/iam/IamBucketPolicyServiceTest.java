@@ -5,8 +5,14 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
+import io.floci.gcp.services.gcs.GcsIamAuthorizationAdapter;
 import io.floci.gcp.services.gcs.GcsService;
+import io.floci.gcp.services.gcs.model.GcsBucket;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -37,6 +43,9 @@ class IamBucketPolicyServiceTest {
         IamService iamService = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
         GcsService gcsService = mock(GcsService.class);
+        GcsBucket storedBucket = new GcsBucket();
+        storedBucket.setProjectId("test-project");
+        when(gcsService.getBucket(bucket)).thenReturn(storedBucket);
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
@@ -51,19 +60,24 @@ class IamBucketPolicyServiceTest {
         String authorization = "Bearer " + token.getTokenValue();
         IamPrincipalResolver principalResolver = new IamPrincipalResolver(tokenService);
         IamConditionEvaluator conditionEvaluator = mock(IamConditionEvaluator.class);
+        @SuppressWarnings("unchecked")
+        Instance<GcsService> gcsServices = mock(Instance.class);
+        when(gcsServices.get()).thenReturn(gcsService);
+        GcsIamAuthorizationAdapter adapter = new GcsIamAuthorizationAdapter(gcsServices);
+        IamAuthorizationRegistry registry = new IamAuthorizationRegistry(List.of(adapter));
+        IamRoleCatalog roleCatalog = new IamRoleCatalog(registry);
         IamPolicyEvaluator policyEvaluator = new IamPolicyEvaluator(
-                new IamRoleCatalog(), new IamResourceHierarchy(), conditionEvaluator);
+                roleCatalog, new IamResourceHierarchy(), conditionEvaluator);
+        IamAuthorizationService sharedAuthorization = new IamAuthorizationService(
+                config, principalResolver, policyEvaluator, new IamResourceHierarchy(), roleCatalog,
+                conditionEvaluator, iamService, registry, new IamRequestIdentity());
         GcsIamAuthorizationService authorizationService = spy(new GcsIamAuthorizationService(
-                new GcsAuthorizationService(tokenService), config, iamService,
-                principalResolver, policyEvaluator));
+                new GcsAuthorizationService(tokenService), sharedAuthorization, adapter));
         IamBucketPolicyService policyService = new IamBucketPolicyService(
                 iamService,
                 gcsService,
                 authorizationService,
-                config,
-                conditionEvaluator,
-                principalResolver,
-                policyEvaluator);
+                conditionEvaluator);
 
         iamService.setPolicy(resource, policy("roles/storage.admin"));
 

@@ -1,5 +1,6 @@
 package io.floci.gcp.services.iam;
 
+import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -7,6 +8,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,6 +21,8 @@ class IamBucketAuthorizationRestIntegrationTest {
 
     @Inject
     IamService iamService;
+    @Inject
+    CredentialTokenService tokenService;
 
     @Test
     void bucketPolicyGrantsEveryMappedBucketOperation() {
@@ -26,6 +30,8 @@ class IamBucketAuthorizationRestIntegrationTest {
         iamService.setPolicy("buckets/" + bucket, storageAdminPolicy());
 
         given().when().get("/storage/v1/b/" + bucket).then().statusCode(200);
+        given().header("Authorization", "Bearer external-token")
+                .when().get("/storage/v1/b/" + bucket).then().statusCode(200);
         given().when().get("/storage/v1/b/" + bucket + "/storageLayout").then().statusCode(200);
         given().contentType("application/json").body(Map.of("location", "EU"))
                 .when().patch("/storage/v1/b/" + bucket).then().statusCode(200);
@@ -49,6 +55,8 @@ class IamBucketAuthorizationRestIntegrationTest {
         String bucket = createBucket();
 
         given().when().get("/storage/v1/b/" + bucket).then().statusCode(403);
+        given().header("Authorization", "Bearer external-token")
+                .when().get("/storage/v1/b/" + bucket).then().statusCode(403);
         given().when().get("/storage/v1/b/" + bucket + "/storageLayout").then().statusCode(403);
         given().contentType("application/json").body(Map.of("location", "EU"))
                 .when().patch("/storage/v1/b/" + bucket).then().statusCode(403);
@@ -73,6 +81,19 @@ class IamBucketAuthorizationRestIntegrationTest {
 
         given().when().get("/storage/v1/b/" + bucket + "/storageLayout").then().statusCode(200);
         given().when().get("/storage/v1/b/" + bucket).then().statusCode(403);
+    }
+
+    @Test
+    void projectStorageAdminGrantAppliesToItsBuckets() {
+        String bucket = createBucket();
+        String email = "project-admin@test-project.iam.gserviceaccount.com";
+        iamService.setPolicy("projects/test-project", policy(
+                "roles/storage.admin", "serviceAccount:" + email));
+        String authorization = "Bearer " + tokenService
+                .mintImpersonatedToken(email, Instant.now().plusSeconds(600)).getTokenValue();
+
+        given().header("Authorization", authorization)
+                .when().get("/storage/v1/b/" + bucket).then().statusCode(200);
     }
 
     @Test
@@ -109,9 +130,13 @@ class IamBucketAuthorizationRestIntegrationTest {
     }
 
     private static StoredPolicy storageAdminPolicy() {
+        return policy("roles/storage.admin", "allUsers");
+    }
+
+    private static StoredPolicy policy(String role, String member) {
         StoredPolicy policy = new StoredPolicy();
         policy.setBindings(List.of(Map.of(
-                "role", "roles/storage.admin", "members", List.of("allUsers"))));
+                "role", role, "members", List.of(member))));
         return policy;
     }
 

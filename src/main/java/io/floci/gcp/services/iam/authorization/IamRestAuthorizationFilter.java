@@ -44,7 +44,7 @@ public class IamRestAuthorizationFilter implements ContainerRequestFilter {
     public void filter(ContainerRequestContext context) throws IOException {
         identity.setAuthorization(context.getHeaderString("Authorization"));
         Optional<IamAuthorizationAdapter> adapter = registry.rest(resourceInfo.getResourceClass());
-        if (adapter.isEmpty() || !authorization.applies(identity.authorization())) {
+        if (adapter.isEmpty() || !authorization.applies(identity.authorization(), adapter.get())) {
             return;
         }
         JsonNode body = mapper.createObjectNode();

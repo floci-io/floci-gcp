@@ -6,8 +6,10 @@ and gRPC transport adapters. The gRPC interceptor is installed in
 The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
-Only the Resource Manager project adapter is currently registered. Pub/Sub and
-Secret Manager IAM enforcement is not supported.
+Resource Manager projects and GCS buckets are currently registered. GCS invokes
+the shared evaluator from its service-level authorization path so JSON filtering
+does not bypass its lock-sensitive lifecycle coordination. Pub/Sub and Secret
+Manager IAM enforcement is not supported.
 
 ## Service extension contract
 
@@ -44,6 +46,10 @@ is not an XML, multipart, raw-media, or HTTP/protobuf authorization parser. Add 
 appropriate transport adapter for those formats while retaining the shared decision
 point. Likewise, streams that address resources after their initial message need
 explicit state handling and tests. The authorization interceptor does not support StreamingPull.
+GCS intentionally does not register its REST controllers with that filter. Its
+bucket authorization service calls the same evaluator after applying GCS-specific
+credential handling, and can therefore be reused by XML, media, upload, and
+service-layer paths as their IAM coverage is added.
 
 ## Required tests
 
@@ -71,10 +77,13 @@ runs the default suite and then this test against a separate enforcing native em
 ## Storage and concurrency
 
 Policies use the global IAM store under the exact resource key; service stores
-use project routing. Authorization does not alter resource lifecycles, deletion
-ordering, or locking. Evaluation reads each policy under its striped policy lock. It does not hold a lock
-across authorization and the subsequent service mutation, nor does it promise a
-consistent snapshot across concurrent child/project policy updates.
+use project routing. GCS retains the lifecycle invariant from its owning service:
+the IAM policy lock is acquired before the bucket mutation lock, and bucket creation
+holds the bucket lock through initial-policy persistence and durable rollback.
+Bucket policy mutation performs authorization while holding the policy lock. The
+shared REST filter and gRPC interceptor do not hold a lock across authorization and
+the subsequent service mutation, nor does evaluation promise a consistent snapshot
+across concurrent child/project policy updates.
 
 ## Upstream evidence
 

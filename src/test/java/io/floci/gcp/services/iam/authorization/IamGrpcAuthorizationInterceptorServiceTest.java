@@ -36,7 +36,7 @@ class IamGrpcAuthorizationInterceptorServiceTest {
         });
         IamAuthorizationService authorization = mock(IamAuthorizationService.class);
         when(authorization.enabled()).thenReturn(true);
-        when(authorization.applies("Bearer example")).thenReturn(true);
+        when(authorization.applies("Bearer example", adapter)).thenReturn(true);
         if (denied) {
             doThrow(GcpException.permissionDenied("example.resources.get denied"))
                     .when(authorization).authorize("Bearer example", adapter, operation);

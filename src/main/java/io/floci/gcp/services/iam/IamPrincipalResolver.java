@@ -2,6 +2,7 @@ package io.floci.gcp.services.iam;
 
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
+import io.floci.gcp.services.iam.authorization.IamIdentityKind;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -22,13 +23,16 @@ public class IamPrincipalResolver {
     }
 
     public Resolution resolve(String authorization) {
+        if (authorization == null || authorization.isBlank()) {
+            return Resolution.anonymous();
+        }
         Optional<String> bearerToken = bearerToken(authorization);
         if (bearerToken.isEmpty()) {
-            return Resolution.anonymous();
+            return Resolution.external();
         }
         Optional<StoredCredentialToken> token = tokenService.lookupBearerToken(bearerToken.get());
         if (token.isEmpty()) {
-            return Resolution.anonymous();
+            return Resolution.external();
         }
         if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
             return Resolution.downscopedToken(token.get().getPrincipal());
@@ -57,21 +61,30 @@ public class IamPrincipalResolver {
                 : principal;
     }
 
-    public record Resolution(IamPrincipal principal, boolean downscoped) {
+    public record Resolution(IamPrincipal principal, IamIdentityKind kind) {
+
+        public boolean downscoped() {
+            return kind == IamIdentityKind.FLOCI_DOWNSCOPED;
+        }
 
         private static Resolution anonymous() {
-            return new Resolution(IamPrincipal.anonymous(), false);
+            return new Resolution(IamPrincipal.anonymous(), IamIdentityKind.ANONYMOUS);
+        }
+
+        private static Resolution external() {
+            return new Resolution(IamPrincipal.anonymous(), IamIdentityKind.EXTERNAL);
         }
 
         private static Resolution downscopedToken(String principal) {
             if (principal == null || principal.isBlank()) {
-                return new Resolution(IamPrincipal.anonymous(), true);
+                return new Resolution(IamPrincipal.anonymous(), IamIdentityKind.FLOCI_DOWNSCOPED);
             }
-            return new Resolution(IamPrincipal.serviceAccount(normalizeServiceAccount(principal)), true);
+            return new Resolution(IamPrincipal.serviceAccount(normalizeServiceAccount(principal)),
+                    IamIdentityKind.FLOCI_DOWNSCOPED);
         }
 
         private static Resolution authenticated(IamPrincipal principal) {
-            return new Resolution(principal, false);
+            return new Resolution(principal, IamIdentityKind.FLOCI_SERVICE_ACCOUNT);
         }
     }
 }

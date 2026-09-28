@@ -132,6 +132,11 @@ public class IamAuthorizationService {
         }
     }
 
+    /** Holds the target and ancestor policy locks while a service authorizes and mutates state. */
+    public <T> T withPolicyLocks(IamResource resource, Supplier<T> action) {
+        return policies.withPolicyLocks(hierarchy.policyResourcesFor(resource), action);
+    }
+
     public List<String> testPermissions(String resource, List<String> requested) {
         String authorization = currentAuthorization();
         if (!enabled()) {

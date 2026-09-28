@@ -35,6 +35,29 @@ public class GcsIamAuthorizationService {
         requireBucketIamPermission(authorizationHeader, bucket, permission);
     }
 
+    public <T> T withBucketPermission(String authorizationHeader, String bucket, String permission,
+            Supplier<T> action) {
+        cabAuthorization.rejectDownscopedToken(authorizationHeader);
+        if (!authorization.enabled()) {
+            return authorization.withPolicyLocks(IamResource.gcsBucket(bucket), action);
+        }
+
+        while (true) {
+            IamResource resource = adapter.bucketResource(bucket);
+            LockedResult<T> result = authorization.withPolicyLocks(resource, () -> {
+                if (!resource.equals(adapter.bucketResource(bucket))) {
+                    return new LockedResult<>(true, null);
+                }
+                authorization.authorize(
+                        authorizationHeader, adapter, new IamPermissionCheck(permission, resource));
+                return new LockedResult<>(false, action.get());
+            });
+            if (!result.retry()) {
+                return result.value();
+            }
+        }
+    }
+
     public void requireObjectRead(String authorizationHeader, String bucket, String object) {
         cabAuthorization.requireObjectRead(authorizationHeader, bucket, object);
         requireObjectIamPermission(authorizationHeader, bucket, object, "storage.objects.get");

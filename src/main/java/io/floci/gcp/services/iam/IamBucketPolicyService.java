@@ -33,15 +33,13 @@ public class IamBucketPolicyService {
     }
 
     public StoredPolicy setPolicy(String bucket, String authorization, StoredPolicy storedPolicy) {
-        String policyResource = IamResource.gcsBucket(bucket).policyResource();
-        return iamService.withPolicyLock(policyResource, () -> {
-            iamAuthorizationService.requireBucketPermission(
-                    authorization, bucket, "storage.buckets.setIamPolicy");
-            gcsService.getBucket(bucket);
-            IamPolicy policy = IamPolicyNormalizer.normalize(storedPolicy);
-            validateConditions(bucket, policy);
-            return iamService.setPolicy(policyResource, storedPolicy);
-        });
+        return iamAuthorizationService.withBucketPermission(
+                authorization, bucket, "storage.buckets.setIamPolicy", () -> {
+                    gcsService.getBucket(bucket);
+                    IamPolicy policy = IamPolicyNormalizer.normalize(storedPolicy);
+                    validateConditions(bucket, policy);
+                    return iamService.setPolicy(IamResource.gcsBucket(bucket).policyResource(), storedPolicy);
+                });
     }
 
     public List<String> testPermissions(String bucket, String authorization, List<String> requestedPermissions) {

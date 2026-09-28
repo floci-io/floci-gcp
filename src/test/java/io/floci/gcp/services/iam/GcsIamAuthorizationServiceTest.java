@@ -7,6 +7,7 @@ import io.floci.gcp.services.gcs.GcsIamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.authorization.IamIdentityKind;
+import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import org.junit.jupiter.api.Test;
@@ -21,14 +22,21 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -62,6 +70,36 @@ class GcsIamAuthorizationServiceTest {
         assertSame(requested, granted);
         verify(cabAuthorization).rejectDownscopedToken(null);
         verify(adapter, never()).bucketResource("bucket");
+    }
+
+    @Test
+    void mutationRetriesWithCurrentProjectWhenBucketOwnershipChangesBeforeLocking() {
+        GcsAuthorizationService cabAuthorization = mock(GcsAuthorizationService.class);
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
+        GcsIamAuthorizationService service = new GcsIamAuthorizationService(
+                cabAuthorization, authorization, adapter);
+        when(authorization.enabled()).thenReturn(true);
+        IamResource previous = IamResource.gcsBucket("bucket", "previous-project");
+        IamResource current = IamResource.gcsBucket("bucket", "current-project");
+        when(adapter.bucketResource("bucket")).thenReturn(previous, current, current, current);
+        doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
+                .when(authorization).withPolicyLocks(any(IamResource.class), any());
+        AtomicInteger actions = new AtomicInteger();
+
+        String result = service.withBucketPermission(
+                "authorization", "bucket", "storage.buckets.setIamPolicy", () -> {
+                    actions.incrementAndGet();
+                    return "written";
+                });
+
+        assertEquals("written", result);
+        assertEquals(1, actions.get());
+        verify(cabAuthorization).rejectDownscopedToken("authorization");
+        verify(authorization, times(2)).withPolicyLocks(any(IamResource.class), any());
+        verify(authorization).authorize(
+                eq("authorization"), same(adapter),
+                eq(new IamPermissionCheck("storage.buckets.setIamPolicy", current)));
     }
 
     @Test

@@ -80,10 +80,11 @@ Policies use the global IAM store under the exact resource key; service stores
 use project routing. GCS retains the lifecycle invariant from its owning service:
 the IAM policy lock is acquired before the bucket mutation lock, and bucket creation
 holds the bucket lock through initial-policy persistence and durable rollback.
-Bucket policy mutation performs authorization while holding the policy lock. The
-shared REST filter and gRPC interceptor do not hold a lock across authorization and
-the subsequent service mutation, nor does evaluation promise a consistent snapshot
-across concurrent child/project policy updates.
+Bucket policy mutation acquires the bucket and owning-project policy locks in global
+stripe order, revalidates bucket ownership, and holds both locks through authorization
+and the policy write. The shared REST filter and gRPC interceptor do not hold a lock
+across authorization and the subsequent service mutation. Other service integrations
+must use the service-level ordered-lock entry point when that consistency is required.
 
 ## Upstream evidence
 

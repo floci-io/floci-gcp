@@ -10,6 +10,7 @@ import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import jakarta.enterprise.inject.Instance;
@@ -29,6 +30,9 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -39,7 +43,16 @@ class IamBucketPolicyServiceTest {
     @Test
     void authorizationAndPolicyWriteExcludeConcurrentRevocation() throws Exception {
         String bucket = "concurrent-policy-bucket";
-        String resource = "buckets/" + bucket;
+        assertRevocationExcluded(bucket, "buckets/" + bucket);
+    }
+
+    @Test
+    void authorizationAndPolicyWriteExcludeConcurrentProjectRevocation() throws Exception {
+        String bucket = "concurrent-project-policy-bucket";
+        assertRevocationExcluded(bucket, "projects/test-project");
+    }
+
+    private static void assertRevocationExcluded(String bucket, String grantingResource) throws Exception {
         IamService iamService = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
         GcsService gcsService = mock(GcsService.class);
@@ -68,18 +81,18 @@ class IamBucketPolicyServiceTest {
         IamRoleCatalog roleCatalog = new IamRoleCatalog(registry);
         IamPolicyEvaluator policyEvaluator = new IamPolicyEvaluator(
                 roleCatalog, new IamResourceHierarchy(), conditionEvaluator);
-        IamAuthorizationService sharedAuthorization = new IamAuthorizationService(
+        IamAuthorizationService sharedAuthorization = spy(new IamAuthorizationService(
                 config, principalResolver, policyEvaluator, new IamResourceHierarchy(), roleCatalog,
-                conditionEvaluator, iamService, registry, new IamRequestIdentity());
-        GcsIamAuthorizationService authorizationService = spy(new GcsIamAuthorizationService(
-                new GcsAuthorizationService(tokenService), sharedAuthorization, adapter));
+                conditionEvaluator, iamService, registry, new IamRequestIdentity()));
+        GcsIamAuthorizationService authorizationService = new GcsIamAuthorizationService(
+                new GcsAuthorizationService(tokenService), sharedAuthorization, adapter);
         IamBucketPolicyService policyService = new IamBucketPolicyService(
                 iamService,
                 gcsService,
                 authorizationService,
                 conditionEvaluator);
 
-        iamService.setPolicy(resource, policy("roles/storage.admin"));
+        iamService.setPolicy(grantingResource, policy("roles/storage.admin"));
 
         CountDownLatch authorizationCompleted = new CountDownLatch(1);
         CountDownLatch allowPolicyWrite = new CountDownLatch(1);
@@ -88,8 +101,8 @@ class IamBucketPolicyServiceTest {
             authorizationCompleted.countDown();
             await(allowPolicyWrite);
             return null;
-        }).when(authorizationService).requireBucketPermission(
-                authorization, bucket, "storage.buckets.setIamPolicy");
+        }).when(sharedAuthorization).authorize(
+                eq(authorization), same(adapter), any(IamPermissionCheck.class));
 
         StoredPolicy restoringPolicy = policy("roles/storage.admin");
         StoredPolicy revokedPolicy = new StoredPolicy();
@@ -103,7 +116,7 @@ class IamBucketPolicyServiceTest {
             CountDownLatch revokerStarted = new CountDownLatch(1);
             Future<?> revoker = executor.submit(() -> {
                 revokerStarted.countDown();
-                iamService.setPolicy(resource, revokedPolicy);
+                iamService.setPolicy(grantingResource, revokedPolicy);
             });
             assertTrue(revokerStarted.await(5, TimeUnit.SECONDS));
             assertThrows(TimeoutException.class, () -> revoker.get(100, TimeUnit.MILLISECONDS));
@@ -111,7 +124,7 @@ class IamBucketPolicyServiceTest {
             allowPolicyWrite.countDown();
             writer.get(5, TimeUnit.SECONDS);
             revoker.get(5, TimeUnit.SECONDS);
-            assertTrue(iamService.getPolicy(resource).getBindings().isEmpty());
+            assertTrue(iamService.getPolicy(grantingResource).getBindings().isEmpty());
         } finally {
             allowPolicyWrite.countDown();
             executor.shutdownNow();

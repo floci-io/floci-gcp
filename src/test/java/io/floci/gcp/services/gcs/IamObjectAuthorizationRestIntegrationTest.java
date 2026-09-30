@@ -314,6 +314,71 @@ class IamObjectAuthorizationRestIntegrationTest {
     }
 
     @Test
+    void objectViewerCannotUseXmlMultipartOperations() {
+        String bucket = createBucket();
+        String object = "denied-multipart.txt";
+        String path = "/" + bucket + "/" + object;
+        setRole(bucket, "roles/storage.objectAdmin");
+        String uploadId = initiateXmlMultipart(path);
+        String etag = uploadXmlMultipartPart(path, uploadId, "original");
+        String completion = xmlMultipartCompletion(etag);
+        setRole(bucket, "roles/storage.objectViewer");
+
+        given().when().post(path + "?uploads").then().statusCode(403);
+        given().body("replacement").when()
+                .put(path + "?uploadId=" + uploadId + "&partNumber=1").then().statusCode(403);
+        given().when().get(path + "?uploadId=" + uploadId).then().statusCode(403);
+        given().when().get("/" + bucket + "?uploads").then().statusCode(403);
+        given().contentType("application/xml").body(completion).when()
+                .post(path + "?uploadId=" + uploadId).then().statusCode(403);
+        given().when().delete(path + "?uploadId=" + uploadId).then().statusCode(403);
+
+        assertFalse(gcsService.objectExists(bucket, object));
+        setRole(bucket, "roles/storage.objectAdmin");
+        given().when().delete(path + "?uploadId=" + uploadId).then().statusCode(204);
+    }
+
+    @Test
+    void xmlMultipartPermissionsAllowCreationAndProtectReplacement() {
+        String bucket = createBucket();
+        String createdObject = "created-multipart.txt";
+        String createdPath = "/" + bucket + "/" + createdObject;
+        gcsService.putObject(bucket, "existing-multipart.txt", "text/plain",
+                "original".getBytes(StandardCharsets.UTF_8), GcsCustomerEncryption.none(),
+                "http://localhost:4588");
+        setRole(bucket, "roles/storage.objectCreator");
+
+        String createdUploadId = initiateXmlMultipart(createdPath);
+        String createdEtag = uploadXmlMultipartPart(createdPath, createdUploadId, "created");
+        given().when().get(createdPath + "?uploadId=" + createdUploadId).then().statusCode(200);
+        given().contentType("application/xml").body(xmlMultipartCompletion(createdEtag)).when()
+                .post(createdPath + "?uploadId=" + createdUploadId).then().statusCode(200);
+        assertArrayEquals("created".getBytes(StandardCharsets.UTF_8),
+                gcsService.getObjectData(bucket, createdObject, GcsCustomerEncryption.none()));
+
+        String abortedPath = "/" + bucket + "/aborted-multipart.txt";
+        String abortedUploadId = initiateXmlMultipart(abortedPath);
+        given().when().get("/" + bucket + "?uploads").then().statusCode(403);
+        given().when().delete(abortedPath + "?uploadId=" + abortedUploadId).then().statusCode(204);
+
+        String existingPath = "/" + bucket + "/existing-multipart.txt";
+        String existingUploadId = initiateXmlMultipart(existingPath);
+        String existingEtag = uploadXmlMultipartPart(existingPath, existingUploadId, "replacement");
+        String completion = xmlMultipartCompletion(existingEtag);
+        given().contentType("application/xml").body(completion).when()
+                .post(existingPath + "?uploadId=" + existingUploadId).then().statusCode(403);
+        assertArrayEquals("original".getBytes(StandardCharsets.UTF_8),
+                gcsService.getObjectData(bucket, "existing-multipart.txt", GcsCustomerEncryption.none()));
+
+        setRole(bucket, "roles/storage.objectAdmin");
+        given().when().get("/" + bucket + "?uploads").then().statusCode(200);
+        given().contentType("application/xml").body(completion).when()
+                .post(existingPath + "?uploadId=" + existingUploadId).then().statusCode(200);
+        assertArrayEquals("replacement".getBytes(StandardCharsets.UTF_8),
+                gcsService.getObjectData(bucket, "existing-multipart.txt", GcsCustomerEncryption.none()));
+    }
+
+    @Test
     void objectViewerCannotStartMultipartOrResumableUploads() {
         String bucket = createBucket();
         setRole(bucket, "roles/storage.objectViewer");
@@ -421,6 +486,21 @@ class IamObjectAuthorizationRestIntegrationTest {
     private String bearer(String serviceAccount) {
         return "Bearer " + tokenService.mintImpersonatedToken(serviceAccount, Instant.now().plusSeconds(600))
                 .getTokenValue();
+    }
+
+    private static String initiateXmlMultipart(String path) {
+        return given().when().post(path + "?uploads").then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+    }
+
+    private static String uploadXmlMultipartPart(String path, String uploadId, String content) {
+        return given().body(content).when().put(path + "?uploadId=" + uploadId + "&partNumber=1")
+                .then().statusCode(200).extract().header("ETag");
+    }
+
+    private static String xmlMultipartCompletion(String etag) {
+        return "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
+                + etag + "</ETag></Part></CompleteMultipartUpload>";
     }
 
     private static RequestSpecification signedRequest() {

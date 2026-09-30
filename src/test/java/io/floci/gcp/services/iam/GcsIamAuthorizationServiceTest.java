@@ -101,6 +101,41 @@ class GcsIamAuthorizationServiceTest {
         }
     }
 
+    @Test
+    void multipartCompletionAcquiresPolicyLockBeforeTheStorageMutationLock() throws Exception {
+        IamService iamService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        iamService.setPolicy("buckets/bucket", objectAdminPolicy());
+        GcsIamAuthorizationService authorizationService = authorizationService(iamService, new IamRoleCatalog());
+        Object storageMutationLock = new Object();
+        CountDownLatch mutationReady = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> completion;
+            Future<?> policyWriter;
+            synchronized (storageMutationLock) {
+                completion = executor.submit(() -> authorizationService.authorizeMultipartCompletion(
+                        null, "bucket", "object.txt", requireOverwritePermission -> {
+                            mutationReady.countDown();
+                            synchronized (storageMutationLock) {
+                                return null;
+                            }
+                        }));
+                assertTrue(mutationReady.await(5, TimeUnit.SECONDS));
+
+                policyWriter = executor.submit(
+                        () -> iamService.setPolicy("buckets/bucket", objectAdminPolicy()));
+                assertThrows(TimeoutException.class, () -> policyWriter.get(100, TimeUnit.MILLISECONDS));
+                assertThrows(TimeoutException.class, () -> completion.get(100, TimeUnit.MILLISECONDS));
+            }
+            completion.get(5, TimeUnit.SECONDS);
+            policyWriter.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private static GcsIamAuthorizationService authorizationService(
             IamService iamService, IamRoleCatalog roleCatalog) {
         EmulatorConfig config = mock(EmulatorConfig.class);

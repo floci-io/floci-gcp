@@ -762,9 +762,10 @@ public class GcsService {
     }
 
     public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
-            byte[] data, Map<String, String> metadata, String baseUrl) {
+            byte[] data, Map<String, String> metadata, String baseUrl, Runnable requireOverwritePermission) {
         synchronized (bucketLock(bucket)) {
             synchronized (objectLock(bucket, objectName)) {
+                requireOverwritePermission(bucket, objectName, requireOverwritePermission);
                 checkPreconditions(bucket, objectName, GcsObjectPreconditions.NONE);
                 GcsObjectMeta result = putObjectLocked(bucket, objectName, contentType, data,
                         GcsCustomerEncryption.none(), metadata, null, baseUrl, ObjectWriteMode.XML_MULTIPART, null);

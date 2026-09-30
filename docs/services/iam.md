@@ -27,6 +27,12 @@ the session URI then acts as the authorization token for status queries and chun
 including requests without an `Authorization` header. ACL operations are not
 restricted by IAM allow policies.
 
+XML multipart upload IDs are not authentication tokens. In `enforce` mode, every
+initiate, part upload, completion, list, list-parts, and abort request evaluates its
+documented `storage.multipartUploads.*` permission. Uploading parts and completing an
+upload also require `storage.objects.create`; completion requires
+`storage.objects.delete` when it replaces a live object.
+
 The initial role catalog supports `roles/storage.objectViewer`,
 `roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
 `roles/storage.admin` for the explicitly enforced permissions. Bucket policies

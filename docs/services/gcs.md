@@ -411,8 +411,10 @@ unsupported. The emulator buffers parts and completed bytes in memory. Object
 publication and session removal are separate checkpoints; crash-atomic completion
 across those stores is not guaranteed.
 
-Authentication retains the existing emulator credential acceptance and limited
-CAB checks. Signed URL expiry checks do not prove cryptographic signature
+Authentication retains the existing emulator credential acceptance and CAB checks.
+In IAM `enforce` mode, every XML multipart request also evaluates its documented
+`storage.multipartUploads.*` and object permissions; an upload ID is not an
+authenticator. Signed URL expiry checks do not prove cryptographic signature
 enforcement. The SDK suite uses only synthetic credentials and fixture signing keys.
 
 Multipart object metadata is finalized before storage publication and Pub/Sub or

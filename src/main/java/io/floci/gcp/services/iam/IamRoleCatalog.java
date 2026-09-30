@@ -11,13 +11,19 @@ import java.util.Set;
 public class IamRoleCatalog {
 
     private static final Set<String> OBJECT_VIEWER = Set.of("storage.objects.get", "storage.objects.list");
-    private static final Set<String> OBJECT_CREATOR = Set.of("storage.objects.create");
+    private static final Set<String> OBJECT_CREATOR = Set.of(
+            "storage.multipartUploads.abort", "storage.multipartUploads.create",
+            "storage.multipartUploads.listParts", "storage.objects.create");
     private static final Set<String> OBJECT_ADMIN = Set.of(
+            "storage.multipartUploads.abort", "storage.multipartUploads.create",
+            "storage.multipartUploads.list", "storage.multipartUploads.listParts",
             "storage.objects.get", "storage.objects.list", "storage.objects.create",
             "storage.objects.delete", "storage.objects.update", "storage.objects.move", "storage.objects.restore");
     private static final Set<String> STORAGE_ADMIN = Set.of(
             "storage.buckets.get", "storage.buckets.update", "storage.buckets.delete",
             "storage.buckets.getIamPolicy", "storage.buckets.setIamPolicy",
+            "storage.multipartUploads.abort", "storage.multipartUploads.create",
+            "storage.multipartUploads.list", "storage.multipartUploads.listParts",
             "storage.objects.get", "storage.objects.list", "storage.objects.create",
             "storage.objects.delete", "storage.objects.update", "storage.objects.move", "storage.objects.restore");
 

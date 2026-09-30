@@ -69,6 +69,50 @@ public class GcsIamAuthorizationService {
         });
     }
 
+    public <T> T authorizeMultipartWrite(String authorization, String bucket, String object,
+            Supplier<T> mutation) {
+        return withObjectPolicyLocks(List.of(bucket), () -> {
+            requireMultipartWrite(authorization, bucket, object);
+            return mutation.get();
+        });
+    }
+
+    public <T> T authorizeMultipartCompletion(String authorization, String bucket, String object,
+            Function<Runnable, T> mutation) {
+        return withObjectPolicyLocks(List.of(bucket), () -> {
+            requireMultipartWrite(authorization, bucket, object);
+            return mutation.apply(deferredObjectDelete(authorization, bucket, object));
+        });
+    }
+
+    public <T> T authorizeMultipartAbort(String authorization, String bucket, String object,
+            Supplier<T> mutation) {
+        return withObjectPolicyLocks(List.of(bucket), () -> {
+            cabAuthorization.requireObjectDelete(authorization, bucket, object);
+            requirePermission(authorization, "storage.multipartUploads.abort",
+                    IamResource.gcsObject(bucket, object));
+            return mutation.get();
+        });
+    }
+
+    public void requireMultipartList(String authorization, String bucket, String prefix) {
+        cabAuthorization.requireObjectList(authorization, bucket, prefix);
+        requirePermission(authorization, "storage.multipartUploads.list", IamResource.gcsBucket(bucket));
+    }
+
+    public void requireMultipartListParts(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectRead(authorization, bucket, object);
+        requirePermission(authorization, "storage.multipartUploads.listParts",
+                IamResource.gcsObject(bucket, object));
+    }
+
+    private void requireMultipartWrite(String authorization, String bucket, String object) {
+        cabAuthorization.requireObjectWrite(authorization, bucket, object);
+        IamResource resource = IamResource.gcsObject(bucket, object);
+        requirePermission(authorization, "storage.multipartUploads.create", resource);
+        requirePermission(authorization, "storage.objects.create", resource);
+    }
+
     public void requireObjectDelete(String authorization, String bucket, String object) {
         cabAuthorization.requireObjectDelete(authorization, bucket, object);
         requirePermission(authorization, "storage.objects.delete", IamResource.gcsObject(bucket, object));

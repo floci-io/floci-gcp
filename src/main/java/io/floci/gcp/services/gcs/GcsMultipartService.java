@@ -56,6 +56,10 @@ public class GcsMultipartService {
         });
     }
     public GcsObjectMeta complete(String bucket, String object, String id, List<Map<String,String>> requested, String baseUrl) {
+        return complete(bucket, object, id, requested, baseUrl, null);
+    }
+    public GcsObjectMeta complete(String bucket, String object, String id, List<Map<String,String>> requested,
+            String baseUrl, Runnable requireOverwritePermission) {
         return gcs.withMultipartBucketLock(bucket, () -> {
             GcsMultipartUpload upload = get(bucket, object, id);
             if (requested.isEmpty() || requested.size() > 10000) { throw GcpException.invalidArgument("A part list is required").withReason("MalformedXML"); }
@@ -73,7 +77,8 @@ public class GcsMultipartService {
                 if (i < requested.size() - 1 && part.data().length < 5 * 1024 * 1024) { throw GcpException.invalidArgument("Non-final parts must contain at least 5 MiB").withReason("InvalidArgument"); }
                 data.writeBytes(part.data());
             }
-            GcsObjectMeta meta = gcs.putXmlMultipartObject(bucket, object, upload.contentType, data.toByteArray(), upload.metadata, baseUrl);
+            GcsObjectMeta meta = gcs.putXmlMultipartObject(bucket, object, upload.contentType,
+                    data.toByteArray(), upload.metadata, baseUrl, requireOverwritePermission);
             uploads.delete(id); uploads.checkpoint(); return meta;
         });
     }

@@ -379,10 +379,11 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 ## IAM allow-policy enforcement
 
 Set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` to evaluate supported
-bucket IAM allow policies for bucket and object operations. The default remains
-`disabled`, preserving the emulator's no-auth behavior. See the [IAM service](iam.md)
-for supported principals, roles, conditions, bootstrap administration, and
-intentional exclusions.
+bucket IAM allow policies for REST JSON and XML bucket and object operations.
+GCS gRPC v2 remains outside IAM allow-policy enforcement; its existing Credential
+Access Boundary checks still apply. The default remains `disabled`, preserving the
+emulator's no-auth behavior. See the [IAM service](iam.md) for supported principals,
+roles, conditions, bootstrap administration, and intentional exclusions.
 
 **Conditional requests (preconditions):**
 

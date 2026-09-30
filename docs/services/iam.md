@@ -35,9 +35,9 @@ inherit to objects. Conditions support `resource.name` equality,
 macros, and undeclared attributes are rejected.
 
 Object-list conditions authorize the bucket-level `storage.objects.list`
-permission but do not filter returned objects. ACLs, project policies, deny
-policies, custom roles, groups, and the full UBLA lifecycle remain outside this
-evaluator. Signed-URL identity remains outside the evaluator. Because the emulator
+permission but do not filter returned objects. GCS gRPC, ACLs, project policies,
+deny policies, custom roles, groups, and the full UBLA lifecycle remain outside
+this evaluator. Signed-URL identity remains outside the evaluator. Because the emulator
 does not cryptographically verify V4 signatures, signed URLs are treated as anonymous
 in `enforce` mode and can access only resources granted to `allUsers`. Conditional
 bindings require UBLA, and a

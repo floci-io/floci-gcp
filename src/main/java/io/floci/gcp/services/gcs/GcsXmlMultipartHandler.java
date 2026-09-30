@@ -10,6 +10,7 @@ import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /** Shares the XML object routes with ordinary transfers, dispatched by native query parameters. */
 @ApplicationScoped
@@ -42,13 +44,16 @@ public class GcsXmlMultipartHandler {
             MultivaluedMap<String, String> query = uri.getQueryParameters();
             String id = query.getFirst("uploadId");
             if (object == null && method.equals("GET") && query.containsKey("uploads")) {
-                authorizationService.requireMultipartList(authorization, bucket, query.getFirst("prefix"));
+                authorize(
+                        () -> authorizationService.requireMultipartList(
+                                authorization, bucket, query.getFirst("prefix")),
+                        authorization);
                 rejectUnsupportedHeaders(headers);
                 return list(bucket, query);
             }
             if (object == null) { throw GcpException.invalidArgument("Object name is required"); }
             if (method.equals("POST") && query.containsKey("uploads") && id == null) {
-                return authorizationService.authorizeMultipartWrite(authorization, bucket, object, () -> {
+                return authorize(() -> authorizationService.authorizeMultipartWrite(authorization, bucket, object, () -> {
                     rejectUnsupportedHeaders(headers);
                     Map<String, String> metadata = new LinkedHashMap<String,String>();
                     headers.getRequestHeaders().forEach((key, values) -> {
@@ -59,19 +64,20 @@ public class GcsXmlMultipartHandler {
                     return xml(new XmlBuilder().start("InitiateMultipartUploadResult", NS)
                             .elem("Bucket", bucket).elem("Key", object).elem("UploadId", upload.id)
                             .end("InitiateMultipartUploadResult"));
-                });
+                }), authorization);
             }
             if (id == null || id.isBlank()) { throw GcpException.invalidArgument("uploadId is required"); }
             return switch (method) {
-                case "PUT" -> authorizationService.authorizeMultipartWrite(authorization, bucket, object, () -> {
+                case "PUT" -> authorize(() -> authorizationService.authorizeMultipartWrite(
+                        authorization, bucket, object, () -> {
                     rejectUnsupportedHeaders(headers);
                     int number = number(query.getFirst("partNumber"), 1, 10000);
                     GcsMultipartUpload.Part part = service.putPart(bucket, object, id, number, bytes == null ? new byte[0] : bytes, headers.getHeaderString("Content-MD5"));
                     return Response.ok().header("ETag", part.etag())
                             .header("x-goog-hash", "crc32c=" + GcsService.computeCrc32c(part.data())
                                     + ",md5=" + GcsService.computeMd5(part.data())).build();
-                });
-                case "POST" -> authorizationService.authorizeMultipartCompletion(
+                }), authorization);
+                case "POST" -> authorize(() -> authorizationService.authorizeMultipartCompletion(
                         authorization, bucket, object, requireOverwritePermission -> {
                     rejectUnsupportedHeaders(headers);
                     List<Map<String, String>> requested = XmlParser.parseRecords(new String(bytes == null ? new byte[0] : bytes, StandardCharsets.UTF_8), "CompleteMultipartUpload", "Part");
@@ -82,15 +88,18 @@ public class GcsXmlMultipartHandler {
                             .elem("Bucket", bucket).elem("Key", object).elem("ETag", "\"" + meta.getEtag() + "\"").end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
                             .header("ETag", "\"" + meta.getEtag() + "\"").header("x-goog-generation", meta.getGeneration())
                             .header("x-goog-hash", "crc32c=" + meta.getCrc32c()).build();
-                });
-                case "DELETE" -> authorizationService.authorizeMultipartAbort(
+                }), authorization);
+                case "DELETE" -> authorize(() -> authorizationService.authorizeMultipartAbort(
                         authorization, bucket, object, () -> {
                     rejectUnsupportedHeaders(headers);
                     service.abort(bucket, object, id);
                     return Response.noContent().build();
-                });
+                }), authorization);
                 case "GET" -> {
-                    authorizationService.requireMultipartListParts(authorization, bucket, object);
+                    authorize(
+                            () -> authorizationService.requireMultipartListParts(
+                                    authorization, bucket, object),
+                            authorization);
                     rejectUnsupportedHeaders(headers);
                     int marker = number(Optional.ofNullable(query.getFirst("part-number-marker")).orElse("0"), 0, 10000);
                     int max = number(Optional.ofNullable(query.getFirst("max-parts")).orElse("1000"), 1, 1000);
@@ -108,8 +117,23 @@ public class GcsXmlMultipartHandler {
             String code = error.getReason() != null ? error.getReason() : switch (error.getHttpStatus()) {
                 case 403 -> "AccessDenied"; case 404 -> "NoSuchBucket"; default -> "InvalidArgument";
             };
-            return Response.status(error.getHttpStatus()).type(MediaType.APPLICATION_XML)
-                    .entity(new XmlBuilder().start("Error").elem("Code", code).elem("Message", error.getMessage()).end("Error").build()).build();
+            return GcsXmlErrorResponse.of(error.getHttpStatus(), code, error.getMessage());
+        }
+    }
+    private static void authorize(Runnable authorizationCheck, String authorization) {
+        authorize(() -> {
+            authorizationCheck.run();
+            return null;
+        }, authorization);
+    }
+    private static <T> T authorize(Supplier<T> authorizationCheck, String authorization) {
+        try {
+            return authorizationCheck.get();
+        } catch (GcpException error) {
+            if (!GcsXmlErrorResponse.handlesAuthentication(error)) {
+                throw error;
+            }
+            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error, authorization));
         }
     }
     private static void rejectUnsupportedHeaders(HttpHeaders headers) {

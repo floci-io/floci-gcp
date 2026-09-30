@@ -1,8 +1,6 @@
 package io.floci.gcp.services.gcs;
 
-import io.floci.gcp.core.common.XmlBuilder;
 import jakarta.ws.rs.WebApplicationException;
-import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
@@ -48,10 +46,9 @@ final class GcsSignedUrl {
 
         expiresAt = expiresAt.plusSeconds(ttlSeconds);
         if (Instant.now().isAfter(expiresAt)) {
-            throw new WebApplicationException(Response.status(Response.Status.BAD_REQUEST)
-                    .type(MediaType.APPLICATION_XML)
-                    .entity(xmlError("ExpiredToken", "The provided token has expired.", null, null))
-                    .build());
+            throw new WebApplicationException(GcsXmlErrorResponse.of(
+                    Response.Status.BAD_REQUEST.getStatusCode(),
+                    "ExpiredToken", "The provided token has expired."));
         }
     }
 
@@ -65,20 +62,8 @@ final class GcsSignedUrl {
     }
 
     private static WebApplicationException malformedSecurityHeader(String details, String parameterName) {
-        return new WebApplicationException(Response.status(Response.Status.BAD_REQUEST)
-                .type(MediaType.APPLICATION_XML)
-                .entity(xmlError("MalformedSecurityHeader", "Your request has a malformed header.", details, parameterName))
-                .build());
-    }
-
-    private static String xmlError(String code, String message, String details, String parameterName) {
-        return new XmlBuilder()
-                .start("Error")
-                .elem("Code", code)
-                .elem("Message", message)
-                .elem("Details", details)
-                .elem("ParameterName", parameterName)
-                .end("Error")
-                .build();
+        return new WebApplicationException(GcsXmlErrorResponse.of(
+                Response.Status.BAD_REQUEST.getStatusCode(),
+                "MalformedSecurityHeader", "Your request has a malformed header.", details, parameterName));
     }
 }

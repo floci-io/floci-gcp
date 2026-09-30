@@ -30,7 +30,9 @@ Manager IAM enforcement is not supported.
    internal policy keys to CEL. Versioned resources can have a parent policy key.
 6. Contribute a finite predefined role map and exact `basicRoles` slices. Basic-role
    permissions are explicitly contributed by each service, never inferred by the
-   shared catalog. Do not use wildcard permission grants.
+   shared catalog. Do not use wildcard permission grants. Bindings with roles outside
+   the finite catalog are skipped as complete, non-granting bindings before condition
+   validation; they must not block grants from known bindings or policy recovery.
 7. Reuse `IamService` policy storage and its existing resource-existence resolvers.
    `testPermissions` routes registered resources through the evaluator. Override
    `validatePolicy` for service-specific binding constraints; it runs on policy
@@ -57,8 +59,10 @@ service-layer paths as their IAM coverage is added.
   condition exclusion, project inheritance, and cross-project isolation.
 - Independent REST and gRPC negative assertions, plus the same requests with the
   feature disabled. Cover each advertised transport with real clients.
-- `testIamPermissions`, policy-mutation escalation, unknown roles/resources/operations,
+- `testIamPermissions`, policy-mutation escalation, unknown resources/operations,
   malformed/expired credentials, and unsupported CEL constructs.
+- An uncatalogued role by itself denies normally, a known grant still succeeds beside
+  an uncatalogued role for the same caller, and the policy remains recoverable.
 - Multi-resource operations, streaming entry points, and side-effect absence after
   denial, where applicable.
 - Inventory controller methods so adding a handler cannot silently bypass the map.

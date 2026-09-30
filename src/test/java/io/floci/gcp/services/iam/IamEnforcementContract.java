@@ -230,19 +230,11 @@ abstract class IamEnforcementContract {
     }
 
     @Test
-    void unknownRoleIsDiagnosableOverBothTransports() {
+    void unknownRoleDoesNotGrantOverEitherTransport() {
         grant(project, "roles/custom.unimplemented", null);
         Response response = request().header("Authorization", credential).get("/v1/" + project);
-        if (enforced()) {
-            response.then().statusCode(400).body("error.status", equalTo("FAILED_PRECONDITION"))
-                    .body("error.message", containsString("roles/custom.unimplemented"));
-            StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> grpcRead(authenticated, project));
-            assertEquals(Status.Code.FAILED_PRECONDITION, error.getStatus().getCode());
-            assertTrue(error.getMessage().contains("roles/custom.unimplemented"));
-        } else {
-            response.then().statusCode(200);
-            grpcRead(authenticated, project);
-        }
+        restDenied(response);
+        grpcDenied(() -> grpcRead(authenticated, project));
     }
 
     @Test
@@ -256,6 +248,24 @@ abstract class IamEnforcementContract {
         request().contentType("application/json")
                 .body(Map.of("policy", Map.of("version", 1,
                         "bindings", List.of(unrelated, callerGrant))))
+                .post("/v1/" + project + ":setIamPolicy").then().statusCode(200);
+
+        request().header("Authorization", credential).get("/v1/" + project).then().statusCode(200);
+        grpcRead(authenticated, project);
+    }
+
+    @Test
+    void unknownRoleForCallerDoesNotBlockKnownGrantOrValidateItsCondition() {
+        Map<String, Object> unsupported = Map.of(
+                "role", "roles/pubsub.publisher",
+                "members", List.of(member),
+                "condition", Map.of("title", "unsupported", "expression", "resource.name.matches('.*')"));
+        Map<String, Object> callerGrant = Map.of(
+                "role", "roles/browser",
+                "members", List.of(member));
+        request().contentType("application/json")
+                .body(Map.of("policy", Map.of("version", 3,
+                        "bindings", List.of(unsupported, callerGrant))))
                 .post("/v1/" + project + ":setIamPolicy").then().statusCode(200);
 
         request().header("Authorization", credential).get("/v1/" + project).then().statusCode(200);

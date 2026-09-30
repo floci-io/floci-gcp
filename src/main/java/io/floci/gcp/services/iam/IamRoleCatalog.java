@@ -4,7 +4,6 @@ import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -15,8 +14,6 @@ import java.util.stream.Stream;
 /** Finite predefined-role catalog with service-owned permission contributions. */
 @ApplicationScoped
 public class IamRoleCatalog {
-
-    private static final Logger LOG = Logger.getLogger(IamRoleCatalog.class);
 
     private static final Set<String> OBJECT_VIEWER = Set.of("storage.objects.get", "storage.objects.list");
     private static final Set<String> OBJECT_CREATOR = Set.of(
@@ -74,10 +71,6 @@ public class IamRoleCatalog {
     }
 
     public boolean grants(String role, String permission) {
-        if (!contains(role)) {
-            LOG.warnf("IAM evaluator does not support role=%s", role);
-            return false;
-        }
-        return permissionsByRole.get(role).contains(permission);
+        return permissionsByRole.getOrDefault(role, Set.of()).contains(permission);
     }
 }

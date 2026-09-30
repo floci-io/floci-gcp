@@ -189,8 +189,7 @@ public class IamAuthorizationService {
                     continue;
                 }
                 if (!roles.contains(binding.role())) {
-                    throw GcpException.failedPrecondition("IAM enforcement does not support role "
-                            + binding.role() + " in policy " + key);
+                    continue;
                 }
                 if (binding.condition() != null) {
                     conditions.validate(binding.condition());

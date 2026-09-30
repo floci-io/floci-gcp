@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestProfile(IamBucketAuthorizationRestIntegrationTest.EnforceAuthorizationProfile.class)
@@ -97,6 +98,35 @@ class IamBucketAuthorizationRestIntegrationTest {
     }
 
     @Test
+    void uncataloguedBucketRoleDoesNotBlockKnownGrantOrPolicyRecovery() {
+        String bucket = createBucket();
+        iamService.setPolicy("buckets/" + bucket, policyWithUncataloguedRole("allUsers"));
+
+        given().when().get("/storage/v1/b/" + bucket).then().statusCode(200);
+        given().contentType("application/json").body(policyBody())
+                .when().put("/storage/v1/b/" + bucket + "/iam").then().statusCode(200);
+
+        StoredPolicy recovered = iamService.getPolicy("buckets/" + bucket);
+        assertEquals(1, recovered.getBindings().size());
+        assertEquals("roles/storage.admin", recovered.getBindings().get(0).get("role"));
+    }
+
+    @Test
+    void uncataloguedProjectRoleDoesNotBlockInheritedBucketGrant() {
+        String bucket = createBucket();
+        String email = "project-admin@test-project.iam.gserviceaccount.com";
+        iamService.setPolicy("projects/test-project", policyWithUncataloguedRole(
+                "serviceAccount:" + email));
+        String authorization = "Bearer " + tokenService
+                .mintImpersonatedToken(email, Instant.now().plusSeconds(600)).getTokenValue();
+
+        given().header("Authorization", authorization)
+                .when().get("/storage/v1/b/" + bucket).then().statusCode(200);
+        given().header("Authorization", authorization).contentType("application/json").body(policyBody())
+                .when().put("/storage/v1/b/" + bucket + "/iam").then().statusCode(200);
+    }
+
+    @Test
     void missingBucketRemainsNotFoundWhenAuthorizationIsEnforced() {
         String bucket = "missing-iam-bucket-" + UUID.randomUUID().toString().substring(0, 8);
 
@@ -137,6 +167,14 @@ class IamBucketAuthorizationRestIntegrationTest {
         StoredPolicy policy = new StoredPolicy();
         policy.setBindings(List.of(Map.of(
                 "role", role, "members", List.of(member))));
+        return policy;
+    }
+
+    private static StoredPolicy policyWithUncataloguedRole(String member) {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(
+                Map.of("role", "roles/storage.admin", "members", List.of(member)),
+                Map.of("role", "roles/storage.legacyBucketReader", "members", List.of(member))));
         return policy;
     }
 

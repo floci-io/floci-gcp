@@ -111,12 +111,12 @@ permissive policy storage.
 The finite catalog also contains `roles/storage.objectViewer`,
 `roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
 `roles/storage.admin` for the explicitly enforced bucket and object permissions.
-An unsupported role in a binding that applies to the caller produces
-`FAILED_PRECONDITION` naming the role and policy. Bindings for other callers do
-not block evaluation. Missing resource/operation mappings on an enforcing adapter
-also produce a named `FAILED_PRECONDITION`. The shared `google.iam.v1.IAMPolicy`
-gRPC mixin enforces project policy resources and rejects resource kinds without a registered mapping for recognized
-callers in enforce mode, including Pub/Sub policy calls routed through that mixin.
+Uncatalogued roles grant no permissions and do not block known
+bindings, including when they apply to the caller. Missing resource/operation
+mappings on an enforcing adapter produce a named `FAILED_PRECONDITION`. The shared
+`google.iam.v1.IAMPolicy` gRPC mixin enforces project policy resources and rejects
+resource kinds without a registered mapping for recognized callers in enforce mode,
+including Pub/Sub policy calls routed through that mixin.
 Those policy APIs support anonymous setup calls. Unsupported CEL expressions produce
 `INVALID_ARGUMENT`; they are not silently treated as a policy denial.
 

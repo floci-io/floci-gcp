@@ -46,8 +46,7 @@ public class GcsXmlMultipartHandler {
             if (object == null && method.equals("GET") && query.containsKey("uploads")) {
                 authorize(
                         () -> authorizationService.requireMultipartList(
-                                authorization, bucket, query.getFirst("prefix")),
-                        authorization);
+                                authorization, bucket, query.getFirst("prefix")));
                 rejectUnsupportedHeaders(headers);
                 return list(bucket, query);
             }
@@ -64,7 +63,7 @@ public class GcsXmlMultipartHandler {
                     return xml(new XmlBuilder().start("InitiateMultipartUploadResult", NS)
                             .elem("Bucket", bucket).elem("Key", object).elem("UploadId", upload.id)
                             .end("InitiateMultipartUploadResult"));
-                }), authorization);
+                }));
             }
             if (id == null || id.isBlank()) { throw GcpException.invalidArgument("uploadId is required"); }
             return switch (method) {
@@ -76,7 +75,7 @@ public class GcsXmlMultipartHandler {
                     return Response.ok().header("ETag", part.etag())
                             .header("x-goog-hash", "crc32c=" + GcsService.computeCrc32c(part.data())
                                     + ",md5=" + GcsService.computeMd5(part.data())).build();
-                }), authorization);
+                }));
                 case "POST" -> authorize(() -> authorizationService.authorizeMultipartCompletion(
                         authorization, bucket, object, requireOverwritePermission -> {
                     rejectUnsupportedHeaders(headers);
@@ -88,18 +87,17 @@ public class GcsXmlMultipartHandler {
                             .elem("Bucket", bucket).elem("Key", object).elem("ETag", "\"" + meta.getEtag() + "\"").end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
                             .header("ETag", "\"" + meta.getEtag() + "\"").header("x-goog-generation", meta.getGeneration())
                             .header("x-goog-hash", "crc32c=" + meta.getCrc32c()).build();
-                }), authorization);
+                }));
                 case "DELETE" -> authorize(() -> authorizationService.authorizeMultipartAbort(
                         authorization, bucket, object, () -> {
                     rejectUnsupportedHeaders(headers);
                     service.abort(bucket, object, id);
                     return Response.noContent().build();
-                }), authorization);
+                }));
                 case "GET" -> {
                     authorize(
                             () -> authorizationService.requireMultipartListParts(
-                                    authorization, bucket, object),
-                            authorization);
+                                    authorization, bucket, object));
                     rejectUnsupportedHeaders(headers);
                     int marker = number(Optional.ofNullable(query.getFirst("part-number-marker")).orElse("0"), 0, 10000);
                     int max = number(Optional.ofNullable(query.getFirst("max-parts")).orElse("1000"), 1, 1000);
@@ -120,20 +118,20 @@ public class GcsXmlMultipartHandler {
             return GcsXmlErrorResponse.of(error.getHttpStatus(), code, error.getMessage());
         }
     }
-    private static void authorize(Runnable authorizationCheck, String authorization) {
+    private static void authorize(Runnable authorizationCheck) {
         authorize(() -> {
             authorizationCheck.run();
             return null;
-        }, authorization);
+        });
     }
-    private static <T> T authorize(Supplier<T> authorizationCheck, String authorization) {
+    private static <T> T authorize(Supplier<T> authorizationCheck) {
         try {
             return authorizationCheck.get();
         } catch (GcpException error) {
             if (!GcsXmlErrorResponse.handlesAuthentication(error)) {
                 throw error;
             }
-            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error, authorization));
+            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error));
         }
     }
     private static void rejectUnsupportedHeaders(HttpHeaders headers) {

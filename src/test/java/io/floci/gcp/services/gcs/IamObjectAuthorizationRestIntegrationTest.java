@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -133,7 +135,9 @@ class IamObjectAuthorizationRestIntegrationTest {
         given().when().delete("/storage/v1/b/{bucket}/o/{object}", bucket, "existing.txt")
                 .then().statusCode(403);
         given().when().delete("/{bucket}/{object}", bucket, "existing.txt")
-                .then().statusCode(403);
+                .then().statusCode(403)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("AccessDenied"));
         given().contentType("text/plain").body("new")
                 .when().put("/{bucket}/{object}", bucket, "xml-upload.txt")
                 .then().statusCode(403);

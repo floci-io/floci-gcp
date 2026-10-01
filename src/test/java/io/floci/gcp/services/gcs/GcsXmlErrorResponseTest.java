@@ -12,13 +12,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GcsXmlErrorResponseTest {
 
     @Test
-    void anonymousPermissionDenialRequiresAuthentication() {
+    void anonymousPermissionDenialRemainsAccessDenied() {
         Response response = GcsXmlErrorResponse.authentication(
-                GcpException.permissionDenied("Access denied"), null);
+                GcpException.permissionDenied("Access denied"));
+
+        assertEquals(403, response.getStatus());
+        assertEquals(MediaType.APPLICATION_XML_TYPE, response.getMediaType());
+        assertTrue(response.getEntity().toString().contains("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void unknownCredentialRequiresAuthentication() {
+        Response response = GcsXmlErrorResponse.authentication(
+                GcpException.unauthenticated("Unknown Floci credential token"));
 
         assertEquals(401, response.getStatus());
-        assertEquals(MediaType.APPLICATION_XML_TYPE, response.getMediaType());
         assertTrue(response.getEntity().toString().contains("<Code>AuthenticationRequired</Code>"));
+    }
+
+    @Test
+    void expiredCredentialIsInvalidAuthentication() {
+        Response response = GcsXmlErrorResponse.authentication(
+                GcpException.unauthenticated("Expired Floci credential token"));
+
+        assertEquals(401, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidAuthentication</Code>"));
     }
 
     @Test

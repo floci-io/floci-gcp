@@ -40,14 +40,33 @@ class GcsXmlAuthenticationRestIntegrationTest {
     }
 
     @Test
-    void invalidCredentialReturnsXmlAuthenticationError() {
+    void unknownCredentialReturnsAuthenticationRequiredAcrossXmlRoutes() {
+        String authorization = "Bearer floci-gcp-downscoped-missing";
+
         given()
-                .header("Authorization", "Bearer floci-gcp-downscoped-missing")
+                .header("Authorization", authorization)
                 .when().get("/{bucket}/object.txt", bucket)
                 .then()
                 .statusCode(401)
                 .contentType(containsString("application/xml"))
-                .body("Error.Code", equalTo("InvalidAuthentication"));
+                .body("Error.Code", equalTo("AuthenticationRequired"));
+
+        given()
+                .header("Authorization", authorization)
+                .body("object data")
+                .when().put("/{bucket}/object.txt", bucket)
+                .then()
+                .statusCode(401)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("AuthenticationRequired"));
+
+        given()
+                .header("Authorization", authorization)
+                .when().post("/{bucket}/object.txt?uploads", bucket)
+                .then()
+                .statusCode(401)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("AuthenticationRequired"));
     }
 
     @Test

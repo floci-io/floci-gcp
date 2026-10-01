@@ -15,11 +15,12 @@ final class GcsXmlErrorResponse {
         return error.getHttpStatus() == 401 || error.getHttpStatus() == 403;
     }
 
-    static Response authentication(GcpException error, String authorization) {
-        boolean credentialProvided = authorization != null && !authorization.isBlank();
-        int status = error.getHttpStatus() == 403 && !credentialProvided ? 401 : error.getHttpStatus();
+    static Response authentication(GcpException error) {
+        int status = error.getHttpStatus();
         String code = switch (status) {
-            case 401 -> credentialProvided ? "InvalidAuthentication" : "AuthenticationRequired";
+            case 401 -> "Expired Floci credential token".equals(error.getMessage())
+                    ? "InvalidAuthentication"
+                    : "AuthenticationRequired";
             case 403 -> "AccessDenied";
             default -> throw new IllegalArgumentException("Not an authentication error: " + status);
         };

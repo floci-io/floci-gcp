@@ -85,7 +85,7 @@ public class GcsXmlDownloadController {
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath), authorization);
+        authorize(() -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath));
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
@@ -113,10 +113,8 @@ public class GcsXmlDownloadController {
             return Response.ok(meta).build();
         };
         String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        return authorize(
-                () -> iamAuthorizationService.authorizeObjectCreate(
-                        authorization, bucket, objectPath, upload),
-                authorization);
+        return authorize(() -> iamAuthorizationService.authorizeObjectCreate(
+                authorization, bucket, objectPath, upload));
     }
 
     /**
@@ -134,7 +132,7 @@ public class GcsXmlDownloadController {
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("DELETE", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath), authorization);
+        authorize(() -> iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath));
         if (generation != null && !generation.isBlank()) {
             service.deleteObjectVersion(bucket, objectPath, generation);
         } else if (!service.deleteObject(bucket, objectPath)) {
@@ -162,7 +160,7 @@ public class GcsXmlDownloadController {
 			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix), authorization);
+        authorize(() -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix));
         service.getBucket(bucket);
 
         // "The object name after which you want to start listing objects. Objects whose names
@@ -252,21 +250,21 @@ public class GcsXmlDownloadController {
         xml.append('<').append(tag).append('>').append(escapeXml(value)).append("</").append(tag).append('>');
     }
 
-    private static void authorize(Runnable authorizationCheck, String authorization) {
+    private static void authorize(Runnable authorizationCheck) {
         authorize(() -> {
             authorizationCheck.run();
             return null;
-        }, authorization);
+        });
     }
 
-    private static <T> T authorize(Supplier<T> authorizationCheck, String authorization) {
+    private static <T> T authorize(Supplier<T> authorizationCheck) {
         try {
             return authorizationCheck.get();
         } catch (GcpException error) {
             if (!GcsXmlErrorResponse.handlesAuthentication(error)) {
                 throw error;
             }
-            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error, authorization));
+            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error));
         }
     }
 

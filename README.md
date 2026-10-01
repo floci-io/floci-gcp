@@ -237,7 +237,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Security Token Service (STS)** | REST JSON | OAuth 2.0 token exchange at `/v1/token`, including downscoped tokens with GCS Credential Access Boundaries |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
 | **GKE (Kubernetes Engine)** | REST JSON | Clusters, node pools, and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. `remove_default_node_pool` + standalone `google_container_node_pool` (Terraform/OpenTofu) works end to end. Reached by SDKs/gcloud/Terraform through host-based routing (`container.*`) or the `/container/v1` path prefix |
-| **Cloud Run** | REST JSON | Services, IAM policies, revisions, long-running operations; Docker-backed invocation on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
+| **[Cloud Run](docs/services/cloud-run.md)** | REST JSON | Services and revisions, Jobs with executions and tasks, Worker Pools with revisions, Instances with `:start`/`:stop`; IAM policies, long-running operations; Docker-backed invocation, job runs, worker replicas and instances on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
 | **Eventarc** | REST JSON | Trigger CRUD (`eventarc.googleapis.com` v1); delivers CloudEvents from Pub/Sub publishes and GCS object events to Cloud Run and HTTP endpoint destinations |
 | **Cloud Functions** | REST JSON | Functions, source upload URL generation, long-running operations; control plane only, no runtime invocation |
 | **Cloud SQL for PostgreSQL and MySQL** | REST JSON | Instance, database, and user lifecycle (PostgreSQL 15 to 18, MySQL 8.0 and 8.4); long-running operations; Docker-backed data plane by default, with mock mode for control-plane-only use |
@@ -258,7 +258,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 |---|---|---|---|
 | Managed Kafka | `redpandadata/redpanda:latest`, `apache/kafka:4.3.1` (Connect) | Kafka-compatible broker via Redpanda; a Kafka Connect worker per Connect cluster | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
 | Cloud SQL for PostgreSQL and MySQL | `postgres:15.18-alpine` (15-18), `mysql:8.0.46` / `mysql:8.4.11` | PostgreSQL or MySQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
-| Cloud Run | User-specified container image | Image-based service execution and request serving | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
+| Cloud Run | User-specified container image | Service and instance request serving, job tasks run to completion, worker pool replicas | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
 | GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
 | BigQuery | `floci/floci-duck:latest` | GoogleSQL queries executed on a DuckDB engine | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` |
 

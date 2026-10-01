@@ -14,9 +14,11 @@ operations evaluate stored bucket and owning-project policies. Bucket
 `testIamPermissions` returns only granted permissions. Anonymous and unrecognized
 external credentials are evaluated as anonymous, so `allUsers` bindings work.
 
-GCS object operations, ACLs, and GCS v2 data methods are not yet IAM-enforced.
-Existing Credential Access Boundary checks for Floci-issued downscoped tokens
-remain active on their supported GCS paths. See
+Supported REST JSON and XML object reads, writes, updates, deletes, listing,
+compose, copy, rewrite, move, restore, resumable uploads, and XML multipart
+uploads use the same evaluator. GCS applies Credential Access Boundary checks
+before IAM and retains the source principal for valid downscoped credentials.
+ACLs and GCS v2 data methods are not IAM-enforced. See
 [IAM enforcement and limitations](iam.md#opt-in-enforcement).
 
 ## Configuration

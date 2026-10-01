@@ -97,6 +97,27 @@ class IamObjectAuthorizationRestIntegrationTest {
     }
 
     @Test
+    void owningProjectPolicyGrantsObjectReadThroughInheritance() {
+        String bucket = createBucket();
+        String serviceAccount = "project-object-reader@example.test";
+        String authorization = bearer(serviceAccount);
+        gcsService.putObject(bucket, "inherited.txt", "text/plain",
+                "inherited".getBytes(StandardCharsets.UTF_8),
+                GcsCustomerEncryption.none(), "http://localhost:4588");
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of(
+                "role", "roles/storage.objectViewer",
+                "members", List.of("serviceAccount:" + serviceAccount))));
+        iamService.setPolicy("projects/test-project", policy);
+
+        given().when().get("/storage/v1/b/{bucket}/o/inherited.txt", bucket)
+                .then().statusCode(403);
+        given().header("Authorization", authorization)
+                .when().get("/storage/v1/b/{bucket}/o/inherited.txt", bucket)
+                .then().statusCode(200);
+    }
+
+    @Test
     void objectViewerAllowsReadAndListButNotUpload() {
         String bucket = "iam-object-" + UUID.randomUUID().toString().substring(0, 8);
         given().contentType("application/json").body(Map.of("name", bucket))

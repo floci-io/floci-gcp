@@ -142,7 +142,7 @@ class GcsIamAuthorizationServiceTest {
     }
 
     @Test
-    void copyAcquiresPolicyLocksBeforeTheStorageMutationLock() throws Exception {
+    void copyAcquiresInheritedProjectPolicyLockBeforeTheStorageMutationLock() throws Exception {
         IamService iamService = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
         iamService.setPolicy("buckets/source", objectAdminPolicy());
@@ -166,7 +166,7 @@ class GcsIamAuthorizationServiceTest {
                 assertTrue(mutationReady.await(5, TimeUnit.SECONDS));
 
                 policyWriter = executor.submit(
-                        () -> iamService.setPolicy("buckets/source", objectAdminPolicy()));
+                        () -> iamService.setPolicy("projects/test-project", objectAdminPolicy()));
                 assertThrows(TimeoutException.class, () -> policyWriter.get(100, TimeUnit.MILLISECONDS));
                 assertThrows(TimeoutException.class, () -> copy.get(100, TimeUnit.MILLISECONDS));
             }
@@ -228,9 +228,10 @@ class GcsIamAuthorizationServiceTest {
         GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
         when(adapter.requiresPolicyEvaluation(IamIdentityKind.ANONYMOUS)).thenReturn(true);
         when(adapter.bucketResource(anyString())).thenAnswer(invocation ->
-                IamResource.gcsBucket(invocation.getArgument(0)));
+                IamResource.gcsBucket(invocation.getArgument(0), "test-project"));
         when(adapter.objectResource(anyString(), anyString())).thenAnswer(invocation ->
-                IamResource.gcsObject(invocation.getArgument(0), invocation.getArgument(1)));
+                IamResource.gcsObject(
+                        invocation.getArgument(0), invocation.getArgument(1), "test-project"));
 
         IamResourceHierarchy hierarchy = new IamResourceHierarchy();
         IamAuthorizationRegistry registry = new IamAuthorizationRegistry(List.of(adapter));

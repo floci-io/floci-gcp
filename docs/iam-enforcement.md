@@ -6,7 +6,7 @@ and gRPC transport adapters. The gRPC interceptor is installed in
 The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
-Resource Manager projects and GCS buckets are currently registered. GCS invokes
+Resource Manager projects and GCS bucket/object operations are currently integrated. GCS invokes
 the shared evaluator from its service-level authorization path so JSON filtering
 does not bypass its lock-sensitive lifecycle coordination. Pub/Sub and Secret
 Manager IAM enforcement is not supported.
@@ -49,9 +49,9 @@ appropriate transport adapter for those formats while retaining the shared decis
 point. Likewise, streams that address resources after their initial message need
 explicit state handling and tests. The authorization interceptor does not support StreamingPull.
 GCS intentionally does not register its REST controllers with that filter. Its
-bucket authorization service calls the same evaluator after applying GCS-specific
-credential handling, and can therefore be reused by XML, media, upload, and
-service-layer paths as their IAM coverage is added.
+authorization service calls the same evaluator after applying GCS-specific
+credential handling. XML, media, upload, and service-layer paths use that entry
+point instead of relying on the JSON filter.
 
 ## Required tests
 
@@ -86,7 +86,9 @@ the IAM policy lock is acquired before the bucket mutation lock, and bucket crea
 holds the bucket lock through initial-policy persistence and durable rollback.
 Bucket policy mutation acquires the bucket and owning-project policy locks in global
 stripe order, revalidates bucket ownership, and holds both locks through authorization
-and the policy write. The shared REST filter and gRPC interceptor do not hold a lock
+and the policy write. Object mutations acquire every applicable bucket and owning-project
+policy lock in the same global order before entering the storage mutation lock. The
+shared REST filter and gRPC interceptor do not hold a lock
 across authorization and the subsequent service mutation. Other service integrations
 must use the service-level ordered-lock entry point when that consistency is required.
 

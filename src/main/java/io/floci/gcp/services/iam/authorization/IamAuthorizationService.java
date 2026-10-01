@@ -65,7 +65,7 @@ public class IamAuthorizationService {
     void onStart(@Observes StartupEvent event) {
         LOG.warnf("IAM authorization mode=%s; supported services=%s. "
                         + "Identity handling is service-specific; GCS bucket policies evaluate anonymous callers. "
-                        + "Pub/Sub, Secret Manager, GCS objects and all other services are NOT IAM-enforced. "
+                        + "Pub/Sub, Secret Manager, GCS ACLs, GCS gRPC and all other services are NOT IAM-enforced. "
                         + "GCS Credential Access Boundary checks remain active.",
                 config.services().iam().authorizationMode(), registry.adapters().stream()
                         .map(IamAuthorizationAdapter::serviceName).sorted().toList());

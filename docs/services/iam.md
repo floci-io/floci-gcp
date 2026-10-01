@@ -35,13 +35,13 @@ For plaintext gRPC, Google credentials may refuse an insecure channel before the
 request reaches the emulator; use a fixed authorization header with the SDK's
 no-credentials provider, or use the emulator's TLS transport.
 Anonymous requests and external credentials bypass Resource Manager evaluation.
-GCS bucket evaluation treats those callers as anonymous so `allUsers` policies
+GCS evaluation treats those callers as anonymous so `allUsers` policies
 work. In enforce mode, an unknown or expired Floci-issued token receives
 `UNAUTHENTICATED`; an evaluated caller without a matching grant receives
 `403 PERMISSION_DENIED` over REST or `PERMISSION_DENIED` over gRPC. GCS applies
-the Credential Access Boundary before IAM. Source-principal handoff is deferred,
-so downscoped credentials cannot use enforce mode or expand their boundary into
-project or bucket management permissions.
+the Credential Access Boundary before IAM and retains the source principal for
+IAM evaluation of valid downscoped credentials. Downscoped tokens cannot expand
+their boundary into project or bucket management permissions.
 
 This is a local permission-testing tool, **not an authentication/security boundary**.
 Token minting and impersonation remain unrestricted. A test using anonymous or

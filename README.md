@@ -81,7 +81,7 @@ export FIREBASE_AUTH_EMULATOR_HOST=localhost:4588
 export GOOGLE_CLOUD_PROJECT=floci-local
 ```
 
-All emulated GCP APIs are available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints. Credentials are not cryptographically validated by default. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); setting `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` also evaluates supported GCS REST bucket and object operations against stored bucket IAM allow policies. See the [IAM service guide](docs/services/iam.md) for scope and exclusions.
+All emulated GCP APIs are available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints. Credentials are not cryptographically validated by default. Floci-issued downscoped GCS tokens are constrained by their Credential Access Boundary (CAB); setting `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` also evaluates supported GCS REST bucket and object operations against stored bucket IAM allow policies using the retained source principal. See the [IAM service guide](docs/services/iam.md) for scope and exclusions.
 
 <details>
 <summary>Using Docker directly?</summary>
@@ -674,11 +674,11 @@ Versions are derived from Conventional Commits by [semantic-release](https://git
 IAM policies are stored without enforcement by default. For local permission tests,
 set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
 service-account tokens. This enforces Resource Manager v1 project metadata/policies
-and supported GCS REST bucket operations through one shared evaluator. Project
+and supported GCS REST bucket and object operations through one shared evaluator. Project
 policies are also enforced through the shared IAM gRPC mixin. Resource Manager
 bypasses anonymous/external credentials; GCS evaluates them as anonymous so `allUsers`
-bindings work. Pub/Sub, Secret Manager, GCS objects, and all other services remain
-unenforced. Read the
+bindings work. Pub/Sub, Secret Manager, GCS ACLs, GCS gRPC, and all other services
+remain unenforced. Read the
 [coverage and limitations](docs/services/iam.md#opt-in-enforcement) before treating a
 green test as evidence of least privilege.
 

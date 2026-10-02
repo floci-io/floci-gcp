@@ -15,6 +15,7 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 | `FLOCI_GCP_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_GCP_BASE_URL`. Set to the Compose/container service name so other containers can reach floci-gcp by DNS |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID used when no project is specified in the request |
 | `FLOCI_GCP_MAX_REQUEST_SIZE` | `512` | Maximum request body size, in **megabytes** (applies to uploads, e.g. GCS objects) |
+| `FLOCI_GCP_LOCATIONS_STRICT` | `false` | Reject location combinations that cannot exist, such as a Cloud SQL `settings.locationPreference.zone` outside the instance region. Off by default: such requests are accepted as sent |
 
 ---
 

@@ -243,6 +243,73 @@ class CloudSqlRestIntegrationTest {
     }
 
     @Test
+    void cloudSqlLocationPreferenceDrivesServingZonesAndIsEchoedBack() {
+        String base = "/v1/projects/sql-it-location";
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "name": "pg-ha",
+                          "databaseVersion": "POSTGRES_16",
+                          "region": "europe-west1",
+                          "settings": {
+                            "tier": "db-custom-1-3840",
+                            "availabilityType": "REGIONAL",
+                            "locationPreference": {"zone": "europe-west1-c", "secondaryZone": "europe-west1-d"}
+                          }
+                        }
+                        """)
+                .when().post(base + "/instances")
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get(base + "/instances/pg-ha")
+                .then()
+                .statusCode(200)
+                .body("gceZone", equalTo("europe-west1-c"))
+                .body("secondaryGceZone", equalTo("europe-west1-d"))
+                .body("settings.locationPreference.zone", equalTo("europe-west1-c"))
+                .body("settings.locationPreference.secondaryZone", equalTo("europe-west1-d"))
+                .body("settings.locationPreference.kind", equalTo("sql#locationPreference"));
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"settings": {"locationPreference": {"zone": "europe-west1-b", "secondaryZone": "no_secondary_zone"}}}
+                        """)
+                .when().patch(base + "/instances/pg-ha")
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get(base + "/instances/pg-ha")
+                .then()
+                .statusCode(200)
+                .body("gceZone", equalTo("europe-west1-b"))
+                .body("secondaryGceZone", nullValue())
+                .body("settings.locationPreference.secondaryZone", equalTo("no_secondary_zone"));
+
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"name": "pg-plain", "databaseVersion": "POSTGRES_16"}
+                        """)
+                .when().post(base + "/instances")
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get(base + "/instances/pg-plain")
+                .then()
+                .statusCode(200)
+                .body("region", equalTo("us-central1"))
+                .body("gceZone", equalTo("us-central1-a"))
+                .body("secondaryGceZone", nullValue());
+    }
+
+    @Test
     void cloudSqlSupportsV1Beta4AndLegacySqlBasePaths() {
         String project = "sql-it-legacy";
 

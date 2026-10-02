@@ -71,6 +71,76 @@ class CloudSqlServiceTest {
     }
 
     @Test
+    void locationPreferenceZoneOutsideRegionIsAcceptedByDefault() {
+        withProject("project-a");
+        service.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18",
+                "region", "us-central1",
+                "settings", Map.of("locationPreference", Map.of("zone", "europe-west1-b"))));
+
+        assertEquals("europe-west1-b", service.getInstance("project-a", "pg-main").get("gceZone"));
+    }
+
+    @Test
+    void locationPreferenceWithoutRegionDerivesRegionFromZone() {
+        withProject("project-a");
+        service.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18",
+                "settings", Map.of("locationPreference", Map.of("zone", "asia-east1-b"))));
+
+        Map<String, Object> instance = service.getInstance("project-a", "pg-main");
+        assertEquals("asia-east1", instance.get("region"));
+        assertEquals("asia-east1-b", instance.get("gceZone"));
+        assertEquals("project-a:asia-east1:pg-main", instance.get("connectionName"));
+    }
+
+    @Test
+    void secondaryZoneIsOnlyServedForRegionalInstances() {
+        withProject("project-a");
+        service.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18",
+                "settings", Map.of("availabilityType", "ZONAL",
+                        "locationPreference", Map.of("zone", "us-central1-b", "secondaryZone", "us-central1-c"))));
+
+        assertNull(service.getInstance("project-a", "pg-main").get("secondaryGceZone"));
+
+        service.patchInstance("project-a", "pg-main", Map.of("settings", Map.of("availabilityType", "REGIONAL")));
+
+        assertEquals("us-central1-c", service.getInstance("project-a", "pg-main").get("secondaryGceZone"));
+    }
+
+    @Test
+    void strictLocationsRejectZonesOutsideTheInstanceRegion() {
+        withProject("project-a");
+        CloudSqlService strict = new CloudSqlService(projectAwareStore(), projectAwareStore(),
+                projectAwareStore(), projectAwareStore(), new ObjectMapper(), "http://localhost:4588",
+                CloudSqlDataPlane.noop(), false, true);
+
+        GcpException zone = assertThrows(GcpException.class, () -> strict.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18",
+                "region", "us-central1",
+                "settings", Map.of("locationPreference", Map.of("zone", "europe-west1-b")))));
+        assertEquals(400, zone.getHttpStatus());
+        assertEquals("INVALID_ARGUMENT", zone.getGcpStatus());
+
+        strict.createInstance("project-a", Map.of(
+                "name", "pg-main",
+                "databaseVersion", "POSTGRES_18",
+                "region", "us-central1",
+                "settings", Map.of("availabilityType", "REGIONAL",
+                        "locationPreference", Map.of("zone", "us-central1-b"))));
+
+        assertThrows(GcpException.class, () -> strict.patchInstance("project-a", "pg-main", Map.of(
+                "settings", Map.of("locationPreference", Map.of("secondaryZone", "us-east1-b")))));
+        assertEquals("us-central1-b", strict.getInstance("project-a", "pg-main").get("gceZone"));
+        assertNull(strict.getInstance("project-a", "pg-main").get("secondaryGceZone"));
+    }
+
+    @Test
     void deleteInstanceCascadesDatabasesAndUsers() {
         withProject("project-a");
         service.createInstance("project-a", Map.of(

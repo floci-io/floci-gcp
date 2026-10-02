@@ -56,6 +56,8 @@ floci-gcp:
     # cert-path: ""    # FLOCI_GCP_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""     # FLOCI_GCP_TLS_KEY_PATH (PEM private key file)
   default-project-id: floci-local
+  locations:
+    strict: false  # FLOCI_GCP_LOCATIONS_STRICT, reject locations that do not exist or do not belong together (e.g. a Cloud SQL zone outside the instance region)
   storage:
     mode: memory
     persistent-path: ./data

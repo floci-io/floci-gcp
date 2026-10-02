@@ -67,6 +67,19 @@ the real API, but the emulator keeps the admin login fixed (`postgres`/`postgres
 `ipAddresses[0].port` field for local pgjdbc/libpq connections. `connectionName` keeps the normal
 Cloud SQL shape (`project:region:instance`) for SDK/Admin API compatibility.
 
+### Zones and location preference
+
+`region` defaults to `us-central1`, or to the region of `settings.locationPreference.zone` when only
+the zone is sent. `gceZone` reports `settings.locationPreference.zone` when it is set (on insert,
+patch and update), and `<region>-a` otherwise. `secondaryGceZone` reports
+`settings.locationPreference.secondaryZone` only for `REGIONAL` instances; `no_secondary_zone`, a
+`ZONAL` availability type, or no secondary zone leaves it unset (floci does not pick a failover zone
+on its own). `settings.locationPreference` is returned as sent, with `kind: sql#locationPreference`,
+so Terraform's `location_preference` block plans clean.
+
+A zone outside the instance region is accepted by default. Set `FLOCI_GCP_LOCATIONS_STRICT=true` to
+reject it (and a mismatched `secondaryZone`) with `400 INVALID_ARGUMENT`.
+
 Database and user Admin API operations are synchronized into the backing PostgreSQL server:
 
 - `databases.insert` creates a PostgreSQL database.

@@ -24,6 +24,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -31,6 +32,7 @@ public class CloudSqlService {
 
     private static final Logger LOG = Logger.getLogger(CloudSqlService.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final String NO_SECONDARY_ZONE = "no_secondary_zone";
 
     private final StorageBackend<String, Map<String, Object>> instanceStore;
     private final StorageBackend<String, Map<String, Object>> databaseStore;
@@ -42,6 +44,7 @@ public class CloudSqlService {
     private final String baseUrl;
     private final CloudSqlDataPlane dataPlane;
     private final boolean dataPlaneEnabled;
+    private final boolean strictLocations;
 
     @Inject
     public CloudSqlService(StorageFactory storageFactory,
@@ -63,6 +66,7 @@ public class CloudSqlService {
         this.baseUrl = config.effectiveBaseUrl();
         this.dataPlane = dataPlane;
         this.dataPlaneEnabled = !config.services().cloudsql().mock();
+        this.strictLocations = config.locations().strict();
     }
 
     CloudSqlService(StorageBackend<String, Map<String, Object>> instanceStore,
@@ -83,6 +87,19 @@ public class CloudSqlService {
                     String baseUrl,
                     CloudSqlDataPlane dataPlane,
                     boolean dataPlaneEnabled) {
+        this(instanceStore, databaseStore, userStore, operationStore, objectMapper, baseUrl,
+                dataPlane, dataPlaneEnabled, false);
+    }
+
+    CloudSqlService(StorageBackend<String, Map<String, Object>> instanceStore,
+                    StorageBackend<String, Map<String, Object>> databaseStore,
+                    StorageBackend<String, Map<String, Object>> userStore,
+                    StorageBackend<String, Map<String, Object>> operationStore,
+                    ObjectMapper objectMapper,
+                    String baseUrl,
+                    CloudSqlDataPlane dataPlane,
+                    boolean dataPlaneEnabled,
+                    boolean strictLocations) {
         this.instanceStore = instanceStore;
         this.databaseStore = databaseStore;
         this.userStore = userStore;
@@ -93,6 +110,7 @@ public class CloudSqlService {
         this.baseUrl = baseUrl;
         this.dataPlane = dataPlane;
         this.dataPlaneEnabled = dataPlaneEnabled;
+        this.strictLocations = strictLocations;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -179,6 +197,7 @@ public class CloudSqlService {
         // rootPassword is write-only in the Admin API; a PATCH must not persist it either.
         patch.remove("rootPassword");
         merge(existing, patch);
+        applyLocationPreference(existing);
         existing.put("kind", "sql#instance");
         existing.put("name", instance);
         existing.put("project", project);
@@ -468,10 +487,10 @@ public class CloudSqlService {
         putDefault(stored, "backendType", "SECOND_GEN");
         putDefault(stored, "instanceType", "CLOUD_SQL_INSTANCE");
         putDefault(stored, "state", "RUNNABLE");
-        putDefault(stored, "region", "us-central1");
-        putDefault(stored, "gceZone", stored.get("region") + "-a");
-        putDefault(stored, "etag", UUID.randomUUID().toString());
         putDefault(stored, "settings", defaultSettings());
+        putDefault(stored, "region", regionOfZone(preferredZone(stored)).orElse("us-central1"));
+        applyLocationPreference(stored);
+        putDefault(stored, "etag", UUID.randomUUID().toString());
         putDefault(stored, "ipAddresses", List.of());
         putDefault(stored, "serverCaCert", serverCaCert(instance));
         stored.put("connectionName", connectionName(project, stored, instance));
@@ -566,7 +585,7 @@ public class CloudSqlService {
     }
 
     @SuppressWarnings("unchecked")
-    private static java.util.Optional<Map<String, Object>> getForProject(
+    private static Optional<Map<String, Object>> getForProject(
             StorageBackend<String, Map<String, Object>> store, String project, String key) {
         if (store instanceof ProjectAwareStorageBackend<?> projectAware) {
             return ((ProjectAwareStorageBackend<Map<String, Object>>) projectAware).getForProject(project, key);
@@ -672,6 +691,67 @@ public class CloudSqlService {
                 "type", type,
                 "requiresRestart", requiresRestart,
                 "appliesTo", List.of(appliesTo));
+    }
+
+    /**
+     * {@code gceZone} and {@code secondaryGceZone} are output fields reporting where the instance
+     * serves from; they follow {@code settings.locationPreference}. The secondary zone only exists
+     * for {@code REGIONAL} instances, and {@code no_secondary_zone} clears it.
+     */
+    @SuppressWarnings("unchecked")
+    private void applyLocationPreference(Map<String, Object> instance) {
+        String region = stringValue(instance.get("region"));
+        Map<String, Object> preference = null;
+        if (instance.get("settings") instanceof Map<?, ?> settings
+                && settings.get("locationPreference") instanceof Map<?, ?> value) {
+            preference = (Map<String, Object>) value;
+        }
+        String zone = preference == null ? null : stringValue(preference.get("zone"));
+        String secondaryZone = preference == null ? null : stringValue(preference.get("secondaryZone"));
+        boolean hasSecondary = !isBlank(secondaryZone) && !NO_SECONDARY_ZONE.equals(secondaryZone);
+        if (strictLocations) {
+            requireZoneInRegion("settings.locationPreference.zone", zone, region);
+            if (hasSecondary) {
+                requireZoneInRegion("settings.locationPreference.secondaryZone", secondaryZone, region);
+            }
+        }
+        if (preference != null) {
+            putDefault(preference, "kind", "sql#locationPreference");
+        }
+        if (!isBlank(zone)) {
+            instance.put("gceZone", zone);
+        } else {
+            putDefault(instance, "gceZone", region + "-a");
+        }
+        boolean regional = instance.get("settings") instanceof Map<?, ?> settings
+                && "REGIONAL".equals(stringValue(settings.get("availabilityType")));
+        if (regional && hasSecondary) {
+            instance.put("secondaryGceZone", secondaryZone);
+        } else if (!regional || NO_SECONDARY_ZONE.equals(secondaryZone)) {
+            instance.remove("secondaryGceZone");
+        }
+    }
+
+    private static void requireZoneInRegion(String field, String zone, String region) {
+        if (!isBlank(zone) && (region == null || !zone.startsWith(region + "-"))) {
+            throw GcpException.invalidArgument("Invalid request: " + field + " " + zone
+                    + " is not in region " + region + ".");
+        }
+    }
+
+    private static String preferredZone(Map<String, Object> instance) {
+        if (instance.get("settings") instanceof Map<?, ?> settings
+                && settings.get("locationPreference") instanceof Map<?, ?> preference) {
+            return stringValue(preference.get("zone"));
+        }
+        return null;
+    }
+
+    private static Optional<String> regionOfZone(String zone) {
+        if (isBlank(zone) || zone.lastIndexOf('-') <= 0) {
+            return Optional.empty();
+        }
+        return Optional.of(zone.substring(0, zone.lastIndexOf('-')));
     }
 
     private Map<String, Object> defaultSettings() {

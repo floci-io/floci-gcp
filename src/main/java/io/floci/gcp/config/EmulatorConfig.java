@@ -46,6 +46,13 @@ public interface EmulatorConfig {
 
     InitHooksConfig initHooks();
 
+    Locations locations();
+
+    interface Locations {
+        @WithDefault("false")
+        boolean strict();
+    }
+
     interface TlsConfig {
         /** Enable TLS/HTTPS. When true, both HTTP and HTTPS are served on the same public port. */
         @WithDefault("false")

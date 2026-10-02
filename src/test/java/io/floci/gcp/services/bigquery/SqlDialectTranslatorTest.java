@@ -169,6 +169,16 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void jsonTypeMapsDuckDbTypesToBigQueryJsonTypeNames() {
+        assertEquals("SELECT (CASE json_type(j)"
+                        + " WHEN 'OBJECT' THEN 'object' WHEN 'ARRAY' THEN 'array' WHEN 'VARCHAR' THEN 'string'"
+                        + " WHEN 'BOOLEAN' THEN 'boolean' WHEN 'NULL' THEN 'null'"
+                        + " WHEN 'BIGINT' THEN 'number' WHEN 'UBIGINT' THEN 'number' WHEN 'HUGEINT' THEN 'number'"
+                        + " WHEN 'DOUBLE' THEN 'number' END) AS t",
+                sql("SELECT JSON_TYPE(j) AS t"));
+    }
+
+    @Test
     void unshimmedFunctionsPassThrough() {
         assertEquals("SELECT LOWER(name) AS l, COALESCE(a, b) AS c FROM \"ds\".\"t\"",
                 sql("SELECT LOWER(name) AS l, COALESCE(a, b) AS c FROM ds.t"));

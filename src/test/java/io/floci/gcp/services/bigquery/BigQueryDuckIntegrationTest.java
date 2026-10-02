@@ -170,6 +170,17 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void jsonTypeReturnsBigQueryTypeNames() {
+        query("""
+                {"query": "SELECT JSON_TYPE(JSON '{\\"a\\": 1}'), JSON_TYPE(JSON '[1, 2]'), JSON_TYPE(JSON '\\"s\\"'), JSON_TYPE(JSON '20'), JSON_TYPE(JSON '-3'), JSON_TYPE(JSON '1.5'), JSON_TYPE(JSON '18446744073709551615'), JSON_TYPE(JSON 'true'), JSON_TYPE(JSON 'null'), JSON_TYPE(CAST(NULL AS JSON))", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(java.util.Arrays.asList("object", "array", "string", "number",
+                        "number", "number", "number", "boolean", "null", null)));
+    }
+
+    @Test
     @Order(6)
     void dryRunReturnsSchemaWithoutAJob() {
         query("""

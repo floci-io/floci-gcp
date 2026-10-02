@@ -48,7 +48,7 @@ final class SqlDialectTranslator {
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "SPLIT", "FORMAT",
-            "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT",
+            "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
             "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS", "TIMESTAMP_ADD", "DATETIME_ADD",
@@ -1256,6 +1256,12 @@ final class SqlDialectTranslator {
             case "JSON_QUERY", "JSON_EXTRACT" -> a.size() == 1
                     ? "json_extract(" + a.getFirst() + ", '$')"
                     : "json_extract(" + String.join(", ", a) + ")";
+            // DuckDB names the physical type (UBIGINT, VARCHAR, ...); BigQuery returns the JSON type name.
+            case "JSON_TYPE" -> args(a, 1, name, "(CASE json_type(" + at(a, 0) + ")"
+                    + " WHEN 'OBJECT' THEN 'object' WHEN 'ARRAY' THEN 'array' WHEN 'VARCHAR' THEN 'string'"
+                    + " WHEN 'BOOLEAN' THEN 'boolean' WHEN 'NULL' THEN 'null'"
+                    + " WHEN 'BIGINT' THEN 'number' WHEN 'UBIGINT' THEN 'number' WHEN 'HUGEINT' THEN 'number'"
+                    + " WHEN 'DOUBLE' THEN 'number' END)");
             case "REGEXP_CONTAINS" -> "regexp_matches(" + String.join(", ", a) + ")";
             case "REGEXP_EXTRACT" -> args(a, 2, name, "regexp_extract(" + at(a, 0) + ", " + at(a, 1) + ", "
                     + (hasCaptureGroup(open, close) ? "1" : "0") + ")");

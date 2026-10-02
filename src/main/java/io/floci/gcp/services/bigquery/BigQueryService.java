@@ -1179,7 +1179,8 @@ public class BigQueryService {
                     Map<String, Object> row = new LinkedHashMap<>();
                     try {
                         Map<String, Object> json = JSON.readValue(line, Map.class);
-                        if (!RowCodec.normalizeRow(new TableSchema(schema), json, ignoreUnknownValues, row).isEmpty()) {
+                        if (!RowCodec.normalizeRow(new TableSchema(schema), json, ignoreUnknownValues, true, row)
+                                .isEmpty()) {
                             badRecords++;
                             continue;
                         }

@@ -1,5 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.TableCell;
@@ -27,6 +29,8 @@ import java.util.Map;
  * cells nest {@code {f:[...]}} (the exact contract of the SDK's {@code FieldValue.fromPb}).
  */
 final class RowCodec {
+
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
     private RowCodec() {}
 
@@ -79,6 +83,17 @@ final class RowCodec {
      */
     static List<ErrorProto> normalizeRow(TableSchema schema, Map<String, Object> json,
                                          boolean ignoreUnknownValues, Map<String, Object> out) {
+        return normalizeRow(schema, json, ignoreUnknownValues, false, out);
+    }
+
+    /**
+     * {@code nativeJson} selects how JSON columns read their value. In a NEWLINE_DELIMITED_JSON
+     * load the value is the JSON value itself, so a string is stored as a JSON string. In
+     * {@code insertAll} a string carries JSON text. Both verified against BigQuery.
+     */
+    static List<ErrorProto> normalizeRow(TableSchema schema, Map<String, Object> json,
+                                         boolean ignoreUnknownValues, boolean nativeJson,
+                                         Map<String, Object> out) {
         List<ErrorProto> errors = new ArrayList<>();
         List<TableFieldSchema> fields = schema != null && schema.getFields() != null
                 ? schema.getFields() : List.of();
@@ -106,7 +121,7 @@ final class RowCodec {
                 continue;
             }
             try {
-                out.put(field.getName(), coerce(field, raw, ignoreUnknownValues));
+                out.put(field.getName(), coerce(field, raw, ignoreUnknownValues, nativeJson));
             } catch (IllegalArgumentException e) {
                 errors.add(error("invalid", field.getName(), e.getMessage()));
             }
@@ -130,10 +145,11 @@ final class RowCodec {
      * too. Throws {@link IllegalArgumentException} with the caller-facing message.
      */
     static Object coerceValue(TableFieldSchema field, Object raw) {
-        return coerce(field, raw, false);
+        return coerce(field, raw, false, false);
     }
 
-    private static Object coerce(TableFieldSchema field, Object raw, boolean ignoreUnknownValues) {
+    private static Object coerce(TableFieldSchema field, Object raw, boolean ignoreUnknownValues,
+                                 boolean nativeJson) {
         if ("REPEATED".equals(field.getMode())) {
             if (!(raw instanceof List<?> list)) {
                 throw new IllegalArgumentException(
@@ -141,15 +157,16 @@ final class RowCodec {
             }
             List<Object> coerced = new ArrayList<>(list.size());
             for (Object element : list) {
-                coerced.add(coerceScalar(field, element, ignoreUnknownValues));
+                coerced.add(coerceScalar(field, element, ignoreUnknownValues, nativeJson));
             }
             return coerced;
         }
-        return coerceScalar(field, raw, ignoreUnknownValues);
+        return coerceScalar(field, raw, ignoreUnknownValues, nativeJson);
     }
 
     @SuppressWarnings("unchecked")
-    private static Object coerceScalar(TableFieldSchema field, Object raw, boolean ignoreUnknownValues) {
+    private static Object coerceScalar(TableFieldSchema field, Object raw, boolean ignoreUnknownValues,
+                                       boolean nativeJson) {
         String type = field.getType();
         switch (type) {
             case "INTEGER" -> {
@@ -201,7 +218,7 @@ final class RowCodec {
                     TableSchema subSchema = new TableSchema(field.getFields() != null
                             ? field.getFields() : List.of());
                     List<ErrorProto> nestedErrors =
-                            normalizeRow(subSchema, (Map<String, Object>) map, ignoreUnknownValues, nested);
+                            normalizeRow(subSchema, (Map<String, Object>) map, ignoreUnknownValues, nativeJson, nested);
                     if (!nestedErrors.isEmpty()) {
                         throw new IllegalArgumentException(nestedErrors.get(0).getMessage());
                     }
@@ -227,15 +244,28 @@ final class RowCodec {
                 }
                 return str;
             }
-            default -> {
-                // STRING, DATE, TIME, DATETIME, NUMERIC, BYTES... stored textually
-                if (raw instanceof String || raw instanceof Number || raw instanceof Boolean) {
-                    return String.valueOf(raw);
+            case "JSON" -> {
+                if (!nativeJson) {
+                    return storedAsText(type, raw);
                 }
-                throw new IllegalArgumentException(
-                        "Cannot convert value to " + type + " (bad value): " + raw);
+                try {
+                    return JSON_MAPPER.writeValueAsString(raw);
+                } catch (JsonProcessingException e) {
+                    throw new IllegalArgumentException("Cannot convert value to JSON (bad value): " + raw, e);
+                }
+            }
+            default -> {
+                return storedAsText(type, raw);
             }
         }
+    }
+
+    private static Object storedAsText(String type, Object raw) {
+        // STRING, DATE, TIME, DATETIME, NUMERIC, BYTES... stored textually
+        if (raw instanceof String || raw instanceof Number || raw instanceof Boolean) {
+            return String.valueOf(raw);
+        }
+        throw new IllegalArgumentException("Cannot convert value to " + type + " (bad value): " + raw);
     }
 
     /**

@@ -154,6 +154,29 @@ class BigQueryDuckLoadIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void jsonColumnKeepsEachNdjsonValueAsItsJsonValue() {
+        putObject("payloads.json", "application/json", ("{\"id\": 1, \"j\": 20}\n"
+                + "{\"id\": 2, \"j\": \"This is a string\"}\n"
+                + "{\"id\": 3, \"j\": {\"id\": 10, \"name\": \"Alice\"}}\n"
+                + "{\"id\": 4, \"j\": \"{\\\"looks\\\": \\\"like json\\\"}\"}\n").getBytes(StandardCharsets.UTF_8));
+        load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/payloads.json"),
+                "sourceFormat", "NEWLINE_DELIMITED_JSON", "destinationTable", destination("payloads"),
+                "schema", Map.of("fields", List.of(
+                        Map.of("name", "id", "type", "INTEGER"),
+                        Map.of("name", "j", "type", "JSON")))))
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("4"));
+        assertEquals(List.of(
+                        List.of("1", "20"),
+                        List.of("2", "\"This is a string\""),
+                        List.of("3", "{\"id\":10,\"name\":\"Alice\"}"),
+                        List.of("4", "\"{\\\"looks\\\": \\\"like json\\\"}\"")),
+                rows("payloads"));
+    }
+
+    @Test
     @Order(6)
     void parquetUploadCarriesItsOwnSchema() throws IOException {
         byte[] parquet;

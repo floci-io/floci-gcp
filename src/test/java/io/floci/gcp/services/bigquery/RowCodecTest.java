@@ -25,6 +25,35 @@ class RowCodecTest {
         return RowCodec.normalizeRow(new TableSchema(List.of(field)), Map.of("n", value), false, out);
     }
 
+    private static Object storedJson(Object value, boolean nativeJson) {
+        TableFieldSchema field = new TableFieldSchema();
+        field.setName("j");
+        field.setType("JSON");
+        Map<String, Object> out = new LinkedHashMap<>();
+        List<ErrorProto> errors = RowCodec.normalizeRow(
+                new TableSchema(List.of(field)), Map.of("j", value), false, nativeJson, out);
+        assertTrue(errors.isEmpty(), String.valueOf(errors));
+        return out.get("j");
+    }
+
+    @Test
+    void ndjsonLoadStoresEachValueAsItsJsonValue() {
+        Map<String, Object> object = new LinkedHashMap<>();
+        object.put("id", 10);
+        object.put("name", "Alice");
+
+        assertEquals("20", storedJson(20, true));
+        assertEquals("\"This is a string\"", storedJson("This is a string", true));
+        assertEquals("{\"id\":10,\"name\":\"Alice\"}", storedJson(object, true));
+        assertEquals("\"{\\\"looks\\\": \\\"like json\\\"}\"", storedJson("{\"looks\": \"like json\"}", true));
+        assertEquals("[1,2]", storedJson(List.of(1, 2), true));
+    }
+
+    @Test
+    void insertAllJsonStringsStayJsonText() {
+        assertEquals("{\"a\": 1}", storedJson("{\"a\": 1}", false));
+    }
+
     @Test
     void integersInRangeAreKept() {
         for (Object value : List.of(Long.MAX_VALUE, Long.MIN_VALUE, 7, new BigDecimal("42"), new BigInteger("-3"), 5.0)) {

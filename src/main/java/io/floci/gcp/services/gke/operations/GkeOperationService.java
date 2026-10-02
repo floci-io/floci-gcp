@@ -1,7 +1,9 @@
 package io.floci.gcp.services.gke.operations;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -16,18 +18,21 @@ import java.util.UUID;
 public class GkeOperationService {
 
     private final StorageBackend<String, StoredOperation> operationStore;
+    private final String defaultProjectId;
 
     @Inject
-    public GkeOperationService(StorageFactory storageFactory) {
+    public GkeOperationService(StorageFactory storageFactory, EmulatorConfig config) {
         this(storageFactory.createGlobal(
                 "gke",
                 "gke-operations.json",
                 new TypeReference<Map<String, StoredOperation>>() {
-                }));
+                }),
+                config.defaultProjectId());
     }
 
-    public GkeOperationService(StorageBackend<String, StoredOperation> operationStore) {
+    public GkeOperationService(StorageBackend<String, StoredOperation> operationStore, String defaultProjectId) {
         this.operationStore = operationStore;
+        this.defaultProjectId = defaultProjectId;
     }
 
     /**
@@ -88,16 +93,30 @@ public class GkeOperationService {
 
         return operationStore.scan(k -> true)
                 .stream()
+                .filter(op -> project.equals(projectOf(op)))
                 .filter(op -> location.equals(op.getLocation()))
                 .toList();
     }
 
     public StoredOperation getOperation(
+            String project,
             String operationId) {
 
         return operationStore
                 .get(operationId)
+                .filter(op -> project.equals(projectOf(op)))
                 .orElseThrow(() -> GcpException.notFound(
                         "Operation not found: " + operationId));
+    }
+
+    /**
+     * The owning project, read from the operation's {@code selfLink}
+     * ({@code projects/{project}/locations/{location}/operations/{id}}), which every operation
+     * has carried since GKE support landed. A record without one falls back to the default
+     * project rather than leaking into every project's listing.
+     */
+    private String projectOf(StoredOperation op) {
+        String project = GcpResourceNames.parseProject(op.getSelfLink());
+        return project == null || project.isEmpty() ? defaultProjectId : project;
     }
 }

@@ -423,9 +423,10 @@ public class KubernetesController {
     @GET
     @Path("/operations/{operationId}")
     public Response getOperation(
+            @PathParam("project") String project,
             @PathParam("operationId") String operationId) {
 
-        return Response.ok(gkeService.getOperation(operationId)).build();
+        return Response.ok(gkeService.getOperation(project, operationId)).build();
     }
 
     /** Non-standard convenience endpoint (no GKE API equivalent): raw k3s kubeconfig. */

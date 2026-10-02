@@ -721,8 +721,8 @@ public class GkeService {
         return operationService.listOperations(project, location);
     }
 
-    public StoredOperation getOperation(String operationId) {
-        return operationService.getOperation(operationId);
+    public StoredOperation getOperation(String project, String operationId) {
+        return operationService.getOperation(project, operationId);
     }
 
     public String kubeConfig(String project, String location, String clusterId) {

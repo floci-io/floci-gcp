@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -124,11 +125,13 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
      * Removes the task containers of this emulator (same {@code floci_emulator} and {@code floci_namespace}
      * labels) left behind by a previous process that did not shut down cleanly. Job task containers are never
      * adopted: every execution that was running is failed by startup reconciliation, so any such container found
-     * at startup is an orphan.
+     * at startup is an orphan. The namespace must match exactly: without a configured namespace the label filter
+     * has no namespace term, so containers of a namespaced emulator on the same daemon are skipped here.
      */
     void removeOrphanedContainers() {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
         labels.put("floci_service", "cloudrun");
+        String namespace = labels.get("floci_namespace");
         List<com.github.dockerjava.api.model.Container> containers;
         try {
             containers = lifecycleManager.runDockerApi("list orphaned Cloud Run job task containers",
@@ -141,8 +144,10 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
             return;
         }
         for (com.github.dockerjava.api.model.Container container : containers) {
-            String resource = container.getLabels() == null ? null : container.getLabels().get("floci_resource");
-            if (resource != null && TASK_RESOURCE.matcher(resource).matches()) {
+            Map<String, String> containerLabels = container.getLabels() == null ? Map.of() : container.getLabels();
+            String resource = containerLabels.get("floci_resource");
+            if (resource != null && TASK_RESOURCE.matcher(resource).matches()
+                    && Objects.equals(namespace, containerLabels.get("floci_namespace"))) {
                 LOG.infof("Removing orphaned Cloud Run job task container=%s task=%s", container.getId(), resource);
                 lifecycleManager.forceRemove(container.getId(), null);
             }

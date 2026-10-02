@@ -5,7 +5,6 @@ import com.google.cloud.run.v2.Revision;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
-import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -116,11 +115,10 @@ public class CloudRunWorkerPoolRuntime {
     /**
      * Removes the worker pool containers of this emulator (same {@code floci_emulator} and
      * {@code floci_namespace} labels) that no replica of this process tracks, which are the ones a previous
-     * process left behind. Returns the {@code floci_resource} label (revision name) of each removed container.
+     * process left behind. Returns the full revision name of each removed container.
      */
     Set<String> removeLeftoverContainers() {
-        Map<String, String> filter = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
-        filter.put("floci_service", "cloudrun");
+        Map<String, String> filter = CloudRunRuntimeService.workloadFilter(config);
         String namespace = filter.get("floci_namespace");
         Set<String> tracked;
         synchronized (lifecycle) {
@@ -128,24 +126,22 @@ public class CloudRunWorkerPoolRuntime {
         }
         List<LeftoverContainer> leftovers;
         try {
-            leftovers = lifecycleManager.runDockerApi("list Cloud Run worker pool containers",
-                    () -> lifecycleManager.getDockerClient().listContainersCmd()
-                            .withShowAll(true)
-                            .withLabelFilter(filter)
-                            .exec()
-                            .stream()
-                            .map(container -> new LeftoverContainer(container.getId(),
-                                    container.getLabels() == null ? Map.of() : container.getLabels()))
-                            .toList());
+            leftovers = lifecycleManager.listContainersByLabels("list Cloud Run worker pool containers", filter)
+                    .stream()
+                    .map(container -> new LeftoverContainer(container.getId(),
+                            container.getLabels() == null ? Map.of() : container.getLabels()))
+                    .toList();
         } catch (Exception e) {
             LOG.warnf(e, "Could not list leftover Cloud Run worker pool containers");
             return Set.of();
         }
         Set<String> resources = new TreeSet<>();
         for (LeftoverContainer container : leftovers) {
-            String resource = container.labels().getOrDefault("floci_resource", "");
+            String resource = Objects.requireNonNullElse(
+                    CloudRunRuntimeService.workloadResourceName(container.labels()), "");
             if (!resource.contains("/workerPools/") || tracked.contains(container.id())
-                    || !Objects.equals(namespace, container.labels().get("floci_namespace"))) {
+                    || !Objects.equals(namespace, container.labels().get("floci_namespace"))
+                    || !CloudRunRuntimeService.isRemovableWorkload(container.id(), container.labels())) {
                 continue;
             }
             LOG.infof("Removing Cloud Run worker pool container left by a previous emulator process "

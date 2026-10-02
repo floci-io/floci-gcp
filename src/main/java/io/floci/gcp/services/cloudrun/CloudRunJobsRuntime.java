@@ -11,7 +11,6 @@ import com.google.cloud.run.v2.Task;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
-import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.Events;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
@@ -123,31 +122,32 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
 
     /**
      * Removes the task containers of this emulator (same {@code floci_emulator} and {@code floci_namespace}
-     * labels) left behind by a previous process that did not shut down cleanly. Job task containers are never
-     * adopted: every execution that was running is failed by startup reconciliation, so any such container found
-     * at startup is an orphan. The namespace must match exactly: without a configured namespace the label filter
-     * has no namespace term, so containers of a namespaced emulator on the same daemon are skipped here.
+     * labels, found by the {@code io.floci.*} identity labels or their legacy aliases) left behind by a previous
+     * process that did not shut down cleanly. Job task containers are never adopted: every execution that was
+     * running is failed by startup reconciliation, so any such container found at startup is an orphan. A container
+     * whose identity labels disagree with their legacy aliases is left alone. The namespace must match exactly:
+     * without a configured namespace the label filter has no namespace term, so containers of a namespaced emulator
+     * on the same daemon are skipped here.
      */
     void removeOrphanedContainers() {
-        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
-        labels.put("floci_service", "cloudrun");
-        String namespace = labels.get("floci_namespace");
+        Map<String, String> filter = CloudRunRuntimeService.workloadFilter(config);
+        String namespace = filter.get("floci_namespace");
         List<com.github.dockerjava.api.model.Container> containers;
         try {
-            containers = lifecycleManager.runDockerApi("list orphaned Cloud Run job task containers",
-                    () -> lifecycleManager.getDockerClient().listContainersCmd()
-                            .withShowAll(true)
-                            .withLabelFilter(labels)
-                            .exec());
+            containers = lifecycleManager.listContainersByLabels("list orphaned Cloud Run job task containers",
+                    filter);
         } catch (RuntimeException e) {
             LOG.warnf("Could not list orphaned Cloud Run job task containers: %s", message(e));
             return;
         }
         for (com.github.dockerjava.api.model.Container container : containers) {
-            Map<String, String> containerLabels = container.getLabels() == null ? Map.of() : container.getLabels();
-            String resource = containerLabels.get("floci_resource");
+            Map<String, String> labels = container.getLabels() == null ? Map.of() : container.getLabels();
+            if (!CloudRunRuntimeService.isRemovableWorkload(container.getId(), labels)) {
+                continue;
+            }
+            String resource = CloudRunRuntimeService.workloadResourceName(labels);
             if (resource != null && TASK_RESOURCE.matcher(resource).matches()
-                    && Objects.equals(namespace, containerLabels.get("floci_namespace"))) {
+                    && Objects.equals(namespace, labels.get("floci_namespace"))) {
                 LOG.infof("Removing orphaned Cloud Run job task container=%s task=%s", container.getId(), resource);
                 lifecycleManager.forceRemove(container.getId(), null);
             }

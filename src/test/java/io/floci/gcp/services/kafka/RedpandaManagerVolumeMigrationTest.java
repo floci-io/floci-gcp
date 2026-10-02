@@ -58,6 +58,12 @@ class RedpandaManagerVolumeMigrationTest {
         manager().startContainer(cluster);
 
         verify(specBuilder).withName("floci-gcp-run-one-kafka-c1");
+        verify(specBuilder).withLabels(Map.of(
+                "io.floci", "gcp",
+                "io.floci.service", "kafka",
+                "io.floci.resource-id", "c1",
+                "io.floci.project", "p1",
+                "io.floci.location", "us-central1"));
         verify(lifecycleManager).ensureVolume("floci-gcp-kafka-abc123");
         verify(specBuilder).withNamedVolume("floci-gcp-kafka-abc123", "/var/lib/redpanda/data");
         assertEquals("floci-gcp-kafka-abc123", cluster.getVolumeName());

@@ -114,6 +114,8 @@ public class GkeClusterManager {
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
                 .withPortBinding(K3S_API_SERVER_PORT, hostPort)
                 .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "gke", cluster.getName(), cluster.getProject(), cluster.getLocation()))
                 .withDockerNetwork(config.services().gke().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation();

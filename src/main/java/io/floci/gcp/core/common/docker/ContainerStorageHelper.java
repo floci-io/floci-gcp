@@ -6,8 +6,12 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Central helper for Docker resource naming, labelling and sidecar volume management
@@ -35,7 +39,29 @@ public final class ContainerStorageHelper {
     static final String CONTAINER_PREFIX = "floci-" + CLOUD + "-";
     static final String LEGACY_PREFIX = "floci-";
 
+    public static final String CLOUD_LABEL = "io.floci";
+    public static final String SERVICE_LABEL = "io.floci.service";
+    public static final String RESOURCE_ID_LABEL = "io.floci.resource-id";
+    public static final String PROJECT_LABEL = "io.floci.project";
+    public static final String LOCATION_LABEL = "io.floci.location";
+
+    /**
+     * Legacy alias of each resource-identity label, keyed by the new label. Call sites set only the
+     * new keys; {@link #withLegacyAliases} stamps the legacy key next to each one with the same value,
+     * and readers go through {@link #labelValue}. This is the only place a legacy key is spelled.
+     */
+    public static final Map<String, String> LEGACY_LABEL_ALIASES = legacyLabelAliases();
+
     private ContainerStorageHelper() {}
+
+    private static Map<String, String> legacyLabelAliases() {
+        Map<String, String> aliases = new LinkedHashMap<>();
+        aliases.put(SERVICE_LABEL, "floci_service");
+        aliases.put(RESOURCE_ID_LABEL, "floci_resource");
+        aliases.put(PROJECT_LABEL, "floci_project");
+        aliases.put(LOCATION_LABEL, "floci_location");
+        return Collections.unmodifiableMap(aliases);
+    }
 
     /**
      * Canonical container/volume name for a resource. Uses {@code volumeId} when set;
@@ -75,6 +101,101 @@ public final class ContainerStorageHelper {
             labels.put("floci_namespace", namespace);
         }
         return labels;
+    }
+
+    /**
+     * Labels tying a container to the emulated GCP resource it backs: {@code io.floci=gcp},
+     * {@code io.floci.service}, {@code io.floci.resource-id} (the resource short name a gcloud user
+     * passes), {@code io.floci.project} and {@code io.floci.location}. Merged into a spec's own labels
+     * (never into {@link #defaultLabels}). A blank or null value omits that key, e.g. the shared
+     * BigQuery SQL engine container has no per-resource id.
+     */
+    public static Map<String, String> resourceIdentityLabels(
+            String service, String resourceId, String project, String location) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put(CLOUD_LABEL, CLOUD);
+        putIfNotBlank(labels, SERVICE_LABEL, service);
+        putIfNotBlank(labels, RESOURCE_ID_LABEL, resourceId);
+        putIfNotBlank(labels, PROJECT_LABEL, project);
+        putIfNotBlank(labels, LOCATION_LABEL, location);
+        return labels;
+    }
+
+    /**
+     * Returns a copy of {@code labels} with the legacy alias of every resource-identity label present,
+     * carrying the same value, so the two keys can never drift on a container this emulator creates.
+     */
+    public static Map<String, String> withLegacyAliases(Map<String, String> labels) {
+        Map<String, String> aliased = new LinkedHashMap<>(labels);
+        for (Map.Entry<String, String> alias : LEGACY_LABEL_ALIASES.entrySet()) {
+            String value = labels.get(alias.getKey());
+            if (value != null) {
+                aliased.put(alias.getValue(), value);
+            }
+        }
+        return aliased;
+    }
+
+    /**
+     * Reads a resource-identity label: the new key's value, or its legacy alias's when the new key is
+     * absent (containers created before the {@code io.floci.*} keys). Null when neither is set.
+     */
+    public static String labelValue(Map<String, String> labels, String newKey) {
+        if (labels == null) {
+            return null;
+        }
+        String value = labels.get(newKey);
+        if (value != null) {
+            return value;
+        }
+        String legacyKey = LEGACY_LABEL_ALIASES.get(newKey);
+        return legacyKey == null ? null : labels.get(legacyKey);
+    }
+
+    /**
+     * The same Docker label filter spelled with legacy keys, or empty when {@code filter} uses no
+     * aliased key. A Docker label filter is an AND, so a reader that must also find containers carrying
+     * only the legacy keys runs the query once per key set and merges the results by container id.
+     */
+    public static Map<String, String> legacyLabelFilter(Map<String, String> filter) {
+        Map<String, String> legacy = new LinkedHashMap<>();
+        boolean aliased = false;
+        for (Map.Entry<String, String> entry : filter.entrySet()) {
+            String legacyKey = LEGACY_LABEL_ALIASES.get(entry.getKey());
+            if (legacyKey != null) {
+                aliased = true;
+                legacy.put(legacyKey, entry.getValue());
+            } else {
+                legacy.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return aliased ? legacy : Map.of();
+    }
+
+    /**
+     * New keys whose legacy alias is also present with a different value. Containers this emulator
+     * creates always agree, so a mismatch means something outside Floci relabelled the container and
+     * destructive paths must leave it alone.
+     */
+    public static List<String> conflictingAliases(Map<String, String> labels) {
+        List<String> conflicts = new ArrayList<>();
+        if (labels == null) {
+            return conflicts;
+        }
+        for (Map.Entry<String, String> alias : LEGACY_LABEL_ALIASES.entrySet()) {
+            String value = labels.get(alias.getKey());
+            String legacyValue = labels.get(alias.getValue());
+            if (value != null && legacyValue != null && !Objects.equals(value, legacyValue)) {
+                conflicts.add(alias.getKey());
+            }
+        }
+        return conflicts;
+    }
+
+    private static void putIfNotBlank(Map<String, String> labels, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            labels.put(key, value);
+        }
     }
 
     /**

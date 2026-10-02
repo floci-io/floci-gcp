@@ -103,7 +103,9 @@ abstract class CloudSqlContainerDataPlane implements CloudSqlDataPlane {
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                .withName(containerName);
+                .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "cloudsql", instance, project, stringValue(updated.get("region"))));
         for (Map.Entry<String, String> env : containerEnv().entrySet()) {
             specBuilder = specBuilder.withEnv(env.getKey(), env.getValue());
         }

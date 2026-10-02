@@ -81,6 +81,7 @@ public class BigQueryDuckManager implements ContainerTeardown {
 
         ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("bigquery", null, null, null))
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation();

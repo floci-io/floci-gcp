@@ -30,6 +30,18 @@ class GcpResourceNamesTest {
     }
 
     @Test
+    void parseLocation_standardPath() {
+        assertEquals("us-central1",
+                GcpResourceNames.parseLocation("projects/p/locations/us-central1/clusters/c1"));
+    }
+
+    @Test
+    void parseLocation_missingOrNull() {
+        assertNull(GcpResourceNames.parseLocation("projects/p/topics/t"));
+        assertNull(GcpResourceNames.parseLocation(null));
+    }
+
+    @Test
     void parseProject_deepPath() {
         assertEquals("p", GcpResourceNames.parseProject("projects/p/databases/(default)/documents/col/doc"));
     }

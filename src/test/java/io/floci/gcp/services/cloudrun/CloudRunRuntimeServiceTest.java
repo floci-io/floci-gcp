@@ -99,10 +99,13 @@ class CloudRunRuntimeServiceTest {
         assertFalse(spec.env().contains("PORT=9999"));
         assertTrue(spec.env().contains("K_SERVICE=svc"));
         assertTrue(spec.env().contains("K_REVISION=svc-00001"));
-        assertEquals("cloudrun", spec.labels().get("floci_service"));
-        assertEquals("p1", spec.labels().get("floci_project"));
-        assertEquals("us-central1", spec.labels().get("floci_location"));
-        assertEquals(revision.getName(), spec.labels().get("floci_resource"));
+        assertEquals(Map.of(
+                "io.floci", "gcp",
+                "io.floci.service", "cloudrun",
+                "io.floci.resource-id", "svc-00001",
+                "io.floci.project", "p1",
+                "io.floci.location", "us-central1",
+                "io.floci.cloudrun.resource-name", revision.getName()), spec.labels());
     }
 
     @Test

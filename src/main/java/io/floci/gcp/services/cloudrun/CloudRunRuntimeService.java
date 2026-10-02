@@ -59,6 +59,13 @@ public class CloudRunRuntimeService {
     private static final String GCS_VOLUME_HELPER_IMAGE = "alpine:3.20";
     private static final String GCS_VOLUME_HELPER_MOUNT = "/floci-gcs-volume";
     private static final int TAR_BLOCK_SIZE = 512;
+    static final String SERVICE_TOKEN = "cloudrun";
+    /**
+     * Full resource name of the revision, job task or instance a workload container runs. Cloud Run's own
+     * restart sweeps need it to tell workload kinds apart and to find the parent; {@code io.floci.resource-id}
+     * carries only the short name.
+     */
+    static final String RESOURCE_NAME_LABEL = "io.floci.cloudrun.resource-name";
 
     private final StorageBackend<String, CloudRunRuntimeInstance> runtimeStore;
     private final ContainerBuilder containerBuilder;
@@ -274,11 +281,7 @@ public class CloudRunRuntimeService {
         builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
-                .withLabels(Map.of(
-                        "floci_service", "cloudrun",
-                        "floci_project", project,
-                        "floci_location", location,
-                        "floci_resource", resourceName));
+                .withLabels(workloadLabels(project, location, resourceName));
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
@@ -1092,6 +1095,51 @@ public class CloudRunRuntimeService {
             name = name + "-" + sanitize(revision.getUid());
         }
         return ContainerStorageHelper.dockerName(config, name);
+    }
+
+    static Map<String, String> workloadLabels(String project, String location, String resourceName) {
+        Map<String, String> labels = ContainerStorageHelper.resourceIdentityLabels(
+                SERVICE_TOKEN, lastSegment(resourceName), project, location);
+        labels.put(RESOURCE_NAME_LABEL, resourceName);
+        return labels;
+    }
+
+    /**
+     * Full resource name of the workload behind a container, read from {@link #RESOURCE_NAME_LABEL}. A container
+     * created before the {@code io.floci.*} keys carries only the legacy resource label, which held the full name;
+     * it is used only when the container has no {@code io.floci.resource-id}, whose legacy alias is the short name.
+     */
+    static String workloadResourceName(Map<String, String> labels) {
+        if (labels == null) {
+            return null;
+        }
+        String resourceName = labels.get(RESOURCE_NAME_LABEL);
+        if (resourceName != null || labels.containsKey(ContainerStorageHelper.RESOURCE_ID_LABEL)) {
+            return resourceName;
+        }
+        return ContainerStorageHelper.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
+    }
+
+    /** Docker label filter for the Cloud Run workload containers of this emulator, spelled with the new keys. */
+    static Map<String, String> workloadFilter(EmulatorConfig config) {
+        Map<String, String> filter = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
+        filter.put(ContainerStorageHelper.SERVICE_LABEL, SERVICE_TOKEN);
+        return filter;
+    }
+
+    /**
+     * Whether a listed container may be removed as a Cloud Run workload: it is labelled {@code cloudrun} and none
+     * of its identity labels disagrees with its legacy alias. A disagreement means something outside Floci
+     * relabelled the container, so it is left alone and a warning is logged.
+     */
+    static boolean isRemovableWorkload(String containerId, Map<String, String> labels) {
+        List<String> conflicts = ContainerStorageHelper.conflictingAliases(labels);
+        if (!conflicts.isEmpty()) {
+            LOG.warnf("Leaving container %s alone: labels %s disagree with their legacy aliases", containerId,
+                    conflicts);
+            return false;
+        }
+        return SERVICE_TOKEN.equals(ContainerStorageHelper.labelValue(labels, ContainerStorageHelper.SERVICE_LABEL));
     }
 
     /**

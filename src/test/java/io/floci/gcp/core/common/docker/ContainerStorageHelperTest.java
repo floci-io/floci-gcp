@@ -3,10 +3,12 @@ package io.floci.gcp.core.common.docker;
 import io.floci.gcp.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,6 +63,81 @@ class ContainerStorageHelperTest {
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "floci-gcp"),
                 ContainerStorageHelper.defaultLabels(config("..")));
+    }
+
+    @Test
+    void resourceIdentityLabelsNameTheBackedResource() {
+        assertEquals(
+                Map.of("io.floci", "gcp", "io.floci.service", "cloudsql", "io.floci.resource-id", "pg-main",
+                        "io.floci.project", "p1", "io.floci.location", "us-central1"),
+                ContainerStorageHelper.resourceIdentityLabels("cloudsql", "pg-main", "p1", "us-central1"));
+    }
+
+    @Test
+    void resourceIdentityLabelsOmitBlankValues() {
+        assertEquals(
+                Map.of("io.floci", "gcp", "io.floci.service", "bigquery"),
+                ContainerStorageHelper.resourceIdentityLabels("bigquery", null, "", " "));
+        assertEquals(
+                Map.of("io.floci", "gcp"),
+                ContainerStorageHelper.resourceIdentityLabels(null, null, null, null));
+    }
+
+    @Test
+    void legacyAliasesCarryTheNewKeysValues() {
+        Map<String, String> labels = ContainerStorageHelper.withLegacyAliases(
+                ContainerStorageHelper.resourceIdentityLabels("cloudrun", "svc-00001", "p1", "us-central1"));
+
+        assertEquals("cloudrun", labels.get("floci_service"));
+        assertEquals("svc-00001", labels.get("floci_resource"));
+        assertEquals("p1", labels.get("floci_project"));
+        assertEquals("us-central1", labels.get("floci_location"));
+        assertEquals(9, labels.size());
+    }
+
+    @Test
+    void legacyAliasesAreOnlyAddedForPresentKeys() {
+        assertEquals(
+                Map.of("io.floci", "gcp", "io.floci.service", "bigquery", "floci_service", "bigquery", "floci", "true"),
+                ContainerStorageHelper.withLegacyAliases(Map.of(
+                        "io.floci", "gcp", "io.floci.service", "bigquery", "floci", "true")));
+    }
+
+    @Test
+    void labelValuePrefersTheNewKeyAndFallsBackToTheLegacyKey() {
+        assertEquals("new", ContainerStorageHelper.labelValue(
+                Map.of("io.floci.service", "new", "floci_service", "old"), "io.floci.service"));
+        assertEquals("old", ContainerStorageHelper.labelValue(
+                Map.of("floci_service", "old"), "io.floci.service"));
+        assertNull(ContainerStorageHelper.labelValue(Map.of("floci", "true"), "io.floci.service"));
+        assertNull(ContainerStorageHelper.labelValue(null, "io.floci.service"));
+    }
+
+    @Test
+    void legacyLabelFilterRespellsAliasedKeysOnly() {
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-gcp", "floci_service", "cloudrun"),
+                ContainerStorageHelper.legacyLabelFilter(Map.of(
+                        "floci", "true", "floci_emulator", "floci-gcp", "io.floci.service", "cloudrun")));
+        assertEquals(Map.of(), ContainerStorageHelper.legacyLabelFilter(Map.of("floci", "true")));
+    }
+
+    @Test
+    void conflictingAliasesReportOnlyDisagreeingPairs() {
+        assertEquals(List.of(), ContainerStorageHelper.conflictingAliases(
+                Map.of("io.floci.service", "cloudrun", "floci_service", "cloudrun")));
+        assertEquals(List.of(), ContainerStorageHelper.conflictingAliases(Map.of("floci_resource", "x")));
+        assertEquals(List.of("io.floci.resource-id"), ContainerStorageHelper.conflictingAliases(
+                Map.of("io.floci.service", "cloudrun", "floci_service", "cloudrun",
+                        "io.floci.resource-id", "a", "floci_resource", "b")));
+    }
+
+    @Test
+    void everyAliasedKeyIsAnIoFlociKeyWithAFlociLegacyKey() {
+        assertEquals(
+                Map.of("io.floci.service", "floci_service", "io.floci.resource-id", "floci_resource",
+                        "io.floci.project", "floci_project", "io.floci.location", "floci_location"),
+                ContainerStorageHelper.LEGACY_LABEL_ALIASES);
     }
 
     private static EmulatorConfig config(String namespace) {

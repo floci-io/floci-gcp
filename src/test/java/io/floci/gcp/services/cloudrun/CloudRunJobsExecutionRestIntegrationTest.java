@@ -462,7 +462,7 @@ class CloudRunJobsExecutionRestIntegrationTest {
         for (int index = 0; index < 3; index++) {
             String taskName = executionName + "/tasks/" + CloudRunRuntimeService.lastSegment(executionName)
                     + "-task" + index;
-            ids.append(docker("ps", "-aq", "--filter", "label=floci_resource=" + taskName));
+            ids.append(docker("ps", "-aq", "--filter", "label=" + CloudRunRuntimeService.RESOURCE_NAME_LABEL + "=" + taskName));
         }
         return ids.toString().trim();
     }

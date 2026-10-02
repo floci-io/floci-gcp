@@ -97,6 +97,33 @@ networks:
 !!! tip "CI pipelines"
     In GitHub Actions or GitLab CI where both your app and floci-gcp run as `services`, set `FLOCI_GCP_HOSTNAME` to the service name (e.g. `floci-gcp`) and point your GCP SDKs at `floci-gcp:4588`.
 
+## Resource Identity Labels
+
+Every container and volume floci-gcp spawns carries the labels `floci=true`, `floci_emulator=floci-gcp` and, when `FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE` is set, `floci_namespace`. A container backing an emulated GCP resource also carries labels tying it back to that resource, additive to those:
+
+| Label | Value | Purpose |
+|---|---|---|
+| `io.floci` | `gcp` | Cloud provider, for multi-cloud discovery when several Floci emulators share a host |
+| `io.floci.service` | e.g. `cloudsql` | The GCP service the container backs: `cloudrun`, `gke`, `kafka`, `kafka-connect`, `cloudsql` or `bigquery` |
+| `io.floci.resource-id` | e.g. `orders-db` | The resource short name you pass to `gcloud` (revision, job task or instance, GKE cluster, Kafka cluster, Connect cluster, Cloud SQL instance) |
+| `io.floci.project` | e.g. `my-project` | The GCP project the resource belongs to |
+| `io.floci.location` | e.g. `us-central1` | The location (region or zone) of the resource |
+
+This makes `docker ps --filter label=io.floci.service=cloudsql --filter label=io.floci.resource-id=orders-db` resolve an emulated resource to its backing container directly, without inferring it from names. Applied to Cloud Run (service revisions, job tasks, worker pools and instances), GKE, Managed Kafka, Managed Kafka Connect and Cloud SQL. The shared BigQuery SQL engine container carries only `io.floci` and `io.floci.service`, since it serves every project and has no single resource. Cloud Run workload containers also carry `io.floci.cloudrun.resource-name` with the full resource name (`projects/.../revisions/...`), which floci-gcp uses to clean up after a restart.
+
+Cloud Run containers used to carry these keys under older names. They are still written next to the new keys, and floci-gcp still recognises containers that carry only the old keys. Three of them keep the same value as their new key; `floci_resource` changed value:
+
+| Legacy label | New label | Status |
+|---|---|---|
+| `floci_service` | `io.floci.service` | legacy: still written, prefer the new key |
+| `floci_resource` | `io.floci.resource-id` | legacy: still written, but now the short name instead of the full resource name |
+| `floci_project` | `io.floci.project` | legacy: still written, prefer the new key |
+| `floci_location` | `io.floci.location` | legacy: still written, prefer the new key |
+
+Containers created by earlier floci-gcp versions carry the full resource name (`projects/.../revisions/...`) in `floci_resource`; new containers carry the short name there, as in `io.floci.resource-id`. A filter that matched `floci_resource` against a full resource name now matches only those older containers: filter on `io.floci.cloudrun.resource-name` for the full name instead.
+
+The `io.floci`, `io.floci.service` and `io.floci.resource-id` keys are shared with floci-aws and floci-az; the scope keys (`io.floci.project`, `io.floci.location` here) are each cloud's own.
+
 ## CI Pipeline Example
 
 ```yaml title=".github/workflows/test.yml"

@@ -7,6 +7,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.Ports;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
@@ -84,6 +85,9 @@ public class RedpandaManager {
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("kafka", clusterId(cluster.getName()),
+                        GcpResourceNames.parseProject(cluster.getName()),
+                        GcpResourceNames.parseLocation(cluster.getName())))
                 .withLogRotation()
                 .withDockerNetwork(config.services().kafka().dockerNetwork());
 

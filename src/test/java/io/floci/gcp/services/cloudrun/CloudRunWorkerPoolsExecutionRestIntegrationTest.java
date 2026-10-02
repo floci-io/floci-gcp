@@ -161,13 +161,13 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
         List<String> output = docker(run.toArray(String[]::new)).strip().lines().toList();
         String containerId = output.getLast();
         try {
-            assertEquals(1, runningContainers(ghostRevision));
+            assertEquals(1, runningContainersWithId(containerId));
             Operation interrupted = operations.pending("projects/" + project + "/locations/" + LOCATION,
                     WorkerPool.newBuilder().setName(ghostPool).build());
 
             workerPools.recoverAfterRestart();
 
-            assertEquals(0, runningContainers(ghostRevision));
+            assertEquals(0, runningContainersWithId(containerId));
             assertInterrupted(interrupted.getName());
         } finally {
             if (!docker("ps", "-aq", "--filter", "id=" + containerId).isBlank()) {
@@ -275,8 +275,13 @@ class CloudRunWorkerPoolsExecutionRestIntegrationTest {
                 """.formatted(instances, image, script);
     }
 
+    private static int runningContainersWithId(String containerId) {
+        String output = docker("ps", "-q", "--filter", "id=" + containerId);
+        return (int) output.lines().filter(line -> !line.isBlank()).count();
+    }
+
     private static int runningContainers(String revisionName) {
-        String output = docker("ps", "-q", "--filter", "label=floci_resource=" + revisionName);
+        String output = docker("ps", "-q", "--filter", "label=" + CloudRunRuntimeService.RESOURCE_NAME_LABEL + "=" + revisionName);
         return (int) output.lines().filter(line -> !line.isBlank()).count();
     }
 

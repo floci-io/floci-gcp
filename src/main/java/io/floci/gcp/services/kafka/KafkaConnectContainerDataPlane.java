@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
@@ -115,6 +116,9 @@ public class KafkaConnectContainerDataPlane implements KafkaConnectDataPlane {
 
         ContainerBuilder.Builder spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("kafka-connect", resourceId(connectCluster),
+                        GcpResourceNames.parseProject(connectCluster),
+                        GcpResourceNames.parseLocation(connectCluster)))
                 .withLogRotation()
                 .withDockerNetwork(config.services().kafka().dockerNetwork())
                 .withExtraHost(RedpandaManager.BROKER_ALIAS, redpandaManager.brokerAddress(kafkaCluster))

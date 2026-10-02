@@ -67,6 +67,7 @@ class CloudSqlPostgresDataPlaneTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(containerBuilder.newContainer("postgres:18.4-alpine")).thenReturn(specBuilder);
         when(specBuilder.withName("floci-gcp-cloudsql-project-a-pg-main")).thenReturn(specBuilder);
+        when(specBuilder.withLabels(any())).thenReturn(specBuilder);
         when(specBuilder.withEnv(any(), any())).thenReturn(specBuilder);
         when(specBuilder.withLogRotation()).thenReturn(specBuilder);
         when(specBuilder.withDockerNetwork(Optional.empty())).thenReturn(specBuilder);
@@ -85,6 +86,11 @@ class CloudSqlPostgresDataPlaneTest {
         assertThrows(GcpException.class, () -> dataPlane.startInstance(
                 "project-a", "pg-main", Map.of("name", "pg-main", "databaseVersion", "POSTGRES_18")));
 
+        verify(specBuilder).withLabels(Map.of(
+                "io.floci", "gcp",
+                "io.floci.service", "cloudsql",
+                "io.floci.resource-id", "pg-main",
+                "io.floci.project", "project-a"));
         verify(lifecycleManager).stopAndRemove("container-1", null);
         verify(lifecycleManager).removeVolume(argThat(name -> name.startsWith(
                 "floci-gcp-cloudsql-project-a-pg-main-")));
@@ -105,6 +111,7 @@ class CloudSqlPostgresDataPlaneTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(containerBuilder.newContainer("postgres:18.4-alpine")).thenReturn(specBuilder);
         when(specBuilder.withName("floci-gcp-run-one-cloudsql-project-a-pg-main")).thenReturn(specBuilder);
+        when(specBuilder.withLabels(any())).thenReturn(specBuilder);
         when(specBuilder.withEnv(any(), any())).thenReturn(specBuilder);
         when(specBuilder.withLogRotation()).thenReturn(specBuilder);
         when(specBuilder.withDockerNetwork(Optional.empty())).thenReturn(specBuilder);
@@ -145,6 +152,7 @@ class CloudSqlPostgresDataPlaneTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(containerBuilder.newContainer("postgres:18.4-alpine")).thenReturn(specBuilder);
         when(specBuilder.withName("floci-gcp-run-one-cloudsql-project-a-pg-main")).thenReturn(specBuilder);
+        when(specBuilder.withLabels(any())).thenReturn(specBuilder);
         when(specBuilder.withEnv(any(), any())).thenReturn(specBuilder);
         when(specBuilder.withLogRotation()).thenReturn(specBuilder);
         when(specBuilder.withDockerNetwork(Optional.empty())).thenReturn(specBuilder);

@@ -75,6 +75,7 @@ class CloudSqlMySqlDataPlaneTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(containerBuilder.newContainer(image)).thenReturn(specBuilder);
         when(specBuilder.withName(any())).thenReturn(specBuilder);
+        when(specBuilder.withLabels(any())).thenReturn(specBuilder);
         when(specBuilder.withEnv(any(), any())).thenReturn(specBuilder);
         when(specBuilder.withLogRotation()).thenReturn(specBuilder);
         when(specBuilder.withDockerNetwork(Optional.empty())).thenReturn(specBuilder);
@@ -95,9 +96,15 @@ class CloudSqlMySqlDataPlaneTest {
                 .thenReturn(new ExecResult(0, "mysqld is alive", ""));
 
         Map<String, Object> updated = dataPlane().startInstance("project-a", "my-main",
-                Map.of("name", "my-main", "databaseVersion", "MYSQL_8_0"));
+                Map.of("name", "my-main", "databaseVersion", "MYSQL_8_0", "region", "us-central1"));
 
         verify(specBuilder).withName("floci-gcp-cloudsql-project-a-my-main");
+        verify(specBuilder).withLabels(Map.of(
+                "io.floci", "gcp",
+                "io.floci.service", "cloudsql",
+                "io.floci.resource-id", "my-main",
+                "io.floci.project", "project-a",
+                "io.floci.location", "us-central1"));
         verify(specBuilder).withEnv("MYSQL_ROOT_PASSWORD", "root");
         verify(specBuilder).withDynamicPort(3306);
         verify(specBuilder).withNamedVolume(argThat(name -> name.startsWith("floci-gcp-cloudsql-project-a-my-main-")),

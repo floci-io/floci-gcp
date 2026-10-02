@@ -35,6 +35,20 @@ public final class GcpResourceNames {
         return end < 0 ? resourceName.substring(start) : resourceName.substring(start, end);
     }
 
+    /** Extracts the location from a resource name segment {@code .../locations/{location}/...}. */
+    public static String parseLocation(String resourceName) {
+        if (resourceName == null) {
+            return null;
+        }
+        int start = resourceName.indexOf("locations/");
+        if (start < 0) {
+            return null;
+        }
+        start += "locations/".length();
+        int end = resourceName.indexOf('/', start);
+        return end < 0 ? resourceName.substring(start) : resourceName.substring(start, end);
+    }
+
     /** Extracts the last path segment (the resource ID) from a full resource name. */
     public static String lastSegment(String resourceName) {
         if (resourceName == null || resourceName.isEmpty()) {

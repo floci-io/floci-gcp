@@ -197,3 +197,13 @@ emulator resources.
 - `GetIamPolicy`
 - `SetIamPolicy`
 - `TestIamPermissions`
+
+## Limitations
+
+- Regional secrets (`projects/{project}/locations/{location}/secrets/...`) are not
+  supported. gRPC calls that use a regional parent or name return `UNIMPLEMENTED`,
+  and the REST API only serves the global `/v1/projects/{project}/secrets/...` paths.
+- gRPC parents and names must match `projects/{project}`,
+  `projects/{project}/secrets/{secret}` or
+  `projects/{project}/secrets/{secret}/versions/{version}`; anything else returns
+  `INVALID_ARGUMENT`.

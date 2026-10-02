@@ -28,7 +28,9 @@ import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
@@ -52,7 +54,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void createSecret(CreateSecretRequest request, StreamObserver<Secret> responseObserver) {
         LOG.infof("createSecret parent=%s secretId=%s", request.getParent(), request.getSecretId());
         try {
-            String project = extractProject(request.getParent());
+            String project = parentProject(request.getParent());
             String replicationType = request.getSecret().getReplication().hasUserManaged() ? "user_managed" : "automatic";
             StoredSecret stored = service.createSecret(project, request.getSecretId(), replicationType);
             responseObserver.onNext(toProto(stored));
@@ -67,7 +69,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void getSecret(GetSecretRequest request, StreamObserver<Secret> responseObserver) {
         LOG.debugf("getSecret name=%s", request.getName());
         try {
-            StoredSecret stored = service.getSecret(request.getName());
+            StoredSecret stored = service.getSecret(secretName(request.getName()));
             responseObserver.onNext(toProto(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -80,7 +82,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void listSecrets(ListSecretsRequest request, StreamObserver<ListSecretsResponse> responseObserver) {
         LOG.debugf("listSecrets parent=%s", request.getParent());
         try {
-            String project = extractProject(request.getParent());
+            String project = parentProject(request.getParent());
             List<StoredSecret> all = service.listSecrets(project);
             PageToken.Page<StoredSecret> page = PageToken.paginate(all,
                     request.getPageSize(), request.getPageToken());
@@ -103,7 +105,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void updateSecret(UpdateSecretRequest request, StreamObserver<Secret> responseObserver) {
         LOG.debugf("updateSecret name=%s", request.getSecret().getName());
         try {
-            StoredSecret stored = service.updateSecret(request.getSecret().getName());
+            StoredSecret stored = service.updateSecret(secretName(request.getSecret().getName()));
             responseObserver.onNext(toProto(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -116,7 +118,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void deleteSecret(DeleteSecretRequest request, StreamObserver<Empty> responseObserver) {
         LOG.infof("deleteSecret name=%s", request.getName());
         try {
-            service.deleteSecret(request.getName());
+            service.deleteSecret(secretName(request.getName()));
             responseObserver.onNext(Empty.getDefaultInstance());
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -131,7 +133,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
         try {
             byte[] payload = request.getPayload().getData().toByteArray();
             Long crc32c = request.getPayload().hasDataCrc32C() ? request.getPayload().getDataCrc32C() : null;
-            StoredSecretVersion version = service.addSecretVersion(request.getParent(), payload, crc32c);
+            StoredSecretVersion version = service.addSecretVersion(secretName(request.getParent()), payload, crc32c);
             responseObserver.onNext(toVersionProto(version));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -144,7 +146,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void getSecretVersion(GetSecretVersionRequest request, StreamObserver<SecretVersion> responseObserver) {
         LOG.debugf("getSecretVersion name=%s", request.getName());
         try {
-            StoredSecretVersion version = service.getSecretVersion(request.getName());
+            StoredSecretVersion version = service.getSecretVersion(secretVersionName(request.getName()));
             responseObserver.onNext(toVersionProto(version));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -158,7 +160,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<ListSecretVersionsResponse> responseObserver) {
         LOG.debugf("listSecretVersions parent=%s", request.getParent());
         try {
-            List<StoredSecretVersion> all = service.listSecretVersions(request.getParent());
+            List<StoredSecretVersion> all = service.listSecretVersions(secretName(request.getParent()));
             PageToken.Page<StoredSecretVersion> page = PageToken.paginate(all,
                     request.getPageSize(), request.getPageToken());
             ListSecretVersionsResponse.Builder response = ListSecretVersionsResponse.newBuilder();
@@ -181,7 +183,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<AccessSecretVersionResponse> responseObserver) {
         LOG.debugf("accessSecretVersion name=%s", request.getName());
         try {
-            StoredSecretVersion version = service.accessSecretVersion(request.getName());
+            StoredSecretVersion version = service.accessSecretVersion(secretVersionName(request.getName()));
             SecretPayload.Builder payloadBuilder = SecretPayload.newBuilder()
                     .setData(ByteString.copyFrom(version.getPayload()));
             if (version.getDataCrc32c() != null) {
@@ -203,7 +205,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<SecretVersion> responseObserver) {
         LOG.infof("disableSecretVersion name=%s", request.getName());
         try {
-            StoredSecretVersion version = service.disableSecretVersion(request.getName());
+            StoredSecretVersion version = service.disableSecretVersion(secretVersionName(request.getName()));
             responseObserver.onNext(toVersionProto(version));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -217,7 +219,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<SecretVersion> responseObserver) {
         LOG.infof("enableSecretVersion name=%s", request.getName());
         try {
-            StoredSecretVersion version = service.enableSecretVersion(request.getName());
+            StoredSecretVersion version = service.enableSecretVersion(secretVersionName(request.getName()));
             responseObserver.onNext(toVersionProto(version));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -231,7 +233,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
             StreamObserver<SecretVersion> responseObserver) {
         LOG.infof("destroySecretVersion name=%s", request.getName());
         try {
-            StoredSecretVersion version = service.destroySecretVersion(request.getName());
+            StoredSecretVersion version = service.destroySecretVersion(secretVersionName(request.getName()));
             responseObserver.onNext(toVersionProto(version));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -244,7 +246,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void setIamPolicy(SetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("setIamPolicy resource=%s", request.getResource());
         try {
-            responseObserver.onNext(service.setIamPolicy(request.getResource(), request.getPolicy()));
+            responseObserver.onNext(service.setIamPolicy(secretName(request.getResource()), request.getPolicy()));
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("setIamPolicy failed: %s", e.getMessage());
@@ -256,7 +258,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     public void getIamPolicy(GetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("getIamPolicy resource=%s", request.getResource());
         try {
-            responseObserver.onNext(service.getIamPolicy(request.getResource()));
+            responseObserver.onNext(service.getIamPolicy(secretName(request.getResource())));
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("getIamPolicy failed: %s", e.getMessage());
@@ -270,7 +272,7 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
         LOG.debugf("testIamPermissions resource=%s", request.getResource());
         try {
             responseObserver.onNext(TestIamPermissionsResponse.newBuilder()
-                    .addAllPermissions(service.testIamPermissions(request.getResource(), request.getPermissionsList()))
+                    .addAllPermissions(service.testIamPermissions(secretName(request.getResource()), request.getPermissionsList()))
                     .build());
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -323,10 +325,46 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
         }
     }
 
-    private static String extractProject(String parent) {
-        if (parent.startsWith("projects/")) {
-            return parent.substring("projects/".length());
+    private static String parentProject(String parent) {
+        String[] segments = splitResourceName(parent, 2, "projects/{project}");
+        return segments[1];
+    }
+
+    private static String secretName(String name) {
+        String[] segments = splitResourceName(name, 4, "projects/{project}/secrets/{secret}");
+        if (!"secrets".equals(segments[2])) {
+            throw invalidResourceName(name, "projects/{project}/secrets/{secret}");
         }
-        return parent;
+        return GcpResourceNames.secret(segments[1], segments[3]);
+    }
+
+    private static String secretVersionName(String name) {
+        String expected = "projects/{project}/secrets/{secret}/versions/{version}";
+        String[] segments = splitResourceName(name, 6, expected);
+        if (!"secrets".equals(segments[2]) || !"versions".equals(segments[4])) {
+            throw invalidResourceName(name, expected);
+        }
+        return GcpResourceNames.secretVersion(segments[1], segments[3], segments[5]);
+    }
+
+    private static String[] splitResourceName(String name, int expectedSegments, String expected) {
+        String[] segments = name.split("/", -1);
+        if (segments.length >= 3 && "projects".equals(segments[0]) && "locations".equals(segments[2])) {
+            throw GcpException.unimplemented(
+                    "Regional secrets (projects/*/locations/*) are not supported by the floci Secret Manager emulator");
+        }
+        if (segments.length != expectedSegments || !"projects".equals(segments[0])) {
+            throw invalidResourceName(name, expected);
+        }
+        for (String segment : segments) {
+            if (segment.isBlank()) {
+                throw invalidResourceName(name, expected);
+            }
+        }
+        return segments;
+    }
+
+    private static GcpException invalidResourceName(String name, String expected) {
+        return GcpException.invalidArgument("Invalid resource name '" + name + "': expected " + expected);
     }
 }

@@ -2,6 +2,7 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.XmlBuilder;
+import io.floci.gcp.services.credentials.CredentialTokenService;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -18,7 +19,8 @@ final class GcsXmlErrorResponse {
     static Response authentication(GcpException error) {
         int status = error.getHttpStatus();
         String code = switch (status) {
-            case 401 -> "Expired Floci credential token".equals(error.getMessage())
+            // TODO(#282): Replace message-based classification with a typed credential failure reason.
+            case 401 -> CredentialTokenService.EXPIRED_TOKEN_MESSAGE.equals(error.getMessage())
                     ? "InvalidAuthentication"
                     : "AuthenticationRequired";
             case 403 -> "AccessDenied";

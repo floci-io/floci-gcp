@@ -106,6 +106,7 @@ class CredentialTokenServiceTest {
                 () -> service.lookupBearerToken(expired.getTokenValue()));
 
         assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+        assertEquals(CredentialTokenService.EXPIRED_TOKEN_MESSAGE, ex.getMessage());
         assertFalse(store.get(expired.getTokenValue()).isPresent());
     }
 

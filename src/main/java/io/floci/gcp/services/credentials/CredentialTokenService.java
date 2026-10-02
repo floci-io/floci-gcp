@@ -21,6 +21,7 @@ public class CredentialTokenService {
     public static final String FLOCI_TOKEN_PREFIX = "floci-gcp-";
     public static final String IMPERSONATED_TOKEN_PREFIX = "floci-gcp-impersonated-";
     public static final String DOWNSCOPED_TOKEN_PREFIX = "floci-gcp-downscoped-";
+    public static final String EXPIRED_TOKEN_MESSAGE = "Expired Floci credential token";
     public static final long DEFAULT_LIFETIME_SECONDS = 3600;
 
     private final StorageBackend<String, StoredCredentialToken> tokenStore;
@@ -117,7 +118,7 @@ public class CredentialTokenService {
                 .orElseThrow(() -> GcpException.unauthenticated("Unknown Floci credential token"));
         if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
             tokenStore.delete(bearerToken);
-            throw GcpException.unauthenticated("Expired Floci credential token");
+            throw GcpException.unauthenticated(EXPIRED_TOKEN_MESSAGE);
         }
         return Optional.of(token);
     }

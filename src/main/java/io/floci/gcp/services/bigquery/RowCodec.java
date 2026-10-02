@@ -94,6 +94,25 @@ final class RowCodec {
     static List<ErrorProto> normalizeRow(TableSchema schema, Map<String, Object> json,
                                          boolean ignoreUnknownValues, boolean nativeJson,
                                          Map<String, Object> out) {
+        return normalizeRow(schema, json, ignoreUnknownValues,
+                nativeJson ? JsonInput.NATIVE_TOP_LEVEL : JsonInput.TEXT, out);
+    }
+
+    /**
+     * How a JSON field's value arrives. A native top-level value is serialized to text, because
+     * top-level JSON columns are staged as text and cast back ({@link DuckTypes#stagedAsText}).
+     * Inside a RECORD or REPEATED field the value is kept as is, since those are read by
+     * {@code read_json} directly and text there would become a JSON string.
+     */
+    private enum JsonInput { TEXT, NATIVE_TOP_LEVEL, NATIVE_NESTED }
+
+    private static JsonInput nested(JsonInput jsonInput) {
+        return jsonInput == JsonInput.NATIVE_TOP_LEVEL ? JsonInput.NATIVE_NESTED : jsonInput;
+    }
+
+    private static List<ErrorProto> normalizeRow(TableSchema schema, Map<String, Object> json,
+                                                 boolean ignoreUnknownValues, JsonInput jsonInput,
+                                                 Map<String, Object> out) {
         List<ErrorProto> errors = new ArrayList<>();
         List<TableFieldSchema> fields = schema != null && schema.getFields() != null
                 ? schema.getFields() : List.of();
@@ -121,7 +140,7 @@ final class RowCodec {
                 continue;
             }
             try {
-                out.put(field.getName(), coerce(field, raw, ignoreUnknownValues, nativeJson));
+                out.put(field.getName(), coerce(field, raw, ignoreUnknownValues, jsonInput));
             } catch (IllegalArgumentException e) {
                 errors.add(error("invalid", field.getName(), e.getMessage()));
             }
@@ -145,11 +164,11 @@ final class RowCodec {
      * too. Throws {@link IllegalArgumentException} with the caller-facing message.
      */
     static Object coerceValue(TableFieldSchema field, Object raw) {
-        return coerce(field, raw, false, false);
+        return coerce(field, raw, false, JsonInput.TEXT);
     }
 
     private static Object coerce(TableFieldSchema field, Object raw, boolean ignoreUnknownValues,
-                                 boolean nativeJson) {
+                                 JsonInput jsonInput) {
         if ("REPEATED".equals(field.getMode())) {
             if (!(raw instanceof List<?> list)) {
                 throw new IllegalArgumentException(
@@ -157,16 +176,16 @@ final class RowCodec {
             }
             List<Object> coerced = new ArrayList<>(list.size());
             for (Object element : list) {
-                coerced.add(coerceScalar(field, element, ignoreUnknownValues, nativeJson));
+                coerced.add(coerceScalar(field, element, ignoreUnknownValues, nested(jsonInput)));
             }
             return coerced;
         }
-        return coerceScalar(field, raw, ignoreUnknownValues, nativeJson);
+        return coerceScalar(field, raw, ignoreUnknownValues, jsonInput);
     }
 
     @SuppressWarnings("unchecked")
     private static Object coerceScalar(TableFieldSchema field, Object raw, boolean ignoreUnknownValues,
-                                       boolean nativeJson) {
+                                       JsonInput jsonInput) {
         String type = field.getType();
         switch (type) {
             case "INTEGER" -> {
@@ -218,7 +237,8 @@ final class RowCodec {
                     TableSchema subSchema = new TableSchema(field.getFields() != null
                             ? field.getFields() : List.of());
                     List<ErrorProto> nestedErrors =
-                            normalizeRow(subSchema, (Map<String, Object>) map, ignoreUnknownValues, nativeJson, nested);
+                            normalizeRow(subSchema, (Map<String, Object>) map, ignoreUnknownValues,
+                                    nested(jsonInput), nested);
                     if (!nestedErrors.isEmpty()) {
                         throw new IllegalArgumentException(nestedErrors.get(0).getMessage());
                     }
@@ -245,13 +265,20 @@ final class RowCodec {
                 return str;
             }
             case "JSON" -> {
-                if (!nativeJson) {
-                    return storedAsText(type, raw);
-                }
-                try {
-                    return JSON_MAPPER.writeValueAsString(raw);
-                } catch (JsonProcessingException e) {
-                    throw new IllegalArgumentException("Cannot convert value to JSON (bad value): " + raw, e);
+                switch (jsonInput) {
+                    case TEXT -> {
+                        return storedAsText(type, raw);
+                    }
+                    case NATIVE_NESTED -> {
+                        return raw;
+                    }
+                    default -> {
+                        try {
+                            return JSON_MAPPER.writeValueAsString(raw);
+                        } catch (JsonProcessingException e) {
+                            throw new IllegalArgumentException("Cannot convert value to JSON (bad value): " + raw, e);
+                        }
+                    }
                 }
             }
             default -> {

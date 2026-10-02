@@ -177,6 +177,33 @@ class BigQueryDuckLoadIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void jsonInsideRecordAndRepeatedFieldsKeepsItsJsonValue() {
+        putObject("nested.json", "application/json", ("{\"id\": 1, \"rec\": {\"j\": 20}, \"arr\": [20, \"This is a string\", {\"a\": 1}]}\n"
+                + "{\"id\": 2, \"rec\": {\"j\": \"This is a string\"}, \"arr\": []}\n"
+                + "{\"id\": 3, \"rec\": {\"j\": {\"id\": 10, \"name\": \"Alice\"}}, \"arr\": [\"{\\\"looks\\\": \\\"like json\\\"}\"]}\n")
+                .getBytes(StandardCharsets.UTF_8));
+        load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/nested.json"),
+                "sourceFormat", "NEWLINE_DELIMITED_JSON", "destinationTable", destination("nested"),
+                "schema", Map.of("fields", List.of(
+                        Map.of("name", "id", "type", "INTEGER"),
+                        Map.of("name", "rec", "type", "RECORD",
+                                "fields", List.of(Map.of("name", "j", "type", "JSON"))),
+                        Map.of("name", "arr", "type", "JSON", "mode", "REPEATED")))))
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue());
+        given().contentType("application/json")
+                .body(Map.of("useLegacySql", false, "query",
+                        "SELECT id, TO_JSON_STRING(rec.j), TO_JSON_STRING(arr) FROM raw.nested ORDER BY id"))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "20", "[20,\"This is a string\",{\"a\":1}]")))
+                .body("rows[1].f.v", equalTo(List.of("2", "\"This is a string\"", "[]")))
+                .body("rows[2].f.v", equalTo(List.of("3", "{\"id\":10,\"name\":\"Alice\"}",
+                        "[\"{\\\"looks\\\": \\\"like json\\\"}\"]")));
+    }
+
+    @Test
     @Order(6)
     void parquetUploadCarriesItsOwnSchema() throws IOException {
         byte[] parquet;

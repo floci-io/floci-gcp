@@ -55,6 +55,31 @@ class RowCodecTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void ndjsonLoadKeepsNestedJsonValuesNative() {
+        TableFieldSchema child = new TableFieldSchema();
+        child.setName("j");
+        child.setType("JSON");
+        TableFieldSchema rec = new TableFieldSchema();
+        rec.setName("rec");
+        rec.setType("RECORD");
+        rec.setFields(List.of(child));
+        TableFieldSchema arr = new TableFieldSchema();
+        arr.setName("arr");
+        arr.setType("JSON");
+        arr.setMode("REPEATED");
+
+        Map<String, Object> object = Map.of("a", 1);
+        Map<String, Object> out = new LinkedHashMap<>();
+        List<ErrorProto> errors = RowCodec.normalizeRow(new TableSchema(List.of(rec, arr)),
+                Map.of("rec", Map.of("j", 20), "arr", List.of(20, "This is a string", object)), false, true, out);
+
+        assertTrue(errors.isEmpty(), String.valueOf(errors));
+        assertEquals(20, ((Map<String, Object>) out.get("rec")).get("j"));
+        assertEquals(List.of(20, "This is a string", object), out.get("arr"));
+    }
+
+    @Test
     void integersInRangeAreKept() {
         for (Object value : List.of(Long.MAX_VALUE, Long.MIN_VALUE, 7, new BigDecimal("42"), new BigInteger("-3"), 5.0)) {
             Map<String, Object> out = new LinkedHashMap<>();

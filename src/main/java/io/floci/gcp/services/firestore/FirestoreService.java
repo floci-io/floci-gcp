@@ -86,6 +86,7 @@ public class FirestoreService {
 
     public WriteCommitResult applyWrite(Write write, Instant commitTime) {
         synchronized (writeLock) {
+            validateFieldPaths(write);
             checkPrecondition(write);
             return applyWriteUnchecked(write, commitTime);
         }
@@ -99,6 +100,7 @@ public class FirestoreService {
         synchronized (writeLock) {
             validateTransaction(transactionId);
             for (Write write : writes) {
+                validateFieldPaths(write);
                 checkPrecondition(write);
             }
             List<WriteCommitResult> results = new ArrayList<>(writes.size());
@@ -108,6 +110,12 @@ public class FirestoreService {
             discardTransaction(transactionId);
             return results;
         }
+    }
+
+    private static void validateFieldPaths(Write write) {
+        write.getUpdateMask().getFieldPathsList().forEach(FirestoreService::splitFieldPath);
+        write.getUpdateTransformsList().forEach(t -> splitFieldPath(t.getFieldPath()));
+        write.getTransform().getFieldTransformsList().forEach(t -> splitFieldPath(t.getFieldPath()));
     }
 
     private void checkPrecondition(Write write) {
@@ -176,19 +184,18 @@ public class FirestoreService {
             String name = doc.getName();
             Map<String, StoredValue> incomingFields = convertFields(doc.getFieldsMap());
 
-            boolean hasMask = write.hasUpdateMask() && write.getUpdateMask().getFieldPathsCount() > 0;
-
-            if (hasMask) {
+            if (write.hasUpdateMask()) {
                 Optional<StoredDocument> existing = documentStore.get(name);
                 Map<String, StoredValue> merged = new LinkedHashMap<>(
                         existing.map(StoredDocument::getFields).orElse(new LinkedHashMap<>()));
 
                 for (String path : write.getUpdateMask().getFieldPathsList()) {
-                    StoredValue val = incomingFields.get(path);
+                    List<String> segments = splitFieldPath(path);
+                    StoredValue val = getAtPath(incomingFields, segments);
                     if (val != null) {
-                        merged.put(path, val);
+                        putAtPath(merged, segments, val);
                     } else {
-                        merged.remove(path);
+                        removeAtPath(merged, segments);
                     }
                 }
 
@@ -246,33 +253,33 @@ public class FirestoreService {
 
     private void applyFieldTransform(Map<String, StoredValue> fields,
             com.google.firestore.v1.DocumentTransform.FieldTransform transform, String now) {
-        String path = transform.getFieldPath();
+        List<String> path = splitFieldPath(transform.getFieldPath());
         if (transform.hasSetToServerValue()
                 && transform.getSetToServerValue() == com.google.firestore.v1.DocumentTransform.FieldTransform.ServerValue.REQUEST_TIME) {
             StoredValue ts = new StoredValue();
             ts.setType("timestamp");
             ts.setStringValue(now);
-            fields.put(path, ts);
+            putAtPath(fields, path, ts);
         } else if (transform.hasIncrement()) {
             Value inc = transform.getIncrement();
-            StoredValue current = fields.get(path);
+            StoredValue current = getAtPath(fields, path);
             if (inc.getValueTypeCase() == Value.ValueTypeCase.INTEGER_VALUE) {
                 long base = (current != null && "integer".equals(current.getType()) && current.getIntegerValue() != null)
                         ? current.getIntegerValue() : 0L;
                 StoredValue result = new StoredValue();
                 result.setType("integer");
                 result.setIntegerValue(base + inc.getIntegerValue());
-                fields.put(path, result);
+                putAtPath(fields, path, result);
             } else if (inc.getValueTypeCase() == Value.ValueTypeCase.DOUBLE_VALUE) {
                 double base = (current != null && current.getDoubleValue() != null)
                         ? current.getDoubleValue() : 0.0;
                 StoredValue result = new StoredValue();
                 result.setType("double");
                 result.setDoubleValue(base + inc.getDoubleValue());
-                fields.put(path, result);
+                putAtPath(fields, path, result);
             }
         } else if (transform.hasAppendMissingElements()) {
-            StoredValue arr = fields.get(path);
+            StoredValue arr = getAtPath(fields, path);
             List<StoredValue> existing = (arr != null && "array".equals(arr.getType()) && arr.getArrayValue() != null)
                     ? new ArrayList<>(arr.getArrayValue()) : new ArrayList<>();
             for (Value v : transform.getAppendMissingElements().getValuesList()) {
@@ -285,9 +292,9 @@ public class FirestoreService {
             StoredValue result = new StoredValue();
             result.setType("array");
             result.setArrayValue(existing);
-            fields.put(path, result);
+            putAtPath(fields, path, result);
         } else if (transform.hasRemoveAllFromArray()) {
-            StoredValue arr = fields.get(path);
+            StoredValue arr = getAtPath(fields, path);
             if (arr != null && "array".equals(arr.getType()) && arr.getArrayValue() != null) {
                 List<StoredValue> filtered = arr.getArrayValue().stream()
                         .filter(e -> transform.getRemoveAllFromArray().getValuesList().stream()
@@ -296,7 +303,7 @@ public class FirestoreService {
                 StoredValue result = new StoredValue();
                 result.setType("array");
                 result.setArrayValue(new ArrayList<>(filtered));
-                fields.put(path, result);
+                putAtPath(fields, path, result);
             }
         }
     }
@@ -463,6 +470,9 @@ public class FirestoreService {
     private static final Duration TRANSACTION_TTL = Duration.ofMinutes(15);
 
     private final Object writeLock = new Object();
+
+    /** https://firebase.google.com/docs/firestore/quotas#limits: maximum depth of fields in a map or array. */
+    private static final int MAX_FIELD_DEPTH = 20;
     private final Map<String, TransactionState> transactions = new ConcurrentHashMap<>();
 
     private static final class TransactionState {
@@ -703,16 +713,95 @@ public class FirestoreService {
         if (doc.getFields() == null) {
             return null;
         }
+        return getAtPath(doc.getFields(), splitFieldPath(path));
+    }
 
-        String[] segments = path.split("\\.", -1);
-        StoredValue value = doc.getFields().get(segments[0]);
-        for (int i = 1; i < segments.length; i++) {
+    /**
+     * Splits a field path into segments, unquoting backtick-quoted segments.
+     * Rejects empty segments, unterminated quotes or escapes, and paths deeper
+     * than Firestore's documented maximum field depth.
+     */
+    static List<String> splitFieldPath(String path) {
+        List<String> segments = new ArrayList<>();
+        StringBuilder segment = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (quoted && c == '\\') {
+                if (++i == path.length()) {
+                    throw invalidFieldPath(path);
+                }
+                segment.append(path.charAt(i));
+            } else if (c == '`') {
+                quoted = !quoted;
+            } else if (c == '.' && !quoted) {
+                addSegment(segments, segment, path);
+            } else {
+                segment.append(c);
+            }
+        }
+        if (quoted) {
+            throw invalidFieldPath(path);
+        }
+        addSegment(segments, segment, path);
+        return segments;
+    }
+
+    private static void addSegment(List<String> segments, StringBuilder segment, String path) {
+        if (segment.isEmpty() || segments.size() == MAX_FIELD_DEPTH) {
+            throw invalidFieldPath(path);
+        }
+        segments.add(segment.toString());
+        segment.setLength(0);
+    }
+
+    private static GcpException invalidFieldPath(String path) {
+        return GcpException.invalidArgument("Invalid field path: " + path);
+    }
+
+    private static StoredValue getAtPath(Map<String, StoredValue> fields, List<String> path) {
+        StoredValue value = fields.get(path.get(0));
+        for (String segment : path.subList(1, path.size())) {
             if (value == null || !"map".equals(value.getType()) || value.getMapValue() == null) {
                 return null;
             }
-            value = value.getMapValue().get(segments[i]);
+            value = value.getMapValue().get(segment);
         }
         return value;
+    }
+
+    /** Sets a nested field, copying each map on the way so stored documents are never mutated. */
+    private static void putAtPath(Map<String, StoredValue> fields, List<String> path, StoredValue value) {
+        if (path.size() == 1) {
+            fields.put(path.get(0), value);
+            return;
+        }
+        StoredValue parent = fields.get(path.get(0));
+        Map<String, StoredValue> children = parent != null && "map".equals(parent.getType())
+                && parent.getMapValue() != null
+                ? new LinkedHashMap<>(parent.getMapValue()) : new LinkedHashMap<>();
+        putAtPath(children, path.subList(1, path.size()), value);
+        StoredValue map = new StoredValue();
+        map.setType("map");
+        map.setMapValue(children);
+        fields.put(path.get(0), map);
+    }
+
+    private static void removeAtPath(Map<String, StoredValue> fields, List<String> path) {
+        if (path.size() == 1) {
+            fields.remove(path.get(0));
+            return;
+        }
+        StoredValue parent = fields.get(path.get(0));
+        if (parent == null || !"map".equals(parent.getType()) || parent.getMapValue() == null) {
+            return;
+        }
+        Map<String, StoredValue> children = new LinkedHashMap<>(parent.getMapValue());
+        removeAtPath(children, path.subList(1, path.size()));
+        StoredValue map = new StoredValue();
+        map.setType("map");
+        map.setMapValue(children);
+        fields.put(path.get(0), map);
     }
 
     private Map<String, StoredValue> convertFields(Map<String, Value> protoFields) {

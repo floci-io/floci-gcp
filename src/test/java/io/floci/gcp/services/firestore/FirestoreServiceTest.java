@@ -2,6 +2,7 @@ package io.floci.gcp.services.firestore;
 
 import com.google.firestore.v1.ArrayValue;
 import com.google.firestore.v1.Document;
+import com.google.firestore.v1.DocumentMask;
 import com.google.firestore.v1.DocumentTransform;
 import com.google.firestore.v1.MapValue;
 import com.google.firestore.v1.Precondition;
@@ -626,5 +627,192 @@ class FirestoreServiceTest {
         service.commit(List.of(upsert(DOC_NAME, "a", "2")), tx, Instant.now());
         assertEquals("2", service.getDocument(DOC_NAME).orElseThrow()
                 .getFields().get("a").getStringValue());
+    }
+
+    @Test
+    void updateMaskWithDottedPathUpdatesOnlyThatNestedField() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME)
+                        .putFields("m", mapOf("x", intValue(9))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.x"))
+                .build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+        assertEquals(9L, stored.getFields().get("m").getMapValue().get("x").getIntegerValue());
+        assertEquals(2L, stored.getFields().get("m").getMapValue().get("y").getIntegerValue());
+        assertEquals("k", stored.getFields().get("keep").getStringValue());
+    }
+
+    @Test
+    void updateMaskMergesNewNestedFieldAlongsideSiblings() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME)
+                        .putFields("m", mapOf("z", intValue(3))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.z"))
+                .build(), Instant.now());
+
+        assertEquals(Set.of("x", "y", "z"), service.getDocument(DOC_NAME).orElseThrow()
+                .getFields().get("m").getMapValue().keySet());
+    }
+
+    @Test
+    void updateMaskDeletesNestedFieldAbsentFromInput() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.x"))
+                .build(), Instant.now());
+
+        assertEquals(Set.of("y"), service.getDocument(DOC_NAME).orElseThrow()
+                .getFields().get("m").getMapValue().keySet());
+    }
+
+    @Test
+    void updateMaskWithQuotedSegmentAddressesLiteralKey() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME)
+                        .putFields("m", mapOf("a.b", intValue(5))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.`a.b`"))
+                .build(), Instant.now());
+
+        assertEquals(5L, service.getDocument(DOC_NAME).orElseThrow()
+                .getFields().get("m").getMapValue().get("a.b").getIntegerValue());
+    }
+
+    @Test
+    void emptyUpdateMaskWithTransformKeepsExistingFields() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                .setUpdateMask(DocumentMask.getDefaultInstance())
+                .addUpdateTransforms(DocumentTransform.FieldTransform.newBuilder()
+                        .setFieldPath("a").setIncrement(intValue(5)))
+                .build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+        assertEquals(6L, stored.getFields().get("a").getIntegerValue());
+        assertEquals("k", stored.getFields().get("keep").getStringValue());
+        assertEquals(Set.of("x", "y"), stored.getFields().get("m").getMapValue().keySet());
+    }
+
+    @Test
+    void transformAtDottedPathIncrementsNestedField() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                .setUpdateMask(DocumentMask.getDefaultInstance())
+                .addUpdateTransforms(DocumentTransform.FieldTransform.newBuilder()
+                        .setFieldPath("m.x").setIncrement(intValue(4)))
+                .build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+        assertEquals(5L, stored.getFields().get("m").getMapValue().get("x").getIntegerValue());
+        assertEquals(2L, stored.getFields().get("m").getMapValue().get("y").getIntegerValue());
+    }
+
+    @Test
+    void splitFieldPathUnquotesBacktickSegments() {
+        assertEquals(List.of("a", "b.c", "d`e"), FirestoreService.splitFieldPath("a.`b.c`.`d\\`e`"));
+    }
+
+    @Test
+    void transformsAtDottedPathAppendAndRemoveNestedArrayElements() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+        Value tags = Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                .addValues(intValue(1)).addValues(intValue(2))).build();
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                .setUpdateMask(DocumentMask.getDefaultInstance())
+                .addUpdateTransforms(DocumentTransform.FieldTransform.newBuilder()
+                        .setFieldPath("m.tags").setAppendMissingElements(tags.getArrayValue()))
+                .addUpdateTransforms(DocumentTransform.FieldTransform.newBuilder()
+                        .setFieldPath("m.tags").setRemoveAllFromArray(ArrayValue.newBuilder()
+                                .addValues(intValue(1))))
+                .build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+        List<StoredValue> remaining = stored.getFields().get("m").getMapValue().get("tags").getArrayValue();
+        assertEquals(List.of(2L), remaining.stream().map(StoredValue::getIntegerValue).toList());
+        assertEquals(1L, stored.getFields().get("m").getMapValue().get("x").getIntegerValue());
+    }
+
+    @Test
+    void queryOnQuotedFieldPathFindsValueWrittenThroughQuotedMask() {
+        String name = DB + "/documents/customers/c1";
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(name)
+                        .putFields("m", mapOf("a.b", intValue(5))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.`a.b`"))
+                .build(), Instant.now());
+
+        assertEquals(1, runNestedFilter("m.`a.b`", StructuredQuery.FieldFilter.Operator.EQUAL,
+                intValue(5)).size());
+    }
+
+    @Test
+    void malformedFieldPathsAreRejected() {
+        for (String path : List.of("m..x", ".m", "m.", "m.`x", "m.`x\\", "m.``")) {
+            GcpException ex = assertThrows(GcpException.class,
+                    () -> FirestoreService.splitFieldPath(path), path);
+            assertEquals(Status.Code.INVALID_ARGUMENT, ex.getGrpcCode(), path);
+        }
+    }
+
+    @Test
+    void fieldPathsDeeperThanTwentySegmentsAreRejected() {
+        assertEquals(20, FirestoreService.splitFieldPath(String.join(".", "a".repeat(20).split(""))).size());
+
+        String tooDeep = String.join(".", "a".repeat(10_000).split(""));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.applyWrite(Write.newBuilder()
+                        .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                        .setUpdateMask(DocumentMask.newBuilder().addFieldPaths(tooDeep))
+                        .build(), Instant.now()));
+        assertEquals(Status.Code.INVALID_ARGUMENT, ex.getGrpcCode());
+    }
+
+    @Test
+    void commitWithMalformedFieldPathAppliesNoWrites() {
+        String other = DB + "/documents/users/bob";
+        Write malformed = Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m..x"))
+                .build();
+
+        assertThrows(GcpException.class, () -> service.commit(
+                List.of(upsert(other, "b", "1"), malformed), new byte[0], Instant.now()));
+        assertTrue(service.getDocument(other).isEmpty());
+        assertTrue(service.getDocument(DOC_NAME).isEmpty());
+    }
+
+    private static Document profileDocument() {
+        return Document.newBuilder()
+                .setName(DOC_NAME)
+                .putFields("a", intValue(1))
+                .putFields("keep", Value.newBuilder().setStringValue("k").build())
+                .putFields("m", mapOf("x", intValue(1), "y", intValue(2)))
+                .build();
+    }
+
+    private static Value intValue(long value) {
+        return Value.newBuilder().setIntegerValue(value).build();
+    }
+
+    private static Value mapOf(Object... keysAndValues) {
+        MapValue.Builder map = MapValue.newBuilder();
+        for (int i = 0; i < keysAndValues.length; i += 2) {
+            map.putFields((String) keysAndValues[i], (Value) keysAndValues[i + 1]);
+        }
+        return Value.newBuilder().setMapValue(map).build();
     }
 }

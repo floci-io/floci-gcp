@@ -1,5 +1,9 @@
 package io.floci.gcp.services.cloudkms;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKey;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKeyVersion;
@@ -19,6 +23,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -42,6 +47,8 @@ import java.util.zip.CRC32C;
 public class CloudKmsHttpController {
 
     private static final Logger LOG = Logger.getLogger(CloudKmsHttpController.class);
+    private static final ObjectMapper EXACT_NUMBERS = new ObjectMapper()
+            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     @Inject
     CloudKmsService service;
@@ -275,16 +282,21 @@ public class CloudKmsHttpController {
     @POST
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}:encrypt")
     public Response encrypt(@PathParam("project") String project, @PathParam("location") String location,
-            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, Map<String, Object> body) {
+            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             byte[] plaintext = decodeField(body, "plaintext");
             byte[] aad = decodeField(body, "additionalAuthenticatedData");
+            boolean verifiedPlaintext = verifyCrc32c(body, "plaintextCrc32c", plaintext);
+            boolean verifiedAad = verifyCrc32c(body, "additionalAuthenticatedDataCrc32c", aad);
             CloudKmsService.EncryptResult result = service.encrypt(
                     cryptoKeyName(project, location, keyRing, cryptoKey), plaintext, aad);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("name", result.versionName());
             response.put("ciphertext", Base64.getEncoder().encodeToString(result.ciphertext()));
             response.put("ciphertextCrc32c", String.valueOf(crc32c(result.ciphertext())));
+            putIfVerified(response, "verifiedPlaintextCrc32c", verifiedPlaintext);
+            putIfVerified(response, "verifiedAdditionalAuthenticatedDataCrc32c", verifiedAad);
             response.put("protectionLevel", "SOFTWARE");
             return Response.ok(response).build();
         } catch (GcpException e) {
@@ -295,10 +307,13 @@ public class CloudKmsHttpController {
     @POST
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}:decrypt")
     public Response decrypt(@PathParam("project") String project, @PathParam("location") String location,
-            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, Map<String, Object> body) {
+            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             byte[] ciphertext = decodeField(body, "ciphertext");
             byte[] aad = decodeField(body, "additionalAuthenticatedData");
+            verifyCrc32c(body, "ciphertextCrc32c", ciphertext);
+            verifyCrc32c(body, "additionalAuthenticatedDataCrc32c", aad);
             CloudKmsService.DecryptResult result = service.decrypt(
                     cryptoKeyName(project, location, keyRing, cryptoKey), ciphertext, aad);
             Map<String, Object> response = new LinkedHashMap<>();
@@ -317,8 +332,9 @@ public class CloudKmsHttpController {
     @SuppressWarnings("unchecked")
     public Response asymmetricSign(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
-            @PathParam("version") String version, Map<String, Object> body) {
+            @PathParam("version") String version, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             byte[] digest = new byte[0];
             if (body != null && body.get("digest") instanceof Map<?, ?> d) {
                 Object sha256 = ((Map<String, Object>) d).get("sha256");
@@ -326,12 +342,14 @@ public class CloudKmsHttpController {
                     digest = Base64.getDecoder().decode(s);
                 }
             }
+            boolean verifiedDigest = verifyCrc32c(body, "digestCrc32c", digest);
             byte[] signature = service.asymmetricSign(
                     versionName(project, location, keyRing, cryptoKey, version), digest);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("name", versionName(project, location, keyRing, cryptoKey, version));
             response.put("signature", Base64.getEncoder().encodeToString(signature));
             response.put("signatureCrc32c", String.valueOf(crc32c(signature)));
+            putIfVerified(response, "verifiedDigestCrc32c", verifiedDigest);
             response.put("protectionLevel", "SOFTWARE");
             return Response.ok(response).build();
         } catch (GcpException e) {
@@ -343,14 +361,17 @@ public class CloudKmsHttpController {
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions/{version}:asymmetricDecrypt")
     public Response asymmetricDecrypt(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
-            @PathParam("version") String version, Map<String, Object> body) {
+            @PathParam("version") String version, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             byte[] ciphertext = decodeField(body, "ciphertext");
+            boolean verifiedCiphertext = verifyCrc32c(body, "ciphertextCrc32c", ciphertext);
             byte[] plaintext = service.asymmetricDecrypt(
                     versionName(project, location, keyRing, cryptoKey, version), ciphertext);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("plaintext", Base64.getEncoder().encodeToString(plaintext));
             response.put("plaintextCrc32c", String.valueOf(crc32c(plaintext)));
+            putIfVerified(response, "verifiedCiphertextCrc32c", verifiedCiphertext);
             response.put("protectionLevel", "SOFTWARE");
             return Response.ok(response).build();
         } catch (GcpException e) {
@@ -448,6 +469,54 @@ public class CloudKmsHttpController {
         CRC32C crc = new CRC32C();
         crc.update(data);
         return crc.getValue();
+    }
+
+    /**
+     * Checks an optional request checksum the way the gRPC controller does: absent means not
+     * verified, a mismatch is INVALID_ARGUMENT. The field is an int64, which proto3 JSON carries as
+     * a string or a number, in either form possibly with an exponent; it must be integral.
+     */
+    private static boolean verifyCrc32c(Map<String, Object> body, String field, byte[] data) {
+        Object value = body != null ? body.get(field) : null;
+        if (value == null) {
+            return false;
+        }
+        long expected;
+        try {
+            if (!(value instanceof String) && !(value instanceof Number)) {
+                throw new NumberFormatException();
+            }
+            expected = new BigDecimal(value.toString()).longValueExact();
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw GcpException.invalidArgument("Invalid value at '" + field + "' (TYPE_INT64): " + value);
+        }
+        if (crc32c(data) != expected) {
+            throw GcpException.invalidArgument("Checksum verification failed");
+        }
+        return true;
+    }
+
+    /**
+     * Parses a request whose int64 checksums must be read exactly. The shared mapper turns a JSON
+     * number with a fraction or exponent into a double, which can round a non-integral literal such
+     * as {@code 1e-324} to {@code 0}; reading floats as BigDecimal keeps the literal.
+     */
+    private static Map<String, Object> parseBody(String rawBody) {
+        if (rawBody == null || rawBody.isBlank()) {
+            return null;
+        }
+        try {
+            return EXACT_NUMBERS.readValue(rawBody, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            throw GcpException.invalidArgument("Invalid JSON payload received: " + e.getOriginalMessage());
+        }
+    }
+
+    /** proto3 JSON leaves a false bool out, so a verified flag only appears when it is true. */
+    private static void putIfVerified(Map<String, Object> response, String field, boolean verified) {
+        if (verified) {
+            response.put(field, true);
+        }
     }
 
     private static Response error(GcpException e) {

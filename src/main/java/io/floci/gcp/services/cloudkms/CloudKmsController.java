@@ -311,6 +311,9 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         try {
             byte[] ciphertext = request.getCiphertext().toByteArray();
             byte[] aad = request.getAdditionalAuthenticatedData().toByteArray();
+            verifyCrc32c(request.hasCiphertextCrc32C(), request.getCiphertextCrc32C().getValue(), ciphertext);
+            verifyCrc32c(request.hasAdditionalAuthenticatedDataCrc32C(),
+                    request.getAdditionalAuthenticatedDataCrc32C().getValue(), aad);
             CloudKmsService.DecryptResult result = service.decrypt(request.getName(), ciphertext, aad);
             responseObserver.onNext(DecryptResponse.newBuilder()
                     .setPlaintext(ByteString.copyFrom(result.plaintext()))

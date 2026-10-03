@@ -20,7 +20,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 | [Managed Kafka](managed-kafka.md) | REST JSON | `/v1/projects/{project}/locations/{location}/clusters` |
 | [GKE (Kubernetes Engine)](gke.md) | REST JSON | `container.*` host or `/container/v1/projects/{project}/locations/{location}/clusters` |
 | [Cloud SQL (PostgreSQL, MySQL)](cloud-sql-postgres.md) | REST JSON | `/v1/projects/{project}/instances` |
-| [Cloud Run](cloud-run.md) | REST JSON | `/v2/projects/{project}/locations/{location}/services` |
+| [Cloud Run](cloud-run.md) | REST JSON | `/v2/projects/{project}/locations/{location}/{services,jobs,workerPools,instances}` |
 | [Cloud Functions](cloud-functions.md) | REST JSON | `/v2/projects/{project}/locations/{location}/functions` |
 | [Cloud Tasks](cloud-tasks.md) | gRPC | `google.cloud.tasks.v2.CloudTasks` |
 | [Cloud Scheduler](scheduler.md) | gRPC + REST JSON | `google.cloud.scheduler.v1.CloudScheduler`, `/v1/projects/{project}/locations/{location}/jobs` |

@@ -24,7 +24,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **IAM** | REST | Service accounts, RSA-2048 keys, policy bindings, SignBlob (V4 signed URLs) |
 | **Security Token Service (STS)** | REST | OAuth 2.0 token exchange for GCS Credential Access Boundaries |
 | **Managed Kafka** | REST | Clusters, topics, consumer groups (Redpanda-backed or mock mode) |
-| **Cloud Run** | REST | Service create/get/list/delete, IAM policy operations, revisions, LRO polling; Docker-backed invocation on by default (mock flag for control plane only) |
+| **Cloud Run** | REST | Services and revisions, Jobs with executions and tasks, Worker Pools with revisions, Instances with `:start`/`:stop`; IAM policy operations, LRO polling; Docker-backed invocation, job runs, worker replicas and instances on by default (mock flag for control plane only) |
 | **Cloud Functions** | REST | Function create/get/list/delete, upload URL generation, LRO polling; control plane only |
 | **Cloud SQL (PostgreSQL, MySQL)** | REST | Instance lifecycle, LRO polling; Docker-backed PostgreSQL and MySQL data planes on by default (mock flag for control plane only) |
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry, pause/resume/purge), tasks (HTTP/App Engine targets), `RunTask`; control plane only |

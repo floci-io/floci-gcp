@@ -311,6 +311,9 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         try {
             byte[] ciphertext = request.getCiphertext().toByteArray();
             byte[] aad = request.getAdditionalAuthenticatedData().toByteArray();
+            verifyCrc32c(request.hasCiphertextCrc32C(), request.getCiphertextCrc32C().getValue(), ciphertext);
+            verifyCrc32c(request.hasAdditionalAuthenticatedDataCrc32C(),
+                    request.getAdditionalAuthenticatedDataCrc32C().getValue(), aad);
             CloudKmsService.DecryptResult result = service.decrypt(request.getName(), ciphertext, aad);
             responseObserver.onNext(DecryptResponse.newBuilder()
                     .setPlaintext(ByteString.copyFrom(result.plaintext()))
@@ -330,11 +333,14 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
             byte[] digest = resolveDigest(request);
             boolean verifiedDigest = verifyCrc32c(request.hasDigestCrc32C(),
                     request.getDigestCrc32C().getValue(), digestBytes(request));
+            boolean verifiedData = verifyCrc32c(request.hasDataCrc32C(),
+                    request.getDataCrc32C().getValue(), request.getData().toByteArray());
             byte[] signature = service.asymmetricSign(request.getName(), digest);
             responseObserver.onNext(AsymmetricSignResponse.newBuilder()
                     .setSignature(ByteString.copyFrom(signature))
                     .setSignatureCrc32C(Int64Value.of(crc32c(signature)))
                     .setVerifiedDigestCrc32C(verifiedDigest)
+                    .setVerifiedDataCrc32C(verifiedData)
                     .setName(request.getName())
                     .setProtectionLevel(ProtectionLevel.SOFTWARE)
                     .build());

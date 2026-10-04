@@ -147,7 +147,7 @@ class SqlDialectTranslatorTest {
 
     @Test
     void starAndImplicitAliasesKeepTheirNames() {
-        assertEquals("SELECT * EXCLUDE (secret), UPPER(name) upper_name FROM \"ds\".\"t\"",
+        assertEquals("SELECT * EXCLUDE (secret), UPPER(name) AS \"upper_name\" FROM \"ds\".\"t\"",
                 sql("SELECT * EXCEPT (secret), UPPER(name) upper_name FROM ds.t"));
     }
 
@@ -176,6 +176,24 @@ class SqlDialectTranslatorTest {
                         + " WHEN 'BIGINT' THEN 'number' WHEN 'UBIGINT' THEN 'number' WHEN 'HUGEINT' THEN 'number'"
                         + " WHEN 'DOUBLE' THEN 'number' END) AS t",
                 sql("SELECT JSON_TYPE(j) AS t"));
+    }
+
+    @Test
+    void implicitSelectAliasesBecomeQuotedAsAliases() {
+        assertEquals("SELECT 1 AS \"sample\", x AS \"name\", COUNT(*) AS \"value\" FROM \"ds\".\"t\"",
+                sql("SELECT 1 sample, x name, COUNT(*) value FROM ds.t"));
+        assertEquals("SELECT name FROM (SELECT 'a' AS \"name\", (CASE WHEN x THEN 1 ELSE 2 END) AS \"type\" FROM \"ds\".\"t\")",
+                sql("SELECT name FROM (SELECT 'a' name, IF(x, 1, 2) type FROM ds.t)"));
+        assertEquals("SELECT CASE WHEN x THEN 1 END AS \"year\" FROM \"ds\".\"t\"",
+                sql("SELECT CASE WHEN x THEN 1 END year FROM ds.t"));
+    }
+
+    @Test
+    void implicitAliasRewriteLeavesExpressionsAlone() {
+        assertEquals("SELECT a AS name FROM \"ds\".\"t\"", sql("SELECT a AS name FROM ds.t"));
+        assertEquals("SELECT a LIKE b FROM \"ds\".\"t\"", sql("SELECT a LIKE b FROM ds.t"));
+        assertEquals("SELECT SUM(x) OVER w FROM \"ds\".\"t\" WINDOW w AS (ORDER BY y)",
+                sql("SELECT SUM(x) OVER w FROM ds.t WINDOW w AS (ORDER BY y)"));
     }
 
     @Test

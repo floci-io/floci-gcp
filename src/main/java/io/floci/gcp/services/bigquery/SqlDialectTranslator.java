@@ -626,6 +626,7 @@ final class SqlDialectTranslator {
                     + " emulator yet; only SELECT queries run on the SQL engine.");
         }
         collectCteNames();
+        quoteImplicitSelectAliases();
         nameAnonymousColumns();
         String rendered = render(0, tokens.size()).trim();
         return new Translation(rendered, tables, informationSchema);
@@ -677,6 +678,86 @@ final class SqlDialectTranslator {
             }
             i = nextSignificant(i + 1, n);
         }
+    }
+
+    /**
+     * Rewrites an implicit select-list alias ({@code SELECT expr name}) to {@code AS "name"}, in every
+     * SELECT. GoogleSQL accepts non-reserved words such as {@code name}, {@code value} or {@code type}
+     * as an implicit alias, while DuckDB rejects its own keywords there unless {@code AS} precedes them.
+     */
+    private void quoteImplicitSelectAliases() {
+        for (int select = 0; select < tokens.size(); select++) {
+            if (tokens.get(select).isKeyword("SELECT")) {
+                quoteImplicitAliases(select);
+            }
+        }
+    }
+
+    private void quoteImplicitAliases(int select) {
+        int first = nextSignificant(select + 1, tokens.size());
+        while (first >= 0 && (tokens.get(first).isKeyword("DISTINCT") || tokens.get(first).isKeyword("ALL"))) {
+            first = nextSignificant(first + 1, tokens.size());
+        }
+        if (first < 0 || tokens.get(first).isKeyword("AS")) {
+            return; // SELECT AS STRUCT / AS VALUE
+        }
+        int depth = 0;
+        int itemStart = first;
+        for (int i = first; i <= tokens.size(); i++) {
+            Token t = i < tokens.size() ? tokens.get(i) : null;
+            boolean itemEnds = t == null
+                    || (depth == 0 && (t.isPunct(",") || t.isPunct(")")
+                    || (t.kind == Kind.IDENT && (t.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(t.upper()))
+                            && !followsStar(i))));
+            if (itemEnds) {
+                quoteImplicitAlias(itemStart, i);
+                if (t == null || !t.isPunct(",")) {
+                    return;
+                }
+                itemStart = i + 1;
+            } else if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            }
+        }
+    }
+
+    /** {@code * EXCEPT (...)} is a column filter, not the EXCEPT set operation. */
+    private boolean followsStar(int index) {
+        int previous = index - 1;
+        while (previous >= 0 && tokens.get(previous).kind == Kind.SPACE) {
+            previous--;
+        }
+        return previous >= 0 && tokens.get(previous).isPunct("*") && tokens.get(index).isKeyword("EXCEPT");
+    }
+
+    private void quoteImplicitAlias(int start, int end) {
+        List<Integer> item = new ArrayList<>();
+        for (int i = start; i < end; i++) {
+            if (tokens.get(i).kind != Kind.SPACE) {
+                item.add(i);
+            }
+        }
+        if (item.size() < 2) {
+            return;
+        }
+        for (int index : item) {
+            if (tokens.get(index).isKeyword("INTERVAL")) {
+                return; // INTERVAL 1 DAY: DAY is a date part, not an alias
+            }
+        }
+        Token last = tokens.get(item.getLast());
+        Token previous = tokens.get(item.get(item.size() - 2));
+        if (last.kind != Kind.IDENT || NON_ALIAS_KEYWORDS.contains(last.upper()) || !isAliasable(previous)
+                || (previous.kind == Kind.IDENT && NON_ALIAS_KEYWORDS.contains(previous.upper())
+                        && !previous.isKeyword("END"))) {
+            return;
+        }
+        int alias = item.getLast();
+        tokens.set(alias, new Token(Kind.QIDENT, "`" + last.text + "`", last.text));
+        tokens.add(alias, new Token(Kind.SPACE, " ", " "));
+        tokens.add(alias, new Token(Kind.IDENT, "AS", "AS"));
     }
 
     /**

@@ -184,6 +184,23 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void implicitAliasesThatAreDuckDbKeywordsWork() {
+        query("""
+                {"query": "SELECT sample, name FROM (SELECT 1 sample, 'ana' name) WHERE sample = 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("sample", "name")))
+                .body("rows[0].f.v", equalTo(List.of("1", "ana")));
+        query("""
+                {"query": "SELECT name value, COUNT(*) year FROM shop.users GROUP BY name ORDER BY value", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("value", "year")))
+                .body("rows[0].f.v", equalTo(List.of("ana", "1")));
+    }
+
+    @Test
     @Order(6)
     void dryRunReturnsSchemaWithoutAJob() {
         query("""

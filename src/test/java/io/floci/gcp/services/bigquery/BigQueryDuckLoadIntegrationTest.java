@@ -201,6 +201,13 @@ class BigQueryDuckLoadIntegrationTest {
                 .body("rows[1].f.v", equalTo(List.of("2", "\"This is a string\"", "[]")))
                 .body("rows[2].f.v", equalTo(List.of("3", "{\"id\":10,\"name\":\"Alice\"}",
                         "[\"{\\\"looks\\\": \\\"like json\\\"}\"]")));
+        given().when().get(BASE + "/datasets/raw/tables/nested/data").then().statusCode(200)
+                .body("rows[0].f[1].v.f[0].v", equalTo("20"))
+                .body("rows[0].f[2].v.v", equalTo(List.of("20", "\"This is a string\"", "{\"a\":1}")))
+                .body("rows[1].f[1].v.f[0].v", equalTo("\"This is a string\""))
+                .body("rows[1].f[2].v", equalTo(List.of()))
+                .body("rows[2].f[1].v.f[0].v", equalTo("{\"id\":10,\"name\":\"Alice\"}"))
+                .body("rows[2].f[2].v.v", equalTo(List.of("\"{\\\"looks\\\": \\\"like json\\\"}\"")));
     }
 
     @Test

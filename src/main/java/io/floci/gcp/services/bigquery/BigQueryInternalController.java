@@ -2,6 +2,7 @@ package io.floci.gcp.services.bigquery;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.bigquery.model.TableSchema;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -129,9 +130,10 @@ public class BigQueryInternalController {
                          @PathParam("datasetId") String datasetId,
                          @PathParam("tableId") String tableId) {
         List<Map<String, Object>> rows = service.storedRows(projectId, datasetId, tableId);
+        TableSchema schema = service.getTable(projectId, datasetId, tableId).getSchema();
         StreamingOutput body = out -> {
             for (Map<String, Object> row : rows) {
-                out.write(mapper.writeValueAsBytes(row));
+                out.write(mapper.writeValueAsBytes(RowCodec.stagingRow(schema, row)));
                 out.write('\n');
             }
         };

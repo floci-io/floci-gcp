@@ -1,5 +1,6 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
@@ -56,7 +57,7 @@ class RowCodecTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void ndjsonLoadKeepsNestedJsonValuesNative() {
+    void ndjsonLoadStoresNestedJsonAsTextAndStagesItAsJson() throws Exception {
         TableFieldSchema child = new TableFieldSchema();
         child.setName("j");
         child.setType("JSON");
@@ -68,15 +69,25 @@ class RowCodecTest {
         arr.setName("arr");
         arr.setType("JSON");
         arr.setMode("REPEATED");
+        TableFieldSchema top = new TableFieldSchema();
+        top.setName("top");
+        top.setType("JSON");
+        TableSchema schema = new TableSchema(List.of(rec, arr, top));
 
-        Map<String, Object> object = Map.of("a", 1);
         Map<String, Object> out = new LinkedHashMap<>();
-        List<ErrorProto> errors = RowCodec.normalizeRow(new TableSchema(List.of(rec, arr)),
-                Map.of("rec", Map.of("j", 20), "arr", List.of(20, "This is a string", object)), false, true, out);
+        List<ErrorProto> errors = RowCodec.normalizeRow(schema, Map.of("rec", Map.of("j", 20),
+                "arr", List.of(20, "This is a string", Map.of("a", 1)), "top", 20), false, true, out);
 
         assertTrue(errors.isEmpty(), String.valueOf(errors));
-        assertEquals(20, ((Map<String, Object>) out.get("rec")).get("j"));
-        assertEquals(List.of(20, "This is a string", object), out.get("arr"));
+        assertEquals("20", ((Map<String, Object>) out.get("rec")).get("j"));
+        assertEquals(List.of("20", "\"This is a string\"", "{\"a\":1}"), out.get("arr"));
+
+        ObjectMapper json = new ObjectMapper();
+        Map<String, Object> staged = RowCodec.stagingRow(schema, out);
+        assertEquals(json.readTree("20"), ((Map<String, Object>) staged.get("rec")).get("j"));
+        assertEquals(List.of(json.readTree("20"), json.readTree("\"This is a string\""), json.readTree("{\"a\":1}")),
+                staged.get("arr"));
+        assertEquals("20", staged.get("top"));
     }
 
     @Test

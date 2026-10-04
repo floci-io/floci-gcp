@@ -189,10 +189,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void intervalDatePartsAreNotAliasesButAnAliasAfterThemIs() {
+        assertEquals("SELECT d + INTERVAL 1 DAY AS \"name\" FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL 1 DAY name FROM ds.t"));
+        assertEquals("SELECT (d + INTERVAL 1 DAY) AS \"name\" FROM \"ds\".\"t\"", sql("SELECT (d + INTERVAL 1 DAY) name FROM ds.t"));
+        assertEquals("SELECT d + INTERVAL 1 DAY AS f0_ FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL 1 DAY FROM ds.t"));
+        assertEquals("SELECT INTERVAL '1:2' HOUR TO MINUTE AS f0_ FROM \"ds\".\"t\"", sql("SELECT INTERVAL '1:2' HOUR TO MINUTE FROM ds.t"));
+    }
+
+    @Test
     void implicitAliasRewriteLeavesExpressionsAlone() {
         assertEquals("SELECT a AS name FROM \"ds\".\"t\"", sql("SELECT a AS name FROM ds.t"));
-        assertEquals("SELECT a LIKE b FROM \"ds\".\"t\"", sql("SELECT a LIKE b FROM ds.t"));
-        assertEquals("SELECT SUM(x) OVER w FROM \"ds\".\"t\" WINDOW w AS (ORDER BY y)",
+        assertEquals("SELECT a LIKE b AS f0_ FROM \"ds\".\"t\"", sql("SELECT a LIKE b FROM ds.t"));
+        assertEquals("SELECT SUM(x) OVER w AS f0_ FROM \"ds\".\"t\" WINDOW w AS (ORDER BY y)",
                 sql("SELECT SUM(x) OVER w FROM ds.t WINDOW w AS (ORDER BY y)"));
     }
 

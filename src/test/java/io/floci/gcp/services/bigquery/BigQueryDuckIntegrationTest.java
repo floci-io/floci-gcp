@@ -198,6 +198,11 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("value", "year")))
                 .body("rows[0].f.v", equalTo(List.of("ana", "1")));
+        query("""
+                {"query": "SELECT (DATE '2024-01-01' + INTERVAL 1 DAY) name, 'a' LIKE 'b'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name", "f0_")));
     }
 
     @Test

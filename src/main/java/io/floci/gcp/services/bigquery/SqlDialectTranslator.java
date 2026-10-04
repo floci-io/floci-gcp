@@ -45,6 +45,23 @@ final class SqlDialectTranslator {
             "WITH", "UNNEST", "TABLESAMPLE", "FOR", "ROWS", "RANGE", "OVER", "PARTITION", "BY",
             "NULLS", "FIRST", "LAST", "DISTINCT", "ALL", "INTERVAL", "LATERAL", "NATURAL");
 
+    /**
+     * GoogleSQL reserved keywords
+     * (https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/lexical#reserved_keywords).
+     * BigQuery rejects them as an implicit alias, so they are never rewritten to one.
+     */
+    private static final Set<String> GOOGLESQL_RESERVED = Set.of(
+            "ALL", "AND", "ANY", "ARRAY", "AS", "ASC", "ASSERT_ROWS_MODIFIED", "AT", "BETWEEN", "BY", "CASE",
+            "CAST", "COLLATE", "CONTAINS", "CREATE", "CROSS", "CUBE", "CURRENT", "DEFAULT", "DEFINE", "DESC",
+            "DISTINCT", "ELSE", "END", "ENUM", "ESCAPE", "EXCEPT", "EXCLUDE", "EXISTS", "EXTRACT", "FALSE",
+            "FETCH", "FOLLOWING", "FOR", "FROM", "FULL", "GRAPH_TABLE", "GROUP", "GROUPING", "GROUPS", "HASH",
+            "HAVING", "IF", "IGNORE", "IN", "INNER", "INTERSECT", "INTERVAL", "INTO", "IS", "JOIN", "LATERAL",
+            "LEFT", "LIKE", "LIMIT", "LOOKUP", "MERGE", "NATURAL", "NEW", "NO", "NOT", "NULL", "NULLS", "OF",
+            "ON", "OR", "ORDER", "OUTER", "OVER", "PARTITION", "PRECEDING", "PROTO", "QUALIFY", "RANGE",
+            "RECURSIVE", "RESPECT", "RIGHT", "ROLLUP", "ROWS", "SELECT", "SET", "SOME", "STRUCT",
+            "TABLESAMPLE", "THEN", "TO", "TREAT", "TRUE", "UNBOUNDED", "UNION", "UNNEST", "USING", "WHEN",
+            "WHERE", "WINDOW", "WITH", "WITHIN");
+
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "SPLIT", "FORMAT",
@@ -739,7 +756,8 @@ final class SqlDialectTranslator {
                 alias = i;
             }
         }
-        if (alias < 0 || tokens.get(alias).kind != Kind.IDENT || !endsWithImplicitAlias(significant(start, end))) {
+        if (alias < 0 || tokens.get(alias).kind != Kind.IDENT || GOOGLESQL_RESERVED.contains(tokens.get(alias).upper())
+                || !endsWithImplicitAlias(significant(start, end))) {
             return;
         }
         Token last = tokens.get(alias);

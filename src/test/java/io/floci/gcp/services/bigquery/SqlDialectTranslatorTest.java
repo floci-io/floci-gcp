@@ -197,6 +197,12 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void reservedWordsAreNotRewrittenIntoAliases() {
+        assertEquals("SELECT 1 struct", sql("SELECT 1 struct"));
+        assertEquals("SELECT 1 default", sql("SELECT 1 default"));
+    }
+
+    @Test
     void implicitAliasRewriteLeavesExpressionsAlone() {
         assertEquals("SELECT a AS name FROM \"ds\".\"t\"", sql("SELECT a AS name FROM ds.t"));
         assertEquals("SELECT a LIKE b AS f0_ FROM \"ds\".\"t\"", sql("SELECT a LIKE b FROM ds.t"));

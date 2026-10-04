@@ -15,6 +15,12 @@ updates:
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
+    ignore:
+      # Pinned to 5.5.x in pom.xml: 5.6.x breaks the native image build (missing xz/brotli/zstd codecs).
+      - dependency-name: "org.apache.httpcomponents.client5:httpclient5"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     labels:
       - "dependencies"
       - "java"

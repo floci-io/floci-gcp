@@ -1,0 +1,2880 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Free, open-source local GCP emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci-gcp/services/cloud-run/">
+      
+      
+        <link rel="prev" href="../cloud-sql-postgres/">
+      
+      
+        <link rel="next" href="../cloud-functions/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Cloud Run - floci-gcp</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cloud-run" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="floci-gcp" class="md-header__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            floci-gcp
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Cloud Run
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="floci-gcp" class="md-nav__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    floci-gcp
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/gcp-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GCP CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Project Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../compute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compute Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Storage (GCS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firestore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firestore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../datastore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Datastore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secret-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam-credentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Credentials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Token Service (STS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../managed-kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gke/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GKE (Kubernetes Engine)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-sql-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud SQL (PostgreSQL, MySQL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Run
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Run
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behavior
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sdk-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SDK Usage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#not-implemented" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Not Implemented
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Jobs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Jobs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-api-surface_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#defaults-and-naming" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Defaults and Naming
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution Semantics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deviations-from-gcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worker-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker Pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worker Pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-api-surface_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resource-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource Behavior
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deviations-from-gcp_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sdk-usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SDK Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instances">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#state-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#url-routing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        URL routing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-deviations-from-gcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventarc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Eventarc
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Usage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firebase-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firebase Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bigquery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BigQuery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../iam-enforcement/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Enforcement Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behavior
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sdk-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SDK Usage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#not-implemented" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Not Implemented
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Jobs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Jobs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-api-surface_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#defaults-and-naming" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Defaults and Naming
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution Semantics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deviations-from-gcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worker-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker Pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worker Pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#supported-api-surface_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported API Surface
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resource-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource Behavior
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deviations-from-gcp_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sdk-usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SDK Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instances">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#state-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#execution_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#url-routing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        URL routing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-deviations-from-gcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance deviations from GCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="cloud-run">Cloud Run</h1>
+<p>floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using Google's published protobuf types.</p>
+<table>
+<thead>
+<tr>
+<th>Config</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable/disable Cloud Run</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK</code></td>
+<td><code>false</code></td>
+<td>Mock mode: control plane only, no Docker-backed image-based service execution</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_DEFAULT_PORT</code></td>
+<td><code>8080</code></td>
+<td>Container port used when the service template omits a port</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT</code></td>
+<td><code>240s</code></td>
+<td>Time to wait for the container TCP port to become reachable</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_REQUEST_TIMEOUT</code></td>
+<td><code>300s</code></td>
+<td>Default invocation proxy timeout</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT</code></td>
+<td><code>300s</code></td>
+<td>Maximum time for asynchronous Cloud Run execution operations before their LRO fails</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT</code></td>
+<td><code>15s</code></td>
+<td>Maximum time to wait for best-effort Docker cleanup after an operation is already resolved</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX</code></td>
+<td><code>localhost.floci.io</code> or <code>FLOCI_GCP_HOSTNAME</code></td>
+<td>Host suffix used for generated Cloud Run execution URLs</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES</code></td>
+<td><code>1</code></td>
+<td>Maximum replica containers run per worker pool (see <a href="#worker-pools">Worker Pools</a>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="supported-api-surface">Supported API Surface</h2>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create service</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/services</code></td>
+</tr>
+<tr>
+<td>List services</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/services</code></td>
+</tr>
+<tr>
+<td>Get service</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/services/{service}</code></td>
+</tr>
+<tr>
+<td>Update service</td>
+<td><code>PATCH /v2/projects/{project}/locations/{location}/services/{service}</code></td>
+</tr>
+<tr>
+<td>Delete service</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/services/{service}</code></td>
+</tr>
+<tr>
+<td>Get IAM policy</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/services/{service}:getIamPolicy</code></td>
+</tr>
+<tr>
+<td>Set IAM policy</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/services/{service}:setIamPolicy</code></td>
+</tr>
+<tr>
+<td>Test IAM permissions</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/services/{service}:testIamPermissions</code></td>
+</tr>
+<tr>
+<td>List revisions</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/services/{service}/revisions</code></td>
+</tr>
+<tr>
+<td>Get revision</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/services/{service}/revisions/{revision}</code></td>
+</tr>
+<tr>
+<td>Delete revision</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/services/{service}/revisions/{revision}</code></td>
+</tr>
+</tbody>
+</table>
+<p>When execution is disabled, create, update, and delete return completed <code>google.longrunning.Operation</code> resources immediately. When execution is enabled, create, template-changing update, and delete return pending operations and complete or fail after runtime startup or cleanup. Operations can be read, listed, waited on, and deleted under <code>/v2/projects/{project}/locations/{location}/operations</code>.</p>
+<h2 id="behavior">Behavior</h2>
+<p>In mock mode (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true</code>) Cloud Run services are metadata only. Creating a service synthesizes the service URL, timestamps, etag, ready condition, traffic status, latest revision fields, and one read-only revision. No container image is pulled and no request-serving runtime is started.</p>
+<p>Image-based service execution runs by default (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false</code>); set <code>mock=true</code> to keep services metadata-only: no Docker containers and no execution-mode template validation. In execution mode, image-based service creation starts one Docker container for the created revision, injects <code>PORT</code>, <code>K_SERVICE</code>, <code>K_REVISION</code>, and <code>K_CONFIGURATION</code>, waits for the ingress TCP port, and returns a deterministic app-root invocation URL on the floci-gcp front door:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>http://{service}-{project-token}.{location}.run.localhost.floci.io:4588
+</code></pre></div>
+<p>The URL scheme and port come from <code>floci-gcp.effectiveBaseUrl()</code>. The project token is a deterministic SHA-256 based token derived from the project ID. <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX</code> can override the host suffix; when it is unset, floci-gcp uses <code>FLOCI_GCP_HOSTNAME</code> if configured, otherwise <code>localhost.floci.io</code>. Direct Docker runtime container ports are internal implementation details and are not returned in <code>uri</code>, <code>urls[]</code>, or <code>trafficStatuses[].uri</code>.</p>
+<p>Generated Cloud Run hosts must route back to the floci-gcp front door. When floci-gcp runs in Docker, the embedded DNS server resolves <code>*.localhost.floci.io</code> for other containers on the same Docker network. When running floci-gcp directly on the host with <code>./mvnw quarkus:dev</code>, local DNS does not automatically resolve those generated hosts; use the legacy <code>/run/v2/projects/{project}/locations/{location}/services/{service}</code> invocation path, configure local DNS, or send the request to <code>localhost:4588</code> with the generated <code>Host</code> header.</p>
+<p>While the create operation is pending, the stored service has <code>Ready=CONDITION_PENDING</code>, <code>reconciling=true</code>, and no <code>latestReadyRevision</code>. After the runtime port becomes reachable, the operation completes and the service is updated with <code>Ready=CONDITION_SUCCEEDED</code> and the ready revision name. If runtime startup fails, the operation fails and both the service and created revision are updated with <code>Ready=CONDITION_FAILED</code>, <code>reconciling=false</code>, and the startup error message.</p>
+<p>PATCH accepts a Cloud Run v2 <code>Service</code> body and an optional <code>updateMask</code> query parameter. Template-changing updates create a new revision. <code>allow_missing</code> upsert behavior and etag preconditions are not implemented. With execution enabled, the previous ready revision remains invokable while the replacement container starts; after the replacement is ready, <code>latestReadyRevision</code> moves to the new revision and older runtime containers for that service are stopped.</p>
+<p>Execution mode supports Cloud Run GCS volumes declared with <code>template.volumes[].gcs</code> and mounted with container <code>volumeMounts</code>. The referenced bucket must already exist in the floci-gcp GCS emulator. At runtime startup, floci-gcp snapshots the bucket's current live objects into a Docker named volume and mounts that volume into the workload container with Docker <code>NoCopy</code> enabled. <code>readOnly=true</code> becomes a Docker read-only volume mount. <code>readOnly=false</code> allows writes into the mounted volume and syncs regular files back to emulator GCS when the runtime container is stopped during service delete or revision replacement. Writable cleanup mirrors the mounted volume back to the bucket prefix, so bucket objects that are no longer present in the mounted filesystem are deleted. Writes are not live-synced during request handling, so other GCS clients only observe them after runtime cleanup. Snapshot copy uses a short-lived <code>alpine:3.20</code> helper container, so Docker must be able to use that image when GCS volumes are mounted.</p>
+<p>GCS volume <code>subPath</code> is supported as a path inside the materialized bucket root. GCS volume <code>mountOptions</code> are rejected. Secret, Cloud SQL, emptyDir, NFS, and other volume sources are still unsupported in execution mode.</p>
+<p>Execution-backed create, template-changing update, and delete run on a bounded background executor. <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT</code> caps these operations and fails the LRO with <code>DEADLINE_EXCEEDED</code> if Docker startup or metadata deletion does not complete in time. Docker API calls made by the shared container lifecycle manager are also capped by <code>FLOCI_GCP_DOCKER_API_TIMEOUT</code>; when that timeout is reached, floci-gcp resets its Docker client before later calls. Delete removes service and revision metadata and completes the LRO before stopping runtime containers, so slow Docker cleanup does not keep Terraform replacement destroys pending; container cleanup is best-effort after the resource is gone and capped by <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT</code>.</p>
+<p>The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path <code>/run/v2/projects/{project}/locations/{location}/services/{service}</code> for compatibility. Host-routed requests preserve the original app path and query string, so <code>GET $uri/api/database?x=1</code> reaches the container as <code>/api/database?x=1</code>. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and <code>X-Forwarded-*</code> headers to the latest ready revision. Missing services return <code>404</code>, services without a ready runtime return <code>503</code>, runtime connection failures return <code>502</code>, and proxy timeouts return <code>504</code>.</p>
+<p><code>validateOnly=true</code> returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.</p>
+<p>Deleting a service revision that is the service's <code>latestReadyRevision</code> or is named in its <code>trafficStatuses</code> fails with <code>400 FAILED_PRECONDITION</code> and <code>Revision "{revision}" cannot be directly deleted because it is actively serving.</code>. Other revisions are removed and the completed operation returns the revision with <code>deleteTime</code> and <code>expireTime</code> set. Runtime containers are not touched by revision delete; retired service revisions have no running container.</p>
+<h2 id="sdk-usage">SDK Usage</h2>
+<p>Cloud Run clients should use the HTTP JSON transport, an explicit endpoint, and no credentials:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">ServicesSettings</span><span class="w"> </span><span class="n">settings</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ServicesSettings</span><span class="p">.</span><span class="na">newHttpJsonBuilder</span><span class="p">()</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span><span class="p">.</span><span class="na">setEndpoint</span><span class="p">(</span><span class="s">"http://localhost:4588"</span><span class="p">)</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="p">.</span><span class="na">setCredentialsProvider</span><span class="p">(</span><span class="n">NoCredentialsProvider</span><span class="p">.</span><span class="na">create</span><span class="p">())</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="p">.</span><span class="na">build</span><span class="p">();</span>
+</code></pre></div>
+<h2 id="not-implemented">Not Implemented</h2>
+<ul>
+<li>Source builds and buildpacks</li>
+<li>Traffic splitting</li>
+<li>Autoscaling and scale-to-zero</li>
+<li>Sidecars, non-GCS volumes, secrets, startup probes</li>
+<li>Cloud Functions execution</li>
+<li>IAM invocation enforcement</li>
+</ul>
+<h2 id="jobs">Jobs</h2>
+<p>Jobs run batch work to completion. floci-gcp implements the Cloud Run Admin API v2 <code>jobs</code> resource with its <code>executions</code> and <code>tasks</code> over REST JSON. gcloud is not supported: <code>gcloud run jobs</code> uses the v1 Knative API, which floci-gcp does not serve for Cloud Run.</p>
+<h3 id="supported-api-surface_1">Supported API Surface</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create job</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/jobs?jobId={id}</code></td>
+</tr>
+<tr>
+<td>List jobs</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs</code></td>
+</tr>
+<tr>
+<td>Get job</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}</code></td>
+</tr>
+<tr>
+<td>Update job</td>
+<td><code>PATCH /v2/projects/{project}/locations/{location}/jobs/{job}</code></td>
+</tr>
+<tr>
+<td>Delete job</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/jobs/{job}</code></td>
+</tr>
+<tr>
+<td>Run job</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/jobs/{job}:run</code></td>
+</tr>
+<tr>
+<td>Get IAM policy</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}:getIamPolicy</code></td>
+</tr>
+<tr>
+<td>Set IAM policy</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/jobs/{job}:setIamPolicy</code></td>
+</tr>
+<tr>
+<td>Test IAM permissions</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/jobs/{job}:testIamPermissions</code></td>
+</tr>
+<tr>
+<td>List executions</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions</code></td>
+</tr>
+<tr>
+<td>Get execution</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}</code></td>
+</tr>
+<tr>
+<td>Delete execution</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}</code></td>
+</tr>
+<tr>
+<td>Cancel execution</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}:cancel</code></td>
+</tr>
+<tr>
+<td>List tasks</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}/tasks</code></td>
+</tr>
+<tr>
+<td>Get task</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/jobs/{job}/executions/{execution}/tasks/{task}</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>{job}</code> may be <code>-</code> when listing executions, and <code>{job}</code> and <code>{execution}</code> may each be <code>-</code> when listing tasks. Lists page with <code>pageSize</code> and <code>pageToken</code>. Jobs are listed by name, executions newest first, tasks by execution and index.</p>
+<p>Create accepts <code>jobId</code> and <code>validateOnly</code>. Update replaces the job with the request body (there is no <code>updateMask</code>) and accepts <code>validateOnly</code> and <code>allowMissing</code>; a patch that changes nothing keeps the generation. Delete accepts <code>validateOnly</code> and <code>etag</code>. Run and cancel take <code>validateOnly</code>, <code>etag</code> and, for run, <code>overrides</code> in the request body. <code>validateOnly</code> returns a completed operation and stores nothing.</p>
+<h3 id="defaults-and-naming">Defaults and Naming</h3>
+<p>A created job gets <code>launchStage: GA</code>, <code>template.taskCount: 1</code>, <code>template.template.maxRetries: 3</code>, <code>template.template.timeout: 600s</code>, <code>template.template.executionEnvironment: EXECUTION_ENVIRONMENT_GEN2</code>, and container resource limits <code>cpu: 1000m</code> and <code>memory: 512Mi</code>. <code>client</code> and <code>clientVersion</code> are preserved. The job reports <code>generation</code>, <code>observedGeneration</code>, <code>executionCount</code>, <code>latestCreatedExecution</code> (name, create and completion time, completion status, delete time) and a <code>Ready</code> terminal condition with an empty <code>conditions</code> list. A duplicate <code>jobId</code> fails with <code>409 ALREADY_EXISTS</code> and <code>Resource '{id}' already exists.</code>, also with <code>validateOnly=true</code>. A missing job, execution or task fails with <code>404 NOT_FOUND</code> and <code>Resource '{id}' of kind 'JOB' in region '{location}' in project '{project}' does not exist.</code> (kind <code>EXECUTION</code> or <code>TASK</code> respectively).</p>
+<p>Executions are named <code>{job}-{5 lowercase alphanumerics}</code> and tasks <code>{execution}-task{index}</code>. <code>parallelism</code> defaults to the task count; a larger value is accepted as given. <code>startExecutionToken</code> and <code>runExecutionToken</code> on create or update start an execution named <code>{job}-{token}</code> when the token differs from the stored one; the operation completes when the execution is created (start token) or finished (run token), and re-sending the same token, or switching back to a token that already named an execution, starts nothing. A token is rejected with <code>400 INVALID_ARGUMENT</code> when the job ID and the token together are 63 characters or more, or when <code>{job}-{token}</code> is not lowercase letters, digits and hyphens starting and ending with a letter or digit.</p>
+<p><code>jobs:run</code> overrides replace <code>taskCount</code> and <code>timeout</code> for that execution. A container override is matched by <code>name</code>; when no container has that name and the template has a single container the override applies to it, otherwise the request fails with <code>400 INVALID_ARGUMENT</code>. Override <code>args</code> replace the container args, <code>env</code> merges by name, and <code>clearArgs</code> removes the args. The effective template is stored on the execution.</p>
+<h3 id="execution-semantics">Execution Semantics</h3>
+<p><code>jobs:run</code> returns a long-running operation whose metadata and response are the Execution. It is not bounded by <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT</code>; a run is bounded by the task timeout plus the cleanup grace, over every retry and every wave of <code>parallelism</code>, plus the startup timeout for image preparation. The operation outcome follows GCP:</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Operation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Every task succeeded</td>
+<td><code>response</code> is the Execution</td>
+</tr>
+<tr>
+<td>A task exited non-zero on its last attempt</td>
+<td><code>error {code: 10, message: "Task {task} failed with exit code: {n} and message: The container exited with an error."}</code></td>
+</tr>
+<tr>
+<td>A task timed out on its last attempt</td>
+<td><code>error {code: 4, message: "Task {task} failed with exit code: 0 and message: The configured timeout was reached."}</code></td>
+</tr>
+<tr>
+<td>A task container disappeared on its last attempt without a stop request</td>
+<td><code>error {code: 13, message: "Task {task} failed with message: The task container stopped unexpectedly."}</code></td>
+</tr>
+<tr>
+<td>The execution was cancelled, deleted or its job deleted</td>
+<td><code>response</code> is the Execution, whose <code>Completed</code> condition is <code>CONDITION_FAILED</code> with <code>Cancelled by user.</code></td>
+</tr>
+</tbody>
+</table>
+<p>Executions carry the <code>Started</code>, <code>Completed</code>, <code>ContainerReady</code> and <code>ResourcesAvailable</code> conditions with the GCP messages and measured durations, and <code>runningCount</code>, <code>succeededCount</code>, <code>failedCount</code>, <code>cancelledCount</code> and <code>retriedCount</code>. An execution is failed only after every task is terminal. Each task reports <code>retried</code> and <code>lastAttemptResult</code>: <code>status: {}</code> on success, <code>{code: 10, message: "The container exited with an error."}</code> with <code>exitCode</code> for a non-zero exit, <code>{code: 4, message: "The configured timeout was reached."}</code> for a timeout, <code>{code: 13, message: "The task container stopped unexpectedly."}</code> for a container that was removed or lost outside the emulator's control, and <code>{code: 1, message: "Cancelled by user."}</code> for a cancelled task. An unexpectedly stopped container is a failed attempt and is retried like a non-zero exit.</p>
+<p>Cancelling a running execution stops its containers and never starts its pending tasks; the cancel operation completes with the Execution. Cancelling an execution that is not running fails with <code>400 FAILED_PRECONDITION</code> and <code>Execution '{id}' cannot be cancelled because it is not running.</code> Deleting a running execution cancels it first. A cancel or delete that arrives while the run bound is already stopping the execution does not replace that failure. Deleting a job cancels its running executions and removes the job, its executions and its tasks. Until that cleanup finishes, creating or upserting a job with the same name fails with <code>409 ABORTED</code> and <code>Job '{id}' is being deleted.</code> Several executions of one job may run at the same time.</p>
+<p>In mock mode (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true</code>) <code>jobs:run</code> creates the execution and its tasks already succeeded, with exit code 0 and timestamps set, and the operation is done with the Execution.</p>
+<p>In execution mode each task attempt runs as a fresh Docker container. At most <code>parallelism</code> containers run at once and tasks start in index order. Non-zero exits and timeouts are retried up to <code>maxRetries</code> with <code>CLOUD_RUN_TASK_ATTEMPT</code> incremented. The per-attempt timeout sends SIGTERM and kills the container after <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT</code>. Container stdout and stderr are written to the emulator log at debug level (category <code>io.floci.gcp.services.cloudrun.CloudRunJobsRuntime</code>), and the container is removed once its exit code is captured. GCS volumes are materialized per attempt as for services, and writable volumes are written back before the attempt's outcome is recorded. Unlike services, the write-back merges instead of mirroring, so parallel tasks writing the same bucket keep each other's outputs: a file is uploaded only when it is new or its content changed since the attempt's snapshot, and an object is deleted only when the attempt removed it and its generation is unchanged since the snapshot. When two attempts change the same object, the last write-back wins. If the write-back of an attempt that exited 0 fails, the attempt is a failed attempt and is retried, then fails with code 13 and <code>The task's GCS volume could not be written back: {detail}.</code>; the materialized volumes are removed either way. Execution mode applies the same template constraints as services, with the same messages: one container, GCS volumes only, at most one port, an image, no env <code>valueSource</code>.</p>
+<p>Each task container receives:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLOUD_RUN_JOB</code></td>
+<td>Job ID</td>
+</tr>
+<tr>
+<td><code>CLOUD_RUN_EXECUTION</code></td>
+<td>Execution ID</td>
+</tr>
+<tr>
+<td><code>CLOUD_RUN_TASK_INDEX</code></td>
+<td>Task index, from 0</td>
+</tr>
+<tr>
+<td><code>CLOUD_RUN_TASK_ATTEMPT</code></td>
+<td>Attempt number, from 0</td>
+</tr>
+<tr>
+<td><code>CLOUD_RUN_TASK_COUNT</code></td>
+<td>Task count of the execution</td>
+</tr>
+</tbody>
+</table>
+<p><code>PORT</code> and the <code>K_*</code> variables are not set for job tasks.</p>
+<p>Every change to an execution and its tasks is applied by a single per-execution coordinator, so task exits, cancel, execution delete, job delete and startup reconciliation cannot interleave. When the emulator stops, running task containers are removed. On the next start with persistent storage, executions and tasks that were still running are marked failed with <code>The emulator restarted before the execution completed.</code> (tasks: <code>The emulator restarted before the task completed.</code>), and their pending run operations fail with code 10. The run, delete and job operations of an execution that was deleted while its containers were still stopping complete with the cancelled Execution, as the delete path does. Job task containers left behind by an emulator process that did not stop cleanly (same <code>floci_emulator</code> and <code>floci_namespace</code> labels) are removed at startup.</p>
+<h3 id="deviations-from-gcp">Deviations from GCP</h3>
+<ul>
+<li><code>etag</code> is accepted on delete, run and cancel but never validated, which matches the observed GCP behavior.</li>
+<li>Deletion is immediate. There is no soft delete or 30-day retention, and <code>showDeleted</code> is accepted and ignored; <code>deleteTime</code> and <code>expireTime</code> appear only on the delete operation's Execution or Job.</li>
+<li><code>validateOnly</code> returns a completed operation that cannot be fetched later. GCP returns an unfinished operation name that also cannot be fetched.</li>
+<li><code>serviceAccount</code> is not defaulted, as for services; GCP fills in the project's default compute service account.</li>
+<li>Container images are stored as given, and unnamed job containers stay unnamed; GCP resolves the execution image to a digest.</li>
+<li>Executions do not emit the GCP <code>Retry</code> condition or <code>logUri</code>.</li>
+<li>The <code>TASK</code> kind in the task <code>404</code> message was not observed on GCP; the job and execution messages were.</li>
+<li>The execution token character rule is inferred from the execution naming; only the length limit is documented in <code>job.proto</code>.</li>
+<li>Recreating a job while its executions are still being cleaned up fails with <code>409 ABORTED</code>; the GCP behavior was not observed.</li>
+<li>A task container that stops without a stop request (removed outside the emulator) fails its attempt with code 13; GCP has no equivalent observable case.</li>
+<li>IAM policies use the same codec as services, so the initial <code>ACAB</code> etag is returned as the base64 of its UTF-8 bytes.</li>
+<li>gcloud is not supported.</li>
+</ul>
+<h2 id="worker-pools">Worker Pools</h2>
+<p>Worker pools run pull-based workloads (queue consumers, Kafka or Pub/Sub pullers) that serve no HTTP traffic. floci-gcp implements the Cloud Run Admin API v2 <code>workerPools</code> resource and its revisions over REST JSON. gcloud is not supported: <code>gcloud run worker-pools</code> reads through the v1 Knative API and writes through gRPC, neither of which floci-gcp serves for Cloud Run.</p>
+<h3 id="supported-api-surface_2">Supported API Surface</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create worker pool</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/workerPools?workerPoolId={id}</code></td>
+</tr>
+<tr>
+<td>List worker pools</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/workerPools</code></td>
+</tr>
+<tr>
+<td>Get worker pool</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/workerPools/{pool}</code></td>
+</tr>
+<tr>
+<td>Update worker pool</td>
+<td><code>PATCH /v2/projects/{project}/locations/{location}/workerPools/{pool}</code></td>
+</tr>
+<tr>
+<td>Delete worker pool</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/workerPools/{pool}</code></td>
+</tr>
+<tr>
+<td>Get IAM policy</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/workerPools/{pool}:getIamPolicy</code></td>
+</tr>
+<tr>
+<td>Set IAM policy</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/workerPools/{pool}:setIamPolicy</code></td>
+</tr>
+<tr>
+<td>Test IAM permissions</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/workerPools/{pool}:testIamPermissions</code></td>
+</tr>
+<tr>
+<td>List revisions</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions</code></td>
+</tr>
+<tr>
+<td>Get revision</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}</code></td>
+</tr>
+<tr>
+<td>Delete revision</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/workerPools/{pool}/revisions/{revision}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Create accepts <code>workerPoolId</code> and <code>validateOnly</code>. Update accepts <code>updateMask</code>, <code>validateOnly</code>, <code>allowMissing</code> (creates the pool when it does not exist) and <code>forceNewRevision</code>; without <code>updateMask</code> every updatable field is replaced from the body, which is what the Terraform provider sends. A top-level mask path such as <code>template</code> or <code>scaling</code> replaces that whole field; a nested path such as <code>template.containers</code> or <code>scaling.manualInstanceCount</code> replaces only that sub-field and keeps its siblings. Unknown, output-only and non-updatable paths fail with <code>400 INVALID_ARGUMENT</code> and <code>Invalid update mask path: {path}</code>. Delete accepts <code>validateOnly</code> and <code>etag</code>. List accepts <code>pageSize</code> and <code>pageToken</code>; <code>showDeleted</code> is accepted and ignored. Creating a pool whose ID already exists fails with <code>409 ALREADY_EXISTS</code> and <code>Resource '{id}' already exists.</code>.</p>
+<h3 id="resource-behavior">Resource Behavior</h3>
+<ul>
+<li>Defaults: <code>scaling.manualInstanceCount</code> is <code>1</code> when unset, every template container gets <code>resources.limits</code> <code>cpu: 1000m</code> and <code>memory: 512Mi</code> when those keys are missing, <code>launchStage</code> is <code>GA</code>, and an empty <code>instanceSplits</code> becomes one <code>INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST</code> split at 100%. <code>template.serviceAccount</code> is stored as given, as for services. <code>customAudiences</code> is dropped, because GCP ignores it.</li>
+<li>Revisions are named <code>{pool}-{5-digit counter}-{3 random lowercase alphanumerics}</code>, for example <code>orders-00002-jw2</code>. A revision is created on create, whenever the template changes (compared after defaults are applied), and whenever <code>forceNewRevision=true</code>. Any other update, such as scaling, labels or splits, only increments <code>generation</code>.</li>
+<li>A revision copies the template: unnamed containers are named <code>{last image path segment}-{1-based index}</code> (<code>busybox-1</code>), <code>executionEnvironment</code> is <code>EXECUTION_ENVIRONMENT_GEN2</code>, and the <code>service</code> field is not set. Images are stored as given; they are not resolved to digests.</li>
+<li><code>instanceSplitStatuses</code> mirrors <code>instanceSplits</code> and always names a concrete revision: a <code>LATEST</code> split names <code>latestCreatedRevision</code>. Every revision the splits resolve to must exist in the same pool and the percentages must add up to 100, otherwise the update fails with <code>400 INVALID_ARGUMENT</code>.</li>
+<li>The pool carries <code>latestCreatedRevision</code>, <code>latestReadyRevision</code>, <code>terminalCondition {type: Ready}</code> with no top-level <code>conditions</code>, <code>generation</code>, <code>observedGeneration</code> and an <code>etag</code>. Output-only fields in a create request (<code>creator</code>, <code>lastModifier</code>, <code>satisfiesPzs</code>, <code>threatDetectionEnabled</code>, <code>reconciling</code>, <code>observedGeneration</code>, the revision and status fields) are ignored.</li>
+<li>A missing pool or revision returns <code>404 NOT_FOUND</code> with <code>Resource '{id}' of kind 'WORKER_POOL' in region '{location}' in project '{project}' does not exist.</code> (kind <code>REVISION</code> for revisions).</li>
+<li>A revision named in <code>instanceSplitStatuses</code> is serving. Serving revisions carry <code>Ready</code>, <code>Active</code>, <code>ResourcesAvailable</code>, <code>ContainerReady</code> and <code>MinInstancesProvisioned</code> conditions with the GCP messages (for example <code>Deploying revision succeeded in 0.42s.</code>) and <code>scalingStatus.desiredMinInstanceCount</code> equal to the pool's <code>manualInstanceCount</code>. Other revisions are retired: <code>Active</code> is <code>CONDITION_FAILED</code> with <code>Revision retired.</code> and <code>revisionReason: RETIRED</code>, and <code>scalingStatus</code> is cleared.</li>
+<li>Deleting a serving revision, or the pool's <code>latestCreatedRevision</code> or <code>latestReadyRevision</code> (which a <code>LATEST</code> split resolves to), fails with <code>400 FAILED_PRECONDITION</code> and <code>Revision "{revision}" cannot be directly deleted because it is actively serving.</code>. Deleting any other revision returns a completed operation whose response is the revision with <code>deleteTime</code> and <code>expireTime</code> set.</li>
+<li>Revisions are listed newest first. Listing the revisions of a pool that does not exist returns an empty response, as GCP does after a pool is deleted.</li>
+<li>IAM get, set and test delegate to the shared IAM service. As for jobs, get and set on a pool that does not exist fail with <code>404 NOT_FOUND</code>, so no policy is stored for a missing or deleted pool, and test returns no permissions.</li>
+<li>Deleting a pool removes the pool, all of its revisions and its IAM policy immediately. The operation response carries <code>deleteTime</code> and <code>expireTime</code>.</li>
+</ul>
+<p>In mock mode (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true</code>) worker pools are metadata only: every operation is returned completed, the pool is ready at once and no container is started.</p>
+<h3 id="execution">Execution</h3>
+<p>With execution enabled (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=false</code>, the default) floci-gcp runs worker pool replicas as Docker containers.</p>
+<ul>
+<li>Only one revision runs: the one with the largest percent in <code>instanceSplitStatuses</code> (the first on ties). The split between several revisions is metadata only.</li>
+<li>The serving revision runs <code>scaling.manualInstanceCount</code> replicas, capped by <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES</code> (default <code>1</code>). A larger request is clamped with a warning in the emulator log; the pool and revision metadata still report the requested count. <code>manualInstanceCount: 0</code> stops every replica.</li>
+<li>Each replica receives the container's own <code>env</code> plus <code>CLOUD_RUN_WORKER_POOL</code> (the pool ID) and <code>CLOUD_RUN_REVISION</code> (the revision ID), which win on conflict. No <code>PORT</code> or <code>K_*</code> variables are injected and no port is published.</li>
+<li>Create, update and delete return pending operations. While the containers converge, the pool has <code>reconciling: true</code>, <code>observedGeneration</code> stays at the previous generation (unset after create), and <code>terminalCondition</code> is <code>CONDITION_RECONCILING</code> with <code>Deploying Revision.</code> (new revision) or <code>Provisioning revision instances to process workloads.</code> (scaling, splits or other fields). The operation completes, and <code>observedGeneration</code> catches up with <code>generation</code>, once the containers match the latest committed state. If a container cannot be started the operation fails with code 13, the pool's <code>terminalCondition</code> becomes <code>CONDITION_FAILED</code> with the Docker error, and the previously running containers are left in place. Operations fail with <code>DEADLINE_EXCEEDED</code> after <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT</code>.</li>
+<li>When the serving revision changes, the new revision's replicas are started before the old revision's replicas are stopped.</li>
+<li>Replicas are stopped with SIGTERM and killed after <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT</code> (kept below <code>FLOCI_GCP_DOCKER_API_TIMEOUT</code>). Deleting a pool stops all of its replicas before the delete operation completes.</li>
+<li>The template must satisfy the same execution-mode constraints as services: exactly one container, GCS volumes only (no <code>mountOptions</code>), at most one container port, an image, and no env <code>valueSource</code>. Each replica gets its own snapshot of a GCS volume; writable volumes are written back to the bucket when that replica stops, so with several replicas the last one stopped wins.</li>
+<li>A replica container that exits is replaced on the next update of the pool, not automatically. Replica containers are removed when the emulator shuts down.</li>
+<li>At startup, floci-gcp fails worker pool operations left pending by the previous process with code 10 (<code>ABORTED</code>) and <code>The emulator restarted before the operation completed.</code>, removes worker pool containers the previous process left behind (matched by the <code>io.floci.service=cloudrun</code> label, an <code>io.floci.cloudrun.resource-name</code> under <code>/workerPools/</code>, and this emulator's <code>floci_emulator</code> and <code>floci_namespace</code> labels; containers from earlier versions are matched by the legacy <code>floci_service</code> and <code>floci_resource</code> labels instead), and reconciles every stored pool, so with persistent storage a restored pool starts its replicas again and leaves <code>reconciling</code>. In mock mode, pools still marked reconciling are marked ready. A pending delete operation is found only when its location still has a pool or a leftover container.</li>
+</ul>
+<p>Terraform and OpenTofu can manage <code>google_cloud_run_v2_worker_pool</code> with the <code>cloud_run_v2_custom_endpoint</code> shown for services; set <code>deletion_protection = false</code> so the resource can be destroyed.</p>
+<h3 id="deviations-from-gcp_1">Deviations from GCP</h3>
+<ul>
+<li>Only the revision with the largest split percent runs containers; the split is metadata only.</li>
+<li>The worker pool revision name format (<code>{pool}-00001-abc</code>) differs from the one floci-gcp uses for services (<code>{service}-00001</code>, no random suffix).</li>
+<li><code>etag</code> is a random UUID and is never validated on update or delete.</li>
+<li>There is no soft delete: <code>showDeleted</code> is ignored and <code>deleteTime</code> and <code>expireTime</code> appear only on the delete operation response.</li>
+<li>While reconciling, GCP keeps reporting the previous <code>instanceSplitStatuses</code>; floci-gcp reports the new statuses at once.</li>
+<li><code>template.revision</code> (a caller-chosen revision name) is ignored. Revisions have no <code>logUri</code> or <code>creator</code>, and GCP's transient <code>Retry</code> and <code>InstanceShutDown</code> conditions are not emitted.</li>
+<li>Scaling fields newer than the Cloud Run v2 protos floci-gcp is built on (<code>scalingMode</code>, <code>minInstanceCount</code>, <code>maxInstanceCount</code>) are dropped.</li>
+<li>The <code>400 INVALID_ARGUMENT</code> messages for invalid <code>instanceSplits</code> are floci-gcp's own. The <code>404</code> message follows the format GCP returns for jobs and executions; the <code>WORKER_POOL</code> and <code>REVISION</code> kind names have not been observed against GCP.</li>
+<li>Refusing to delete <code>latestCreatedRevision</code> or <code>latestReadyRevision</code> while splits pin another revision mirrors floci-gcp's services behavior; GCP's answer in that case has not been observed.</li>
+<li>gcloud is not supported.</li>
+</ul>
+<h3 id="sdk-usage_1">SDK Usage</h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">WorkerPoolsSettings</span><span class="w"> </span><span class="n">settings</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WorkerPoolsSettings</span><span class="p">.</span><span class="na">newHttpJsonBuilder</span><span class="p">()</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span><span class="p">.</span><span class="na">setEndpoint</span><span class="p">(</span><span class="s">"http://localhost:4588"</span><span class="p">)</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="p">.</span><span class="na">setCredentialsProvider</span><span class="p">(</span><span class="n">NoCredentialsProvider</span><span class="p">.</span><span class="na">create</span><span class="p">())</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="p">.</span><span class="na">build</span><span class="p">();</span>
+</code></pre></div>
+<p><code>RevisionsClient</code> lists and deletes worker pool revisions with a <code>projects/{project}/locations/{location}/workerPools/{pool}</code> parent.</p>
+<h2 id="instances">Instances</h2>
+<p>floci-gcp emulates Cloud Run v2 Instances (<code>projects.locations.instances</code>) over REST JSON with the <code>google.cloud.run.v2.Instance</code> message from <code>proto-google-cloud-run-v2</code> 0.96.0. An instance is a single long-lived HTTP container with its own URL that can be stopped and started.</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create instance</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/instances</code></td>
+</tr>
+<tr>
+<td>List instances</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/instances</code></td>
+</tr>
+<tr>
+<td>Get instance</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/instances/{instance}</code></td>
+</tr>
+<tr>
+<td>Update instance</td>
+<td><code>PATCH /v2/projects/{project}/locations/{location}/instances/{instance}</code></td>
+</tr>
+<tr>
+<td>Delete instance</td>
+<td><code>DELETE /v2/projects/{project}/locations/{location}/instances/{instance}</code></td>
+</tr>
+<tr>
+<td>Start instance</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/instances/{instance}:start</code></td>
+</tr>
+<tr>
+<td>Stop instance</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/instances/{instance}:stop</code></td>
+</tr>
+<tr>
+<td>Get IAM policy</td>
+<td><code>GET /v2/projects/{project}/locations/{location}/instances/{instance}:getIamPolicy</code></td>
+</tr>
+<tr>
+<td>Set IAM policy</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/instances/{instance}:setIamPolicy</code></td>
+</tr>
+<tr>
+<td>Test IAM permissions</td>
+<td><code>POST /v2/projects/{project}/locations/{location}/instances/{instance}:testIamPermissions</code></td>
+</tr>
+</tbody>
+</table>
+<p>Create, update, start, stop and delete return <code>google.longrunning.Operation</code> resources whose metadata and response are the <code>Instance</code>. The request body of create and update is an <code>Instance</code>, with <code>containers</code> at the top level (there is no <code>template</code>).</p>
+<ul>
+<li>Create accepts <code>instanceId</code> or <code>instance_id</code>. Both are optional: without one, the server generates a 15-character ID of lowercase letters and digits that starts with a letter. <code>validateOnly</code> validates without storing anything.</li>
+<li>A duplicate instance ID, or an ID already used by a Cloud Run Service in the same project and location, returns <code>409 ALREADY_EXISTS</code> with <code>Resource '{id}' already exists.</code>. Creating a Service with the ID of an existing instance in the same project and location returns the same error.</li>
+<li>Missing instances return <code>404 NOT_FOUND</code> with <code>Resource '{id}' of kind 'INSTANCE' in region '{location}' in project '{project}' does not exist.</code>.</li>
+<li>List supports <code>pageSize</code> and <code>pageToken</code>.</li>
+<li>Update accepts <code>updateMask</code>, <code>validateOnly</code> and <code>allowMissing</code>. With an update mask, a masked top-level field is replaced as a whole and output-only paths are ignored. A nested path such as <code>vpcAccess.connector</code> updates only that subfield and keeps its siblings; map and repeated fields (<code>labels</code>, <code>containers</code>, <code>volumes</code>, ...) can only be masked as a whole. A path that does not name an <code>Instance</code> field returns <code>400 INVALID_ARGUMENT</code> with <code>Invalid update mask path: {path}</code>. Without an update mask, every settable field present in the body is replaced. <code>allowMissing=true</code> creates the instance when it does not exist.</li>
+<li>Delete accepts <code>validateOnly</code> and <code>etag</code>. Start and stop accept <code>validateOnly</code> in the query string or the request body.</li>
+<li>IAM methods use the shared IAM policy store in the same way as Services. Deleting an instance deletes its policy.</li>
+</ul>
+<p>Default values filled in on create and update match GCP: each container gets <code>resources.limits</code> <code>cpu: 2000m</code> and <code>memory: 2048Mi</code> when unset and <code>ports: [{name: http1, containerPort: 8080}]</code> when no port is given; <code>ingress</code> defaults to <code>INGRESS_TRAFFIC_ALL</code> and <code>launchStage</code> to <code>GA</code>. Unnamed containers stay unnamed, as observed on GCP.</p>
+<h3 id="state-model">State model</h3>
+<p>The instance state is reported by <code>terminalCondition</code>, whose <code>type</code> is always <code>Running</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th><code>terminalCondition.state</code></th>
+<th><code>terminalCondition.message</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Starting</td>
+<td><code>CONDITION_RECONCILING</code></td>
+<td><code>Waiting for instance to start.</code></td>
+</tr>
+<tr>
+<td>Running</td>
+<td><code>CONDITION_SUCCEEDED</code></td>
+<td><code>Started instance in {seconds}s.</code></td>
+</tr>
+<tr>
+<td>Stopping</td>
+<td><code>CONDITION_RECONCILING</code></td>
+<td><code>Waiting for instance to be stopped.</code></td>
+</tr>
+<tr>
+<td>Stopped</td>
+<td><code>CONDITION_FAILED</code></td>
+<td><code>Instance stopped.</code></td>
+</tr>
+<tr>
+<td>Deleted (delete operation response)</td>
+<td><code>CONDITION_FAILED</code></td>
+<td><code>Instance completed for deletion.</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>conditions</code> holds <code>ContainerReady</code> (<code>Imported container image in {seconds}s.</code>) and <code>ResourcesAvailable</code> (<code>Provisioned imported containers.</code>). Every create, update, start, stop and delete increments <code>generation</code>; <code>observedGeneration</code> catches up when the transition finishes and <code>reconciling</code> is true while it is in progress. Stopping an instance that is not running returns <code>400 FAILED_PRECONDITION</code> with <code>Instance '{id}' cannot be stopped because it is not running.</code>; starting a running (or starting) instance returns <code>400 FAILED_PRECONDITION</code> with <code>Instance '{id}' cannot be started because it is already running.</code>. A start whose container fails to come up leaves the instance in <code>CONDITION_FAILED</code> with the error message and fails the operation; it can be started again. After such a failure <code>ContainerReady</code> and <code>ResourcesAvailable</code> are <code>CONDITION_FAILED</code> with the same message, and <code>containerStatuses</code> lists the current containers without an <code>imageDigest</code>, so no state from an earlier successful start survives.</p>
+<p><code>urls</code> and <code>containerStatuses</code> are kept while the instance is stopped. The delete operation response carries <code>deleteTime</code> and <code>expireTime</code> (30 days later), but the instance is removed immediately.</p>
+<h3 id="execution_1">Execution</h3>
+<p>In mock mode (<code>FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true</code>) instances are metadata only: create and start complete immediately in the running phase with a URL, stop and start only flip the terminal condition, and <code>containerStatuses[].imageDigest</code> is empty.</p>
+<p>With execution enabled, an instance runs one Docker container. Create, start and container-changing updates return pending operations that complete once the container port accepts connections (bounded by <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_STARTUP_TIMEOUT</code>). Stop sends SIGTERM, waits up to <code>FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT</code>, then removes the container; start creates a new one; delete removes it. An update restarts the container only when <code>containers</code> or <code>volumes</code> change and the instance is running or starting; a stopped instance picks up the change on its next start. <code>containerStatuses[].imageDigest</code> is the first repository digest reported by Docker for the image. The Docker-mode constraints are the same as for Services: exactly one container, at most one port, an image, GCS volumes only (no <code>mountOptions</code>), no env <code>valueSource</code>, with the same error messages. GCS volumes are materialized and written back with the same code as Services, when the container is stopped or replaced.</p>
+<p>The container receives only <code>PORT</code> from the emulator, in addition to the environment variables declared on the container.</p>
+<p>For one instance, create, update, start, stop and delete are applied in request order: each request checks its precondition against the stored instance while holding that instance's lock, and container work runs on a per-instance queue. A transition that has been superseded by a later start, stop, restart or delete before its container work finished does not overwrite the later transition's state; a deleted instance is never written back. A transition only writes into the instance it was requested for, identified by <code>uid</code>: when an instance is deleted and re-created with the same ID while an earlier start is still running, that start completes its own operation with the deleted instance and leaves the new instance untouched.</p>
+<p>A container that exits on its own is not restarted and its instance keeps its phase; requests to its URL return <code>503</code> until the instance is stopped, updated or deleted, which removes the container and writes its GCS volumes back. On emulator shutdown floci-gcp waits up to 5 seconds for queued instance work to finish, then removes every instance container that has a runtime record and writes its writable GCS volumes back. A start still creating its container after that wait may not have recorded it yet, so that container can be left running without the shutdown writeback.</p>
+<h3 id="url-routing">URL routing</h3>
+<p>Instances get a URL of the same form as Services, <code>http://{instance}-{project-token}.{location}.run.localhost.floci.io:4588</code>, with the same host suffix and port rules. Requests whose <code>Host</code> is a generated Cloud Run host are resolved against Services first and then against Instances. Instance and Service creation each refuse an ID already used by the other kind in the same project and location, so a host names at most one resource. Requests to a stopped instance, or to an instance in mock mode, return <code>503</code>; requests to an unknown generated host return <code>404</code>. The proxy is the one Services use and forwards methods, paths, query strings, bodies, safe headers and <code>X-Forwarded-*</code> headers. Internally, routed requests are served under <code>/run/v2/projects/{project}/locations/{location}/instances/{instance}/</code>.</p>
+<p>Use the Java <code>InstancesClient</code> with the HTTP JSON transport, as for <code>ServicesClient</code>. <code>google-cloud-run</code> 0.96.0 or later is needed for <code>InstancesClient</code>.</p>
+<h3 id="instance-deviations-from-gcp">Instance deviations from GCP</h3>
+<ul>
+<li><code>restartPolicy</code>, <code>sshEnabled</code>, <code>defaultUriDisabled</code> and <code>Condition.instanceReason</code> are returned by GCP but do not exist in <code>proto-google-cloud-run-v2</code> 0.96.0, so they are neither accepted nor emitted. The emulator never restarts an instance container on its own, which is equivalent to a <code>NEVER</code> restart policy; GCP defaults to <code>ON_FAILURE</code>. Revisit this when the published proto gains these fields.</li>
+<li>GCP environment variables for instances could not be observed (invoking the test instance failed authentication), so the container receives <code>PORT</code> only and no <code>K_*</code> or <code>CLOUD_RUN_*</code> variables.</li>
+<li><code>etag</code> is accepted on delete and never validated, which matches the observed GCP behavior for a mismatched etag.</li>
+<li>No soft delete: deleted instances disappear immediately and <code>showDeleted</code> has no effect. <code>deleteTime</code> and <code>expireTime</code> appear only on the delete operation response.</li>
+<li><code>creator</code>, <code>lastModifier</code>, <code>logUri</code> and a default <code>serviceAccount</code> are not filled in, the same as Services. The resource <code>etag</code> is a random token per change, not GCP's format.</li>
+<li>Pending operations do not emit GCP's transient <code>Retry</code> condition or <code>CONDITION_PENDING</code> phase.</li>
+<li>gcloud is not supported: gcloud uses the v1 Knative API for instances.</li>
+<li>Instances are not reconciled after an emulator restart. With persistent storage, an instance that was running is still reported in its last phase but has no container, since shutdown removed it; requests to its URL return <code>503</code> until it is stopped and started again. Containers left behind by a crashed emulator (no graceful shutdown) are not removed at startup.</li>
+<li>The Service/Instance ID check is not atomic with the other kind's create: a Service and an Instance with the same ID created concurrently can both succeed, and the Service then owns the URL.</li>
+<li>GCP's conditions after a failed start were not observed; the emulator marks <code>ContainerReady</code> and <code>ResourcesAvailable</code> as <code>CONDITION_FAILED</code> with the start error.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

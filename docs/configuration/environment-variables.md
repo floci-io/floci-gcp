@@ -15,7 +15,6 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 | `FLOCI_GCP_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_GCP_BASE_URL`. Set to the Compose/container service name so other containers can reach floci-gcp by DNS |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID used when no project is specified in the request |
 | `FLOCI_GCP_MAX_REQUEST_SIZE` | `512` | Maximum request body size, in **megabytes** (applies to uploads, e.g. GCS objects) |
-| `FLOCI_GCP_LOCATIONS_STRICT` | `false` | Reject location combinations that cannot exist, such as a Cloud SQL `settings.locationPreference.zone` outside the instance region. Off by default: such requests are accepted as sent |
 
 ---
 
@@ -64,6 +63,17 @@ floci-gcp's embedded DNS server runs inside the container and resolves GCS virtu
 | `FLOCI_GCP_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to floci-gcp's container IP |
 | `FLOCI_GCP_DNS_CONTAINER_FALLBACK_ENABLED` | `true` | Append public resolvers after the embedded DNS in every spawned container so sidecars (Cloud Run, GKE, Kafka) can resolve public hostnames. Disable in offline or locked-down networks where these resolvers are blocked |
 | `FLOCI_GCP_DNS_CONTAINER_FALLBACK_SERVERS` | `8.8.8.8,8.8.4.4` | The fallback resolvers appended when container fallback is enabled |
+
+---
+
+## Locations
+
+See [Locations](../services/locations.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_GCP_LOCATIONS_STRICT` | `false` | Reject unknown locations on regional create and list calls (Cloud Run, Cloud Functions, KMS, Cloud Tasks, Cloud Scheduler, Eventarc, Managed Kafka, GKE), and location combinations that cannot exist (such as a Cloud SQL `settings.locationPreference.zone` outside the instance region), with `INVALID_ARGUMENT`. Off by default: such requests are accepted as sent |
+| `FLOCI_GCP_SERVICES_COMPUTE_REGIONS` | _(unset)_ | Optional comma-separated Compute Engine region allow-list. Unset serves every catalog region with its real zones |
 
 ---
 

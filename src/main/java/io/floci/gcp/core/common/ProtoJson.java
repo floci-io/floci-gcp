@@ -31,6 +31,8 @@ public final class ProtoJson {
             .add(Instance.getDescriptor())
             .add(com.google.cloud.functions.v2.Function.getDescriptor())
             .add(com.google.cloud.functions.v2.OperationMetadata.getDescriptor())
+            .add(com.google.cloud.functions.v2.LocationMetadata.getDescriptor())
+            .add(com.google.cloud.kms.v1.LocationMetadata.getDescriptor())
             .add(com.google.cloud.eventarc.v1.Trigger.getDescriptor())
             .add(com.google.cloud.eventarc.v1.OperationMetadata.getDescriptor())
             .add(com.google.api.serviceusage.v1.Service.getDescriptor())

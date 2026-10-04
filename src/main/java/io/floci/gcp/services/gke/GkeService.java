@@ -3,6 +3,7 @@ package io.floci.gcp.services.gke;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -63,6 +64,7 @@ public class GkeService {
     private final GkeClusterManager clusterManager;
     private final GkeOperationService operationService;
     private final ServiceRegistry serviceRegistry;
+    private final LocationCatalog locations;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "gke-readiness-poller");
         t.setDaemon(true);
@@ -74,14 +76,15 @@ public class GkeService {
                       EmulatorConfig config,
                       GkeClusterManager clusterManager,
                       GkeOperationService operationService,
-                      ServiceRegistry serviceRegistry) {
+                      ServiceRegistry serviceRegistry,
+                      LocationCatalog locations) {
         this(storageFactory.createGlobal("gke", "gke-clusters.json",
                         new TypeReference<Map<String, StoredCluster>>() {
                         }),
                 storageFactory.createGlobal("gke", "gke-node-pools.json",
                         new TypeReference<Map<String, StoredNodePool>>() {
                         }),
-                config, clusterManager, operationService, serviceRegistry);
+                config, clusterManager, operationService, serviceRegistry, locations);
     }
 
     GkeService(StorageBackend<String, StoredCluster> clusterStore,
@@ -90,6 +93,18 @@ public class GkeService {
                GkeClusterManager clusterManager,
                GkeOperationService operationService,
                ServiceRegistry serviceRegistry) {
+        this(clusterStore, nodePoolStore, config, clusterManager, operationService, serviceRegistry,
+                LocationCatalog.lenient());
+    }
+
+    GkeService(StorageBackend<String, StoredCluster> clusterStore,
+               StorageBackend<String, StoredNodePool> nodePoolStore,
+               EmulatorConfig config,
+               GkeClusterManager clusterManager,
+               GkeOperationService operationService,
+               ServiceRegistry serviceRegistry,
+               LocationCatalog locations) {
+        this.locations = locations;
         this.clusterStore = clusterStore;
         this.nodePoolStore = nodePoolStore;
         this.config = config;
@@ -216,6 +231,7 @@ public class GkeService {
         if (clusterMap == null) {
             throw GcpException.invalidArgument("Missing root 'cluster' object");
         }
+        locations.requireLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
         String name = (String) clusterMap.get("name");
         if (name == null || name.isBlank()) {
             throw GcpException.invalidArgument("Cluster name is required");
@@ -292,6 +308,9 @@ public class GkeService {
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
+        if (!"-".equals(location)) {
+            locations.requireLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
+        }
         return clusterStore.scan(k -> true).stream()
                 .filter(c -> project.equals(c.getProject()) && ("-".equals(location) || location.equals(c.getLocation())))
                 .map(this::withNodePools)

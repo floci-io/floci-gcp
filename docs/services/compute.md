@@ -6,8 +6,11 @@ The emulator does not execute virtual machines or forward network traffic.
 
 Set `FLOCI_GCP_SERVICES_COMPUTE_ENABLED=false` to disable the service.
 `FLOCI_GCP_SERVICES_COMPUTE_OPERATION_DELAY_MS` defaults to 50 ms.
-`FLOCI_GCP_SERVICES_COMPUTE_REGIONS` defaults to `us-central1,europe-west1`;
-each configured region has synthetic zones `a`, `b`, and `c`.
+Regions and zones come from the bundled [location catalog](locations.md): all 43 regions and
+their 130 real zones (for example `us-central1-f` and `europe-west1-d`). To serve fewer regions,
+set `FLOCI_GCP_SERVICES_COMPUTE_REGIONS` to a comma-separated list, such as
+`us-central1,europe-west1`. Each listed region keeps its real zones from the catalog. Unset or
+empty serves the whole catalog. Any region or zone outside that set returns `404`.
 Machine, accelerator and disk catalogs are a small deterministic fixture catalog,
 not an assertion of current Google availability, quotas or pricing.
 

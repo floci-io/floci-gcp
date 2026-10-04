@@ -16,6 +16,7 @@ import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -47,19 +48,22 @@ public class CloudFunctionsService {
     private final GcsService gcsService;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final LocationCatalog locations;
 
     @Inject
     public CloudFunctionsService(StorageFactory storageFactory,
                                  LongRunningOperationsService operations,
                                  GcsService gcsService,
                                  ServiceRegistry serviceRegistry,
-                                 EmulatorConfig config) {
+                                 EmulatorConfig config,
+                                 LocationCatalog locations) {
         this.functionStore = storageFactory.create("cloudfunctions-functions", "cloudfunctions-functions.json",
                 new TypeReference<Map<String, String>>() {});
         this.operations = operations;
         this.gcsService = gcsService;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        this.locations = locations;
     }
 
     CloudFunctionsService(StorageBackend<String, String> functionStore,
@@ -70,6 +74,7 @@ public class CloudFunctionsService {
         this.gcsService = gcsService;
         this.serviceRegistry = null;
         this.config = null;
+        this.locations = LocationCatalog.lenient();
     }
 
     CloudFunctionsService(StorageBackend<String, String> functionStore,
@@ -81,6 +86,7 @@ public class CloudFunctionsService {
         this.gcsService = gcsService;
         this.serviceRegistry = serviceRegistry;
         this.config = null;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -93,6 +99,7 @@ public class CloudFunctionsService {
     }
 
     public Operation createFunction(String project, String location, String functionId, String body, boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String parent = parent(project, location);
         Function requested = ProtoJson.merge(body, Function.newBuilder()).build();
         String id = firstPresent(functionId, GcpResourceNames.lastSegment(requested.getName()));
@@ -121,6 +128,9 @@ public class CloudFunctionsService {
 
     public ListFunctionsResponse listFunctions(String project, String location, int pageSize, String pageToken) {
         boolean allLocations = "-".equals(location);
+        if (!allLocations) {
+            locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        }
         String prefix = allLocations ? "projects/" + project + "/locations/" : parent(project, location) + "/functions/";
         List<Function> functions = functionStore.scan(k -> k.startsWith(prefix) && k.contains("/functions/")).stream()
                 .map(json -> ProtoJson.merge(json, Function.newBuilder()).build())

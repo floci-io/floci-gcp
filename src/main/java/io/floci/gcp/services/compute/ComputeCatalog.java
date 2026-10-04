@@ -1,6 +1,7 @@
 package io.floci.gcp.services.compute;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.gcp.core.common.LocationCatalog;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -9,20 +10,20 @@ final class ComputeCatalog {
     static final Set<String> COLLECTIONS = Set.of("regions", "zones", "machineTypes", "diskTypes", "acceleratorTypes");
     private ComputeCatalog() {}
 
-    static List<ObjectNode> list(ComputeService.Context c, List<String> regions) {
+    static List<ObjectNode> list(ComputeService.Context c, List<String> regions, LocationCatalog locations) {
         List<ObjectNode> result = new ArrayList<>();
         switch (c.collection()) {
             case "regions" -> regions.forEach(region -> {
                 ObjectNode r = c.object().put("name", region).put("status", "UP");
                 var zones = r.putArray("zones");
-                for (String suffix : List.of("a", "b", "c")) {
-                    zones.add(c.link("zones/" + region + "-" + suffix));
+                for (String zone : locations.zones(region)) {
+                    zones.add(c.link("zones/" + zone));
                 }
                 result.add(r);
             });
             case "zones" -> regions.forEach(region -> {
-                for (String suffix : List.of("a", "b", "c")) {
-                    result.add(c.object().put("name", region + "-" + suffix).put("status", "UP")
+                for (String zone : locations.zones(region)) {
+                    result.add(c.object().put("name", zone).put("status", "UP")
                             .put("region", c.link("regions/" + region)));
                 }
             });

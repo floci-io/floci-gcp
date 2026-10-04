@@ -38,6 +38,9 @@ floci-gcp:
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-project-id: floci-local
 
+  locations:
+    strict: false                     # Reject unknown locations on regional create/list calls
+
   tls:                                # See "TLS / HTTPS" for details
     enabled: false                    # Serve HTTP and HTTPS on the same port
     self-signed: true                 # Auto-generate a cert when no cert-path/key-path is given

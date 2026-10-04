@@ -1,6 +1,10 @@
 {
   "resources": {
-    "includes": []
+    "includes": [
+      {
+        "pattern": "\\Qlocations/gcp-locations.json\\E"
+      }
+    ]
   },
   "bundles": []
 }

@@ -3,6 +3,7 @@ package io.floci.gcp.services.cloudkms;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -40,11 +41,13 @@ public class CloudKmsService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final LocationCatalog locations;
 
     @Inject
     public CloudKmsService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, LocationCatalog locations) {
         this.serviceRegistry = serviceRegistry;
+        this.locations = locations;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.keyRingStore = storageFactory.createGlobal("cloudkms-keyrings", "cloudkms-keyrings.json",
@@ -64,6 +67,7 @@ public class CloudKmsService {
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -79,6 +83,7 @@ public class CloudKmsService {
     // ── KeyRings ─────────────────────────────────────────────────────────────
 
     public StoredKeyRing createKeyRing(String parent, String keyRingId) {
+        requireKmsLocation(parent);
         String name = parent + "/keyRings/" + keyRingId;
         LOG.infof("createKeyRing name=%s", name);
         if (keyRingStore.get(name).isPresent()) {
@@ -95,8 +100,14 @@ public class CloudKmsService {
     }
 
     public List<StoredKeyRing> listKeyRings(String parent) {
+        requireKmsLocation(parent);
         String prefix = parent + "/keyRings/";
         return keyRingStore.scan(k -> k.startsWith(prefix));
+    }
+
+    private void requireKmsLocation(String parent) {
+        locations.requireParentLocation(parent, LocationCatalog.Kind.REGION, LocationCatalog.Kind.GLOBAL,
+                LocationCatalog.Kind.KMS_MULTI_REGION);
     }
 
     // ── CryptoKeys ───────────────────────────────────────────────────────────

@@ -1,6 +1,9 @@
 package io.floci.gcp.test;
 
 import com.google.cloud.kms.v1.*;
+import com.google.cloud.location.GetLocationRequest;
+import com.google.cloud.location.ListLocationsRequest;
+import com.google.cloud.location.Location;
 import com.google.protobuf.ByteString;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -19,7 +22,9 @@ import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
@@ -187,6 +192,22 @@ class KmsTest {
         GenerateRandomBytesResponse response = client.generateRandomBytes(
                 LocationName.of(PROJECT_ID, LOCATION).toString(), 32, ProtectionLevel.SOFTWARE);
         assertThat(response.getData().size()).isEqualTo(32);
+    }
+
+    @Test
+    @Order(9)
+    void listAndGetLocations() {
+        List<String> ids = new ArrayList<>();
+        client.listLocations(ListLocationsRequest.newBuilder()
+                        .setName("projects/" + PROJECT_ID).build())
+                .iterateAll().forEach(location -> ids.add(location.getLocationId()));
+        assertThat(ids).contains("us-central1", "europe-west1").hasSize(43);
+
+        Location location = client.getLocation(
+                GetLocationRequest.newBuilder()
+                        .setName("projects/" + PROJECT_ID + "/locations/" + LOCATION).build());
+        assertThat(location.getLocationId()).isEqualTo(LOCATION);
+        assertThat(location.getLabelsMap()).containsEntry("cloud.googleapis.com/region", LOCATION);
     }
 
     private static PublicKey parsePem(String pem, String algorithm) throws Exception {

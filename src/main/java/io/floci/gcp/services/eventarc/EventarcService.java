@@ -20,6 +20,7 @@ import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -62,13 +63,16 @@ public class EventarcService {
     private final EmulatorConfig config;
     private final CloudRunUrlService cloudRunUrlService;
     private final HttpClient httpClient;
+    private final LocationCatalog locations;
 
     @Inject
     public EventarcService(StorageFactory storageFactory,
                            LongRunningOperationsService operations,
                            ServiceRegistry serviceRegistry,
                            EmulatorConfig config,
-                           CloudRunUrlService cloudRunUrlService) {
+                           CloudRunUrlService cloudRunUrlService,
+                           LocationCatalog locations) {
+        this.locations = locations;
         this.triggerStore = storageFactory.createGlobal("eventarc-triggers", "eventarc-triggers.json",
                 new TypeReference<Map<String, String>>() {});
         this.operations = operations;
@@ -91,6 +95,7 @@ public class EventarcService {
         this.config = config;
         this.cloudRunUrlService = cloudRunUrlService;
         this.httpClient = httpClient;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -106,6 +111,7 @@ public class EventarcService {
 
     public Operation createTrigger(String project, String location, String triggerId,
                                    String body, boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String parent = parent(project, location);
         Trigger requested = ProtoJson.merge(body, Trigger.newBuilder()).build();
         String id = triggerId != null && !triggerId.isBlank() ? triggerId : GcpResourceNames.lastSegment(requested.getName());
@@ -141,6 +147,9 @@ public class EventarcService {
     }
 
     public ListTriggersResponse listTriggers(String project, String location, int pageSize, String pageToken) {
+        if (!"-".equals(location)) {
+            locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        }
         String prefix = parent(project, location) + "/triggers/";
         List<Trigger> triggers = triggerStore.scan(k -> k.startsWith(prefix)).stream()
                 .map(json -> ProtoJson.merge(json, Trigger.newBuilder()).build())

@@ -3,6 +3,7 @@ package io.floci.gcp.services.tasks;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -33,11 +34,13 @@ public class CloudTasksService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final LocationCatalog locations;
 
     @Inject
     public CloudTasksService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, LocationCatalog locations) {
         this.serviceRegistry = serviceRegistry;
+        this.locations = locations;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.queueStore = storageFactory.createGlobal("cloudtasks-queues", "cloudtasks-queues.json",
@@ -53,6 +56,7 @@ public class CloudTasksService {
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -69,6 +73,7 @@ public class CloudTasksService {
 
     public StoredQueue createQueue(String project, String location, String queueId,
             double maxDispatchesPerSecond, int maxConcurrentDispatches, int maxAttempts) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String name = "projects/" + project + "/locations/" + location + "/queues/" + queueId;
         LOG.infof("createQueue name=%s", name);
         if (queueStore.get(name).isPresent()) {
@@ -96,6 +101,7 @@ public class CloudTasksService {
 
     public List<StoredQueue> listQueues(String project, String location) {
         LOG.debugf("listQueues project=%s location=%s", project, location);
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String prefix = "projects/" + project + "/locations/" + location + "/queues/";
         return queueStore.scan(k -> k.startsWith(prefix));
     }

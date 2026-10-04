@@ -1,5 +1,8 @@
 package io.floci.gcp.test;
 
+import com.google.cloud.location.GetLocationRequest;
+import com.google.cloud.location.ListLocationsRequest;
+import com.google.cloud.location.Location;
 import com.google.cloud.tasks.v2.*;
 import com.google.protobuf.ByteString;
 import org.junit.jupiter.api.*;
@@ -155,5 +158,20 @@ class CloudTasksTest {
         client.listQueues(parent).iterateAll().forEach(queues::add);
 
         assertThat(queues).noneMatch(q -> q.getName().equals(queueName));
+    }
+
+    @Test
+    @Order(11)
+    void listAndGetLocations() {
+        List<String> ids = new ArrayList<>();
+        client.listLocations(ListLocationsRequest.newBuilder()
+                        .setName("projects/" + PROJECT_ID).build())
+                .iterateAll().forEach(location -> ids.add(location.getLocationId()));
+        assertThat(ids).contains(LOCATION);
+
+        Location location = client.getLocation(
+                GetLocationRequest.newBuilder()
+                        .setName("projects/" + PROJECT_ID + "/locations/" + LOCATION).build());
+        assertThat(location.getName()).isEqualTo("projects/" + PROJECT_ID + "/locations/" + LOCATION);
     }
 }

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.ProjectAwareStorageBackend;
@@ -32,14 +33,16 @@ public class ComputeService {
     private final EmulatorConfig config;
     private final ServiceRegistry registry;
     private final Instance<ComputeResourceHandler> handlers;
+    private final LocationCatalog locations;
 
     @Inject
     public ComputeService(StorageFactory factory, EmulatorConfig config, ServiceRegistry registry,
-                          Instance<ComputeResourceHandler> handlers) {
+                          Instance<ComputeResourceHandler> handlers, LocationCatalog locations) {
         this.store = (ProjectAwareStorageBackend<ComputeProject>) factory.<ComputeProject>create("compute", "compute.json", new TypeReference<Map<String, ComputeProject>>() {});
         this.config = config;
         this.registry = registry;
         this.handlers = handlers;
+        this.locations = locations;
     }
     void start(@Observes StartupEvent event) {
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
@@ -93,16 +96,19 @@ public class ComputeService {
         if (parts.length <= index || parts.length > index + 3) { throw GcpException.notFound("Invalid resource path"); }
         Context c = new Context(project, scope, parts[index], parts.length > index + 1 ? parts[index + 1] : null,
                 parts.length > index + 2 ? parts[index + 2] : null, state);
-        if (scope.startsWith("regions/") && !config.services().compute().regions().contains(scope.substring(8))) {
+        if (scope.startsWith("regions/") && !regions().contains(scope.substring(8))) {
             throw GcpException.notFound("Unknown region: " + scope);
         }
         if (scope.startsWith("zones/")) {
             String zone = scope.substring(6);
-            if (config.services().compute().regions().stream().noneMatch(r -> List.of(r + "-a", r + "-b", r + "-c").contains(zone))) {
+            if (locations.regionOfZone(zone).filter(regions()::contains).isEmpty()) {
                 throw GcpException.notFound("Unknown zone: " + zone);
             }
         }
         return c;
+    }
+    private List<String> regions() {
+        return config.services().compute().regions().filter(r -> !r.isEmpty()).orElseGet(locations::regions);
     }
     private ComputeResourceHandler handler(Context c) {
         return handlers.stream().filter(h -> h.handles(c.collection())).findFirst()
@@ -116,7 +122,7 @@ public class ComputeService {
                     .map(e -> e.getValue().response).toList(), query);
         }
         if (ComputeCatalog.COLLECTIONS.contains(c.collection())) {
-            List<ObjectNode> values = ComputeCatalog.list(c, config.services().compute().regions());
+            List<ObjectNode> values = ComputeCatalog.list(c, regions(), locations);
             if (c.name() == null) { return page(c, values, query); }
             return values.stream().filter(r -> r.path("name").asText().equals(c.name())).findFirst()
                     .orElseThrow(() -> GcpException.notFound("Catalog resource not found"));
@@ -394,7 +400,7 @@ public class ComputeService {
             String key = path(ref);
             Context target = context(project, key, state);
             if (ComputeCatalog.COLLECTIONS.contains(target.collection)) {
-                return ComputeCatalog.list(target, config.services().compute().regions()).stream()
+                return ComputeCatalog.list(target, regions(), locations).stream()
                         .filter(r -> r.path("name").asText().equals(target.name)).findFirst()
                         .orElseThrow(() -> GcpException.notFound("Catalog resource not found: " + ref));
             }

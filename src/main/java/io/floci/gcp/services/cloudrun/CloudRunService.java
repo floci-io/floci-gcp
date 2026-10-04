@@ -18,6 +18,7 @@ import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -69,6 +70,7 @@ public class CloudRunService {
     private final CloudRunRuntimeService runtimeService;
     private final CloudRunUrlService urlService;
     private final Predicate<String> instanceExists;
+    private final LocationCatalog locations;
     private final ExecutorService operationExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors()),
             runnable -> {
@@ -98,7 +100,8 @@ public class CloudRunService {
                            EmulatorConfig config,
                            CloudRunRuntimeService runtimeService,
                            CloudRunUrlService urlService,
-                           Instance<CloudRunInstancesService> instancesService) {
+                           Instance<CloudRunInstancesService> instancesService,
+                           LocationCatalog locations) {
         this.serviceStore = storageFactory.createGlobal("cloudrun-services", "cloudrun-services.json",
                 new TypeReference<Map<String, String>>() {});
         this.revisionStore = storageFactory.createGlobal("cloudrun-revisions", "cloudrun-revisions.json",
@@ -110,6 +113,7 @@ public class CloudRunService {
         this.runtimeService = runtimeService;
         this.urlService = urlService;
         this.instanceExists = name -> instancesService.get().instanceExists(name);
+        this.locations = locations;
     }
 
     CloudRunService(StorageBackend<String, String> serviceStore,
@@ -145,6 +149,7 @@ public class CloudRunService {
         this.runtimeService = runtimeService;
         this.urlService = urlService;
         this.instanceExists = name -> false;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -168,6 +173,7 @@ public class CloudRunService {
 
     public Operation createService(String project, String location, String serviceId,
                                    String body, boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String parent = parent(project, location);
         com.google.cloud.run.v2.Service requested = ProtoJson
                 .merge(body, com.google.cloud.run.v2.Service.newBuilder())
@@ -224,6 +230,12 @@ public class CloudRunService {
         return operation;
     }
 
+    private void requireListLocation(String location) {
+        if (!"-".equals(location)) {
+            locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        }
+    }
+
     public com.google.cloud.run.v2.Service getService(String name) {
         return serviceStore.get(name)
                 .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build())
@@ -239,6 +251,7 @@ public class CloudRunService {
             throw GcpException.invalidArgument(
                     "Location must be a valid Google Cloud region, and cannot be the \"-\" wildcard");
         }
+        requireListLocation(location);
         String prefix = parent(project, location) + "/services/";
         List<com.google.cloud.run.v2.Service> services = serviceStore.scan(k -> k.startsWith(prefix)).stream()
                 .map(json -> ProtoJson.merge(json, com.google.cloud.run.v2.Service.newBuilder()).build())

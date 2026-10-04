@@ -3,6 +3,7 @@ package io.floci.gcp.services.scheduler;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -32,12 +33,14 @@ public class SchedulerService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final LocationCatalog locations;
 
     @Inject
     public SchedulerService(ServiceRegistry serviceRegistry, EmulatorConfig config,
             StorageFactory storageFactory, GrpcServerManager grpcServerManager,
-            ScheduleInvoker invoker) {
+            ScheduleInvoker invoker, LocationCatalog locations) {
         this.serviceRegistry = serviceRegistry;
+        this.locations = locations;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.invoker = invoker;
@@ -51,6 +54,7 @@ public class SchedulerService {
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.locations = LocationCatalog.lenient();
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -66,6 +70,7 @@ public class SchedulerService {
     // ── CRUD ─────────────────────────────────────────────────────────────────────
 
     public StoredJob createJob(String parent, StoredJob job) {
+        locations.requireParentLocation(parent, LocationCatalog.Kind.REGION);
         String jobId = lastSegment(job.getName());
         if (jobId == null || jobId.isBlank()) {
             jobId = UUID.randomUUID().toString();
@@ -95,6 +100,7 @@ public class SchedulerService {
 
     public List<StoredJob> listJobs(String project, String location) {
         LOG.debugf("listJobs project=%s location=%s", project, location);
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String prefix = "projects/" + project + "/locations/" + location + "/jobs/";
         return jobStore.scan(k -> k.startsWith(prefix));
     }

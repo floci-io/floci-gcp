@@ -10,6 +10,23 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 class ComputeIntegrationTest extends ComputeTestSupport {
+    @Test void regionsAndZonesServeTheFullLocationCatalog() {
+        String root = root();
+        var regions = given().get(root + "/regions").then().statusCode(200).extract().jsonPath();
+        assertEquals(43, regions.getList("items.name").size());
+        assertEquals(java.util.List.of("https://www.googleapis.com" + root + "/zones/europe-west1-b",
+                        "https://www.googleapis.com" + root + "/zones/europe-west1-c",
+                        "https://www.googleapis.com" + root + "/zones/europe-west1-d"),
+                given().get(root + "/regions/europe-west1").then().statusCode(200).extract().jsonPath().getList("zones", String.class));
+        var zones = given().get(root + "/zones").then().statusCode(200).extract().jsonPath().getList("items.name", String.class);
+        assertEquals(130, zones.size());
+        assertTrue(zones.contains("us-central1-f"));
+        assertFalse(zones.contains("europe-west1-a"));
+        given().get(root + "/zones/asia-northeast1-a/diskTypes").then().statusCode(200);
+        given().get(root + "/zones/europe-west1-a/diskTypes").then().statusCode(404);
+        given().get(root + "/regions/mars-north1/subnetworks").then().statusCode(404);
+    }
+
     @Test void diskTypeZonesAreUrlsWhileOtherCatalogsUseZoneNames() {
         for (String zone : java.util.List.of("us-central1-a", "europe-west1-b")) {
             String root = root(), catalog = root + "/zones/" + zone;

@@ -49,6 +49,11 @@ public interface EmulatorConfig {
     Locations locations();
 
     interface Locations {
+        /**
+         * When true, reject locations that are not in the bundled GCP location catalog on regional
+         * create/list calls, and location combinations that cannot exist (such as a Cloud SQL zone
+         * outside the instance region), with INVALID_ARGUMENT. Env: FLOCI_GCP_LOCATIONS_STRICT
+         */
         @WithDefault("false")
         boolean strict();
     }
@@ -144,8 +149,11 @@ public interface EmulatorConfig {
         boolean enabled();
         @WithDefault("50")
         long operationDelayMs();
-        @WithDefault("us-central1,europe-west1")
-        java.util.List<String> regions();
+        /**
+         * Optional allow-list of Compute regions. Absent or empty serves the full bundled
+         * location catalog. Env: FLOCI_GCP_SERVICES_COMPUTE_REGIONS
+         */
+        Optional<List<String>> regions();
     }
 
     interface ServicesConfig {

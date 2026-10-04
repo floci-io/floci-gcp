@@ -3,6 +3,7 @@ package io.floci.gcp.services.kafka;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
@@ -49,6 +50,7 @@ public class KafkaService {
     private final ServiceRegistry serviceRegistry;
     private final RedpandaManager redpandaManager;
     private final KafkaConnectDataPlane connectDataPlane;
+    private final LocationCatalog locations;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
@@ -56,7 +58,8 @@ public class KafkaService {
                         EmulatorConfig config,
                         ServiceRegistry serviceRegistry,
                         RedpandaManager redpandaManager,
-                        KafkaConnectContainerDataPlane connectDataPlane) {
+                        KafkaConnectContainerDataPlane connectDataPlane,
+                        LocationCatalog locations) {
         this.clusterStore = storageFactory.createGlobal("kafka", "kafka-clusters.json",
                 new TypeReference<Map<String, StoredCluster>>() {});
         this.topicStore = storageFactory.createGlobal("kafka", "kafka-topics.json",
@@ -69,6 +72,7 @@ public class KafkaService {
         this.serviceRegistry = serviceRegistry;
         this.redpandaManager = redpandaManager;
         this.connectDataPlane = connectDataPlane;
+        this.locations = locations;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -97,6 +101,7 @@ public class KafkaService {
 
     public StoredCluster createCluster(String project, String location, String clusterId,
                                        Map<String, Object> body) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         String name = "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
         if (clusterStore.get(name).isPresent()) {
             throw GcpException.alreadyExists("Cluster already exists: " + name);
@@ -134,6 +139,9 @@ public class KafkaService {
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
+        if (!"-".equals(location)) {
+            locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        }
         String prefix = "projects/" + project + "/locations/" + location + "/clusters/";
         return clusterStore.scan(k -> k.startsWith(prefix));
     }

@@ -71,6 +71,7 @@ nav:
   - Services:
     - Overview: services/index.md
     - Compute Engine: services/compute.md
+    - Locations: services/locations.md
     - Cloud Storage (GCS): services/gcs.md
     - Pub/Sub: services/pubsub.md
     - Firestore: services/firestore.md

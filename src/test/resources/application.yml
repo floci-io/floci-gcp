@@ -19,7 +19,6 @@ floci-gcp:
     compute:
       enabled: true
       operation-delay-ms: 50
-      regions: us-central1,europe-west1
     iam:
       enabled: true
       authorization-mode: disabled

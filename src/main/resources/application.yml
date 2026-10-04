@@ -57,7 +57,7 @@ floci-gcp:
     # key-path: ""     # FLOCI_GCP_TLS_KEY_PATH (PEM private key file)
   default-project-id: floci-local
   locations:
-    strict: false  # FLOCI_GCP_LOCATIONS_STRICT, reject locations that do not exist or do not belong together (e.g. a Cloud SQL zone outside the instance region)
+    strict: false  # FLOCI_GCP_LOCATIONS_STRICT, reject unknown locations on regional create/list calls and locations that do not belong together (e.g. a Cloud SQL zone outside the instance region) with INVALID_ARGUMENT
   storage:
     mode: memory
     persistent-path: ./data
@@ -69,7 +69,7 @@ floci-gcp:
     compute:
       enabled: true
       operation-delay-ms: 50
-      regions: us-central1,europe-west1
+      # regions: us-central1,europe-west1   # FLOCI_GCP_SERVICES_COMPUTE_REGIONS; optional allow-list, unset serves the full location catalog
     gcs:
       enabled: true
       upload-session-idle-timeout-seconds: 604800

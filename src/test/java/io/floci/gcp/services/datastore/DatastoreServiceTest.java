@@ -1,12 +1,19 @@
 package io.floci.gcp.services.datastore;
 
+import com.google.datastore.v1.ArrayValue;
 import com.google.datastore.v1.Entity;
+import com.google.datastore.v1.Filter;
 import com.google.datastore.v1.Key;
 import com.google.datastore.v1.KindExpression;
 import com.google.datastore.v1.Mutation;
 import com.google.datastore.v1.PartitionId;
+import com.google.datastore.v1.PropertyFilter;
+import com.google.datastore.v1.PropertyReference;
 import com.google.datastore.v1.Query;
 import com.google.datastore.v1.Value;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.NullValue;
+import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.datastore.model.StoredEntity;
@@ -126,5 +133,167 @@ class DatastoreServiceTest {
         byte[] txn = service.beginTransaction();
         assertNotNull(txn);
         assertTrue(txn.length > 0);
+    }
+
+    @Test
+    void equalFilterOnTimestampReturnsOnlyMatchingEntity() {
+        Value first = Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(1_700_000_000L).setNanos(100).build())
+                .build();
+        Value second = Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(1_700_000_000L).setNanos(200).build())
+                .build();
+        upsertProperty("Event", "first", "seen", first);
+        upsertProperty("Event", "second", "seen", second);
+
+        List<StoredEntity> equal = runPropertyQuery("Event", "seen", PropertyFilter.Operator.EQUAL, first);
+        assertEquals(List.of("first"), namesOf(equal));
+
+        List<StoredEntity> notEqual = runPropertyQuery("Event", "seen", PropertyFilter.Operator.NOT_EQUAL, first);
+        assertEquals(List.of("second"), namesOf(notEqual));
+    }
+
+    @Test
+    void equalFilterOnBlobReturnsOnlyMatchingEntity() {
+        Value first = Value.newBuilder().setBlobValue(ByteString.copyFrom(new byte[] {1, 2, 3})).build();
+        Value second = Value.newBuilder().setBlobValue(ByteString.copyFrom(new byte[] {4, 5})).build();
+        upsertProperty("BlobKind", "first", "payload", first);
+        upsertProperty("BlobKind", "second", "payload", second);
+
+        List<StoredEntity> results = runPropertyQuery(
+                "BlobKind", "payload", PropertyFilter.Operator.EQUAL, first);
+        assertEquals(List.of("first"), namesOf(results));
+    }
+
+    @Test
+    void equalFilterOnKeyMatchesSamePathOnly() {
+        Value first = Value.newBuilder().setKeyValue(namedKey("Ref", "alpha")).build();
+        Value second = Value.newBuilder().setKeyValue(namedKey("Ref", "beta")).build();
+        upsertProperty("Link", "first", "target", first);
+        upsertProperty("Link", "second", "target", second);
+
+        List<StoredEntity> results = runPropertyQuery("Link", "target", PropertyFilter.Operator.EQUAL, first);
+        assertEquals(List.of("first"), namesOf(results));
+    }
+
+    @Test
+    void equalFilterOnEntityMatchesSamePropertiesOnly() {
+        Value first = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .putProperties("n", Value.newBuilder().setStringValue("a").build())
+                        .build())
+                .build();
+        Value extra = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .putProperties("n", Value.newBuilder().setStringValue("a").build())
+                        .putProperties("extra", Value.newBuilder().setIntegerValue(1).build())
+                        .build())
+                .build();
+        upsertProperty("Wrap", "first", "body", first);
+        upsertProperty("Wrap", "extra", "body", extra);
+
+        List<StoredEntity> results = runPropertyQuery("Wrap", "body", PropertyFilter.Operator.EQUAL, first);
+        assertEquals(List.of("first"), namesOf(results));
+    }
+
+    @Test
+    void equalFilterOnArrayMatchesSameElementsInOrderOnly() {
+        Value match = arrayValue("a", "b");
+        Value reordered = arrayValue("b", "a");
+        Value longer = arrayValue("a", "b", "c");
+        upsertProperty("Seq", "match", "items", match);
+        upsertProperty("Seq", "reordered", "items", reordered);
+        upsertProperty("Seq", "longer", "items", longer);
+
+        List<StoredEntity> results = runPropertyQuery("Seq", "items", PropertyFilter.Operator.EQUAL, match);
+        assertEquals(List.of("match"), namesOf(results));
+    }
+
+    @Test
+    void outOfRangeTimestampFilterReturnsNoEntities() {
+        Value stored = Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(1_700_000_000L).build())
+                .build();
+        upsertProperty("Event", "only", "seen", stored);
+        Value filter = Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build())
+                .build();
+
+        List<StoredEntity> results = runPropertyQuery("Event", "seen", PropertyFilter.Operator.EQUAL, filter);
+        assertTrue(results.isEmpty());
+    }
+
+    @Test
+    void timestampFilterAgainstStringPropertyReturnsNoEntities() {
+        upsertProperty("Event", "only", "seen", Value.newBuilder().setStringValue("1700000000").build());
+        Value filter = Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(1_700_000_000L).build())
+                .build();
+
+        List<StoredEntity> results = runPropertyQuery("Event", "seen", PropertyFilter.Operator.EQUAL, filter);
+        assertTrue(results.isEmpty());
+    }
+
+    @Test
+    void equalFilterStillMatchesBooleanIntegerDoubleStringAndNull() {
+        Value yes = Value.newBuilder().setBooleanValue(true).build();
+        upsertProperty("Bools", "yes", "v", yes);
+        upsertProperty("Bools", "no", "v", Value.newBuilder().setBooleanValue(false).build());
+        assertEquals(List.of("yes"), namesOf(runPropertyQuery("Bools", "v", PropertyFilter.Operator.EQUAL, yes)));
+
+        Value one = Value.newBuilder().setIntegerValue(1L).build();
+        upsertProperty("Ints", "one", "v", one);
+        upsertProperty("Ints", "two", "v", Value.newBuilder().setIntegerValue(2L).build());
+        assertEquals(List.of("one"), namesOf(runPropertyQuery("Ints", "v", PropertyFilter.Operator.EQUAL, one)));
+
+        Value half = Value.newBuilder().setDoubleValue(1.5).build();
+        upsertProperty("Doubles", "half", "v", half);
+        upsertProperty("Doubles", "other", "v", Value.newBuilder().setDoubleValue(2.5).build());
+        assertEquals(List.of("half"), namesOf(runPropertyQuery("Doubles", "v", PropertyFilter.Operator.EQUAL, half)));
+
+        Value name = Value.newBuilder().setStringValue("Ada").build();
+        upsertProperty("Strings", "ada", "v", name);
+        upsertProperty("Strings", "bob", "v", Value.newBuilder().setStringValue("Bob").build());
+        assertEquals(List.of("ada"), namesOf(runPropertyQuery("Strings", "v", PropertyFilter.Operator.EQUAL, name)));
+
+        Value nil = Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build();
+        upsertProperty("Nulls", "nil", "v", nil);
+        upsertProperty("Nulls", "text", "v", Value.newBuilder().setStringValue("x").build());
+        assertEquals(List.of("nil"), namesOf(runPropertyQuery("Nulls", "v", PropertyFilter.Operator.EQUAL, nil)));
+    }
+
+    private void upsertProperty(String kind, String name, String property, Value value) {
+        Entity entity = Entity.newBuilder()
+                .setKey(namedKey(kind, name))
+                .putProperties(property, value)
+                .build();
+        service.applyMutation(PROJECT, Mutation.newBuilder().setUpsert(entity).build(), Instant.now());
+    }
+
+    private List<StoredEntity> runPropertyQuery(
+            String kind, String property, PropertyFilter.Operator op, Value value) {
+        Query query = Query.newBuilder()
+                .addKind(KindExpression.newBuilder().setName(kind).build())
+                .setFilter(Filter.newBuilder()
+                        .setPropertyFilter(PropertyFilter.newBuilder()
+                                .setProperty(PropertyReference.newBuilder().setName(property).build())
+                                .setOp(op)
+                                .setValue(value)
+                                .build())
+                        .build())
+                .build();
+        return service.runQuery(PROJECT, null, query);
+    }
+
+    private static Value arrayValue(String... elements) {
+        ArrayValue.Builder array = ArrayValue.newBuilder();
+        for (String element : elements) {
+            array.addValues(Value.newBuilder().setStringValue(element).build());
+        }
+        return Value.newBuilder().setArrayValue(array.build()).build();
+    }
+
+    private static List<String> namesOf(List<StoredEntity> entities) {
+        return entities.stream().map(StoredEntity::getKeyName).toList();
     }
 }

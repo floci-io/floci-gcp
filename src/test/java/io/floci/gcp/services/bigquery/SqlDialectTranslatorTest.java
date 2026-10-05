@@ -224,6 +224,9 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT d + INTERVAL (n * 2) HOUR AS \"d2\" FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL n * 2 HOUR d2 FROM ds.t"));
         assertEquals("SELECT CAST(d + INTERVAL (-x) DAY AS DATE) AS f0_ FROM \"ds\".\"t\"",
                 sql("SELECT DATE_ADD(d, INTERVAL -x DAY) FROM ds.t"));
+        assertEquals("SELECT CAST(d + INTERVAL (n + day) DAY AS DATE) AS f0_ FROM \"ds\".\"t\"",
+                sql("SELECT DATE_ADD(d, INTERVAL n + day DAY) FROM ds.t"));
+        assertEquals("SELECT d + INTERVAL (x) DAY AS \"day\" FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL x DAY day FROM ds.t"));
     }
 
     @Test

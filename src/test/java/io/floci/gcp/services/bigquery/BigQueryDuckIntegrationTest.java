@@ -247,6 +247,11 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2023-10-10", "2024-01-03", "1704844799999000", "1704844799999999")));
+        query("""
+                {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL n + day DAY) FROM (SELECT 1 n, 2 day)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2024-01-13")));
     }
 
     @Test

@@ -982,19 +982,23 @@ final class SqlDialectTranslator {
     /**
      * Index of the last token of the interval literal whose INTERVAL keyword is at {@code start}: its
      * datetime part, or the ending part of a {@code TO} range. The step size before it may be any
-     * expression. -1 when no datetime part follows at the same nesting level.
+     * expression, so a datetime-part word only ends it when the token before can end an operand
+     * ({@code INTERVAL n + day DAY}: {@code day} is a column). -1 when no datetime part follows at the
+     * same nesting level; the scan stops at the next INTERVAL so repeated literals stay linear.
      */
     private static int intervalEnd(List<Token> sig, int start) {
         int depth = 0;
         for (int i = start + 1; i < sig.size(); i++) {
             Token t = sig.get(i);
-            if (t.isPunct("(") || t.isPunct("[")) {
+            if (t.isKeyword("INTERVAL")) {
+                return -1;
+            } else if (t.isPunct("(") || t.isPunct("[")) {
                 depth++;
             } else if (t.isPunct(")") || t.isPunct("]")) {
                 if (--depth < 0) {
                     return -1;
                 }
-            } else if (depth == 0 && i > start + 1 && isIntervalPart(t)) {
+            } else if (depth == 0 && i > start + 1 && isIntervalPart(t) && endsOperand(sig.get(i - 1))) {
                 return i + 2 < sig.size() && sig.get(i + 1).isKeyword("TO") && isIntervalPart(sig.get(i + 2))
                         ? i + 2 : i;
             } else if (depth == 0 && (t.isPunct(",") || t.isKeyword("FROM")
@@ -1003,6 +1007,12 @@ final class SqlDialectTranslator {
             }
         }
         return -1;
+    }
+
+    private static boolean endsOperand(Token t) {
+        return t.kind == Kind.NUMBER || t.kind == Kind.STRING || t.kind == Kind.QIDENT || t.isPunct(")")
+                || t.isPunct("]") || t.isKeyword("END")
+                || (t.kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(t.upper()));
     }
 
     private static boolean isIntervalPart(Token t) {

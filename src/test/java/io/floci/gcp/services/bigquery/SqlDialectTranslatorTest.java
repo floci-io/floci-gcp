@@ -219,6 +219,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void intervalExpressionStepSizesAreParenthesized() {
+        assertEquals("SELECT d + INTERVAL (-5) DAY AS f0_ FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL -5 DAY FROM ds.t"));
+        assertEquals("SELECT d + INTERVAL (n * 2) HOUR AS \"d2\" FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL n * 2 HOUR d2 FROM ds.t"));
+        assertEquals("SELECT CAST(d + INTERVAL (-x) DAY AS DATE) AS f0_ FROM \"ds\".\"t\"",
+                sql("SELECT DATE_ADD(d, INTERVAL -x DAY) FROM ds.t"));
+    }
+
+    @Test
+    void intervalLiteralStepSizesStayAsTheyAre() {
+        assertEquals("SELECT d + INTERVAL 5 DAY AS f0_, d + INTERVAL '-5' DAY AS f1_, d + INTERVAL (-5) DAY AS f2_"
+                + " FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL 5 DAY, d + INTERVAL '-5' DAY, d + INTERVAL (-5) DAY FROM ds.t"));
+        assertEquals("SELECT INTERVAL '1:2' HOUR TO MINUTE AS f0_ FROM \"ds\".\"t\"", sql("SELECT INTERVAL '1:2' HOUR TO MINUTE FROM ds.t"));
+    }
+
+    @Test
     void reservedWordsAreNotRewrittenIntoAliases() {
         assertEquals("SELECT 1 struct", sql("SELECT 1 struct"));
         assertEquals("SELECT 1 default", sql("SELECT 1 default"));

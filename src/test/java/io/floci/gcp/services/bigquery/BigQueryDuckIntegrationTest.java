@@ -206,6 +206,29 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void offsetIsAnOrdinaryName() {
+        query("""
+                {"query": "SELECT 1 offset", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("offset")))
+                .body("rows[0].f.v", equalTo(List.of("1")));
+        query("""
+                {"query": "SELECT offset + 1 o2 FROM (SELECT 1 offset) WHERE offset = 1 ORDER BY offset", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("o2")))
+                .body("rows[0].f.v", equalTo(List.of("2")));
+        query("""
+                {"query": "SELECT x, 5 offset FROM UNNEST([1, 2, 3]) x ORDER BY x LIMIT 1 OFFSET 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "offset")))
+                .body("rows[0].f.v", equalTo(List.of("2", "5")));
+    }
+
+    @Test
     @Order(6)
     void dryRunReturnsSchemaWithoutAJob() {
         query("""

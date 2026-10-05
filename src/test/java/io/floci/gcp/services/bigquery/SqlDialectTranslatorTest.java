@@ -197,6 +197,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void offsetAsANameIsQuoted() {
+        assertEquals("SELECT 1 \"offset\"", sql("SELECT 1 offset"));
+        assertEquals("SELECT 1 AS \"offset\"", sql("SELECT 1 AS offset"));
+        assertEquals("SELECT \"offset\" + 1 AS o2 FROM \"ds\".\"t\" WHERE \"offset\" = 1 ORDER BY \"offset\"", sql("SELECT offset + 1 AS o2 FROM ds.t WHERE offset = 1 ORDER BY offset"));
+    }
+
+    @Test
+    void offsetKeywordsStayKeywords() {
+        assertEquals("SELECT x, 5 \"offset\" FROM \"ds\".\"t\" ORDER BY x LIMIT 1 OFFSET 1", sql("SELECT x, 5 offset FROM ds.t ORDER BY x LIMIT 1 OFFSET 1"));
+        assertEquals("SELECT a[OFFSET(1)] AS f0_ FROM \"ds\".\"t\"", sql("SELECT a[OFFSET(1)] FROM ds.t"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT x FROM UNNEST([1]) x WITH OFFSET")).getReason());
+    }
+
+    @Test
     void reservedWordsAreNotRewrittenIntoAliases() {
         assertEquals("SELECT 1 struct", sql("SELECT 1 struct"));
         assertEquals("SELECT 1 default", sql("SELECT 1 default"));

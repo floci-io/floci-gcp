@@ -4,7 +4,9 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -158,6 +160,43 @@ final class SqlDialectTranslator {
         tokens = new Lexer(sql).tokenize();
         stripTrailingSemicolons();
         rejectScripts();
+        quoteOffsetIdentifiers();
+    }
+
+    /**
+     * GoogleSQL does not reserve OFFSET, so {@code offset} is an ordinary name (a column, or an alias as
+     * in {@code SELECT 1 offset}), while DuckDB reserves it. Every {@code offset} that is not the
+     * {@code LIMIT … OFFSET} clause, {@code WITH OFFSET} or the {@code OFFSET(n)} array subscript
+     * becomes a quoted identifier.
+     */
+    private void quoteOffsetIdentifiers() {
+        Deque<Boolean> limitSeenOuter = new ArrayDeque<>();
+        boolean limitSeen = false;
+        Token previous = null;
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            if (t.kind == Kind.SPACE) {
+                continue;
+            }
+            if (t.isPunct("(") || t.isPunct("[")) {
+                limitSeenOuter.push(limitSeen);
+                limitSeen = false;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                limitSeen = !limitSeenOuter.isEmpty() && limitSeenOuter.pop();
+            } else if (t.isKeyword("SELECT")) {
+                limitSeen = false;
+            } else if (t.isKeyword("LIMIT")) {
+                limitSeen = true;
+            } else if (t.isKeyword("OFFSET")) {
+                int next = nextSignificant(i + 1, tokens.size());
+                boolean keyword = limitSeen || (previous != null && previous.isKeyword("WITH"))
+                        || (next >= 0 && tokens.get(next).isPunct("("));
+                if (!keyword) {
+                    tokens.set(i, new Token(Kind.QIDENT, "`" + t.text + "`", t.text));
+                }
+            }
+            previous = t;
+        }
     }
 
     private Statement classify(String sql) {

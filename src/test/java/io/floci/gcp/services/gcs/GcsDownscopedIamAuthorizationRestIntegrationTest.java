@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -73,6 +74,22 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
         given().header("Authorization", bearer(unauthorizedToken))
                 .when().get("/storage/v1/b/{bucket}/o/{object}?alt=media", bucket, "allowed/report.csv")
                 .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void downscopedImpersonatedTokenCanReadAllowedObjectOverXmlApi() {
+        String authorizedToken = downscopedTokenFor(SOURCE_SERVICE_ACCOUNT);
+
+        given().header("Authorization", bearer(authorizedToken))
+                .when().get("/{bucket}/{object}", bucket, "allowed/report.csv")
+                .then().statusCode(200).body(equalTo("allowed"));
+
+        String unauthorizedToken = downscopedTokenFor(UNAUTHORIZED_SERVICE_ACCOUNT);
+        given().header("Authorization", bearer(unauthorizedToken))
+                .when().get("/{bucket}/{object}", bucket, "allowed/report.csv")
+                .then().statusCode(403)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("AccessDenied"));
     }
 
     private String downscopedTokenFor(String serviceAccount) {

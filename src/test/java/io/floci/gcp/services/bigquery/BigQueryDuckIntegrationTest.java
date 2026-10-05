@@ -226,6 +226,11 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("x", "offset")))
                 .body("rows[0].f.v", equalTo(List.of("2", "5")));
+        query("""
+                {"query": "WITH a AS (SELECT 1 x), offset AS (SELECT x + 1 x FROM a) SELECT x FROM offset", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2")));
     }
 
     @Test

@@ -204,6 +204,13 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void cteNamedOffsetIsQuoted() {
+        assertEquals("WITH \"offset\" AS (SELECT 1 AS x) SELECT x FROM \"offset\"", sql("WITH offset AS (SELECT 1 AS x) SELECT x FROM offset"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT v FROM UNNEST([1]) v WITH OFFSET AS o")).getReason());
+    }
+
+    @Test
     void offsetKeywordsStayKeywords() {
         assertEquals("SELECT x, 5 \"offset\" FROM \"ds\".\"t\" ORDER BY x LIMIT 1 OFFSET 1", sql("SELECT x, 5 offset FROM ds.t ORDER BY x LIMIT 1 OFFSET 1"));
         assertEquals("SELECT a[OFFSET(1)] AS f0_ FROM \"ds\".\"t\"", sql("SELECT a[OFFSET(1)] FROM ds.t"));

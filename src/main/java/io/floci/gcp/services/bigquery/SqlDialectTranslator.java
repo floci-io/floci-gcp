@@ -169,6 +169,15 @@ final class SqlDialectTranslator {
      * {@code LIMIT … OFFSET} clause, {@code WITH OFFSET} or the {@code OFFSET(n)} array subscript
      * becomes a quoted identifier.
      */
+    /** {@code WITH offset AS (...)} declares a CTE named offset; {@code WITH OFFSET [AS o]} is the clause. */
+    private boolean startsCte(int afterName) {
+        if (afterName < 0 || !tokens.get(afterName).isKeyword("AS")) {
+            return false;
+        }
+        int open = nextSignificant(afterName + 1, tokens.size());
+        return open >= 0 && tokens.get(open).isPunct("(");
+    }
+
     private void quoteOffsetIdentifiers() {
         Deque<Boolean> limitSeenOuter = new ArrayDeque<>();
         boolean limitSeen = false;
@@ -189,7 +198,7 @@ final class SqlDialectTranslator {
                 limitSeen = true;
             } else if (t.isKeyword("OFFSET")) {
                 int next = nextSignificant(i + 1, tokens.size());
-                boolean keyword = limitSeen || (previous != null && previous.isKeyword("WITH"))
+                boolean keyword = limitSeen || (previous != null && previous.isKeyword("WITH") && !startsCte(next))
                         || (next >= 0 && tokens.get(next).isPunct("("));
                 if (!keyword) {
                     tokens.set(i, new Token(Kind.QIDENT, "`" + t.text + "`", t.text));

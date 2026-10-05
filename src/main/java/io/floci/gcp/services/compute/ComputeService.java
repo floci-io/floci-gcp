@@ -107,12 +107,16 @@ public class ComputeService {
         if (scope.startsWith("zones/")) {
             String zone = scope.substring(6);
             // A zone the catalog does not list stays reachable while stored resources use it:
-            // before the catalog, every region served synthetic -a, -b and -c zones.
-            if (locations.regionOfZone(zone).filter(regions()::contains).isEmpty() && !holdsScope(state, scope)) {
+            // before the catalog, every region served synthetic -a, -b and -c zones. Inserts
+            // are checked again against the catalog alone.
+            if (!catalogZone(zone) && !holdsScope(state, scope)) {
                 throw GcpException.notFound("Unknown zone: " + zone);
             }
         }
         return c;
+    }
+    private boolean catalogZone(String zone) {
+        return locations.regionOfZone(zone).filter(regions()::contains).isPresent();
     }
     private static boolean holdsScope(ComputeProject state, String scope) {
         String prefix = scope + "/";
@@ -216,6 +220,9 @@ public class ComputeService {
             name(required(body, "name"));
             c = context(project, path + "/" + body.path("name").asText(), c.state);
             c.query = query;
+            if (c.scope().startsWith("zones/") && !catalogZone(c.scope().substring(6))) {
+                throw GcpException.notFound("Unknown zone: " + c.scope().substring(6));
+            }
             if (c.state.resources.containsKey(c.key())) { throw GcpException.alreadyExists("Resource already exists: " + c.key()); }
             resource = body;
             resource.put("id", Long.toString(++c.state.sequence)).put("kind", "compute#" + singular(c.collection()))

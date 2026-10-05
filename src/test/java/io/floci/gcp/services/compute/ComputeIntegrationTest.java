@@ -24,6 +24,8 @@ class ComputeIntegrationTest extends ComputeTestSupport {
         assertFalse(zones.contains("europe-west1-a"));
         given().get(root + "/zones/asia-northeast1-a/diskTypes").then().statusCode(200);
         given().get(root + "/zones/europe-west1-a/diskTypes").then().statusCode(404);
+        given().contentType("application/json").body(Map.of("name", "legacy-zone-disk"))
+                .post(root + "/zones/europe-west1-a/disks").then().statusCode(404);
         given().get(root + "/regions/mars-north1/subnetworks").then().statusCode(404);
     }
 

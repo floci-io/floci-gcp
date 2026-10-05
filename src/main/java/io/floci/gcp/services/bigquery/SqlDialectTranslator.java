@@ -220,7 +220,10 @@ final class SqlDialectTranslator {
         for (int index : sig) {
             sigTokens.add(tokens.get(index));
         }
-        for (int k = sigTokens.size() - 1; k >= 0; k--) {
+        // Insertions are collected first and applied from the back, so a nested interval that also
+        // needs parentheses does not shift the positions computed for the outer one.
+        List<int[]> inserts = new ArrayList<>();
+        for (int k = 0; k < sigTokens.size(); k++) {
             if (!sigTokens.get(k).isKeyword("INTERVAL")) {
                 continue;
             }
@@ -237,8 +240,13 @@ final class SqlDialectTranslator {
             if (literal || grouped) {
                 continue;
             }
-            tokens.add(sig.get(last) + 1, new Token(Kind.PUNCT, ")", ")"));
-            tokens.add(sig.get(first), new Token(Kind.PUNCT, "(", "("));
+            inserts.add(new int[] {sig.get(first), 0});
+            inserts.add(new int[] {sig.get(last) + 1, 1});
+        }
+        inserts.sort((a, b) -> a[0] != b[0] ? Integer.compare(b[0], a[0]) : Integer.compare(a[1], b[1]));
+        for (int[] insert : inserts) {
+            String paren = insert[1] == 0 ? "(" : ")";
+            tokens.add(insert[0], new Token(Kind.PUNCT, paren, paren));
         }
     }
 
@@ -984,13 +992,13 @@ final class SqlDialectTranslator {
      * datetime part, or the ending part of a {@code TO} range. The step size before it may be any
      * expression, so a datetime-part word only ends it when the token before can end an operand
      * ({@code INTERVAL n + day DAY}: {@code day} is a column). -1 when no datetime part follows at the
-     * same nesting level; the scan stops at the next INTERVAL so repeated literals stay linear.
+     * same nesting level; the scan stops at the next INTERVAL at that level, so repeated literals stay linear.
      */
     private static int intervalEnd(List<Token> sig, int start) {
         int depth = 0;
         for (int i = start + 1; i < sig.size(); i++) {
             Token t = sig.get(i);
-            if (t.isKeyword("INTERVAL")) {
+            if (depth == 0 && t.isKeyword("INTERVAL")) {
                 return -1;
             } else if (t.isPunct("(") || t.isPunct("[")) {
                 depth++;
@@ -1010,7 +1018,8 @@ final class SqlDialectTranslator {
     }
 
     private static boolean endsOperand(Token t) {
-        return t.kind == Kind.NUMBER || t.kind == Kind.STRING || t.kind == Kind.QIDENT || t.isPunct(")")
+        return t.kind == Kind.NUMBER || t.kind == Kind.STRING || t.kind == Kind.QIDENT
+                || t.kind == Kind.NAMED_PARAM || t.kind == Kind.POSITIONAL_PARAM || t.isPunct(")")
                 || t.isPunct("]") || t.isKeyword("END")
                 || (t.kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(t.upper()));
     }

@@ -252,6 +252,18 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2024-01-13")));
+        query("""
+                {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL @n DAY) a, DATE_ADD(DATE '2024-01-10', INTERVAL -@n DAY) b",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "n", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "5"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2024-01-15", "2024-01-05")));
+        query("""
+                {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -EXTRACT(DAY FROM DATE_ADD(DATE '2024-01-01', INTERVAL 1 DAY)) DAY) c, DATE_ADD(DATE '2024-01-10', INTERVAL -EXTRACT(DAY FROM DATE_ADD(DATE '2024-01-01', INTERVAL -1 DAY)) DAY) d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2024-01-08", "2023-12-10")));
     }
 
     @Test

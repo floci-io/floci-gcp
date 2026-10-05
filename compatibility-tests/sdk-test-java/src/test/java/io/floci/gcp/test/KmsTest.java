@@ -201,13 +201,19 @@ class KmsTest {
         client.listLocations(ListLocationsRequest.newBuilder()
                         .setName("projects/" + PROJECT_ID).build())
                 .iterateAll().forEach(location -> ids.add(location.getLocationId()));
-        assertThat(ids).contains("us-central1", "europe-west1").hasSize(43);
+        // 43 catalog regions plus KMS's global and three multi-regions: gRPC carries no API identity.
+        assertThat(ids).contains("us-central1", "europe-west1", "global", "us", "europe", "asia").hasSize(47);
 
         Location location = client.getLocation(
                 GetLocationRequest.newBuilder()
                         .setName("projects/" + PROJECT_ID + "/locations/" + LOCATION).build());
         assertThat(location.getLocationId()).isEqualTo(LOCATION);
         assertThat(location.getLabelsMap()).containsEntry("cloud.googleapis.com/region", LOCATION);
+
+        Location global = client.getLocation(
+                GetLocationRequest.newBuilder()
+                        .setName("projects/" + PROJECT_ID + "/locations/global").build());
+        assertThat(global.getLocationId()).isEqualTo("global");
     }
 
     private static PublicKey parsePem(String pem, String algorithm) throws Exception {

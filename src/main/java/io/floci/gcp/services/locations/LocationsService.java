@@ -1,6 +1,7 @@
 package io.floci.gcp.services.locations;
 
 import com.google.cloud.functions.v2.Environment;
+import com.google.cloud.kms.v1.LocationMetadata;
 import com.google.cloud.location.ListLocationsResponse;
 import com.google.cloud.location.Location;
 import com.google.protobuf.Any;
@@ -15,12 +16,14 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The {@code google.cloud.location.Locations} mixin shared by every regional API. On a single
- * port the API is only known from the request host, so service-specific extras (KMS
- * multi-regions and {@code LocationMetadata}, Cloud Functions {@code LocationMetadata}) are
- * added only when the first host label names that API.
+ * port the API is only known from the request host. Service-specific {@code LocationMetadata}
+ * (KMS, Cloud Functions) is added only when the first host label names that API; KMS's
+ * {@code global} and multi-region locations are also listed when no API can be identified, so
+ * SDKs pointed at the emulator, and gRPC callers, can resolve them.
  */
 @ApplicationScoped
 public class LocationsService {
@@ -28,6 +31,10 @@ public class LocationsService {
     static final String REGION_LABEL = "cloud.googleapis.com/region";
     static final String KMS_API = "cloudkms";
     static final String FUNCTIONS_API = "cloudfunctions";
+    // First host labels of the APIs that serve this mixin. Any other host (an emulator endpoint
+    // such as localhost) and every gRPC call identify no API, so they get the union of locations.
+    static final Set<String> MIXIN_APIS = Set.of("cloudkms", "cloudfunctions", "cloudtasks",
+            "cloudscheduler", "secretmanager", "eventarc", "managedkafka", "run");
 
     private final LocationCatalog catalog;
     private final GrpcServerManager grpcServerManager;
@@ -86,7 +93,7 @@ public class LocationsService {
 
     private List<String> locationIds(String api) {
         List<String> ids = new ArrayList<>(catalog.regions());
-        if (KMS_API.equals(api)) {
+        if (KMS_API.equals(api) || api == null || !MIXIN_APIS.contains(api)) {
             ids.add(LocationCatalog.GLOBAL);
             ids.addAll(List.of("asia", "europe", "us"));
         }
@@ -102,11 +109,12 @@ public class LocationsService {
             location.putLabels(REGION_LABEL, id);
         }
         if (KMS_API.equals(api)) {
-            location.setMetadata(Any.pack(com.google.cloud.kms.v1.LocationMetadata.newBuilder()
+            location.setMetadata(Any.pack(LocationMetadata.newBuilder()
                     .setHsmAvailable(false)
                     .setEkmAvailable(false)
                     .build()));
         } else if (FUNCTIONS_API.equals(api)) {
+            // Cloud Functions' LocationMetadata shares its simple name with the imported KMS one.
             location.setMetadata(Any.pack(com.google.cloud.functions.v2.LocationMetadata.newBuilder()
                     .addEnvironments(Environment.GEN_2)
                     .build()));

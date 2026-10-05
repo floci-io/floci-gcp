@@ -73,6 +73,14 @@ class LocationCatalogTest {
     }
 
     @Test
+    void strictListChecksSkipTheWildcard() {
+        LocationCatalog strict = LocationCatalog.strictCatalog();
+        assertDoesNotThrow(() -> strict.requireListLocation("-", LocationCatalog.Kind.REGION));
+        assertDoesNotThrow(() -> strict.requireListLocation("us-east1", LocationCatalog.Kind.REGION));
+        assertThrows(GcpException.class, () -> strict.requireListLocation("mars-north1", LocationCatalog.Kind.REGION));
+    }
+
+    @Test
     void locationOfParsesResourceNames() {
         assertEquals("us-east1", LocationCatalog.locationOf("projects/p/locations/us-east1"));
         assertEquals("global", LocationCatalog.locationOf("projects/p/locations/global/keyRings/k"));

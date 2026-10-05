@@ -16,8 +16,9 @@ import io.grpc.stub.StreamObserver;
  * {@code google.cloud.location.Locations} over gRPC. The stub artifact that ships
  * {@code LocationsGrpc} (grpc-google-common-protos) is not on the classpath, so the service
  * definition is declared by hand from the proto-google-common-protos messages, like Datastore.
- * The gRPC bridge does not expose the call authority, so the API cannot be told apart here and
- * responses carry no service-specific metadata.
+ * The gRPC bridge does not expose the call authority, so the API cannot be told apart here:
+ * responses list the union of locations (KMS's {@code global} and multi-regions included) and
+ * carry no service-specific metadata.
  */
 public class LocationsGrpcController implements BindableService {
 

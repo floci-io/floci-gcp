@@ -41,7 +41,7 @@ class LocationsGrpcIntegrationTest {
             ListLocationsResponse rest = ClientCalls.blockingUnaryCall(channel, LocationsGrpcController.LIST_LOCATIONS,
                     CallOptions.DEFAULT, ListLocationsRequest.newBuilder().setName("projects/loc-grpc")
                             .setPageSize(40).setPageToken(page.getNextPageToken()).build());
-            assertEquals(3, rest.getLocationsCount());
+            assertEquals(7, rest.getLocationsCount());
             assertTrue(rest.getNextPageToken().isEmpty());
 
             Location location = ClientCalls.blockingUnaryCall(channel, LocationsGrpcController.GET_LOCATION,
@@ -51,6 +51,12 @@ class LocationsGrpcIntegrationTest {
             assertEquals("europe-west1", location.getLocationId());
             assertEquals("europe-west1", location.getLabelsOrThrow("cloud.googleapis.com/region"));
             assertFalse(location.hasMetadata());
+
+            Location global = ClientCalls.blockingUnaryCall(channel, LocationsGrpcController.GET_LOCATION,
+                    CallOptions.DEFAULT,
+                    GetLocationRequest.newBuilder().setName("projects/loc-grpc/locations/global").build());
+            assertEquals("global", global.getLocationId());
+            assertFalse(global.hasMetadata());
 
             StatusRuntimeException missing = assertThrows(StatusRuntimeException.class,
                     () -> ClientCalls.blockingUnaryCall(channel, LocationsGrpcController.GET_LOCATION, CallOptions.DEFAULT,

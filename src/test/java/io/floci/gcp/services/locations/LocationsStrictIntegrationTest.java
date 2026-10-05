@@ -46,6 +46,13 @@ class LocationsStrictIntegrationTest {
     }
 
     @Test
+    void strictListsNeverCheckTheWildcard() {
+        given().when().get("/v1/projects/loc-strict/locations/-/keyRings").then().statusCode(200);
+        given().when().get("/v1/projects/loc-strict/locations/-/jobs").then().statusCode(200);
+        given().when().get("/v1/projects/loc-strict/locations/mars-north1/jobs").then().statusCode(400);
+    }
+
+    @Test
     void strictGkeAcceptsZonesAndRegions() {
         given().when().get("/container/v1/projects/loc-strict/locations/us-central1-c/clusters")
                 .then().statusCode(200);

@@ -147,9 +147,7 @@ public class EventarcService {
     }
 
     public ListTriggersResponse listTriggers(String project, String location, int pageSize, String pageToken) {
-        if (!"-".equals(location)) {
-            locations.requireLocation(location, LocationCatalog.Kind.REGION);
-        }
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = parent(project, location) + "/triggers/";
         List<Trigger> triggers = triggerStore.scan(k -> k.startsWith(prefix)).stream()
                 .map(json -> ProtoJson.merge(json, Trigger.newBuilder()).build())

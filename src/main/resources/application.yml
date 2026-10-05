@@ -23,6 +23,9 @@ quarkus:
     delay-enabled: true
 
   native:
+    # Classpath resources read at run time; native image bundles only what is listed here.
+    resources:
+      includes: locations/gcp-locations.json
     # No --allow-incomplete-classpath and no --report-unsupported-elements-at-runtime: both have
     # been no-ops since GraalVM 22.1 (incomplete classpaths are the default, and Quarkus passes
     # --link-at-build-time itself, so a reachable class missing from the classpath fails the build).

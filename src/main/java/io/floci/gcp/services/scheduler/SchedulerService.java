@@ -100,7 +100,7 @@ public class SchedulerService {
 
     public List<StoredJob> listJobs(String project, String location) {
         LOG.debugf("listJobs project=%s location=%s", project, location);
-        locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = "projects/" + project + "/locations/" + location + "/jobs/";
         return jobStore.scan(k -> k.startsWith(prefix));
     }

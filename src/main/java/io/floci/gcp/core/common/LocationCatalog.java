@@ -26,6 +26,7 @@ public class LocationCatalog {
 
     static final String RESOURCE = "locations/gcp-locations.json";
     public static final String GLOBAL = "global";
+    public static final String WILDCARD = "-";
     public static final Set<String> KMS_MULTI_REGIONS = Set.of("us", "europe", "asia");
 
     public enum Kind { REGION, ZONE, GLOBAL, KMS_MULTI_REGION }
@@ -130,12 +131,18 @@ public class LocationCatalog {
 
     /**
      * Rejects {@code location} with INVALID_ARGUMENT when strict mode is on and the location is not
-     * one of the allowed kinds. Lenient mode (the default) accepts any value. Callers handle the
-     * {@code -} list wildcard themselves.
+     * one of the allowed kinds. Lenient mode (the default) accepts any value.
      */
     public void requireLocation(String location, Kind... allowed) {
         if (strict && !accepts(location, allowed)) {
             throw GcpException.invalidArgument("Invalid location: " + location);
+        }
+    }
+
+    /** Same as {@link #requireLocation} for list calls: the {@code -} wildcard is never checked. */
+    public void requireListLocation(String location, Kind... allowed) {
+        if (!WILDCARD.equals(location)) {
+            requireLocation(location, allowed);
         }
     }
 

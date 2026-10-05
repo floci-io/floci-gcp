@@ -18,6 +18,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
@@ -27,6 +28,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ComputeService {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Logger LOG = Logger.getLogger(ComputeService.class);
     private static final Pattern NAME = Pattern.compile("[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?");
     private static final Set<String> LABELLED = Set.of("instances", "disks", "images", "snapshots", "addresses", "forwardingRules");
     private final ProjectAwareStorageBackend<ComputeProject> store;
@@ -45,6 +47,9 @@ public class ComputeService {
         this.locations = locations;
     }
     void start(@Observes StartupEvent event) {
+        config.services().compute().regions().ifPresent(allowed -> allowed.stream()
+                .filter(r -> !r.isEmpty() && !locations.isRegion(r))
+                .forEach(r -> LOG.warnf("Ignoring unknown region %s in floci-gcp.services.compute.regions", r)));
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
                 .storageKey("compute").resourceClasses(ComputeController.class).build());
     }
@@ -101,14 +106,23 @@ public class ComputeService {
         }
         if (scope.startsWith("zones/")) {
             String zone = scope.substring(6);
-            if (locations.regionOfZone(zone).filter(regions()::contains).isEmpty()) {
+            // A zone the catalog does not list stays reachable while stored resources use it:
+            // before the catalog, every region served synthetic -a, -b and -c zones.
+            if (locations.regionOfZone(zone).filter(regions()::contains).isEmpty() && !holdsScope(state, scope)) {
                 throw GcpException.notFound("Unknown zone: " + zone);
             }
         }
         return c;
     }
+    private static boolean holdsScope(ComputeProject state, String scope) {
+        String prefix = scope + "/";
+        return state.resources.keySet().stream().anyMatch(k -> k.startsWith(prefix))
+                || state.operations.keySet().stream().anyMatch(k -> k.startsWith(prefix));
+    }
     private List<String> regions() {
-        return config.services().compute().regions().filter(r -> !r.isEmpty()).orElseGet(locations::regions);
+        return config.services().compute().regions().filter(r -> !r.isEmpty())
+                .map(allowed -> allowed.stream().filter(locations::isRegion).toList())
+                .orElseGet(locations::regions);
     }
     private ComputeResourceHandler handler(Context c) {
         return handlers.stream().filter(h -> h.handles(c.collection())).findFirst()

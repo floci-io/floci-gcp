@@ -23,9 +23,10 @@ class LocationsRestIntegrationTest {
 
     @Test
     void v1ListReturnsEveryCatalogRegionInTerraformShape() {
+        // 43 catalog regions plus KMS's global and three multi-regions: localhost names no API.
         JsonPath body = given().when().get("/v1/projects/loc-rest/locations")
                 .then().statusCode(200)
-                .body("locations", hasSize(43))
+                .body("locations", hasSize(47))
                 .body("nextPageToken", nullValue())
                 .extract().jsonPath();
         List<String> ids = body.getList("locations.locationId", String.class);
@@ -52,7 +53,7 @@ class LocationsRestIntegrationTest {
             seen.addAll(page.getList("locations.locationId", String.class));
             token = page.getString("nextPageToken");
         } while (token != null);
-        assertEquals(43, seen.size());
+        assertEquals(47, seen.size());
     }
 
     @Test
@@ -79,7 +80,7 @@ class LocationsRestIntegrationTest {
     void v2ListAndGetServeTheSameCatalog() {
         given().when().get("/v2/projects/loc-rest/locations")
                 .then().statusCode(200)
-                .body("locations", hasSize(43))
+                .body("locations", hasSize(47))
                 .body("locations.locationId", hasItem("southamerica-east1"));
         given().when().get("/v2/projects/loc-rest/locations/us-east4")
                 .then().statusCode(200)
@@ -102,7 +103,12 @@ class LocationsRestIntegrationTest {
                 .then().statusCode(200)
                 .body("locationId", equalTo("global"))
                 .body("labels", nullValue());
-        given().when().get("/v1/projects/loc-rest/locations/global").then().statusCode(404);
+        given().header("Host", "cloudtasks.googleapis.com")
+                .when().get("/v1/projects/loc-rest/locations")
+                .then().statusCode(200)
+                .body("locations", hasSize(43));
+        given().header("Host", "cloudtasks.googleapis.com")
+                .when().get("/v1/projects/loc-rest/locations/global").then().statusCode(404);
     }
 
     @Test

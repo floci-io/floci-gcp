@@ -34,6 +34,9 @@ public class CloudKmsService {
             Set.of("EC_SIGN_P256_SHA256", "RSA_SIGN_PKCS1_2048_SHA256");
     private static final String DECRYPT_ALGORITHM = "RSA_DECRYPT_OAEP_2048_SHA256";
 
+    private static final LocationCatalog.Kind[] KMS_LOCATION_KINDS = {
+            LocationCatalog.Kind.REGION, LocationCatalog.Kind.GLOBAL, LocationCatalog.Kind.KMS_MULTI_REGION};
+
     private final StorageBackend<String, StoredKeyRing> keyRingStore;
     private final StorageBackend<String, StoredCryptoKey> cryptoKeyStore;
     private final StorageBackend<String, StoredCryptoKeyVersion> versionStore;
@@ -100,14 +103,13 @@ public class CloudKmsService {
     }
 
     public List<StoredKeyRing> listKeyRings(String parent) {
-        requireKmsLocation(parent);
+        locations.requireListLocation(LocationCatalog.locationOf(parent), KMS_LOCATION_KINDS);
         String prefix = parent + "/keyRings/";
         return keyRingStore.scan(k -> k.startsWith(prefix));
     }
 
     private void requireKmsLocation(String parent) {
-        locations.requireParentLocation(parent, LocationCatalog.Kind.REGION, LocationCatalog.Kind.GLOBAL,
-                LocationCatalog.Kind.KMS_MULTI_REGION);
+        locations.requireParentLocation(parent, KMS_LOCATION_KINDS);
     }
 
     // ── CryptoKeys ───────────────────────────────────────────────────────────

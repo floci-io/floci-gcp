@@ -231,9 +231,7 @@ public class CloudRunService {
     }
 
     private void requireListLocation(String location) {
-        if (!"-".equals(location)) {
-            locations.requireLocation(location, LocationCatalog.Kind.REGION);
-        }
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
     }
 
     public com.google.cloud.run.v2.Service getService(String name) {

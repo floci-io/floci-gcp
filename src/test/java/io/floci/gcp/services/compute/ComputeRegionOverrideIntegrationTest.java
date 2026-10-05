@@ -23,13 +23,15 @@ class ComputeRegionOverrideIntegrationTest extends ComputeTestSupport {
         assertEquals(List.of("us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"),
                 given().get(root + "/zones").then().statusCode(200).extract().jsonPath().getList("items.name", String.class));
         given().get(root + "/regions/europe-west1").then().statusCode(404);
+        given().get(root + "/regions/mars-north1").then().statusCode(404);
         given().get(root + "/zones/europe-west1-b/diskTypes").then().statusCode(404);
     }
 
     public static class SingleRegionProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.compute.regions", "us-central1");
+            // mars-north1 is not in the catalog, so it is ignored rather than advertised as UP.
+            return Map.of("floci-gcp.services.compute.regions", "us-central1,mars-north1");
         }
     }
 }

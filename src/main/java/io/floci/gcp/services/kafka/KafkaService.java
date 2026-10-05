@@ -139,9 +139,7 @@ public class KafkaService {
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
-        if (!"-".equals(location)) {
-            locations.requireLocation(location, LocationCatalog.Kind.REGION);
-        }
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = "projects/" + project + "/locations/" + location + "/clusters/";
         return clusterStore.scan(k -> k.startsWith(prefix));
     }

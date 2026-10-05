@@ -308,9 +308,7 @@ public class GkeService {
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
-        if (!"-".equals(location)) {
-            locations.requireLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
-        }
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
         return clusterStore.scan(k -> true).stream()
                 .filter(c -> project.equals(c.getProject()) && ("-".equals(location) || location.equals(c.getLocation())))
                 .map(this::withNodePools)

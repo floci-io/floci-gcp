@@ -101,7 +101,7 @@ public class CloudTasksService {
 
     public List<StoredQueue> listQueues(String project, String location) {
         LOG.debugf("listQueues project=%s location=%s", project, location);
-        locations.requireLocation(location, LocationCatalog.Kind.REGION);
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = "projects/" + project + "/locations/" + location + "/queues/";
         return queueStore.scan(k -> k.startsWith(prefix));
     }

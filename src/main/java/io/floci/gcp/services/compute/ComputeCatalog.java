@@ -1,5 +1,6 @@
 package io.floci.gcp.services.compute;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.core.common.LocationCatalog;
 import java.util.ArrayList;
@@ -15,7 +16,7 @@ final class ComputeCatalog {
         switch (c.collection()) {
             case "regions" -> regions.forEach(region -> {
                 ObjectNode r = c.object().put("name", region).put("status", "UP");
-                var zones = r.putArray("zones");
+                ArrayNode zones = r.putArray("zones");
                 for (String zone : locations.zones(region)) {
                     zones.add(c.link("zones/" + zone));
                 }

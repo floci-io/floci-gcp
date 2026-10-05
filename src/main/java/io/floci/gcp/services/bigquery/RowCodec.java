@@ -427,7 +427,8 @@ final class RowCodec {
 
     private static Object encodeValue(TableFieldSchema field, Object value, TimestampFormat format) {
         if (value == null) {
-            return null;
+            // BigQuery never returns a NULL ARRAY: query results and tabledata.list carry it as [].
+            return "REPEATED".equals(field.getMode()) ? List.of() : null;
         }
         if ("REPEATED".equals(field.getMode()) && value instanceof List<?> list) {
             List<Map<String, Object>> wrapped = new ArrayList<>(list.size());

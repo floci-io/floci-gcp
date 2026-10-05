@@ -267,6 +267,18 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void nullArrayIsReturnedAsEmptyArray() {
+        query("""
+                {"query": "SELECT CAST(NULL AS ARRAY<INT64>) a, 1 b", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v", equalTo(List.of()))
+                .body("rows[0].f[1].v", equalTo("1"));
+    }
+
+    @Test
     @Order(6)
     void dryRunReturnsSchemaWithoutAJob() {
         query("""

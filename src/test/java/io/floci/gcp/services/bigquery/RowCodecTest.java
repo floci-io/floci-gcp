@@ -51,6 +51,26 @@ class RowCodecTest {
     }
 
     @Test
+    void nullRepeatedCellEncodesAsEmptyArray() {
+        TableFieldSchema tags = new TableFieldSchema();
+        tags.setName("tags");
+        tags.setType("STRING");
+        tags.setMode("REPEATED");
+        TableFieldSchema name = new TableFieldSchema();
+        name.setName("name");
+        name.setType("STRING");
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("tags", null);
+        row.put("name", null);
+
+        var cells = RowCodec.encodeRow(new TableSchema(List.of(tags, name)), row,
+                RowCodec.TimestampFormat.ISO8601_STRING).getF();
+
+        assertEquals(List.of(), cells.get(0).getV());
+        assertEquals(null, cells.get(1).getV());
+    }
+
+    @Test
     void insertAllJsonStringsStayJsonText() {
         assertEquals("{\"a\": 1}", storedJson("{\"a\": 1}", false));
     }

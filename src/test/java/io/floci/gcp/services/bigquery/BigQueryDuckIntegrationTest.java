@@ -279,6 +279,29 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void arrayAggNullModifiersMatchBigQuery() {
+        query("""
+                {"query": "SELECT ARRAY_AGG(x IGNORE NULLS ORDER BY x) a, ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) b, ARRAY_AGG(IF(x = 1, 'keep ignore nulls', NULL) IGNORE NULLS) c FROM UNNEST([1, NULL, 3, 3]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "3", "3")))
+                .body("rows[0].f[1].v.v", equalTo(List.of("3", "1")))
+                .body("rows[0].f[2].v.v", equalTo(List.of("keep ignore nulls")));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x RESPECT NULLS ORDER BY x) a FROM UNNEST([2, 1]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "2")));
+        query("""
+                {"query": "SELECT x, ARRAY_AGG(x IGNORE NULLS) OVER (ORDER BY x) a FROM UNNEST([1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("does not support IGNORE NULLS or RESPECT NULLS"));
+    }
+
+    @Test
     @Order(6)
     void dryRunReturnsSchemaWithoutAJob() {
         query("""

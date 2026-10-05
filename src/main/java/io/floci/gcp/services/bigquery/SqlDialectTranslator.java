@@ -74,7 +74,7 @@ final class SqlDialectTranslator {
             "TIME_ADD", "TIMESTAMP_SUB", "DATETIME_SUB", "TIME_SUB", "DATE_ADD", "DATE_SUB",
             "TIMESTAMP_DIFF", "DATETIME_DIFF", "DATE_DIFF", "TIME_DIFF", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
             "DATE_TRUNC", "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME",
-            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP");
+            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP", "ARRAY_AGG");
 
     /**
      * Words DuckDB reserves (or restricts) that GoogleSQL allows as plain column names; they
@@ -1487,6 +1487,9 @@ final class SqlDialectTranslator {
             case "STRUCT" -> {
                 return renderStruct(open, close);
             }
+            case "ARRAY_AGG" -> {
+                return renderArrayAgg(original, open, close);
+            }
             default -> {
                 // fall through to argument-based shims
             }
@@ -1777,6 +1780,50 @@ final class SqlDialectTranslator {
     }
 
     // ── Token helpers ───────────────────────────────────────────────────────
+
+    /**
+     * {@code ARRAY_AGG([DISTINCT] expr {IGNORE|RESPECT} NULLS [ORDER BY …])}: DuckDB has no null
+     * modifier inside {@code array_agg}. {@code RESPECT NULLS} is the default and is dropped;
+     * {@code IGNORE NULLS} becomes an aggregate {@code FILTER} on the aggregated expression. BigQuery
+     * rejects either modifier on the analytic form. Returns null without a modifier, so the call is
+     * rendered as before.
+     */
+    private String renderArrayAgg(String original, int open, int close) {
+        int modifier = -1;
+        int depth = 0;
+        for (int k = open + 1; k < close; k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            } else if (depth == 0 && (t.isKeyword("IGNORE") || t.isKeyword("RESPECT"))) {
+                int nulls = nextSignificant(k + 1, close);
+                if (nulls >= 0 && tokens.get(nulls).isKeyword("NULLS")) {
+                    modifier = k;
+                    break;
+                }
+            }
+        }
+        if (modifier < 0) {
+            return null;
+        }
+        int over = nextSignificant(close + 1, tokens.size());
+        if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
+            throw invalidQuery("Analytic function array_agg does not support IGNORE NULLS or RESPECT NULLS.");
+        }
+        int afterNulls = nextSignificant(modifier + 1, close) + 1;
+        String body = (render(open + 1, modifier).trim() + " " + render(afterNulls, close).trim()).trim();
+        String call = original + "(" + body + ")";
+        if (tokens.get(modifier).isKeyword("RESPECT")) {
+            return call;
+        }
+        int expressionStart = nextSignificant(open + 1, modifier);
+        if (expressionStart >= 0 && tokens.get(expressionStart).isKeyword("DISTINCT")) {
+            expressionStart++;
+        }
+        return call + " FILTER (WHERE (" + render(expressionStart, modifier).trim() + ") IS NOT NULL)";
+    }
 
     private List<String> arguments(int open, int close) {
         List<String> args = new ArrayList<>();

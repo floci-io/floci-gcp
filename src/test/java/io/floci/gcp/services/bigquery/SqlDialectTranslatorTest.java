@@ -154,6 +154,24 @@ class SqlDialectTranslatorTest {
     // ── Functions ────────────────────────────────────────────────────────────
 
     @Test
+    void arrayAggNullModifiers() {
+        assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
+        assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));
+        assertEquals("SELECT ARRAY_AGG((CASE WHEN x = 1 THEN 'keep ignore nulls' ELSE NULL END))"
+                + " FILTER (WHERE ((CASE WHEN x = 1 THEN 'keep ignore nulls' ELSE NULL END)) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(IF(x = 1, 'keep ignore nulls', NULL) IGNORE NULLS) AS xs FROM ds.t"));
+        assertEquals("SELECT ARRAY_AGG(x) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x RESPECT NULLS) AS xs FROM ds.t"));
+        assertEquals("SELECT ARRAY_AGG(x) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x) AS xs FROM ds.t"));
+    }
+
+    @Test
+    void arrayAggNullModifierIsRejectedOnTheAnalyticForm() {
+        GcpException e = assertThrows(GcpException.class,
+                () -> sql("SELECT ARRAY_AGG(y IGNORE NULLS) OVER (ORDER BY x) AS a FROM ds.t"));
+        assertEquals("invalidQuery", e.getReason());
+        assertTrue(e.getMessage().contains("does not support IGNORE NULLS or RESPECT NULLS"), e.getMessage());
+    }
+
+    @Test
     void functionShimsRewriteToDuckDb() {
         assertEquals("SELECT (CASE WHEN (b) = 0 THEN NULL ELSE (a) / (b) END) AS r", sql("SELECT SAFE_DIVIDE(a, b) AS r"));
         assertEquals("SELECT count_if(x > 1) AS c", sql("SELECT COUNTIF(x > 1) AS c"));

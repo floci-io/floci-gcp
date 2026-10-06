@@ -755,13 +755,27 @@ final class SqlDialectTranslator {
 
     // ── CTEs and anonymous column names ─────────────────────────────────────
 
+    /**
+     * Names declared by every {@code WITH} that opens a query: the statement's own, and those of
+     * parenthesized queries and subqueries ({@code (WITH s AS (...) SELECT * FROM s)}).
+     */
     private void collectCteNames() {
-        int n = tokens.size();
-        int i = nextSignificant(0, n);
-        if (i < 0 || !tokens.get(i).isKeyword("WITH")) {
-            return;
+        Token previous = null;
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            if (t.kind == Kind.SPACE) {
+                continue;
+            }
+            if (t.isKeyword("WITH") && (previous == null || previous.isPunct("("))) {
+                collectCteList(i);
+            }
+            previous = t;
         }
-        i = nextSignificant(i + 1, n);
+    }
+
+    private void collectCteList(int with) {
+        int n = tokens.size();
+        int i = nextSignificant(with + 1, n);
         if (i >= 0 && tokens.get(i).isKeyword("RECURSIVE")) {
             i = nextSignificant(i + 1, n);
         }
@@ -883,6 +897,9 @@ final class SqlDialectTranslator {
             if (t.isPunct("(") || t.isPunct("[")) {
                 depth++;
             } else if (t.isPunct(")") || t.isPunct("]")) {
+                if (depth == 0) {
+                    break; // closes a parenthesized query: (SELECT ...)
+                }
                 depth--;
             } else if (depth == 0 && t.isPunct(",")) {
                 items.add(new int[] {itemStart, end});
@@ -910,26 +927,27 @@ final class SqlDialectTranslator {
         }
     }
 
+    /**
+     * The outermost query's first SELECT. Parentheses that open the statement wrap that query
+     * ({@code (SELECT ...)}, {@code ((SELECT ...) UNION ALL ...)}, {@code (WITH s AS (...) SELECT ...)}),
+     * so its SELECT sits at their depth; deeper ones belong to CTEs and subqueries.
+     */
     private int firstTopLevelSelect() {
+        int base = 0;
+        int first = nextSignificant(0, tokens.size());
+        while (first >= 0 && tokens.get(first).isPunct("(")) {
+            base++;
+            first = nextSignificant(first + 1, tokens.size());
+        }
         int depth = 0;
-        int firstToken = nextSignificant(0, tokens.size());
-        boolean afterWith = firstToken >= 0 && tokens.get(firstToken).isKeyword("WITH");
         for (int i = 0; i < tokens.size(); i++) {
             Token t = tokens.get(i);
             if (t.isPunct("(")) {
                 depth++;
             } else if (t.isPunct(")")) {
                 depth--;
-            } else if (t.isKeyword("SELECT") && depth == 0) {
+            } else if (t.isKeyword("SELECT") && depth == base) {
                 return i;
-            }
-        }
-        // (SELECT ...) UNION ... : name the first nested select.
-        if (!afterWith) {
-            for (int i = 0; i < tokens.size(); i++) {
-                if (tokens.get(i).isKeyword("SELECT")) {
-                    return i;
-                }
             }
         }
         return -1;

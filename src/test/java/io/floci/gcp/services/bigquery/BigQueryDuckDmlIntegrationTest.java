@@ -167,6 +167,19 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
+    @Order(4)
+    void ctasWithAParenthesizedQuery() {
+        // The shape dbt-bigquery generates for table and incremental models.
+        query("CREATE OR REPLACE TABLE shop.wrapped PARTITION BY d CLUSTER BY id OPTIONS() AS ("
+                + "WITH s AS (SELECT id FROM shop.items) SELECT id, CURRENT_DATE() AS d, id * 10 ten FROM s)")
+                .then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/wrapped").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "d", "ten")));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1", "10"), List.of("3", "30"),
+                List.of("4", "40")), rows("SELECT id, ten FROM shop.wrapped ORDER BY id"));
+    }
+
+    @Test
     @Order(5)
     void restCreatedViewIsQueryable() {
         given().contentType("application/json").body("""

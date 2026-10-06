@@ -80,6 +80,25 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void parenthesizedQueriesNameTheirOwnSelectList() {
+        assertEquals("(SELECT 1 + 1 AS f0_)", sql("(SELECT 1 + 1)"));
+        assertEquals("((SELECT 1 AS \"x\", 2 + 2 AS f0_))", sql("((SELECT 1 x, 2 + 2))"));
+        assertEquals("(SELECT 1 AS \"x\") UNION ALL (SELECT 2 AS \"x\") ORDER BY x",
+                sql("(SELECT 1 x) UNION ALL (SELECT 2 x) ORDER BY x"));
+    }
+
+    @Test
+    void ctesOfParenthesizedQueriesAndSubqueriesAreNotTreatedAsTables() {
+        SqlDialectTranslator.Translation t = translate("(WITH s AS (SELECT * FROM ds.t) SELECT x + 1 FROM s)");
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), t.tables());
+        assertEquals("(WITH s AS (SELECT * FROM \"ds\".\"t\") SELECT x + 1 AS f0_ FROM \"s\")", t.sql());
+        assertEquals("SELECT * FROM (WITH s AS (SELECT 1 AS x) SELECT x FROM \"s\")",
+                sql("SELECT * FROM (WITH s AS (SELECT 1 AS x) SELECT x FROM s)"));
+        assertEquals("SELECT (WITH s AS (SELECT 1 AS x) SELECT x FROM \"s\") AS \"y\"",
+                sql("SELECT (WITH s AS (SELECT 1 AS x) SELECT x FROM s) y"));
+    }
+
+    @Test
     void unnestAliasNamesTheElement() {
         assertEquals("SELECT tag FROM \"ds\".\"t\", UNNEST(tags) AS \"_unnest_tag\"(\"tag\")",
                 sql("SELECT tag FROM ds.t, UNNEST(tags) AS tag"));

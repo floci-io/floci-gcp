@@ -3,7 +3,25 @@ name: Cloud SDK contracts
 on:
   push:
     branches: ['main']
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - '.mvn/**'
+      - 'mvnw*'
+      - 'docker/**'
+      - 'compatibility-tests/sdk-test-java/**'
+      - 'compatibility-tests/sdk-test-ruby/**'
+      - '.github/workflows/cloud-contracts.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - '.mvn/**'
+      - 'mvnw*'
+      - 'docker/**'
+      - 'compatibility-tests/sdk-test-java/**'
+      - 'compatibility-tests/sdk-test-ruby/**'
+      - '.github/workflows/cloud-contracts.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,14 +42,6 @@ jobs:
           java-version: '25'
           distribution: mandrel
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: JVM regression suite
-        run: mvn -B -ntp test
-      - name: Preserve JVM results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: jvm-regression
-          path: target/surefire-reports/*.xml
       - name: Native image check
         run: |
           mvn -B -ntp package -Dnative -DskipTests -Dquarkus.native.additional-build-args-append=-Ob

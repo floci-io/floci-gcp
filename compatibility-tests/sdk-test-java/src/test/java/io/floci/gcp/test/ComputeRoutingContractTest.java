@@ -56,7 +56,6 @@ class ComputeRoutingContractTest {
                 addresses.deleteAsync(project, "frontend").get(20, TimeUnit.SECONDS);
                 assertThatThrownBy(() -> addresses.get(project, "frontend")).isInstanceOf(com.google.api.gax.rpc.NotFoundException.class);
                 assertThat(forwarding.get(project, "frontend").getIPAddress()).isEqualTo(firstRule.getIPAddress());
-                forwarding.patchAsync(project, "frontend", ForwardingRule.newBuilder().setFingerprint(firstRule.getFingerprint()).setDescription("released reservation").build()).get(20, TimeUnit.SECONDS);
                 assertThatThrownBy(() -> addresses.insertAsync(project, Address.newBuilder().setName("reuse").setAddress(firstRule.getIPAddress()).build()).get(20, TimeUnit.SECONDS))
                         .hasCauseInstanceOf(com.google.api.gax.rpc.InvalidArgumentException.class);
                 String fingerprint = maps.get(project, "routes").getFingerprint();

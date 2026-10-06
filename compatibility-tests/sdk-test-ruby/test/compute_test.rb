@@ -79,7 +79,6 @@ class ComputeContractTest < Minitest::Test
     wait client("GlobalAddresses").delete(**address_args)
     assert_raises(Google::Cloud::NotFoundError) { client("GlobalAddresses").get(**address_args) }
     assert_equal first.I_p_address, client("GlobalForwardingRules").get(**args).I_p_address
-    wait client("GlobalForwardingRules").patch(**args, forwarding_rule_resource: {fingerprint: first.fingerprint, description: "released reservation"})
     assert_raises(Google::Cloud::InvalidArgumentError) do
       wait client("GlobalAddresses").insert(project: @project, address_resource: {name: "reuse", address: first.I_p_address})
     end

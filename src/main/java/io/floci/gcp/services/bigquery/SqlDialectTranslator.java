@@ -1614,8 +1614,102 @@ final class SqlDialectTranslator {
         collectCteNames();
         quoteImplicitSelectAliases();
         nameAnonymousColumns();
+        expandStructStars();
         String rendered = render(0, tokens.size()).trim();
         return new Translation(rendered, tables, informationSchema);
+    }
+
+    /**
+     * {@code expr.*} expands a STRUCT into one column per field. DuckDB only takes {@code name.*} on a bare
+     * column or table, so {@code .*} after a dotted path, a call, a subscript or a parenthesized expression
+     * becomes {@code unnest(expr)}, which DuckDB expands the same way, inside aggregate queries too. It runs
+     * after {@link #nameAnonymousColumns}, so the expansion does not get a generated name.
+     */
+    private void expandStructStars() {
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).isPunct("*")) {
+                continue;
+            }
+            int dot = significantBefore(i);
+            if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+                continue;
+            }
+            int last = significantBefore(dot);
+            if (last < 0) {
+                continue;
+            }
+            int start = starOperandStart(last);
+            Token first = tokens.get(start);
+            boolean bareName = start == last && (first.kind == Kind.IDENT || first.kind == Kind.QIDENT)
+                    && !first.identifierText().contains(".");
+            if (bareName) {
+                continue;
+            }
+            int after = nextSignificant(i + 1, tokens.size());
+            if (after >= 0 && (tokens.get(after).isKeyword("EXCEPT") || tokens.get(after).isKeyword("REPLACE"))) {
+                throw invalidQuery("Dot-star with " + tokens.get(after).upper() + " on a STRUCT expression is not"
+                        + " supported by the floci BigQuery emulator yet.");
+            }
+            List<Token> expansion = new ArrayList<>();
+            expansion.add(Token.raw("unnest"));
+            expansion.add(new Token(Kind.PUNCT, "(", "("));
+            expansion.addAll(tokens.subList(start, dot));
+            expansion.add(new Token(Kind.PUNCT, ")", ")"));
+            tokens.subList(start, i + 1).clear();
+            tokens.addAll(start, expansion);
+            i = start + expansion.size() - 1;
+        }
+    }
+
+    /** First token of the value a {@code .*} applies to: a dotted path, a call, a subscript chain or parentheses. */
+    private int starOperandStart(int last) {
+        Token t = tokens.get(last);
+        int start = last;
+        if (t.isPunct(")")) {
+            start = openingFor(last, "(", ")");
+            int name = significantBefore(start);
+            if (name >= 0 && tokens.get(name).kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(tokens.get(name).upper())) {
+                start = name;
+            }
+        } else if (t.isPunct("]")) {
+            int open = openingFor(last, "[", "]");
+            int before = significantBefore(open);
+            if (before >= 0 && (tokens.get(before).isPunct(")") || tokens.get(before).isPunct("]")
+                    || tokens.get(before).kind == Kind.IDENT || tokens.get(before).kind == Kind.QIDENT)) {
+                return starOperandStart(before);
+            }
+            return open;
+        }
+        int dot = significantBefore(start);
+        while (dot >= 0 && tokens.get(dot).isPunct(".")) {
+            int name = significantBefore(dot);
+            if (name < 0 || !(tokens.get(name).kind == Kind.IDENT || tokens.get(name).kind == Kind.QIDENT)) {
+                break;
+            }
+            start = name;
+            dot = significantBefore(start);
+        }
+        return start;
+    }
+
+    private int significantBefore(int index) {
+        int k = index - 1;
+        while (k >= 0 && tokens.get(k).kind == Kind.SPACE) {
+            k--;
+        }
+        return k;
+    }
+
+    private int openingFor(int close, String open, String closeText) {
+        int depth = 0;
+        for (int k = close; k >= 0; k--) {
+            if (tokens.get(k).isPunct(closeText)) {
+                depth++;
+            } else if (tokens.get(k).isPunct(open) && --depth == 0) {
+                return k;
+            }
+        }
+        throw invalidQuery("Syntax error: Unexpected \"" + closeText + "\"");
     }
 
     private void stripTrailingSemicolons() {

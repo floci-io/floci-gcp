@@ -451,6 +451,39 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void structDotStarExpandsLikeBigQuery() {
+        query("""
+                {"query": "SELECT t.s.*, t.n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 7 n) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("1", "x", "7")));
+        query("""
+                {"query": "SELECT STRUCT(1 AS a, 'x' AS b).*", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "x")));
+        query("""
+                {"query": "SELECT g, ANY_VALUE(STRUCT(x AS v, x * 10 AS w)).*, MAX(x) m FROM UNNEST([STRUCT('a' AS g, 1 AS x), ('b', 3)]) GROUP BY g ORDER BY g", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("g", "v", "w", "m")))
+                .body("rows.f.v", equalTo(List.of(List.of("a", "1", "10", "1"), List.of("b", "3", "30", "3"))));
+        query("""
+                {"query": "SELECT t.s.inr.* FROM (SELECT STRUCT(STRUCT(1 AS c, 2 AS d) AS inr) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+        query("""
+                {"query": "SELECT t.s.* FROM (SELECT CAST(NULL AS STRUCT<a INT64, b STRING>) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null)));
+    }
+
+    @Test
+    @Order(5)
     void intervalStepSizeCanBeAnExpression() {
         query("""
                 {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -5 DAY) minus, DATE_ADD(DATE '2024-01-10', INTERVAL - 5 DAY) spaced, DATE_ADD(DATE '2024-01-10', INTERVAL 2 * 3 DAY) product, DATE_ADD(DATE '2024-01-10', INTERVAL -x DAY) negated FROM UNNEST([2]) x", "useLegacySql": false}

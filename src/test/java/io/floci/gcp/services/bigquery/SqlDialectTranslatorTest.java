@@ -270,6 +270,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void structDotStarBecomesUnnest() {
+        assertEquals("SELECT unnest(t.s), t.n FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.s.*, t.n FROM ds.t t"));
+        assertEquals("SELECT unnest(t.s.inr) FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.s.inr.* FROM ds.t t"));
+        String call = sql("SELECT g, ANY_VALUE(s).*, MAX(x) AS m FROM ds.t GROUP BY g");
+        assertTrue(call.startsWith("SELECT g, unnest(ANY_VALUE(s)), MAX(x) AS m"), call);
+        assertEquals("SELECT s.* FROM \"ds\".\"t\"", sql("SELECT s.* FROM ds.t"), "a bare name keeps its .*");
+        assertEquals("SELECT t.* FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.* FROM ds.t t"));
+        assertTrue(assertThrows(GcpException.class, () -> sql("SELECT t.s.* EXCEPT (a) FROM ds.t t"))
+                .getMessage().contains("not supported by the floci BigQuery emulator yet"));
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));

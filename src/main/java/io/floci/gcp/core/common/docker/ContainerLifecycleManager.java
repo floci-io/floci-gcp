@@ -462,6 +462,9 @@ public class ContainerLifecycleManager {
         if (spec.groupAdd() != null && !spec.groupAdd().isEmpty()) {
             hostConfig.withGroupAdd(spec.groupAdd());
         }
+        if (spec.securityOpts() != null && !spec.securityOpts().isEmpty()) {
+            hostConfig.withSecurityOpts(spec.securityOpts());
+        }
         if (spec.hasMemoryLimit()) {
             // Docker defaults the swap limit to twice the memory limit; an equal value disables swap.
             hostConfig.withMemory(spec.memoryBytes())

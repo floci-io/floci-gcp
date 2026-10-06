@@ -105,7 +105,7 @@ class ContainerLifecycleManagerResourceLimitsTest {
     private static ContainerSpec spec(Long memoryBytes, Long nanoCpus) {
         return new ContainerSpec("busybox:stable", null, List.of(), null, null, memoryBytes, Map.of(), List.of(), null,
                 List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of(),
-                List.of(), nanoCpus);
+                List.of(), nanoCpus, List.of());
     }
 
     private ContainerLifecycleManager manager() {

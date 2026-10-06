@@ -164,6 +164,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void arrayAggLimitKeepsTheFirstElements() {
+        assertEquals("SELECT list_slice(ARRAY_AGG(x ORDER BY x DESC), 1, 2) AS top2 FROM \"ds\".\"t\"",
+                sql("SELECT ARRAY_AGG(x ORDER BY x DESC LIMIT 2) AS top2 FROM ds.t"));
+        assertEquals("SELECT list_slice(ARRAY_AGG(DISTINCT x ORDER BY x) FILTER (WHERE (x) IS NOT NULL), 1, 1) AS l"
+                + " FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x LIMIT 1) AS l FROM ds.t"));
+        GcpException e = assertThrows(GcpException.class,
+                () -> sql("SELECT ARRAY_AGG(x LIMIT 1) OVER () AS a FROM ds.t"));
+        assertEquals("invalidQuery", e.getReason());
+        assertTrue(e.getMessage().contains("LIMIT in arguments is not supported on analytic functions"), e.getMessage());
+    }
+
+    @Test
     void arrayAggNullModifierIsRejectedOnTheAnalyticForm() {
         GcpException e = assertThrows(GcpException.class,
                 () -> sql("SELECT ARRAY_AGG(y IGNORE NULLS) OVER (ORDER BY x) AS a FROM ds.t"));

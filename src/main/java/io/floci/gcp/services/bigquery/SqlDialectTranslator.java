@@ -1782,14 +1782,15 @@ final class SqlDialectTranslator {
     // ── Token helpers ───────────────────────────────────────────────────────
 
     /**
-     * {@code ARRAY_AGG([DISTINCT] expr {IGNORE|RESPECT} NULLS [ORDER BY …])}: DuckDB has no null
-     * modifier inside {@code array_agg}. {@code RESPECT NULLS} is the default and is dropped;
-     * {@code IGNORE NULLS} becomes an aggregate {@code FILTER} on the aggregated expression. BigQuery
-     * rejects either modifier on the analytic form. Returns null without a modifier, so the call is
-     * rendered as before.
+     * {@code ARRAY_AGG([DISTINCT] expr [{IGNORE|RESPECT} NULLS] [ORDER BY …] [LIMIT n])}: DuckDB has no
+     * null modifier and no LIMIT inside {@code array_agg}. {@code RESPECT NULLS} is the default and is
+     * dropped; {@code IGNORE NULLS} becomes an aggregate {@code FILTER} on the aggregated expression;
+     * {@code LIMIT n} keeps the first n elements with {@code list_slice}. BigQuery rejects all of them on
+     * the analytic form. Returns null without any of them, so the call is rendered as before.
      */
     private String renderArrayAgg(String original, int open, int close) {
         int modifier = -1;
+        int limit = -1;
         int depth = 0;
         for (int k = open + 1; k < close; k++) {
             Token t = tokens.get(k);
@@ -1801,28 +1802,36 @@ final class SqlDialectTranslator {
                 int nulls = nextSignificant(k + 1, close);
                 if (nulls >= 0 && tokens.get(nulls).isKeyword("NULLS")) {
                     modifier = k;
-                    break;
                 }
+            } else if (depth == 0 && t.isKeyword("LIMIT")) {
+                limit = k;
             }
         }
-        if (modifier < 0) {
+        if (modifier < 0 && limit < 0) {
             return null;
         }
         int over = nextSignificant(close + 1, tokens.size());
         if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
-            throw invalidQuery("Analytic function array_agg does not support IGNORE NULLS or RESPECT NULLS.");
+            throw invalidQuery(modifier >= 0
+                    ? "Analytic function array_agg does not support IGNORE NULLS or RESPECT NULLS."
+                    : "LIMIT in arguments is not supported on analytic functions");
         }
-        int afterNulls = nextSignificant(modifier + 1, close) + 1;
-        String body = (render(open + 1, modifier).trim() + " " + render(afterNulls, close).trim()).trim();
+        int bodyEnd = limit >= 0 ? limit : close;
+        String body = modifier < 0 ? render(open + 1, bodyEnd).trim()
+                : (render(open + 1, modifier).trim() + " "
+                        + render(nextSignificant(modifier + 1, close) + 1, bodyEnd).trim()).trim();
         String call = original + "(" + body + ")";
-        if (tokens.get(modifier).isKeyword("RESPECT")) {
-            return call;
+        if (modifier >= 0 && tokens.get(modifier).isKeyword("IGNORE")) {
+            int expressionStart = nextSignificant(open + 1, modifier);
+            if (expressionStart >= 0 && tokens.get(expressionStart).isKeyword("DISTINCT")) {
+                expressionStart++;
+            }
+            call += " FILTER (WHERE (" + render(expressionStart, modifier).trim() + ") IS NOT NULL)";
         }
-        int expressionStart = nextSignificant(open + 1, modifier);
-        if (expressionStart >= 0 && tokens.get(expressionStart).isKeyword("DISTINCT")) {
-            expressionStart++;
+        if (limit >= 0) {
+            call = "list_slice(" + call + ", 1, " + render(limit + 1, close).trim() + ")";
         }
-        return call + " FILTER (WHERE (" + render(expressionStart, modifier).trim() + ") IS NOT NULL)";
+        return call;
     }
 
     private List<String> arguments(int open, int close) {

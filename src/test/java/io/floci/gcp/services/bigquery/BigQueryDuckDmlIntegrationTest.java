@@ -353,6 +353,14 @@ class BigQueryDuckDmlIntegrationTest {
 
     @Test
     @Order(4)
+    void ctasWithArraySubscripts() {
+        query("CREATE TABLE shop.subscripted AS SELECT [STRUCT('a' AS p)][SAFE_OFFSET(0)].p AS p, [10, 20][OFFSET(1)] AS o")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("a", "20")), rows("SELECT p, o FROM shop.subscripted"));
+    }
+
+    @Test
+    @Order(4)
     void ctasWithAParenthesizedQuery() {
         // The shape dbt-bigquery generates for table and incremental models.
         query("CREATE OR REPLACE TABLE shop.wrapped PARTITION BY d CLUSTER BY id OPTIONS() AS ("

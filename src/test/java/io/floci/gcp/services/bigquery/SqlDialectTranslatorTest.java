@@ -198,6 +198,35 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void safeArraySubscriptsBecomeOneBasedIndexes() {
+        assertEquals("SELECT (a[CASE WHEN (i) >= 0 THEN (i) + 1 END]) AS f0_, (a[CASE WHEN (2) >= 1 THEN (2) END]) AS f1_"
+                + " FROM \"ds\".\"t\"", sql("SELECT a[SAFE_OFFSET(i)], a[SAFE_ORDINAL(2)] FROM ds.t"));
+        assertEquals("SELECT (ARRAY_AGG(x ORDER BY x)[CASE WHEN (0) >= 0 THEN (0) + 1 END]) AS top FROM \"ds\".\"t\"",
+                sql("SELECT ARRAY_AGG(x ORDER BY x)[SAFE_OFFSET(0)] AS top FROM ds.t"));
+        assertEquals("SELECT (t.a[CASE WHEN (0) >= 0 THEN (0) + 1 END]) AS f FROM \"ds\".\"t\" AS \"t\"",
+                sql("SELECT t.a[SAFE_OFFSET(0)] AS f FROM ds.t t"));
+    }
+
+    @Test
+    void createTableKeepsItsQuerySubscriptsAsGoogleSql() {
+        // The stored query is translated again when it runs, so it must not be rewritten here.
+        assertEquals("SELECT a[SAFE_OFFSET(0)] AS x FROM ds.s",
+                statement("CREATE TABLE ds.t AS SELECT a[SAFE_OFFSET(0)] AS x FROM ds.s").querySql().trim());
+    }
+
+    @Test
+    void plainArraySubscriptsCheckTheirBounds() {
+        String offset = sql("SELECT a[OFFSET(i)] AS v FROM ds.t");
+        assertTrue(offset.contains("WHEN (i) < 0 THEN error('Array index ' || CAST((i) AS VARCHAR) || ' is out of bounds (underflow)')"), offset);
+        assertTrue(offset.contains("WHEN (i) >= len(a) + 0 THEN error('Array index ' || CAST((i) AS VARCHAR) || ' is out of bounds (overflow)')"), offset);
+        assertTrue(offset.contains("ELSE (a)[(i) + 1] END) AS v"), offset);
+        assertEquals(offset, sql("SELECT a[i] AS v FROM ds.t"), "a bare index is an OFFSET");
+        String ordinal = sql("SELECT a[ORDINAL(i)] AS v FROM ds.t");
+        assertTrue(ordinal.contains("WHEN (i) < 1 THEN") && ordinal.contains("ELSE (a)[(i)] END) AS v"), ordinal);
+        assertEquals("SELECT [1, 2] AS a", sql("SELECT [1, 2] AS a"), "an array literal is not a subscript");
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));
@@ -296,7 +325,7 @@ class SqlDialectTranslatorTest {
     @Test
     void offsetKeywordsStayKeywords() {
         assertEquals("SELECT x, 5 \"offset\" FROM \"ds\".\"t\" ORDER BY x LIMIT 1 OFFSET 1", sql("SELECT x, 5 offset FROM ds.t ORDER BY x LIMIT 1 OFFSET 1"));
-        assertEquals("SELECT a[OFFSET(1)] AS f0_ FROM \"ds\".\"t\"", sql("SELECT a[OFFSET(1)] FROM ds.t"));
+        assertTrue(sql("SELECT a[OFFSET(1)] FROM ds.t").startsWith("SELECT (CASE WHEN (1) IS NULL OR (a) IS NULL"));
         assertEquals("invalidQuery", assertThrows(GcpException.class,
                 () -> sql("SELECT x FROM UNNEST([1]) x WITH OFFSET")).getReason());
     }

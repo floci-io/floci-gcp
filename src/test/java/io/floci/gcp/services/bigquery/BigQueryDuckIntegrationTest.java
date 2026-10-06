@@ -347,6 +347,37 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void arraySubscriptsMatchBigQuery() {
+        query("""
+                {"query": "SELECT [10,20,30][OFFSET(1)] o, [10,20,30][SAFE_OFFSET(5)] so, [10,20,30][ORDINAL(1)] ord, [10,20,30][SAFE_ORDINAL(9)] sord, [10,20,30][2] bare, [10,20,30][SAFE_OFFSET(NULL)] n", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("o", "so", "ord", "sord", "bare", "n")))
+                .body("rows[0].f.v", equalTo(Arrays.asList("20", null, "10", null, "30", null)));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x DESC)[SAFE_OFFSET(0)] top, ARRAY_AGG(STRUCT(x AS v) ORDER BY x)[OFFSET(0)].v low FROM UNNEST([3,1,2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("3", "1")));
+        query("""
+                {"query": "SELECT t.a[SAFE_OFFSET(0)] f, SPLIT('a,b,c')[OFFSET(2)] s FROM (SELECT [7,8] a) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("7", "c")));
+        query("""
+                {"query": "SELECT [10,20,30][OFFSET(5)]", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 5 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT [10,20,30][ORDINAL(0)]", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 0 is out of bounds (underflow)"));
+    }
+
+    @Test
+    @Order(5)
     void intervalStepSizeCanBeAnExpression() {
         query("""
                 {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -5 DAY) minus, DATE_ADD(DATE '2024-01-10', INTERVAL - 5 DAY) spaced, DATE_ADD(DATE '2024-01-10', INTERVAL 2 * 3 DAY) product, DATE_ADD(DATE '2024-01-10', INTERVAL -x DAY) negated FROM UNNEST([2]) x", "useLegacySql": false}

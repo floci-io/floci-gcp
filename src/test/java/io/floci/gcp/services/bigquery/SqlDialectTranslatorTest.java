@@ -649,6 +649,19 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void initcapWalksTheCharactersAgainstTheDelimiters() {
+        String rendered = sql("SELECT INITCAP(name) AS n FROM ds.t");
+        assertTrue(rendered.startsWith("SELECT (CASE WHEN (name) IS NULL OR (' ' || chr(9)"), rendered);
+        assertTrue(rendered.contains("'[](){}/|\\<>!?@\"^#$&~_,.:;*%+-'"), rendered);
+        assertTrue(rendered.contains("list_transform(range(1, length((name)) + 1), lambda __i:"), rendered);
+        assertTrue(sql("SELECT INITCAP(name, '12') AS n FROM ds.t").contains("strpos(('12'), substr((name), __i, 1))"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT INITCAP() FROM ds.t")).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT INITCAP(a, b, c) FROM ds.t")).getReason());
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));

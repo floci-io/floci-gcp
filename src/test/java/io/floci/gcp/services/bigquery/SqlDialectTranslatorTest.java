@@ -666,6 +666,17 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void anyValueHavingBecomesArgMaxOrArgMin() {
+        assertEquals("SELECT g, arg_max_null(x, row(y, (x) IS NOT NULL)) FILTER (WHERE (y) IS NOT NULL) AS v"
+                + " FROM \"ds\".\"t\" GROUP BY g", sql("SELECT g, ANY_VALUE(x HAVING MAX y) AS v FROM ds.t GROUP BY g"));
+        assertEquals("SELECT arg_min_null(x, row(f(y, 1), (x) IS NULL)) FILTER (WHERE (f(y, 1)) IS NOT NULL) AS v"
+                + " FROM \"ds\".\"t\"", sql("SELECT ANY_VALUE(x HAVING MIN f(y, 1)) AS v FROM ds.t"));
+        assertEquals("SELECT ANY_VALUE(x) AS v FROM \"ds\".\"t\"", sql("SELECT ANY_VALUE(x) AS v FROM ds.t"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT ANY_VALUE(x HAVING y) FROM ds.t")).getReason());
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));

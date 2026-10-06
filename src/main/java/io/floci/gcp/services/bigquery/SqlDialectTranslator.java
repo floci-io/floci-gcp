@@ -80,7 +80,7 @@ final class SqlDialectTranslator {
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF", "CONCAT",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "ARRAY_AGG", "ARRAY_CONCAT_AGG", "CONTAINS_SUBSTR",
-            "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP",
+            "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP", "ANY_VALUE",
             "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
@@ -4618,6 +4618,9 @@ final class SqlDialectTranslator {
             case "COUNTIF" -> {
                 return renderCountIf(open, close);
             }
+            case "ANY_VALUE" -> {
+                return renderAnyValueHaving(open, close);
+            }
             default -> {
                 // fall through to argument-based shims
             }
@@ -5453,6 +5456,43 @@ final class SqlDialectTranslator {
             ranges.add(new int[] {start, close});
         }
         return ranges;
+    }
+
+    /**
+     * {@code ANY_VALUE(x HAVING MAX|MIN y)}: x from the rows whose y is the group's maximum (minimum). Rows with a
+     * NULL y never qualify, and among tied rows a non-NULL x wins, but a NULL x on the extreme row is not replaced
+     * by another row's value. DuckDB's arg_max_null/arg_min_null keep that NULL; ordering by (y, x is non-NULL)
+     * breaks ties toward a value. Returns null when there is no HAVING modifier, so plain ANY_VALUE passes through.
+     */
+    private String renderAnyValueHaving(int open, int close) {
+        int having = -1;
+        int depth = 0;
+        for (int k = open + 1; k < close && having < 0; k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && t.isKeyword("HAVING")) {
+                having = k;
+            }
+        }
+        if (having < 0) {
+            return null;
+        }
+        int bound = nextSignificant(having + 1, close);
+        boolean max = bound >= 0 && tokens.get(bound).isKeyword("MAX");
+        if (!max && (bound < 0 || !tokens.get(bound).isKeyword("MIN"))) {
+            throw invalidQuery("Syntax error: Expected keyword MAX or keyword MIN");
+        }
+        int after = nextSignificant(close + 1, tokens.size());
+        if (after >= 0 && tokens.get(after).isKeyword("OVER")) {
+            throw invalidQuery("HAVING modifier is not supported on analytic functions");
+        }
+        String value = render(open + 1, having).strip();
+        String key = render(bound + 1, close).strip();
+        return (max ? "arg_max_null(" : "arg_min_null(") + value + ", row(" + key + ", (" + value + ") IS "
+                + (max ? "NOT NULL" : "NULL") + ")) FILTER (WHERE (" + key + ") IS NOT NULL)";
     }
 
     private int matchingParen(int open) {

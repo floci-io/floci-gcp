@@ -402,11 +402,163 @@ final class SqlDialectTranslator {
                 rest = aliasIndex + 1;
             }
         }
+        if (first.equals("MERGE")) {
+            qualifyNotMatchedSourceColumns(rest);
+        }
         out.append(render(rest, tokens.size()));
         if (first.equals("MERGE")) {
             out.append(" RETURNING merge_action");
         }
         return new Translation(out.toString().trim(), tables, informationSchema);
+    }
+
+    /**
+     * A {@code WHEN NOT MATCHED [BY TARGET]} clause has no target row, so GoogleSQL resolves a bare column
+     * in its search condition or {@code INSERT ... VALUES} to the source; dbt-bigquery's incremental
+     * MERGE relies on it ({@code INSERT (`a`) VALUES (`a`)}). DuckDB resolves those names against both
+     * tables and rejects them as ambiguous, so they are qualified with the source alias here.
+     */
+    private void qualifyNotMatchedSourceColumns(int from) {
+        String source = mergeSourceAlias(from);
+        if (source == null) {
+            return;
+        }
+        List<Integer> columns = new ArrayList<>();
+        int depth = 0;
+        int clauseStart = -1;
+        for (int i = from; i <= tokens.size(); i++) {
+            Token t = i < tokens.size() ? tokens.get(i) : null;
+            boolean clauseEnds = t == null || (depth == 0 && t.isKeyword("WHEN"));
+            if (clauseEnds && clauseStart >= 0) {
+                collectBareColumns(clauseStart, i, columns);
+                clauseStart = -1;
+            }
+            if (t == null) {
+                break;
+            }
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && t.isKeyword("WHEN")) {
+                clauseStart = notMatchedByTargetBody(i);
+            }
+        }
+        for (int k = columns.size() - 1; k >= 0; k--) {
+            int at = columns.get(k);
+            tokens.add(at, new Token(Kind.PUNCT, ".", "."));
+            tokens.add(at, new Token(Kind.QIDENT, "`" + source + "`", source));
+        }
+    }
+
+    /** Index after {@code WHEN NOT MATCHED [BY TARGET]}, or -1 for any other WHEN clause. */
+    private int notMatchedByTargetBody(int when) {
+        int not = nextSignificant(when + 1, tokens.size());
+        if (not < 0 || !tokens.get(not).isKeyword("NOT")) {
+            return -1;
+        }
+        int matched = nextSignificant(not + 1, tokens.size());
+        if (matched < 0 || !tokens.get(matched).isKeyword("MATCHED")) {
+            return -1;
+        }
+        int by = nextSignificant(matched + 1, tokens.size());
+        if (by >= 0 && tokens.get(by).isKeyword("BY")) {
+            int side = nextSignificant(by + 1, tokens.size());
+            return side >= 0 && tokens.get(side).isKeyword("TARGET") ? side + 1 : -1;
+        }
+        return matched + 1;
+    }
+
+    /** The name the MERGE source goes by: its alias, or the table's own name. */
+    private String mergeSourceAlias(int from) {
+        int using = -1;
+        int depth = 0;
+        for (int i = from; i < tokens.size() && using < 0; i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && t.isKeyword("USING")) {
+                using = i;
+            }
+        }
+        int source = using < 0 ? -1 : nextSignificant(using + 1, tokens.size());
+        if (source < 0) {
+            return null;
+        }
+        String name = null;
+        int after;
+        if (tokens.get(source).isPunct("(")) {
+            after = nextSignificant(matchingParen(source) + 1, tokens.size());
+        } else {
+            int last = source;
+            int dot = nextSignificant(last + 1, tokens.size());
+            while (dot >= 0 && tokens.get(dot).isPunct(".")) {
+                last = nextSignificant(dot + 1, tokens.size());
+                dot = nextSignificant(last + 1, tokens.size());
+            }
+            String path = tokens.get(last).identifierText();
+            name = path.substring(path.lastIndexOf('.') + 1);
+            after = dot;
+        }
+        if (after >= 0 && tokens.get(after).isKeyword("AS")) {
+            after = nextSignificant(after + 1, tokens.size());
+        }
+        if (after >= 0 && (tokens.get(after).kind == Kind.QIDENT
+                || (tokens.get(after).kind == Kind.IDENT && !tokens.get(after).isKeyword("ON")))) {
+            name = tokens.get(after).identifierText();
+        }
+        return name;
+    }
+
+    /**
+     * Bare column names in {@code [from, to)}: an identifier that is not a keyword, a function name, part
+     * of a dotted path, a name introduced by AS (a type or field alias), or a word following an operand
+     * ({@code DAY} in {@code INTERVAL 1 DAY}). The {@code INSERT} column list names target columns and
+     * is skipped.
+     */
+    private void collectBareColumns(int from, int to, List<Integer> columns) {
+        for (int i = from; i < to; i++) {
+            Token t = tokens.get(i);
+            if (t.isKeyword("INSERT")) {
+                int open = nextSignificant(i + 1, to);
+                if (open >= 0 && tokens.get(open).isPunct("(")) {
+                    i = matchingParen(open);
+                }
+                continue;
+            }
+            boolean name = t.kind == Kind.QIDENT ? !t.value.contains(".")
+                    : t.kind == Kind.IDENT && !GOOGLESQL_RESERVED.contains(t.upper())
+                            && !NON_ALIAS_KEYWORDS.contains(t.upper()) && !MERGE_CLAUSE_WORDS.contains(t.upper());
+            if (!name) {
+                continue;
+            }
+            int next = nextSignificant(i + 1, tokens.size());
+            if (next >= 0 && (tokens.get(next).isPunct("(") || tokens.get(next).isPunct("."))) {
+                continue;
+            }
+            int previous = i - 1;
+            while (previous >= 0 && tokens.get(previous).kind == Kind.SPACE) {
+                previous--;
+            }
+            Token p = previous >= 0 ? tokens.get(previous) : null;
+            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || p.isPunct("<") || endsMergeOperand(p))) {
+                continue;
+            }
+            columns.add(i);
+        }
+    }
+
+    private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
+            "VALUES", "ROW", "UPDATE", "DELETE");
+
+    /** True when {@code t} can end an operand, so a word right after it is not a column reference. */
+    private static boolean endsMergeOperand(Token t) {
+        return t.kind == Kind.NUMBER || t.kind == Kind.STRING || t.kind == Kind.QIDENT
+                || t.isPunct(")") || t.isPunct("]")
+                || (t.kind == Kind.IDENT && !GOOGLESQL_RESERVED.contains(t.upper())
+                        && !NON_ALIAS_KEYWORDS.contains(t.upper()) && !MERGE_CLAUSE_WORDS.contains(t.upper()));
     }
 
     // ── Statement parsing helpers ───────────────────────────────────────────

@@ -361,6 +361,55 @@ class BigQueryDuckDmlIntegrationTest {
 
     @Test
     @Order(4)
+    void alterSetOptionsChangesOnlyTheListedOptions() {
+        query("CREATE TABLE shop.optioned (x INT64)").then().statusCode(200);
+        // dbt-bigquery runs this after every seed load.
+        String jobId = query("ALTER TABLE shop.optioned SET OPTIONS()").then().statusCode(200)
+                .extract().jsonPath().getString("jobReference.jobId");
+        given().when().get(BASE + "/jobs/" + jobId).then().statusCode(200)
+                .body("statistics.query.statementType", equalTo("ALTER_TABLE"))
+                .body("statistics.query.ddlOperationPerformed", equalTo("ALTER"))
+                .body("statistics.query.ddlTargetTable.tableId", equalTo("optioned"));
+
+        query("ALTER TABLE shop.optioned SET OPTIONS(description='desc one', friendly_name='Friendly',"
+                + " labels=[('team', 'data'), ('env', 'dev')], expiration_timestamp=TIMESTAMP '2099-01-01 00:00:00 UTC')")
+                .then().statusCode(200);
+        query("ALTER TABLE shop.optioned SET OPTIONS(labels=[STRUCT('only' AS key, 'one' AS value)])").then().statusCode(200);
+        query("ALTER TABLE IF EXISTS shop.optioned SET OPTIONS(description='desc two')").then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned").then().statusCode(200)
+                .body("description", equalTo("desc two"))
+                .body("friendlyName", equalTo("Friendly"))
+                .body("labels", equalTo(Map.of("only", "one")))
+                .body("expirationTime", equalTo("4070908800000"));
+
+        query("ALTER TABLE shop.optioned SET OPTIONS(description=NULL, friendly_name=NULL, labels=NULL,"
+                + " expiration_timestamp=NULL)").then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned").then().statusCode(200)
+                .body("description", nullValue())
+                .body("friendlyName", nullValue())
+                .body("labels", nullValue())
+                .body("expirationTime", nullValue());
+
+        String skipped = query("ALTER TABLE IF EXISTS shop.no_such_table SET OPTIONS(description='x')")
+                .then().statusCode(200).extract().jsonPath().getString("jobReference.jobId");
+        given().when().get(BASE + "/jobs/" + skipped).then()
+                .body("statistics.query.ddlOperationPerformed", equalTo("SKIP"));
+        query("ALTER TABLE shop.no_such_table SET OPTIONS()").then().statusCode(404)
+                .body("error.message", equalTo("Not found: Table " + PROJECT + ":shop.no_such_table"));
+
+        query("CREATE VIEW shop.optioned_v AS SELECT 1 AS one").then().statusCode(200);
+        query("ALTER TABLE shop.optioned_v SET OPTIONS(description='v')").then().statusCode(400)
+                .body("error.message", equalTo("ALTER TABLE SET OPTIONS only supports setting options for tables,"
+                        + " while optioned_v is a(n) view"));
+        query("ALTER VIEW shop.optioned SET OPTIONS(description='v')").then().statusCode(400)
+                .body("error.message", equalTo("ALTER VIEW SET OPTIONS only supports setting options for views,"
+                        + " while optioned is a(n) table"));
+        query("ALTER VIEW shop.optioned_v SET OPTIONS(description='v')").then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned_v").then().body("description", equalTo("v"));
+    }
+
+    @Test
+    @Order(4)
     void ctasWithAParenthesizedQuery() {
         // The shape dbt-bigquery generates for table and incremental models.
         query("CREATE OR REPLACE TABLE shop.wrapped PARTITION BY d CLUSTER BY id OPTIONS() AS ("

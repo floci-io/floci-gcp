@@ -725,8 +725,70 @@ public class BigQueryService {
                             "Not found: Dataset " + projectId + ":" + statement.datasetTarget());
                 }
             }
+            case ALTER_TABLE, ALTER_VIEW -> alterTarget(projectId, statement);
             default -> { }
         }
+    }
+
+    /**
+     * The table an {@code ALTER TABLE/VIEW ... SET OPTIONS} changes, or empty when {@code IF EXISTS}
+     * skips a missing one. Each form applies only to its own kind of table.
+     */
+    private Optional<Table> alterTarget(String projectId, SqlDialectTranslator.Statement statement) {
+        SqlDialectTranslator.TableRef target = statement.target();
+        Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+        if (existing.isEmpty()) {
+            if (statement.ifExists()) {
+                return existing;
+            }
+            throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
+        }
+        boolean view = existing.get().viewQuery() != null;
+        if (view != (statement.kind() == SqlDialectTranslator.StatementKind.ALTER_VIEW)) {
+            String form = view ? "TABLE" : "VIEW";
+            throw QueryEngine.invalidQuery("ALTER " + form + " SET OPTIONS only supports setting options for "
+                    + (view ? "tables" : "views") + ", while " + target.tableId() + " is a(n) "
+                    + (view ? "view" : "table"));
+        }
+        return existing;
+    }
+
+    /** Applies SET OPTIONS: each listed option is set, or cleared by NULL; labels replace the old ones. */
+    private void alterOptions(String projectId, SqlDialectTranslator.Statement statement, StoredJob job) {
+        SqlDialectTranslator.TableRef target = statement.target();
+        job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
+        Optional<Table> found = alterTarget(projectId, statement);
+        if (found.isEmpty()) {
+            job.setDdlOperationPerformed("SKIP");
+            return;
+        }
+        Table table = found.get();
+        Map<String, Object> options = statement.options();
+        if (options.containsKey("description")) {
+            table.setDescription((String) options.get("description"));
+        }
+        if (options.containsKey("friendly_name")) {
+            table.setFriendlyName((String) options.get("friendly_name"));
+        }
+        if (options.containsKey("labels")) {
+            Map<String, String> labels = new LinkedHashMap<>();
+            if (options.get("labels") instanceof Map<?, ?> given) {
+                given.forEach((key, value) -> labels.put(String.valueOf(key), String.valueOf(value)));
+            }
+            table.setLabels(labels.isEmpty() ? null : labels);
+        }
+        if (options.containsKey("expiration_timestamp")) {
+            Object expiration = options.get("expiration_timestamp");
+            if (expiration == null) {
+                table.getExtra().remove("expirationTime");
+            } else {
+                table.getExtra().put("expirationTime", String.valueOf(expiration));
+            }
+        }
+        table.setLastModifiedTime(nowMillis());
+        table.setEtag(etag());
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+        job.setDdlOperationPerformed("ALTER");
     }
 
     private void executeStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
@@ -764,6 +826,7 @@ public class BigQueryService {
                 job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
             }
             case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, statement, options, job);
+            case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, statement, job);
             case DROP_TABLE, DROP_VIEW -> {
                 job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
                 Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));

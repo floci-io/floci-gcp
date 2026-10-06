@@ -784,6 +784,36 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void alterSetOptionsIsClassifiedWithItsOptions() {
+        SqlDialectTranslator.Statement empty = statement("ALTER TABLE ds.t SET OPTIONS()");
+        assertEquals(SqlDialectTranslator.StatementKind.ALTER_TABLE, empty.kind());
+        assertEquals("ALTER_TABLE", empty.statementType());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "t"), empty.target());
+        assertTrue(empty.options().isEmpty());
+
+        SqlDialectTranslator.Statement all = statement("ALTER TABLE IF EXISTS ds.t SET OPTIONS(description='d',"
+                + " friendly_name=NULL, labels=[('a', 'b'), STRUCT('c' AS key, 'd' AS value)],"
+                + " expiration_timestamp=TIMESTAMP '2026-11-20 00:00:00 UTC')");
+        assertTrue(all.ifExists());
+        assertEquals("d", all.options().get("description"));
+        assertTrue(all.options().containsKey("friendly_name") && all.options().get("friendly_name") == null);
+        assertEquals(Map.of("a", "b", "c", "d"), all.options().get("labels"));
+        assertEquals(1795132800000L, all.options().get("expiration_timestamp"));
+        assertEquals("ALTER_VIEW", statement("ALTER VIEW ds.v SET OPTIONS(description='v')").statementType());
+    }
+
+    @Test
+    void alterRejectsWhatBigQueryRejectsAndWhatFlociDoesNotSupport() {
+        assertEquals("Unknown option: foo", assertThrows(GcpException.class,
+                () -> statement("ALTER TABLE ds.t SET OPTIONS(foo='bar')")).getMessage());
+        assertEquals("Option description value has type INT64 which cannot be coerced to expected type STRING",
+                assertThrows(GcpException.class,
+                        () -> statement("ALTER TABLE ds.t SET OPTIONS(description=5)")).getMessage());
+        assertTrue(assertThrows(GcpException.class, () -> statement("ALTER TABLE ds.t ADD COLUMN y INT64"))
+                .getMessage().contains("only supported with SET OPTIONS"));
+    }
+
+    @Test
     void dropAndSchemaStatements() {
         SqlDialectTranslator.Statement drop = statement("DROP TABLE IF EXISTS ds.t");
         assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE, drop.kind());

@@ -8,6 +8,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -134,17 +135,27 @@ final class SqlDialectTranslator {
 
     enum StatementKind {
         QUERY, INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE_TABLE, CREATE_VIEW, DROP_TABLE, DROP_VIEW,
-        CREATE_SCHEMA, DROP_SCHEMA
+        CREATE_SCHEMA, DROP_SCHEMA, ALTER_TABLE, ALTER_VIEW
     }
 
     /**
      * A classified statement. {@code querySql} is the GoogleSQL text of the {@code SELECT} part
      * of {@code CREATE TABLE ... AS} and {@code CREATE VIEW}; {@code columns} is the column list
-     * of a plain {@code CREATE TABLE}, already in BigQuery schema form.
+     * of a plain {@code CREATE TABLE}, already in BigQuery schema form. {@code options} are the
+     * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW}, by option name; a null value
+     * clears the option.
      */
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
-                     boolean materialized, String querySql, List<TableFieldSchema> columns) {
+                     boolean materialized, String querySql, List<TableFieldSchema> columns,
+                     Map<String, Object> options) {
+
+        Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
+                  boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
+                  boolean materialized, String querySql, List<TableFieldSchema> columns) {
+            this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
+                    materialized, querySql, columns, null);
+        }
 
         boolean isDml() {
             return kind == StatementKind.INSERT || kind == StatementKind.UPDATE || kind == StatementKind.DELETE
@@ -465,6 +476,7 @@ final class SqlDialectTranslator {
             }
             case "CREATE" -> classifyCreate(sig);
             case "DROP" -> classifyDrop(sig);
+            case "ALTER" -> classifyAlter(sig);
             default -> throw invalidQuery("Statement type " + first + " is not supported by the floci BigQuery"
                     + " emulator yet.");
         };
@@ -572,6 +584,165 @@ final class SqlDialectTranslator {
                     false, false, ifExists, false, materialized, null, null);
             default -> throw invalidQuery("DROP " + object + " is not supported by the floci BigQuery emulator yet.");
         };
+    }
+
+    /** Options {@code ALTER TABLE/VIEW ... SET OPTIONS} applies; BigQuery's other ones are rejected as unsupported. */
+    private static final Set<String> ALTERABLE_OPTIONS = Set.of("description", "friendly_name", "labels",
+            "expiration_timestamp");
+
+    private static final Set<String> UNSUPPORTED_TABLE_OPTIONS = Set.of("partition_expiration_days",
+            "require_partition_filter", "kms_key_name", "default_rounding_mode", "enable_change_history",
+            "max_staleness", "enable_fine_grained_mutations", "storage_uri", "file_format", "table_format",
+            "tags", "privacy_policy");
+
+    /** {@code ALTER {TABLE|VIEW} [IF EXISTS] name SET OPTIONS (name = value, ...)}. */
+    private Statement classifyAlter(List<Integer> sig) {
+        String object = sig.size() > 1 ? tokens.get(sig.get(1)).upper() : "";
+        if (!object.equals("TABLE") && !object.equals("VIEW")) {
+            throw invalidQuery("ALTER " + object + " is not supported by the floci BigQuery emulator yet.");
+        }
+        int at = 2;
+        boolean ifExists = false;
+        if (keywordAt(sig, at, "IF")) {
+            expectKeyword(sig, at + 1, "EXISTS");
+            ifExists = true;
+            at += 2;
+        }
+        Path path = pathAt(sig, at);
+        TableRef target = resolveTable(path.segments());
+        int set = nextSignificant(path.end(), tokens.size());
+        int options = set < 0 ? -1 : nextSignificant(set + 1, tokens.size());
+        if (set < 0 || !tokens.get(set).isKeyword("SET") || options < 0 || !tokens.get(options).isKeyword("OPTIONS")) {
+            throw invalidQuery("ALTER " + object + " is only supported with SET OPTIONS by the floci BigQuery"
+                    + " emulator yet.");
+        }
+        int open = nextSignificant(options + 1, tokens.size());
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            throw invalidQuery("Syntax error: Expected \"(\" after OPTIONS");
+        }
+        int close = matchingParen(open);
+        int trailing = nextSignificant(close + 1, tokens.size());
+        if (trailing >= 0) {
+            throw invalidQuery("Syntax error: Unexpected \"" + tokens.get(trailing).text + "\"");
+        }
+        Map<String, Object> values = new LinkedHashMap<>();
+        int depth = 0;
+        int start = open + 1;
+        for (int k = open + 1; k <= close; k++) {
+            Token t = tokens.get(k);
+            if (k == close || (depth == 0 && t.isPunct(","))) {
+                List<Token> item = significant(start, k);
+                if (!item.isEmpty()) {
+                    readOption(item, values);
+                }
+                start = k + 1;
+            } else if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            }
+        }
+        return new Statement(object.equals("TABLE") ? StatementKind.ALTER_TABLE : StatementKind.ALTER_VIEW,
+                "ALTER_" + object, target, null, false, false, ifExists, false, false, null, null, values);
+    }
+
+    private static void readOption(List<Token> item, Map<String, Object> values) {
+        if (item.size() < 3 || item.get(0).kind != Kind.IDENT || !item.get(1).isPunct("=")) {
+            throw invalidQuery("Syntax error: Expected an option assignment in OPTIONS");
+        }
+        String name = item.get(0).text.toLowerCase(Locale.ROOT);
+        if (UNSUPPORTED_TABLE_OPTIONS.contains(name)) {
+            throw invalidQuery("Option " + name + " is not supported by the floci BigQuery emulator yet.");
+        }
+        if (!ALTERABLE_OPTIONS.contains(name)) {
+            throw invalidQuery("Unknown option: " + name);
+        }
+        List<Token> value = item.subList(2, item.size());
+        if (value.size() == 1 && value.getFirst().isKeyword("NULL")) {
+            values.put(name, null);
+            return;
+        }
+        switch (name) {
+            case "description", "friendly_name" -> values.put(name, stringOption(name, value));
+            case "labels" -> values.put(name, labelsOption(value));
+            default -> values.put(name, timestampOption(value));
+        }
+    }
+
+    private static String stringOption(String name, List<Token> value) {
+        if (value.size() == 1 && value.getFirst().kind == Kind.STRING) {
+            return value.getFirst().value;
+        }
+        throw invalidQuery("Option " + name + " value has type " + literalType(value)
+                + " which cannot be coerced to expected type STRING");
+    }
+
+    /** The GoogleSQL type of a single literal, for BigQuery's coercion error. */
+    private static String literalType(List<Token> value) {
+        if (value.size() == 1) {
+            Token t = value.getFirst();
+            if (t.kind == Kind.NUMBER) {
+                return t.text.contains(".") || t.text.toLowerCase(Locale.ROOT).contains("e") ? "FLOAT64" : "INT64";
+            }
+            if (t.isKeyword("TRUE") || t.isKeyword("FALSE")) {
+                return "BOOL";
+            }
+            if (t.kind == Kind.BYTES) {
+                return "BYTES";
+            }
+        }
+        return "an expression the floci BigQuery emulator does not evaluate in OPTIONS";
+    }
+
+    /** {@code [('key', 'value'), ...]} or {@code [STRUCT('key' AS key, 'value' AS value), ...]}. */
+    private static Map<String, String> labelsOption(List<Token> value) {
+        if (value.isEmpty() || !value.getFirst().isPunct("[") || !value.getLast().isPunct("]")) {
+            throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+        }
+        Map<String, String> labels = new LinkedHashMap<>();
+        List<String> pair = new ArrayList<>();
+        for (int k = 1; k < value.size() - 1; k++) {
+            Token t = value.get(k);
+            if (t.kind == Kind.STRING) {
+                pair.add(t.value);
+            } else if (t.isPunct(")")) {
+                if (pair.size() != 2) {
+                    throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+                }
+                labels.put(pair.get(0), pair.get(1));
+                pair.clear();
+            } else if (!(t.isPunct("(") || t.isPunct(",") || t.isKeyword("STRUCT") || t.isKeyword("AS")
+                    || (t.kind == Kind.IDENT && k > 0 && value.get(k - 1).isKeyword("AS")))) {
+                throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+            }
+        }
+        if (!pair.isEmpty()) {
+            throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+        }
+        return labels;
+    }
+
+    /** {@code TIMESTAMP '...'} (or a plain string) as epoch milliseconds. */
+    private static Long timestampOption(List<Token> value) {
+        Token literal = value.size() == 2 && value.getFirst().isKeyword("TIMESTAMP") ? value.get(1)
+                : value.size() == 1 ? value.getFirst() : null;
+        if (literal == null || literal.kind != Kind.STRING) {
+            throw invalidQuery("Option expiration_timestamp value has type " + literalType(value)
+                    + " which cannot be coerced to expected type TIMESTAMP");
+        }
+        String text = literal.value.trim();
+        if (text.endsWith(" UTC")) {
+            text = text.substring(0, text.length() - 4);
+        }
+        if (text.matches("-?\\d{4,}-\\d{2}-\\d{2}")) {
+            text = text + " 00:00:00";
+        }
+        String seconds = DuckTypes.timestampTextToSeconds(text);
+        try {
+            return new BigDecimal(seconds).movePointRight(3).longValue();
+        } catch (NumberFormatException e) {
+            throw invalidQuery("Invalid TIMESTAMP literal for option expiration_timestamp: " + literal.value);
+        }
     }
 
     private Statement statement(StatementKind kind, String statementType, TableRef target) {

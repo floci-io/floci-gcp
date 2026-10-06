@@ -18,7 +18,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.*;
 
 class NetworkUsageContractTest {
-    @Test void syntheticCountersAreFilteredAndSummed() throws Exception {
+    @Test void syntheticByteSamplesAreFilteredAndSummed() throws Exception {
         URI endpoint = URI.create(TestFixtures.endpoint());
         String target = System.getenv().getOrDefault("FLOCI_GCP_GRPC_ENDPOINT", endpoint.getHost() + ":" + endpoint.getPort());
         var channel = ManagedChannelBuilder.forTarget(target).usePlaintext().build();
@@ -27,15 +27,16 @@ class NetworkUsageContractTest {
         String project = "projects/" + TestFixtures.uniqueName("java-metrics");
         long now = Instant.now().getEpochSecond();
         try (var client = MetricServiceClient.create(settings)) {
+            // Custom metrics cannot be DELTA. These gauges are synthetic byte samples.
             for (String direction : new String[]{"sent", "received"}) {
-                String type = "compute.googleapis.com/instance/network/" + direction + "_bytes_count";
-                client.createMetricDescriptor(project, MetricDescriptor.newBuilder().setType(type).setMetricKind(MetricDescriptor.MetricKind.DELTA).setValueType(MetricDescriptor.ValueType.INT64).setUnit("By").build());
-                {
+                String type = "custom.googleapis.com/sdk_contract/network/" + direction + "_bytes";
+                client.createMetricDescriptor(project, MetricDescriptor.newBuilder().setType(type).setMetricKind(MetricDescriptor.MetricKind.GAUGE).setValueType(MetricDescriptor.ValueType.INT64).setUnit("By").build());
+                try {
                     for (String instance : new String[]{"1001", "1002"}) {
                         var series = TimeSeries.newBuilder().setMetric(Metric.newBuilder().setType(type))
-                                .setMetricKind(MetricDescriptor.MetricKind.DELTA).setValueType(MetricDescriptor.ValueType.INT64)
+                                .setMetricKind(MetricDescriptor.MetricKind.GAUGE).setValueType(MetricDescriptor.ValueType.INT64)
                                 .setResource(MonitoredResource.newBuilder().setType("gce_instance").putLabels("project_id", project.substring(9)).putLabels("instance_id", instance).putLabels("zone", "us-central1-a"))
-                                .addPoints(Point.newBuilder().setInterval(TimeInterval.newBuilder().setStartTime(Timestamp.newBuilder().setSeconds(now - 120)).setEndTime(Timestamp.newBuilder().setSeconds(now - 60)))
+                                .addPoints(Point.newBuilder().setInterval(TimeInterval.newBuilder().setEndTime(Timestamp.newBuilder().setSeconds(now - 60)))
                                         .setValue(TypedValue.newBuilder().setInt64Value(instance.equals("1001") ? 100 : 9999))).build();
                         client.createTimeSeries(CreateTimeSeriesRequest.newBuilder().setName(project).addTimeSeries(series).build());
                     }
@@ -51,7 +52,9 @@ class NetworkUsageContractTest {
                     assertThat(total).isEqualTo(100);
                     assertThat(client.listTimeSeries(request.toBuilder().setName("projects/other-" + project.substring(9)).build()).iterateAll()).isEmpty();
                     assertThat(client.listTimeSeries(request.toBuilder().clearAggregation().setInterval(TimeInterval.newBuilder().setStartTime(Timestamp.newBuilder().setSeconds(now - 30)).setEndTime(Timestamp.newBuilder().setSeconds(now))).build()).iterateAll()).isEmpty();
-                } // System metric fixtures live only in this disposable emulator project.
+                } finally {
+                    client.deleteMetricDescriptor(project + "/metricDescriptors/" + type);
+                }
             }
         } finally { channel.shutdownNow(); }
     }

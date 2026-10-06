@@ -13,6 +13,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` | `15s` | Maximum time to wait for best-effort Docker cleanup after an operation is already resolved |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES` | `1` | Maximum replica containers run per worker pool (see [Worker Pools](#worker-pools)) |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` | unset | Comma-separated Docker security options for every workload container (see [Security options](#security-options)) |
 
 ## Supported API Surface
 
@@ -59,6 +60,16 @@ GCS volume `subPath` is supported as a path inside the materialized bucket root.
 Execution mode applies container `resources.limits` to the Docker container of every workload: services, job tasks, worker pools, and instances. `memory` accepts a decimal number with an optional `k`, `M`, `G`, `T` (powers of 1000) or `Ki`, `Mi`, `Gi`, `Ti` (powers of 1024) suffix and becomes the Docker memory limit. Swap is disabled by setting the Docker swap limit to the same value, because Cloud Run has no swap. `cpu` accepts whole or fractional cores (`1`, `0.5`) or millicores (`2000m`) and becomes the Docker CPU limit, clamped to the number of CPUs available to Docker, since Docker rejects a CPU limit above that count. A missing key leaves that resource unlimited. Jobs and worker pools store a missing `cpu` as `1000m` and a missing `memory` as `512Mi`, and instances store `2000m` and `2048Mi`, so those workloads always run limited. Only a service created without limits runs unlimited. A value that cannot be parsed fails with `400 INVALID_ARGUMENT` and `Invalid value for resources.limits.{key}: {value}`. Docker still enforces its own minimum memory limit when the container is created.
 
 Execution-backed create, template-changing update, and delete run on a bounded background executor. `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT` caps these operations and fails the LRO with `DEADLINE_EXCEEDED` if Docker startup or metadata deletion does not complete in time. Docker API calls made by the shared container lifecycle manager are also capped by `FLOCI_GCP_DOCKER_API_TIMEOUT`; when that timeout is reached, floci-gcp resets its Docker client before later calls. Delete removes service and revision metadata and completes the LRO before stopping runtime containers, so slow Docker cleanup does not keep Terraform replacement destroys pending; container cleanup is best-effort after the resource is gone and capped by `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT`.
+
+### Security options
+
+Cloud Run lets a container create an unprivileged user namespace (`unshare(CLONE_NEWUSER)`), which rootless sandboxes such as bubblewrap rely on. Docker's default seccomp profile rejects that call with `EPERM`, so floci-gcp workload containers cannot do it by default. Set `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` to pass Docker security options to every Cloud Run workload container (services, job tasks, worker pool replicas, and instances), and to no other container floci-gcp starts:
+
+```bash
+FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS=seccomp=unconfined
+```
+
+Hosts that enforce AppArmor may also need `apparmor=unconfined`, for example `seccomp=unconfined,apparmor=unconfined`. Leaving the variable unset keeps Docker's default profile, because running arbitrary images unconfined on the host's Docker daemon is a poor default.
 
 The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path `/run/v2/projects/{project}/locations/{location}/services/{service}` for compatibility. Host-routed requests preserve the original app path and query string, so `GET $uri/api/database?x=1` reaches the container as `/api/database?x=1`. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
 

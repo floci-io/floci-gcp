@@ -114,6 +114,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` | `15s` | Maximum time to wait for best-effort Docker cleanup after an operation is already resolved |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES` | `1` | Maximum replica containers run per Cloud Run worker pool; larger `manualInstanceCount` values are clamped with a warning |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` | unset | Comma-separated Docker security options for Cloud Run workload containers, for example `seccomp=unconfined` |
 | `FLOCI_GCP_SERVICES_CLOUDFUNCTIONS_ENABLED` | `true` | Cloud Functions |
 | `FLOCI_GCP_SERVICES_GKE_ENABLED` | `true` | GKE (Kubernetes Engine) |
 | `FLOCI_GCP_SERVICES_BIGQUERY_ENABLED` | `true` | BigQuery |

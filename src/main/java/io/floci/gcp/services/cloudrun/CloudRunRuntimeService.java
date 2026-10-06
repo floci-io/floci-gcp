@@ -281,7 +281,8 @@ public class CloudRunRuntimeService {
         builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
-                .withLabels(workloadLabels(project, location, resourceName));
+                .withLabels(workloadLabels(project, location, resourceName))
+                .withSecurityOpts(config.services().cloudrun().execution().securityOpts().orElse(List.of()));
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())

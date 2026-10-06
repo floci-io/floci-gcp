@@ -47,6 +47,7 @@ floci-gcp:
         cleanup-timeout: 15s
         url-host-suffix:
         max-worker-instances: 1
+        security-opts:
     cloudfunctions:
       enabled: true
     monitoring:

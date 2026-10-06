@@ -440,6 +440,14 @@ public interface EmulatorConfig {
 
             @WithDefault("1")
             int maxWorkerInstances();
+
+            /**
+             * Docker security options applied to every Cloud Run workload container, for example
+             * {@code seccomp=unconfined} so workloads can create unprivileged user namespaces as on
+             * Cloud Run. Unset keeps Docker's default seccomp profile.
+             * Env: FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS
+             */
+            Optional<List<String>> securityOpts();
         }
     }
 

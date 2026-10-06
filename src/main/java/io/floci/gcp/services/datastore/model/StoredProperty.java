@@ -156,20 +156,15 @@ public class StoredProperty {
     }
 
     private boolean matchesArray(Value filterValue) {
-        if (arrayValues == null || !filterValue.hasArrayValue()) {
+        if (arrayValues == null) {
             return false;
         }
-        List<Value> filterValues = filterValue.getArrayValue().getValuesList();
-        if (arrayValues.size() != filterValues.size()) {
-            return false;
-        }
-        for (int i = 0; i < arrayValues.size(); i++) {
-            StoredProperty element = arrayValues.get(i);
-            if (element == null || !element.matchesEqual(filterValues.get(i))) {
-                return false;
+        for (StoredProperty element : arrayValues) {
+            if (element != null && element.matchesEqual(filterValue)) {
+                return true;
             }
         }
-        return true;
+        return false;
     }
 
     private boolean matchesEntity(Value filterValue) {

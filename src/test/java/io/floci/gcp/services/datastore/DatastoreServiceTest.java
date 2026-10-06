@@ -197,15 +197,30 @@ class DatastoreServiceTest {
     }
 
     @Test
-    void equalFilterOnArrayMatchesSameElementsInOrderOnly() {
-        Value match = arrayValue("a", "b");
-        Value reordered = arrayValue("b", "a");
-        Value longer = arrayValue("a", "b", "c");
-        upsertProperty("Seq", "match", "items", match);
-        upsertProperty("Seq", "reordered", "items", reordered);
-        upsertProperty("Seq", "longer", "items", longer);
+    void equalFilterOnArrayMatchesWhenAnyElementEquals() {
+        upsertProperty("Post", "tagged", "tags", arrayValue("fun", "programming"));
+        upsertProperty("Post", "other", "tags", arrayValue("work"));
 
-        List<StoredEntity> results = runPropertyQuery("Seq", "items", PropertyFilter.Operator.EQUAL, match);
+        Value fun = Value.newBuilder().setStringValue("fun").build();
+        assertEquals(List.of("tagged"), namesOf(
+                runPropertyQuery("Post", "tags", PropertyFilter.Operator.EQUAL, fun)));
+
+        Value programming = Value.newBuilder().setStringValue("programming").build();
+        assertEquals(List.of("tagged"), namesOf(
+                runPropertyQuery("Post", "tags", PropertyFilter.Operator.EQUAL, programming)));
+
+        Value missing = Value.newBuilder().setStringValue("missing").build();
+        List<StoredEntity> absent = runPropertyQuery("Post", "tags", PropertyFilter.Operator.EQUAL, missing);
+        assertTrue(absent.isEmpty());
+    }
+
+    @Test
+    void equalFilterOnScalarPropertyStillMatchesByEquality() {
+        Value title = Value.newBuilder().setStringValue("fun").build();
+        upsertProperty("Note", "match", "title", title);
+        upsertProperty("Note", "other", "title", Value.newBuilder().setStringValue("work").build());
+
+        List<StoredEntity> results = runPropertyQuery("Note", "title", PropertyFilter.Operator.EQUAL, title);
         assertEquals(List.of("match"), namesOf(results));
     }
 

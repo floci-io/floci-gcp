@@ -189,6 +189,15 @@ class SqlDialectTranslatorTest {
     // ── Functions ────────────────────────────────────────────────────────────
 
     @Test
+    void currentRowInAWindowFrameStaysAKeyword() {
+        assertEquals("SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s,"
+                        + " COUNT(*) OVER (ORDER BY x ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS c FROM \"ds\".\"t\"",
+                sql("SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s,"
+                        + " COUNT(*) OVER (ORDER BY x ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS c FROM ds.t"));
+        assertEquals("SELECT \"row\" FROM \"ds\".\"t\"", sql("SELECT row FROM ds.t"), "a column named row is still quoted");
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));

@@ -2051,7 +2051,7 @@ final class SqlDialectTranslator {
                 continue;
             }
             boolean call = next >= 0 && tokens.get(next).isPunct("(");
-            if (!call && DUCKDB_ONLY_RESERVED.contains(t.text.toLowerCase(Locale.ROOT))) {
+            if (!call && DUCKDB_ONLY_RESERVED.contains(t.text.toLowerCase(Locale.ROOT)) && !isFrameBoundRow(i)) {
                 out.append(DuckTypes.quoteIdentifier(t.text));
             } else {
                 out.append(t.text);
@@ -2059,6 +2059,18 @@ final class SqlDialectTranslator {
             i++;
         }
         return out.toString();
+    }
+
+    /** {@code CURRENT ROW} bounds a window frame: there ROW is the keyword, not a column named row. */
+    private boolean isFrameBoundRow(int index) {
+        if (!tokens.get(index).isKeyword("ROW")) {
+            return false;
+        }
+        int k = index - 1;
+        while (k >= 0 && tokens.get(k).kind == Kind.SPACE) {
+            k--;
+        }
+        return k >= 0 && tokens.get(k).isKeyword("CURRENT");
     }
 
     private boolean isPrecededByDot(int index) {

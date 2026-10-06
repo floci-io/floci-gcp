@@ -497,6 +497,10 @@ public class BigQueryController {
                     "projectId", sj.getProjectId(),
                     "datasetId", sj.getDestinationDatasetId(),
                     "tableId", sj.getDestinationTableId()));
+        } else if (sj.getDdlTargetTable() != null) {
+            // BigQuery also reports the table a DDL statement acted on as the job's destination;
+            // dbt-bigquery reads it after CREATE TABLE ... AS SELECT to count the new table's rows.
+            queryConfig.put("destinationTable", sj.getDdlTargetTable());
         }
         Map<String, Object> configuration = new LinkedHashMap<>();
         configuration.put("jobType", "QUERY");

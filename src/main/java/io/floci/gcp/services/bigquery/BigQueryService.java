@@ -652,6 +652,26 @@ public class BigQueryService {
         return job;
     }
 
+    /**
+     * An int32 job option. JSON clients send it as a number or, like the Python client for
+     * {@code skipLeadingRows}, as a decimal string; BigQuery rejects any other string with a 400 that
+     * names the field's path in the request.
+     */
+    private static Integer integerOption(Object value, String fieldPath) {
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        if (value instanceof String s && !s.isBlank()) {
+            try {
+                return Integer.valueOf(s.trim());
+            } catch (NumberFormatException e) {
+                throw GcpException.invalidArgument("Invalid value at '" + fieldPath + "' (TYPE_INT32), \"" + s + "\"")
+                        .withReason("invalid");
+            }
+        }
+        return null;
+    }
+
     private BigQuerySqlEngine.Request request(String projectId, String sql, QueryOptions options, boolean dryRun) {
         return new BigQuerySqlEngine.Request(projectId, sql, options.defaultDatasetId(), options.queryParameters(),
                 options.parameterMode(), dryRun);
@@ -1113,6 +1133,11 @@ public class BigQueryService {
                 ? list.stream().map(String::valueOf).toList() : List.of();
         if (uploadedData == null && sourceUris.isEmpty()) {
             throw GcpException.invalidArgument("Required parameter is missing: sourceUris").withReason("invalid");
+        }
+        Integer skipLeadingRows = integerOption(config.get("skipLeadingRows"),
+                "job.configuration.load.skip_leading_rows.value");
+        if (skipLeadingRows != null) {
+            config.put("skipLeadingRows", skipLeadingRows);
         }
 
         StoredJob job = new StoredJob();

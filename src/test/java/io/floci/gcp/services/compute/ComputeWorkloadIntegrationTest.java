@@ -33,6 +33,30 @@ class ComputeWorkloadIntegrationTest extends ComputeTestSupport {
         done(root, given().delete(root + zone + "/disks/vm"));
         done(root, given().delete(root + zone + "/disks/data"));
     }
+    @Test void g2WorkstationWithVirtualWorkstationGpu() throws Exception {
+        String root = root(), zone = "/zones/us-central1-a";
+        var machineTypes = given().get(root + zone + "/machineTypes").jsonPath();
+        String g2 = "items.find { it.name == 'g2-standard-8' }";
+        assertEquals(8, machineTypes.getInt(g2 + ".guestCpus"));
+        assertEquals(32768, machineTypes.getInt(g2 + ".memoryMb"));
+        assertEquals(1, machineTypes.getList(g2 + ".accelerators").size());
+        assertEquals("nvidia-l4", machineTypes.getString(g2 + ".accelerators[0].guestAcceleratorType"));
+        assertEquals(1, machineTypes.getInt(g2 + ".accelerators[0].guestAcceleratorCount"));
+        assertTrue(given().get(root + zone + "/acceleratorTypes").jsonPath().getList("items.name").contains("nvidia-l4-vws"));
+        done(root, post(root + "/global/networks", Map.of("name", "net", "autoCreateSubnetworks", false)));
+        done(root, post(root + "/regions/us-central1/subnetworks", Map.of("name", "subnet", "network", "global/networks/net", "ipCidrRange", "10.10.0.0/24")));
+        Map<String,Object> vm = Map.of("name", "workstation", "machineType", "zones/us-central1-a/machineTypes/g2-standard-8",
+                "networkInterfaces", List.of(Map.of("subnetwork", "regions/us-central1/subnetworks/subnet")),
+                "guestAccelerators", List.of(Map.of("acceleratorType", "zones/us-central1-a/acceleratorTypes/nvidia-l4-vws", "acceleratorCount", 1)),
+                "scheduling", Map.of("onHostMaintenance", "TERMINATE"),
+                "disks", List.of(Map.of("boot", true, "initializeParams", Map.of("diskSizeGb", "50"))));
+        done(root, post(root + zone + "/instances", vm));
+        var created = given().get(root + zone + "/instances/workstation").jsonPath();
+        assertTrue(created.getString("machineType").endsWith("/machineTypes/g2-standard-8"));
+        assertTrue(created.getString("guestAccelerators[0].acceleratorType").endsWith("/acceleratorTypes/nvidia-l4-vws"));
+        assertEquals(1, created.getInt("guestAccelerators[0].acceleratorCount"));
+        assertEquals("TERMINATE", created.getString("scheduling.onHostMaintenance"));
+    }
     @Test void diskPerformanceLabelsAndAggregateScopes() throws Exception {
         String root = root(), path = root + "/zones/us-central1-a/disks";
         done(root, post(path, Map.of("name", "hyper", "sizeGb", "100", "type", "zones/us-central1-a/diskTypes/hyperdisk-balanced", "provisionedIops", "4000", "provisionedThroughput", "200")));

@@ -29,7 +29,7 @@ final class ComputeCatalog {
                 }
             });
             case "machineTypes" -> {
-                for (String name : List.of("e2-standard-2", "n2-standard-4", "n2-standard-8", "g2-standard-4", "c3-standard-4")) {
+                for (String name : List.of("e2-standard-2", "n2-standard-4", "n2-standard-8", "g2-standard-4", "g2-standard-8", "c3-standard-4")) {
                     int cpus = Integer.parseInt(name.substring(name.lastIndexOf('-') + 1));
                     ObjectNode r = c.object().put("name", name).put("guestCpus", cpus).put("memoryMb", cpus * 4096)
                             .put("zone", c.scope().substring(6));
@@ -41,7 +41,7 @@ final class ComputeCatalog {
             }
             case "diskTypes" -> List.of("pd-standard", "pd-balanced", "pd-ssd", "hyperdisk-balanced", "hyperdisk-throughput", "hyperdisk-extreme")
                     .forEach(name -> result.add(c.object().put("name", name).put("zone", c.link(c.scope()))));
-            case "acceleratorTypes" -> List.of("nvidia-tesla-t4", "nvidia-l4")
+            case "acceleratorTypes" -> List.of("nvidia-tesla-t4", "nvidia-l4", "nvidia-l4-vws")
                     .forEach(name -> result.add(c.object().put("name", name).put("maximumCardsPerInstance", 4).put("zone", c.scope().substring(6))));
             default -> throw new IllegalArgumentException(c.collection());
         }

@@ -7,11 +7,12 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
+
 import static org.assertj.core.api.Assertions.*;
 
 class GcsXmlMultipartContractTest {
     @Test void nativeMultipartClientRoundTripAndAbort() throws Exception {
-        var options = StorageOptions.http().setHost(TestFixtures.endpoint()).setProjectId("test-project").setCredentials(NoCredentials.getInstance()).build();
+        HttpStorageOptions options = StorageOptions.http().setHost(TestFixtures.endpoint()).setProjectId("test-project").setCredentials(NoCredentials.getInstance()).build();
         Storage storage = options.getService();
         MultipartUploadClient client = MultipartUploadClient.create(MultipartUploadSettings.of(options));
         String bucket = TestFixtures.uniqueName("java-xml"), key = "nested/file.bin";
@@ -23,15 +24,15 @@ class GcsXmlMultipartContractTest {
             String etag = client.uploadPart(UploadPartRequest.builder().bucket(bucket).key(key).uploadId(upload).partNumber(1).build(), RequestBody.of(ByteBuffer.wrap(first))).eTag();
             assertThat(client.uploadPart(UploadPartRequest.builder().bucket(bucket).key(key).uploadId(upload).partNumber(1).build(), RequestBody.of(ByteBuffer.wrap(first))).eTag()).isEqualTo(etag);
             String last = client.uploadPart(UploadPartRequest.builder().bucket(bucket).key(key).uploadId(upload).partNumber(2).build(), RequestBody.of(ByteBuffer.wrap(new byte[]{0, 1, 2, 3}))).eTag();
-            var page = client.listParts(ListPartsRequest.builder().bucket(bucket).key(key).uploadId(upload).maxParts(1).build());
+            ListPartsResponse page = client.listParts(ListPartsRequest.builder().bucket(bucket).key(key).uploadId(upload).maxParts(1).build());
             assertThat(page.truncated()).isTrue();
             assertThat(page.nextPartNumberMarker()).isEqualTo(1);
             assertThat(client.listParts(ListPartsRequest.builder().bucket(bucket).key(key).uploadId(upload).partNumberMarker(1).build()).parts()).hasSize(1);
             String pending = client.createMultipartUpload(CreateMultipartUploadRequest.builder().bucket(bucket).key(key).build()).uploadId();
             try {
-                var uploadsPage = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).maxUploads(1).build());
+                ListMultipartUploadsResponse uploadsPage = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).maxUploads(1).build());
                 assertThat(uploadsPage.truncated()).isTrue();
-                var next = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).maxUploads(1)
+                ListMultipartUploadsResponse next = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).maxUploads(1)
                         .keyMarker(uploadsPage.nextKeyMarker()).uploadIdMarker(uploadsPage.nextUploadIdMarker()).build());
                 assertThat(next.uploads()).hasSize(1);
                 assertThat(next.uploads().getFirst().uploadId()).isNotEqualTo(uploadsPage.uploads().getFirst().uploadId());

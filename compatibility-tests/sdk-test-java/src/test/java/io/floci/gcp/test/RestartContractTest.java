@@ -7,14 +7,17 @@ import com.google.cloud.storage.*;
 import com.google.cloud.storage.multipartupload.model.*;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+
 import static org.assertj.core.api.Assertions.*;
 
 class RestartContractTest {
@@ -38,49 +41,49 @@ class RestartContractTest {
                 .setCredentials(NoCredentials.getInstance()).build();
     }
     private void seed() throws Exception {
-        var state = new Properties();
+        Properties state = new Properties();
         state.setProperty("project", TestFixtures.uniqueName("java-restart"));
         state.setProperty("bucket", TestFixtures.uniqueName("java-restart"));
         state.setProperty("request", UUID.randomUUID().toString());
-        var options = options();
-        var storage = options.getService();
+        HttpStorageOptions options = options();
+        Storage storage = options.getService();
         storage.create(BucketInfo.of(state.getProperty("bucket")));
-        var uploads = MultipartUploadClient.create(MultipartUploadSettings.of(options));
+        MultipartUploadClient uploads = MultipartUploadClient.create(MultipartUploadSettings.of(options));
         String id = uploads.createMultipartUpload(CreateMultipartUploadRequest.builder().bucket(state.getProperty("bucket")).key("pending").build()).uploadId();
         state.setProperty("upload", id);
         String etag = uploads.uploadPart(UploadPartRequest.builder().bucket(state.getProperty("bucket")).key("pending").uploadId(id).partNumber(7).build(), RequestBody.of(ByteBuffer.wrap(new byte[]{1,0,3,4}))).eTag();
         state.setProperty("etag", etag);
-        try (var disks = disks()) {
-            var op = disks.insertCallable().call(InsertDiskRequest.newBuilder().setProject(state.getProperty("project")).setZone("us-central1-a")
+        try (DisksClient disks = disks()) {
+            Operation op = disks.insertCallable().call(InsertDiskRequest.newBuilder().setProject(state.getProperty("project")).setZone("us-central1-a")
                     .setRequestId(state.getProperty("request")).setDiskResource(Disk.newBuilder().setName("persistent").setSizeGb(24)).build());
             state.setProperty("operation", op.getName());
         }
         Files.createDirectories(statePath().getParent());
-        try (var out = Files.newOutputStream(statePath())) { state.store(out, "Synthetic SDK restart fixture"); }
+        try (OutputStream out = Files.newOutputStream(statePath())) { state.store(out, "Synthetic SDK restart fixture"); }
     }
     private void verify() throws Exception {
-        var state = new Properties();
-        try (var input = Files.newInputStream(statePath())) { state.load(input); }
+        Properties state = new Properties();
+        try (InputStream input = Files.newInputStream(statePath())) { state.load(input); }
         String project = state.getProperty("project"), bucket = state.getProperty("bucket"), upload = state.getProperty("upload");
-        try (var disks = disks()) {
+        try (DisksClient disks = disks()) {
             assertThat(disks.get(project, "us-central1-a", "persistent").getSizeGb()).isEqualTo(24);
-            var op = disks.insertAsync(InsertDiskRequest.newBuilder().setProject(project).setZone("us-central1-a")
+            Operation op = disks.insertAsync(InsertDiskRequest.newBuilder().setProject(project).setZone("us-central1-a")
                     .setRequestId(state.getProperty("request")).setDiskResource(Disk.newBuilder().setName("persistent").setSizeGb(24)).build()).get(20, TimeUnit.SECONDS);
             assertThat(op.getName()).isEqualTo(state.getProperty("operation"));
             assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
-            var options = options();
-            var storage = options.getService();
-            var uploads = MultipartUploadClient.create(MultipartUploadSettings.of(options));
+            HttpStorageOptions options = options();
+            Storage storage = options.getService();
+            MultipartUploadClient uploads = MultipartUploadClient.create(MultipartUploadSettings.of(options));
             assertThat(storage.get(bucket, "pending")).isNull();
             assertThat(uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload).build()).parts()).hasSize(1);
             byte[] first = new byte[5 * 1024 * 1024]; Arrays.fill(first, (byte) 71);
             String firstEtag = uploads.uploadPart(UploadPartRequest.builder().bucket(bucket).key("pending").uploadId(upload)
                     .partNumber(1).build(), RequestBody.of(ByteBuffer.wrap(first))).eTag();
-            var page = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload).maxParts(1).build());
+            ListPartsResponse page = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload).maxParts(1).build());
             assertThat(page.parts().getFirst().partNumber()).isEqualTo(1);
             assertThat(page.nextPartNumberMarker()).isEqualTo(1);
             assertThat(page.truncated()).isTrue();
-            var next = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload)
+            ListPartsResponse next = uploads.listParts(ListPartsRequest.builder().bucket(bucket).key("pending").uploadId(upload)
                     .maxParts(1).partNumberMarker(page.nextPartNumberMarker()).build());
             assertThat(next.parts().getFirst().partNumber()).isEqualTo(7);
             assertThat(next.truncated()).isFalse();

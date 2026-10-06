@@ -78,7 +78,10 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(BASE + "/jobs/" + jobId).then().statusCode(200)
                 .body("statistics.query.statementType", equalTo("CREATE_TABLE"))
                 .body("statistics.query.ddlOperationPerformed", equalTo("CREATE"))
-                .body("statistics.query.ddlTargetTable.tableId", equalTo("items"));
+                .body("statistics.query.ddlTargetTable.tableId", equalTo("items"))
+                .body("configuration.query.destinationTable.projectId", equalTo(PROJECT))
+                .body("configuration.query.destinationTable.datasetId", equalTo("shop"))
+                .body("configuration.query.destinationTable.tableId", equalTo("items"));
 
         given().when().get(BASE + "/datasets/shop/tables/items").then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("id", "name", "price", "tags")))
@@ -144,8 +147,15 @@ class BigQueryDuckDmlIntegrationTest {
     @Test
     @Order(4)
     void ctasAndViews() {
-        query("CREATE TABLE shop.pricey AS SELECT id, name, price FROM shop.items WHERE price > 1")
-                .then().statusCode(200);
+        String ctasJob = query("CREATE TABLE shop.pricey AS SELECT id, name, price FROM shop.items WHERE price > 1")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("jobReference.jobId");
+        given().when().get(BASE + "/jobs/" + ctasJob).then().statusCode(200)
+                .body("statistics.query.statementType", equalTo("CREATE_TABLE_AS_SELECT"))
+                .body("configuration.query.destinationTable.tableId", equalTo("pricey"));
+        given().when().get(BASE + "/queries/" + ctasJob).then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
         given().when().get(BASE + "/datasets/shop/tables/pricey").then().statusCode(200)
                 .body("numRows", equalTo("2"))
                 .body("schema.fields.type", equalTo(List.of("INTEGER", "STRING", "NUMERIC")));

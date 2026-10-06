@@ -111,6 +111,7 @@ public class ContainerBuilder {
         private String cgroupnsMode;
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
+        private final List<String> securityOpts = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -321,6 +322,12 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** Adds Docker security options (Docker {@code --security-opt}), for example {@code "seccomp=unconfined"}. */
+        public Builder withSecurityOpts(List<String> securityOpts) {
+            this.securityOpts.addAll(securityOpts);
+            return this;
+        }
+
         /**
          * Injects floci-gcp's embedded DNS server into the container so emulator hostnames
          * resolve to floci-gcp's Docker network IP. No-op when the embedded DNS server is
@@ -367,7 +374,8 @@ public class ContainerBuilder {
                     user,
                     List.copyOf(groupAdd),
                     List.copyOf(loopbackPorts),
-                    nanoCpus
+                    nanoCpus,
+                    List.copyOf(securityOpts)
             );
         }
     }

@@ -77,7 +77,7 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
     }
 
     @Test
-    void downscopedImpersonatedTokenCanReadAllowedObjectOverXmlApi() {
+    void downscopedImpersonatedTokenRequiresCabAndBucketPolicyOverXmlApi() {
         String authorizedToken = downscopedTokenFor(SOURCE_SERVICE_ACCOUNT);
 
         given().header("Authorization", bearer(authorizedToken))
@@ -87,6 +87,12 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
         String unauthorizedToken = downscopedTokenFor(UNAUTHORIZED_SERVICE_ACCOUNT);
         given().header("Authorization", bearer(unauthorizedToken))
                 .when().get("/{bucket}/{object}", bucket, "allowed/report.csv")
+                .then().statusCode(403)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("AccessDenied"));
+
+        given().header("Authorization", bearer(authorizedToken))
+                .when().get("/{bucket}/{object}", bucket, "outside/report.csv")
                 .then().statusCode(403)
                 .contentType(containsString("application/xml"))
                 .body("Error.Code", equalTo("AccessDenied"));

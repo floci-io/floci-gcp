@@ -422,6 +422,30 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void generateDateArrayMatchesBigQuery() {
+        query("""
+                {"query": "SELECT GENERATE_DATE_ARRAY('2024-01-01', '2024-01-04') a, GENERATE_DATE_ARRAY(DATE '2024-01-01', DATE '2024-01-10', INTERVAL 3 DAY) b, GENERATE_DATE_ARRAY('2024-01-31', '2024-04-30', INTERVAL 1 MONTH) c, GENERATE_DATE_ARRAY('2024-01-05', '2024-01-01') d, GENERATE_DATE_ARRAY('2024-01-01', NULL) n", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04")))
+                .body("rows[0].f[1].v.v", equalTo(List.of("2024-01-01", "2024-01-04", "2024-01-07", "2024-01-10")))
+                .body("rows[0].f[2].v.v", equalTo(List.of("2024-01-31", "2024-02-29", "2024-03-29", "2024-04-29")))
+                .body("rows[0].f[3].v", equalTo(List.of()))
+                .body("rows[0].f[4].v", equalTo(List.of()));
+        query("""
+                {"query": "SELECT d FROM UNNEST(GENERATE_DATE_ARRAY('2024-01-01', '2024-01-03', INTERVAL 1 WEEK)) d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2024-01-01"))));
+        query("""
+                {"query": "SELECT GENERATE_DATE_ARRAY('2024-01-01', '2024-01-03', INTERVAL 0 DAY)", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("GENERATE_ARRAY step cannot be 0."));
+    }
+
+    @Test
+    @Order(5)
     void intervalStepSizeCanBeAnExpression() {
         query("""
                 {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -5 DAY) minus, DATE_ADD(DATE '2024-01-10', INTERVAL - 5 DAY) spaced, DATE_ADD(DATE '2024-01-10', INTERVAL 2 * 3 DAY) product, DATE_ADD(DATE '2024-01-10', INTERVAL -x DAY) negated FROM UNNEST([2]) x", "useLegacySql": false}

@@ -258,6 +258,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void generateDateArrayBecomesADateSeries() {
+        assertEquals("SELECT (CASE WHEN (INTERVAL 1 DAY) = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
+                + " ELSE coalesce(CAST(generate_series(CAST(CAST(a AS DATE) AS TIMESTAMP), CAST(CAST(b AS DATE) AS TIMESTAMP),"
+                + " INTERVAL 1 DAY) AS DATE[]), CAST([] AS DATE[])) END) AS d FROM \"ds\".\"t\"",
+                sql("SELECT GENERATE_DATE_ARRAY(a, b) AS d FROM ds.t"));
+        assertTrue(sql("SELECT GENERATE_DATE_ARRAY(a, b, INTERVAL 1 MONTH) AS d FROM ds.t")
+                .contains("CAST(CAST(b AS DATE) AS TIMESTAMP), INTERVAL 1 MONTH) AS DATE[])"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT GENERATE_DATE_ARRAY(a) FROM ds.t")).getReason());
+    }
+
+    @Test
     void arrayAggNullModifiers() {
         assertEquals("SELECT ARRAY_AGG(x) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(x IGNORE NULLS) AS xs FROM ds.t"));
         assertEquals("SELECT ARRAY_AGG(DISTINCT x ORDER BY x DESC) FILTER (WHERE (x) IS NOT NULL) AS xs FROM \"ds\".\"t\"", sql("SELECT ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x DESC) AS xs FROM ds.t"));

@@ -67,7 +67,7 @@ final class SqlDialectTranslator {
 
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF",
-            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "SPLIT", "FORMAT",
+            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
@@ -2509,6 +2509,7 @@ final class SqlDialectTranslator {
             case "ARRAY_LENGTH" -> "len(" + String.join(", ", a) + ")";
             case "ARRAY_REVERSE" -> "list_reverse(" + String.join(", ", a) + ")";
             case "GENERATE_ARRAY" -> "generate_series(" + String.join(", ", a) + ")";
+            case "GENERATE_DATE_ARRAY" -> generateDateArray(a);
             case "SPLIT" -> a.size() == 1 ? "string_split(" + a.getFirst() + ", ',')"
                     : "string_split(" + String.join(", ", a) + ")";
             case "FORMAT" -> "printf(" + String.join(", ", a) + ")";
@@ -2566,6 +2567,22 @@ final class SqlDialectTranslator {
             case "TIMESTAMP" -> "CAST(" + at(a, 0) + " AS TIMESTAMPTZ)";
             default -> original + "(" + String.join(", ", a) + ")";
         };
+    }
+
+    /**
+     * {@code GENERATE_DATE_ARRAY(start, end[, INTERVAL n part])}: every date from start to end, both
+     * included, one day apart by default. DuckDB's generate_series steps the same way over timestamps, but
+     * returns NULL for a NULL bound where BigQuery returns an empty array, and BigQuery rejects a zero step.
+     */
+    private static String generateDateArray(List<String> a) {
+        if (a.size() < 2 || a.size() > 3) {
+            throw invalidQuery("No matching signature for function GENERATE_DATE_ARRAY with " + a.size() + " arguments");
+        }
+        String step = a.size() == 3 ? a.get(2) : "INTERVAL 1 DAY";
+        return "(CASE WHEN (" + step + ") = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
+                + " ELSE coalesce(CAST(generate_series(CAST(CAST(" + a.get(0) + " AS DATE) AS TIMESTAMP),"
+                + " CAST(CAST(" + a.get(1) + " AS DATE) AS TIMESTAMP), " + step + ") AS DATE[]), CAST([] AS DATE[]))"
+                + " END)";
     }
 
     private static String args(List<String> a, int expected, String name, String rendered) {

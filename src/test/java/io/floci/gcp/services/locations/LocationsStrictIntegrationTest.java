@@ -39,7 +39,8 @@ class LocationsStrictIntegrationTest {
         given().when().get("/v2/projects/loc-strict/locations/us-central1/functions")
                 .then().statusCode(200);
         given().when().get("/v2/projects/loc-strict/locations/-/services")
-                .then().statusCode(200);
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
         given().contentType("application/json").body("{\"template\":{\"containers\":[{\"image\":\"nginx\"}]}}")
                 .when().post("/v2/projects/loc-strict/locations/moon-1/services?serviceId=svc")
                 .then().statusCode(400);

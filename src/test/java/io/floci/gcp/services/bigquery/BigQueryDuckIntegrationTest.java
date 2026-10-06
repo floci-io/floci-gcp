@@ -422,6 +422,30 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void initcapMatchesBigQuery() {
+        query("""
+                {"query": "SELECT INITCAP('hello world-everyone!') a, INITCAP('SEARCH_DISPLAY') b, INITCAP('Apples1oranges2pears', '12') c, INITCAP('tHisEisEaESentence', 'E') d, INITCAP('a-b c', '') e, INITCAP(' x  y ') f", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("Hello World-Everyone!", "Search_Display", "Apples1Oranges2Pears",
+                        "ThisEIsEAESentence", "A-b c", " X  Y ")));
+        query("""
+                {"query": "SELECT INITCAP('a[b]c(d)e{f}g/h|i<k>l!m?n@o^q#r$s&t~u_v,w.x:y;z*a%b+c-d') a, INITCAP('a=b`d1e') b, INITCAP('ÉCOLE são paulo') c, INITCAP('3rd place') d, INITCAP(REPLACE('SEARCH_DISPLAY_SELECT', '_', ' ')) e", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("A[B]C(D)E{F}G/H|I<K>L!M?N@O^Q#R$S&T~U_V,W.X:Y;Z*A%B+C-D", "A=b`d1e",
+                        "École São Paulo", "3rd Place", "Search Display Select")));
+        query("""
+                {"query": "SELECT INITCAP(NULL) a, INITCAP('ab', NULL) b, INITCAP('') c", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue())
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v", equalTo(""));
+    }
+
+    @Test
+    @Order(5)
     void intervalStepSizeCanBeAnExpression() {
         query("""
                 {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -5 DAY) minus, DATE_ADD(DATE '2024-01-10', INTERVAL - 5 DAY) spaced, DATE_ADD(DATE '2024-01-10', INTERVAL 2 * 3 DAY) product, DATE_ADD(DATE '2024-01-10', INTERVAL -x DAY) negated FROM UNNEST([2]) x", "useLegacySql": false}

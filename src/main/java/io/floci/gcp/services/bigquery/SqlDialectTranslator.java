@@ -67,7 +67,7 @@ final class SqlDialectTranslator {
 
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF",
-            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "SPLIT", "FORMAT",
+            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "SPLIT", "FORMAT", "INITCAP",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
@@ -2512,6 +2512,7 @@ final class SqlDialectTranslator {
             case "SPLIT" -> a.size() == 1 ? "string_split(" + a.getFirst() + ", ',')"
                     : "string_split(" + String.join(", ", a) + ")";
             case "FORMAT" -> "printf(" + String.join(", ", a) + ")";
+            case "INITCAP" -> initcap(a);
             case "TO_JSON_STRING" -> "CAST(to_json(" + at(a, 0) + ") AS VARCHAR)";
             case "JSON_VALUE", "JSON_EXTRACT_SCALAR" -> a.size() == 1
                     ? "json_extract_string(" + a.getFirst() + ", '$')"
@@ -2566,6 +2567,28 @@ final class SqlDialectTranslator {
             case "TIMESTAMP" -> "CAST(" + at(a, 0) + " AS TIMESTAMPTZ)";
             default -> original + "(" + String.join(", ", a) + ")";
         };
+    }
+
+    /** BigQuery's default INITCAP delimiters: whitespace plus {@code [](){}/|\<>!?@"^#$&~_,.:;*%+-}. */
+    private static final String INITCAP_DELIMITERS = "(' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13)"
+            + " || '[](){}/|\\<>!?@\"^#$&~_,.:;*%+-')";
+
+    /**
+     * {@code INITCAP(value[, delimiters])}: DuckDB has no equivalent, so walk the characters. A delimiter is
+     * kept as is, the character after one (or the first) is upper-cased and every other character lower-cased.
+     * A NULL value or delimiter set yields NULL; an empty delimiter set makes the whole value one word.
+     */
+    private static String initcap(List<String> a) {
+        if (a.isEmpty() || a.size() > 2) {
+            throw invalidQuery("No matching signature for function INITCAP with " + a.size() + " arguments");
+        }
+        String s = "(" + a.get(0) + ")";
+        String d = a.size() == 2 ? "(" + a.get(1) + ")" : INITCAP_DELIMITERS;
+        String ch = "substr(" + s + ", __i, 1)";
+        return "(CASE WHEN " + s + " IS NULL OR " + d + " IS NULL THEN NULL ELSE array_to_string(list_transform("
+                + "range(1, length(" + s + ") + 1), lambda __i: CASE WHEN strpos(" + d + ", " + ch + ") > 0 THEN " + ch
+                + " WHEN __i = 1 OR strpos(" + d + ", substr(" + s + ", __i - 1, 1)) > 0 THEN upper(" + ch + ")"
+                + " ELSE lower(" + ch + ") END), '') END)";
     }
 
     private static String args(List<String> a, int expected, String name, String rendered) {

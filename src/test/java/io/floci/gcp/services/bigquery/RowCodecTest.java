@@ -3,6 +3,7 @@ package io.floci.gcp.services.bigquery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
+import io.floci.gcp.services.bigquery.model.TableCell;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 import org.junit.jupiter.api.Test;
@@ -63,7 +64,7 @@ class RowCodecTest {
         row.put("tags", null);
         row.put("name", null);
 
-        var cells = RowCodec.encodeRow(new TableSchema(List.of(tags, name)), row,
+        List<TableCell> cells = RowCodec.encodeRow(new TableSchema(List.of(tags, name)), row,
                 RowCodec.TimestampFormat.ISO8601_STRING).getF();
 
         assertEquals(List.of(), cells.get(0).getV());

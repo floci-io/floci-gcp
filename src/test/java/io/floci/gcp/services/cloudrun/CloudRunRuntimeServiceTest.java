@@ -189,7 +189,7 @@ class CloudRunRuntimeServiceTest {
     @Test
     void workloadSpecAppliesConfiguredSecurityOpts() {
         when(config.services().cloudrun().execution().securityOpts())
-                .thenReturn(Optional.of(List.of("seccomp=unconfined", "apparmor=unconfined")));
+                .thenReturn(Optional.of(List.of("seccomp=unconfined", " apparmor=unconfined", " ")));
         Container container = Container.newBuilder().setImage("alpine:3.22").build();
 
         ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",

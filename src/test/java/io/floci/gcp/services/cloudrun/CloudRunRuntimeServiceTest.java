@@ -177,6 +177,17 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void workloadIngressPortIsPublishedOnLoopbackOnly() {
+        Container container = Container.newBuilder().setImage("gcr.io/p1/app:latest").build();
+
+        ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",
+                "projects/p1/locations/us-central1/instances/app", "container-name", container, Map.of(),
+                8080, List.of());
+
+        assertEquals(List.of(8080), spec.loopbackPorts());
+    }
+
+    @Test
     void ingressUsesHttp11ByDefaultAndH2cWhenExplicitlyConfigured() {
         Container defaultContainer = Container.newBuilder()
                 .addPorts(ContainerPort.newBuilder().setContainerPort(8080))

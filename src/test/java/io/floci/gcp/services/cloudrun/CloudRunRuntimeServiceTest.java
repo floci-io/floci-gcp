@@ -6,6 +6,7 @@ import com.google.cloud.run.v2.ContainerPort;
 import com.google.cloud.run.v2.EmptyDirVolumeSource;
 import com.google.cloud.run.v2.EnvVar;
 import com.google.cloud.run.v2.GCSVolumeSource;
+import com.google.cloud.run.v2.ResourceRequirements;
 import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.Service;
 import com.google.cloud.run.v2.Volume;
@@ -106,6 +107,73 @@ class CloudRunRuntimeServiceTest {
                 "io.floci.project", "p1",
                 "io.floci.location", "us-central1",
                 "io.floci.cloudrun.resource-name", revision.getName()), spec.labels());
+    }
+
+    @Test
+    void buildSpecAppliesResourceLimitsToTheServiceContainer() {
+        Service service = Service.newBuilder()
+                .setName("projects/p1/locations/us-central1/services/svc")
+                .build();
+        Revision revision = Revision.newBuilder()
+                .setName(service.getName() + "/revisions/svc-00001")
+                .addContainers(Container.newBuilder()
+                        .setImage("gcr.io/p1/svc:latest")
+                        .setResources(ResourceRequirements.newBuilder()
+                                .putLimits("cpu", "1")
+                                .putLimits("memory", "256Mi")))
+                .build();
+
+        ContainerSpec spec = runtimeService.buildSpec("p1", "us-central1", service, revision,
+                revision.getContainers(0), 8080, "container-name");
+
+        assertEquals(268_435_456L, spec.memoryBytes());
+        assertEquals(1_000_000_000L, spec.nanoCpus());
+    }
+
+    @Test
+    void buildWorkloadSpecAppliesResourceLimitsToPortlessWorkloads() {
+        Container container = Container.newBuilder()
+                .setImage("gcr.io/p1/job:latest")
+                .setResources(ResourceRequirements.newBuilder()
+                        .putLimits("cpu", "1")
+                        .putLimits("memory", "256Mi"))
+                .build();
+
+        ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",
+                "projects/p1/locations/us-central1/jobs/job/executions/job-abc/tasks/0", "task-container",
+                container, Map.of(), null, List.of());
+
+        assertEquals(268_435_456L, spec.memoryBytes());
+        assertEquals(1_000_000_000L, spec.nanoCpus());
+    }
+
+    @Test
+    void buildWorkloadSpecLeavesLimitsUnsetWhenTheContainerHasNone() {
+        Container container = Container.newBuilder()
+                .setImage("gcr.io/p1/job:latest")
+                .build();
+
+        ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",
+                "projects/p1/locations/us-central1/jobs/job/executions/job-abc/tasks/0", "task-container",
+                container, Map.of(), null, List.of());
+
+        assertEquals("gcr.io/p1/job:latest", spec.image());
+        assertNull(spec.memoryBytes());
+        assertNull(spec.nanoCpus());
+    }
+
+    @Test
+    void validateSupportedRejectsAnUnparseableResourceLimit() {
+        Container container = Container.newBuilder()
+                .setImage("gcr.io/p1/svc:latest")
+                .setResources(ResourceRequirements.newBuilder().putLimits("memory", "abc"))
+                .build();
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> CloudRunRuntimeService.validateSupported(List.of(container), List.of()));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("Invalid value for resources.limits.memory: abc", ex.getMessage());
     }
 
     @Test

@@ -368,6 +368,120 @@ class FirestoreServiceTest {
         assertEquals(0, blobs.getArrayValue().size());
     }
 
+    @Test
+    void equalityFilterMatchesArrayValue() {
+        service.applyWrite(topLevelValueDocument("matching", "tags", stringArray("a", "b")), Instant.now());
+        service.applyWrite(topLevelValueDocument("reordered", "tags", stringArray("b", "a")), Instant.now());
+        service.applyWrite(topLevelValueDocument("longer", "tags", stringArray("a", "b", "c")), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("tags",
+                StructuredQuery.FieldFilter.Operator.EQUAL, stringArray("a", "b"));
+
+        assertEquals(List.of(DB + "/documents/customers/matching"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void notEqualFilterExcludesMatchingMapValue() {
+        Value address = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("city", Value.newBuilder().setStringValue("Lisbon").build())
+                .putFields("zip", Value.newBuilder().setIntegerValue(1000).build())).build();
+        Value other = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("city", Value.newBuilder().setStringValue("Porto").build())
+                .putFields("zip", Value.newBuilder().setIntegerValue(1000).build())).build();
+        service.applyWrite(topLevelValueDocument("matching", "address", address), Instant.now());
+        service.applyWrite(topLevelValueDocument("different", "address", other), Instant.now());
+
+        List<StoredDocument> results = runTopLevelFilter("address",
+                StructuredQuery.FieldFilter.Operator.NOT_EQUAL, address);
+
+        assertEquals(List.of(DB + "/documents/customers/different"),
+                results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void arrayUnionSkipsElementAlreadyPresent() {
+        String name = DB + "/documents/customers/union-string";
+        service.applyWrite(topLevelValueDocument("union-string", "tags", stringArray()), Instant.now());
+
+        service.applyWrite(appendMissing(name, "tags", Value.newBuilder().setStringValue("x").build()), Instant.now());
+        service.applyWrite(appendMissing(name, "tags", Value.newBuilder().setStringValue("x").build()), Instant.now());
+
+        StoredValue tags = service.getDocument(name).orElseThrow().getFields().get("tags");
+        assertEquals(1, tags.getArrayValue().size());
+    }
+
+    @Test
+    void arrayUnionSkipsMapElementAlreadyPresent() {
+        String name = DB + "/documents/customers/union-map";
+        Value entry = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("id", Value.newBuilder().setStringValue("x").build())).build();
+        service.applyWrite(topLevelValueDocument("union-map", "entries", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(entry)).build()), Instant.now());
+
+        service.applyWrite(appendMissing(name, "entries", entry), Instant.now());
+
+        StoredValue entries = service.getDocument(name).orElseThrow().getFields().get("entries");
+        assertEquals(1, entries.getArrayValue().size());
+    }
+
+    @Test
+    void arrayUnionTreatsIntegerAndDoubleAsEqual() {
+        String name = DB + "/documents/customers/union-number";
+        service.applyWrite(topLevelValueDocument("union-number", "vals", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(Value.newBuilder().setIntegerValue(3))).build()),
+                Instant.now());
+
+        service.applyWrite(appendMissing(name, "vals", Value.newBuilder().setDoubleValue(3.0).build()), Instant.now());
+
+        List<StoredValue> vals = service.getDocument(name).orElseThrow().getFields().get("vals").getArrayValue();
+        assertEquals(1, vals.size());
+        assertEquals("integer", vals.get(0).getType());
+        assertEquals(3L, vals.get(0).getIntegerValue());
+        assertTrue(vals.get(0).matchesEqual(StoredValue.fromProto(Value.newBuilder().setDoubleValue(3.0).build())));
+    }
+
+    @Test
+    void arrayRemoveRemovesMatchingMapElement() {
+        String name = DB + "/documents/customers/remove-map";
+        Value first = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("id", Value.newBuilder().setStringValue("a").build())).build();
+        Value second = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("id", Value.newBuilder().setStringValue("b").build())).build();
+        service.applyWrite(topLevelValueDocument("remove-map", "entries", Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder().addValues(first).addValues(second)).build()), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setTransform(DocumentTransform.newBuilder()
+                        .setDocument(name)
+                        .addFieldTransforms(DocumentTransform.FieldTransform.newBuilder()
+                                .setFieldPath("entries")
+                                .setRemoveAllFromArray(ArrayValue.newBuilder().addValues(first))))
+                .build(), Instant.now());
+
+        StoredValue entries = service.getDocument(name).orElseThrow().getFields().get("entries");
+        assertEquals(1, entries.getArrayValue().size());
+        assertEquals("b", entries.getArrayValue().get(0).getMapValue().get("id").getStringValue());
+    }
+
+    private Value stringArray(String... values) {
+        ArrayValue.Builder array = ArrayValue.newBuilder();
+        for (String value : values) {
+            array.addValues(Value.newBuilder().setStringValue(value));
+        }
+        return Value.newBuilder().setArrayValue(array).build();
+    }
+
+    private Write appendMissing(String name, String fieldPath, Value element) {
+        return Write.newBuilder()
+                .setTransform(DocumentTransform.newBuilder()
+                        .setDocument(name)
+                        .addFieldTransforms(DocumentTransform.FieldTransform.newBuilder()
+                                .setFieldPath(fieldPath)
+                                .setAppendMissingElements(ArrayValue.newBuilder().addValues(element))))
+                .build();
+    }
+
     private List<StoredDocument> runTopLevelFilter(String fieldPath,
             StructuredQuery.FieldFilter.Operator operator, Value value) {
         StructuredQuery query = StructuredQuery.newBuilder()

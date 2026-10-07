@@ -8,6 +8,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.google.protobuf.Timestamp;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -122,8 +123,13 @@ public class StoredValue {
     public boolean matchesEqual(Value proto) {
         switch (proto.getValueTypeCase()) {
             case BOOLEAN_VALUE -> { return "boolean".equals(type) && proto.getBooleanValue() == Boolean.TRUE.equals(booleanValue); }
-            case INTEGER_VALUE -> { return "integer".equals(type) && integerValue != null && proto.getIntegerValue() == integerValue; }
-            case DOUBLE_VALUE -> { return "double".equals(type) && doubleValue != null && proto.getDoubleValue() == doubleValue; }
+            case INTEGER_VALUE -> { return matchesNumber(BigDecimal.valueOf(proto.getIntegerValue())); }
+            case DOUBLE_VALUE -> {
+                double d = proto.getDoubleValue();
+                if (Double.isNaN(d)) { return "double".equals(type) && doubleValue != null && doubleValue.isNaN(); }
+                if (Double.isInfinite(d)) { return "double".equals(type) && doubleValue != null && doubleValue == d; }
+                return matchesNumber(new BigDecimal(d));
+            }
             case STRING_VALUE -> { return "string".equals(type) && proto.getStringValue().equals(stringValue); }
             case NULL_VALUE -> { return "null".equals(type); }
             case REFERENCE_VALUE -> { return "reference".equals(type) && proto.getReferenceValue().equals(stringValue); }
@@ -140,20 +146,37 @@ public class StoredValue {
             }
             case BYTES_VALUE -> { return "bytes".equals(type) && stringValue != null
                     && stringValue.equals(Base64.getEncoder().encodeToString(proto.getBytesValue().toByteArray())); }
+            case ARRAY_VALUE -> {
+                List<Value> values = proto.getArrayValue().getValuesList();
+                List<StoredValue> stored = arrayValue != null ? arrayValue : List.of();
+                if (!"array".equals(type) || stored.size() != values.size()) { return false; }
+                for (int i = 0; i < values.size(); i++) {
+                    if (!stored.get(i).matchesEqual(values.get(i))) { return false; }
+                }
+                return true;
+            }
+            case MAP_VALUE -> {
+                Map<String, Value> fields = proto.getMapValue().getFieldsMap();
+                Map<String, StoredValue> stored = mapValue != null ? mapValue : Map.of();
+                if (!"map".equals(type) || !stored.keySet().equals(fields.keySet())) { return false; }
+                return fields.entrySet().stream().allMatch(e -> stored.get(e.getKey()).matchesEqual(e.getValue()));
+            }
             default -> { return false; }
         }
     }
 
+    private boolean matchesNumber(BigDecimal number) {
+        if ("integer".equals(type) && integerValue != null) {
+            return BigDecimal.valueOf(integerValue).compareTo(number) == 0;
+        }
+        if ("double".equals(type) && doubleValue != null && Double.isFinite(doubleValue)) {
+            return new BigDecimal(doubleValue).compareTo(number) == 0;
+        }
+        return false;
+    }
+
     public boolean matchesEqual(StoredValue other) {
-        if (other == null || !java.util.Objects.equals(type, other.type)) return false;
-        return switch (type) {
-            case "boolean" -> java.util.Objects.equals(booleanValue, other.booleanValue);
-            case "integer" -> java.util.Objects.equals(integerValue, other.integerValue);
-            case "double" -> java.util.Objects.equals(doubleValue, other.doubleValue);
-            case "string", "reference", "timestamp", "bytes" -> java.util.Objects.equals(stringValue, other.stringValue);
-            case "null" -> true;
-            default -> false;
-        };
+        return other != null && matchesEqual(other.toProto());
     }
 
     public String getType() { return type; }

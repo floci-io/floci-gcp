@@ -442,6 +442,78 @@ class FirestoreServiceTest {
     }
 
     @Test
+    void numericEqualityIsExactAcrossIntegerAndDouble() {
+        // 2^53 + 1 has no double representation; the nearest double is 2^53.
+        assertTrue(matches(integer(9007199254740992L), dbl(9007199254740992.0)));
+        assertTrue(matches(dbl(9007199254740992.0), integer(9007199254740992L)));
+        assertFalse(matches(integer(9007199254740993L), dbl(9007199254740992.0)));
+        assertFalse(matches(dbl(9007199254740992.0), integer(9007199254740993L)));
+        assertFalse(matches(integer(Long.MAX_VALUE), dbl(9.223372036854775807E18)));
+        assertFalse(matches(integer(3), dbl(3.5)));
+    }
+
+    @Test
+    void numericEqualityHandlesSignedZeroNaNAndInfinity() {
+        assertTrue(matches(dbl(-0.0), dbl(0.0)));
+        assertTrue(matches(dbl(0.0), dbl(-0.0)));
+        assertTrue(matches(integer(0), dbl(-0.0)));
+        assertTrue(matches(dbl(-0.0), integer(0)));
+
+        // NaN matches only NaN.
+        assertTrue(matches(dbl(Double.NaN), dbl(Double.NaN)));
+        assertFalse(matches(dbl(Double.NaN), dbl(0.0)));
+        assertFalse(matches(dbl(0.0), dbl(Double.NaN)));
+        assertFalse(matches(integer(0), dbl(Double.NaN)));
+        assertFalse(matches(dbl(Double.NaN), integer(0)));
+
+        assertTrue(matches(dbl(Double.POSITIVE_INFINITY), dbl(Double.POSITIVE_INFINITY)));
+        assertFalse(matches(dbl(Double.POSITIVE_INFINITY), dbl(Double.NEGATIVE_INFINITY)));
+        assertFalse(matches(integer(Long.MAX_VALUE), dbl(Double.POSITIVE_INFINITY)));
+        assertFalse(matches(dbl(Double.POSITIVE_INFINITY), integer(Long.MAX_VALUE)));
+    }
+
+    @Test
+    void numericEdgeCasesApplyInsideArraysAndMaps() {
+        Value intArray = Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                .addValues(integer(3)).addValues(integer(0))).build();
+        Value doubleArray = Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                .addValues(dbl(3.0)).addValues(dbl(-0.0))).build();
+        Value nanArray = Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                .addValues(dbl(Double.NaN))).build();
+        Value bigInt = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("n", integer(9007199254740993L))).build();
+        Value bigDouble = Value.newBuilder().setMapValue(MapValue.newBuilder()
+                .putFields("n", dbl(9007199254740992.0))).build();
+
+        assertTrue(matches(intArray, doubleArray));
+        assertTrue(matches(doubleArray, intArray));
+        assertTrue(matches(nanArray, nanArray));
+        assertFalse(matches(bigInt, bigDouble));
+        assertFalse(matches(bigDouble, bigInt));
+
+        service.applyWrite(topLevelValueDocument("ints", "vals", intArray), Instant.now());
+        service.applyWrite(topLevelValueDocument("big", "vals", bigInt), Instant.now());
+        assertEquals(List.of(DB + "/documents/customers/ints"),
+                runTopLevelFilter("vals", StructuredQuery.FieldFilter.Operator.EQUAL, doubleArray)
+                        .stream().map(StoredDocument::getName).toList());
+        assertEquals(List.of(),
+                runTopLevelFilter("vals", StructuredQuery.FieldFilter.Operator.EQUAL, bigDouble)
+                        .stream().map(StoredDocument::getName).toList());
+    }
+
+    private static boolean matches(Value stored, Value query) {
+        return StoredValue.fromProto(stored).matchesEqual(query);
+    }
+
+    private static Value integer(long value) {
+        return Value.newBuilder().setIntegerValue(value).build();
+    }
+
+    private static Value dbl(double value) {
+        return Value.newBuilder().setDoubleValue(value).build();
+    }
+
+    @Test
     void arrayRemoveRemovesMatchingMapElement() {
         String name = DB + "/documents/customers/remove-map";
         Value first = Value.newBuilder().setMapValue(MapValue.newBuilder()

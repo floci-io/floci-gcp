@@ -463,7 +463,12 @@ public class ContainerLifecycleManager {
             hostConfig.withGroupAdd(spec.groupAdd());
         }
         if (spec.hasMemoryLimit()) {
-            hostConfig.withMemory(spec.memoryBytes());
+            // Docker defaults the swap limit to twice the memory limit; an equal value disables swap.
+            hostConfig.withMemory(spec.memoryBytes())
+                    .withMemorySwap(spec.memoryBytes());
+        }
+        if (spec.hasCpuLimit()) {
+            hostConfig.withNanoCPUs(effectiveNanoCpus(spec.nanoCpus()));
         }
         if (spec.hasPortBindings()) {
             Ports ports = new Ports();
@@ -499,6 +504,21 @@ public class ContainerLifecycleManager {
         }
 
         return hostConfig;
+    }
+
+    // Docker rejects a NanoCPUs value above the host's CPU count, so clamp instead of failing the create.
+    private long effectiveNanoCpus(long requested) {
+        Integer hostCpus = dockerApi("docker info", () -> dockerClient().infoCmd().exec()).getNCPU();
+        if (hostCpus == null || hostCpus <= 0) {
+            return requested;
+        }
+        long hostNanoCpus = hostCpus * 1_000_000_000L;
+        if (requested <= hostNanoCpus) {
+            return requested;
+        }
+        LOG.infof("Clamping container CPU limit from %d to %d nanoCPUs to fit the %d CPUs available to Docker",
+                requested, hostNanoCpus, hostCpus);
+        return hostNanoCpus;
     }
 
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {

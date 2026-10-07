@@ -33,6 +33,7 @@ import java.util.Map;
  * @param groupAdd Supplementary group IDs added to the container process
  * @param loopbackPorts Container ports from {@code portBindings} whose host binding is restricted
  *                      to {@code 127.0.0.1}, for management APIs only the emulator should reach
+ * @param nanoCpus CPU limit in units of 1e-9 CPUs (null = no limit)
  */
 public record ContainerSpec(
         String image,
@@ -55,7 +56,8 @@ public record ContainerSpec(
         String workingDir,
         String user,
         List<String> groupAdd,
-        List<Integer> loopbackPorts
+        List<Integer> loopbackPorts,
+        Long nanoCpus
 ) {
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
@@ -69,7 +71,7 @@ public record ContainerSpec(
                          List<String> dnsServers, String workingDir, String user, List<String> groupAdd) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, exposedPorts, networkMode, mounts, binds,
                 extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd,
-                List.of());
+                List.of(), null);
     }
 
     public boolean hasPortBindings() {
@@ -78,6 +80,10 @@ public record ContainerSpec(
 
     public boolean hasMemoryLimit() {
         return memoryBytes != null && memoryBytes > 0;
+    }
+
+    public boolean hasCpuLimit() {
+        return nanoCpus != null && nanoCpus > 0;
     }
 
     public boolean hasLogConfig() {

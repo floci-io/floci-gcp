@@ -97,6 +97,7 @@ public class ContainerBuilder {
         private List<String> entrypoint;
         private String workingDir;
         private Long memoryBytes;
+        private Long nanoCpus;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPorts = new ArrayList<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
@@ -164,6 +165,11 @@ public class ContainerBuilder {
 
         public Builder withMemoryBytes(long memoryBytes) {
             this.memoryBytes = memoryBytes;
+            return this;
+        }
+
+        public Builder withNanoCpus(long nanoCpus) {
+            this.nanoCpus = nanoCpus;
             return this;
         }
 
@@ -360,7 +366,8 @@ public class ContainerBuilder {
                     workingDir,
                     user,
                     List.copyOf(groupAdd),
-                    List.copyOf(loopbackPorts)
+                    List.copyOf(loopbackPorts),
+                    nanoCpus
             );
         }
     }

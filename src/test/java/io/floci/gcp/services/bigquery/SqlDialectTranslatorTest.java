@@ -918,6 +918,15 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void anAliasAfterNullTrueOrFalseIsAnAlias() {
+        assertEquals("SELECT x IS NOT NULL AS \"c\", x IS NULL AS \"d\", NULL AS \"n\", TRUE AS \"t\", x IS NOT FALSE AS \"nf\""
+                        + " FROM \"ds\".\"t\"",
+                sql("SELECT x IS NOT NULL c, x IS NULL d, NULL n, TRUE t, x IS NOT FALSE nf FROM ds.t"));
+        assertEquals("SELECT x IS NOT NULL AS f0_, NULL AS f1_, x IS TRUE AS f2_ FROM \"ds\".\"t\"",
+                sql("SELECT x IS NOT NULL, NULL, x IS TRUE FROM ds.t"));
+    }
+
+    @Test
     void offsetAsANameIsQuoted() {
         assertEquals("SELECT 1 \"offset\"", sql("SELECT 1 offset"));
         assertEquals("SELECT 1 AS \"offset\"", sql("SELECT 1 AS offset"));

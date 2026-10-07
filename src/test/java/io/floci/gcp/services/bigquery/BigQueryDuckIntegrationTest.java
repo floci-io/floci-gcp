@@ -1393,6 +1393,28 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void aliasesAfterNullTrueAndFalseMatchBigQuery() {
+        query("""
+                {"query": "SELECT x IS NOT NULL c, x IS NULL d, NULL n, TRUE t, FALSE f, x IS TRUE it, x IS NOT FALSE nf FROM UNNEST([true, NULL]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "d", "n", "t", "f", "it", "nf")))
+                .body("rows[0].f.v", equalTo(Arrays.asList("true", "false", null, "true", "false", "true", "true")))
+                .body("rows[1].f.v", equalTo(Arrays.asList("false", "true", null, "true", "false", "false", "true")));
+        query("""
+                {"query": "SELECT x IS NOT NULL, NULL, TRUE, x IS TRUE FROM UNNEST([true]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_", "f1_", "f2_", "f3_")));
+        query("""
+                {"query": "SELECT CAST(NULL AS INT64) i, IF(x IS NULL, 1, 0) k FROM UNNEST([true]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("i", "k")));
+    }
+
+    @Test
+    @Order(5)
     void offsetIsAnOrdinaryName() {
         query("""
                 {"query": "SELECT 1 offset", "useLegacySql": false}

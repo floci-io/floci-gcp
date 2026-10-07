@@ -3251,6 +3251,12 @@ final class SqlDialectTranslator {
     }
 
     /**
+     * Keywords that close a value ({@code CASE ... END}, {@code x IS NOT NULL}, {@code TRUE}), so a name
+     * right after one is an implicit alias rather than an operand.
+     */
+    private static final Set<String> VALUE_ENDING_KEYWORDS = Set.of("END", "NULL", "TRUE", "FALSE");
+
+    /**
      * True when a select item ends in an implicit alias ({@code expr alias}). The last word is not an
      * alias when it is an operand of an operator keyword ({@code a LIKE b}, {@code SUM(x) OVER w}) or
      * part of an interval literal ({@code INTERVAL 1 DAY}, {@code INTERVAL '1:2' HOUR TO MINUTE}).
@@ -3262,7 +3268,7 @@ final class SqlDialectTranslator {
         Token previous = item.get(item.size() - 2);
         if (!isName(item.getLast()) || !isAliasable(previous)
                 || (previous.kind == Kind.IDENT && NON_ALIAS_KEYWORDS.contains(previous.upper())
-                        && !previous.isKeyword("END"))) {
+                        && !VALUE_ENDING_KEYWORDS.contains(previous.upper()))) {
             return false;
         }
         return !endsInsideInterval(item);

@@ -276,7 +276,7 @@ public class CloudRunRuntimeService {
         ContainerBuilder.Builder builder = containerBuilder.newContainer(container.getImage())
                 .withName(containerName);
         if (publishedPort != null) {
-            builder.withDynamicPort(publishedPort);
+            builder.withLoopbackDynamicPort(publishedPort);
         }
         builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()

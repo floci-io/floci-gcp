@@ -44,7 +44,7 @@ Image-based service execution runs by default (`FLOCI_GCP_SERVICES_CLOUDRUN_MOCK
 http://{service}-{project-token}.{location}.run.localhost.floci.io:4588
 ```
 
-The URL scheme and port come from `floci-gcp.effectiveBaseUrl()`. The project token is a deterministic SHA-256 based token derived from the project ID. `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` can override the host suffix; when it is unset, floci-gcp uses `FLOCI_GCP_HOSTNAME` if configured, otherwise `localhost.floci.io`. Direct Docker runtime container ports are internal implementation details and are not returned in `uri`, `urls[]`, or `trafficStatuses[].uri`.
+The URL scheme and port come from `floci-gcp.effectiveBaseUrl()`. The project token is a deterministic SHA-256 based token derived from the project ID. `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` can override the host suffix; when it is unset, floci-gcp uses `FLOCI_GCP_HOSTNAME` if configured, otherwise `localhost.floci.io`. Direct Docker runtime container ports are internal implementation details and are not returned in `uri`, `urls[]`, or `trafficStatuses[].uri`. Docker publishes them on `127.0.0.1` only, so other machines on the network cannot bypass the front door.
 
 Generated Cloud Run hosts must route back to the floci-gcp front door. When floci-gcp runs in Docker, the embedded DNS server resolves `*.localhost.floci.io` for other containers on the same Docker network. When running floci-gcp directly on the host with `./mvnw quarkus:dev`, local DNS does not automatically resolve those generated hosts; use the legacy `/run/v2/projects/{project}/locations/{location}/services/{service}` invocation path, configure local DNS, or send the request to `localhost:4588` with the generated `Host` header.
 

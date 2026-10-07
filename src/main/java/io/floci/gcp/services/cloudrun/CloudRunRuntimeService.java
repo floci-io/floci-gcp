@@ -295,6 +295,13 @@ public class CloudRunRuntimeService {
         if (!container.getWorkingDir().isBlank()) {
             builder.withWorkingDir(container.getWorkingDir());
         }
+        CloudRunResourceLimits limits = CloudRunResourceLimits.of(container);
+        if (limits.memoryBytes() != null) {
+            builder.withMemoryBytes(limits.memoryBytes());
+        }
+        if (limits.nanoCpus() != null) {
+            builder.withNanoCpus(limits.nanoCpus());
+        }
         for (CloudRunRuntimeVolumeMount mount : gcsVolumeMounts) {
             if (mount.volumeName() != null && !mount.volumeName().isBlank()) {
                 builder.withNamedVolume(mount.volumeName(), mount.mountPath(), mount.readOnly());
@@ -336,7 +343,7 @@ public class CloudRunRuntimeService {
 
     /**
      * Docker-mode constraints shared by every Cloud Run workload (services, job tasks, worker pools,
-     * instances): exactly one container, GCS volumes only, at most one port.
+     * instances): exactly one container, GCS volumes only, at most one port, parseable resources.limits.
      */
     static void validateSupported(List<Container> containers, List<Volume> volumeList) {
         if (containers.size() != 1) {
@@ -365,6 +372,7 @@ public class CloudRunRuntimeService {
         if (container.getPortsCount() > 1) {
             throw GcpException.invalidArgument("Cloud Run execution supports at most one container port");
         }
+        CloudRunResourceLimits.of(container);
         for (EnvVar envVar : container.getEnvList()) {
             if (envVar.hasValueSource()) {
                 throw GcpException.invalidArgument("Cloud Run execution does not support env valueSource");

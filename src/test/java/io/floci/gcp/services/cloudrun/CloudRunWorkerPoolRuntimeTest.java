@@ -3,9 +3,11 @@ package io.floci.gcp.services.cloudrun;
 import com.google.cloud.run.v2.Container;
 import com.google.cloud.run.v2.Revision;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.cloudrun.CloudRunWorkerPoolRuntime.DesiredWorkers;
+import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +19,8 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -37,6 +41,7 @@ class CloudRunWorkerPoolRuntimeTest {
             1);
 
     private ContainerLifecycleManager lifecycleManager;
+    private CloudRunRuntimeService runtimeService;
     private CloudRunWorkerPoolRuntime runtime;
 
     @BeforeEach
@@ -44,7 +49,22 @@ class CloudRunWorkerPoolRuntimeTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudrun().execution().maxWorkerInstances()).thenReturn(2);
-        runtime = new CloudRunWorkerPoolRuntime(mock(CloudRunRuntimeService.class), lifecycleManager, config);
+        runtimeService = mock(CloudRunRuntimeService.class);
+        runtime = new CloudRunWorkerPoolRuntime(runtimeService, lifecycleManager, config);
+    }
+
+    @Test
+    void replicaWhoseSpecCannotBeBuiltReleasesItsVolumes() {
+        List<CloudRunRuntimeVolumeMount> mounts = List.of(new CloudRunRuntimeVolumeMount(
+                "bucket", "", "wp-volume", "/root", null, "/data", false));
+        when(runtimeService.prepareGcsVolumeMounts(anyString(), anyList(), any())).thenReturn(mounts);
+        when(runtimeService.buildWorkloadSpec(anyString(), anyString(), anyString(), any(), any(), anyMap(), isNull(),
+                anyList())).thenThrow(GcpException.invalidArgument("Invalid value for resources.limits.memory: abc"));
+
+        assertThrows(GcpException.class, () -> runtime.apply(ONE_REPLICA));
+
+        verify(runtimeService).releaseGcsVolumeMounts(mounts);
+        verify(lifecycleManager, never()).createAndStart(any());
     }
 
     @Test

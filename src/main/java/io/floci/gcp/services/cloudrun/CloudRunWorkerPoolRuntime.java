@@ -202,10 +202,10 @@ public class CloudRunWorkerPoolRuntime {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("CLOUD_RUN_WORKER_POOL", poolId);
         env.put("CLOUD_RUN_REVISION", revisionId);
-        ContainerSpec spec = runtimeService.buildWorkloadSpec(desired.project(), desired.location(),
-                revision.getName(), containerName, container, env, null, mounts);
         ContainerLifecycleManager.ContainerInfo info;
         try {
+            ContainerSpec spec = runtimeService.buildWorkloadSpec(desired.project(), desired.location(),
+                    revision.getName(), containerName, container, env, null, mounts);
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
             runtimeService.releaseGcsVolumeMounts(mounts);

@@ -71,6 +71,10 @@ FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS=seccomp=unconfined
 
 Hosts that enforce AppArmor may also need `apparmor=unconfined`, for example `seccomp=unconfined,apparmor=unconfined`. Leaving the variable unset keeps Docker's default profile, because running arbitrary images unconfined on the host's Docker daemon is a poor default.
 
+floci-gcp strips whitespace around each entry and drops empty entries, so `seccomp=unconfined, apparmor=unconfined` works. It does not validate the values. Docker checks them only when it creates a workload container. An invalid option such as `foo=bar` does not stop floci-gcp from starting, but every job run and service create then fails with code 13 (`INTERNAL`) and Docker's error message.
+
+For seccomp, `seccomp=unconfined` is the supported value. A custom profile file does not work. `docker run --security-opt seccomp=profile.json` reads the file in the Docker CLI and sends its contents, but floci-gcp passes the value to the Docker API unchanged, and the API expects the profile JSON itself.
+
 The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path `/run/v2/projects/{project}/locations/{location}/services/{service}` for compatibility. Host-routed requests preserve the original app path and query string, so `GET $uri/api/database?x=1` reaches the container as `/api/database?x=1`. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
 
 `validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.

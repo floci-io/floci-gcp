@@ -7,6 +7,7 @@ import com.google.datastore.v1.Value;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.google.protobuf.Timestamp;
+import com.google.type.LatLng;
 
 import java.time.Instant;
 import java.util.Base64;
@@ -58,6 +59,11 @@ public class StoredProperty {
                 p.type = "bytes";
                 p.stringValue = Base64.getEncoder().encodeToString(v.getBlobValue().toByteArray());
             }
+            case GEO_POINT_VALUE -> {
+                p.type = "geo_point";
+                LatLng geo = v.getGeoPointValue();
+                p.stringValue = geo.getLatitude() + "," + geo.getLongitude();
+            }
             case KEY_VALUE -> {
                 p.type = "key";
                 p.stringValue = keyToString(v.getKeyValue());
@@ -99,6 +105,15 @@ public class StoredProperty {
             case "bytes" -> {
                 if (stringValue != null) {
                     b.setBlobValue(ByteString.copyFrom(Base64.getDecoder().decode(stringValue)));
+                }
+            }
+            case "geo_point" -> {
+                if (stringValue != null) {
+                    String[] latLng = stringValue.split(",", 2);
+                    b.setGeoPointValue(LatLng.newBuilder()
+                            .setLatitude(Double.parseDouble(latLng[0]))
+                            .setLongitude(Double.parseDouble(latLng[1]))
+                            .build());
                 }
             }
             case "array" -> {

@@ -53,6 +53,24 @@ class DatastoreServiceTest {
     }
 
     @Test
+    void geoPointValueReadsBackUnchanged() {
+        Key key = namedKey("Place", "hq");
+        Value.Builder at = Value.newBuilder();
+        at.getGeoPointValueBuilder().setLatitude(37.422).setLongitude(-122.084);
+        Entity entity = Entity.newBuilder()
+                .setKey(key)
+                .putProperties("at", at.build())
+                .build();
+        service.applyMutation(PROJECT, Mutation.newBuilder().setUpsert(entity).build(), Instant.now());
+
+        Value stored = service.lookupEntity(PROJECT, key).orElseThrow().getProperties().get("at").toProto();
+
+        assertEquals(Value.ValueTypeCase.GEO_POINT_VALUE, stored.getValueTypeCase());
+        assertEquals(37.422, stored.getGeoPointValue().getLatitude());
+        assertEquals(-122.084, stored.getGeoPointValue().getLongitude());
+    }
+
+    @Test
     void lookupMissingEntityReturnsEmpty() {
         Key key = namedKey("Person", "missing");
         Optional<StoredEntity> result = service.lookupEntity(PROJECT, key);

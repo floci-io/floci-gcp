@@ -10,6 +10,7 @@ import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import com.google.type.LatLng;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.firestore.model.StoredDocument;
@@ -224,6 +225,22 @@ class FirestoreServiceTest {
 
         assertEquals(List.of(DB + "/documents/customers/different"),
                 results.stream().map(StoredDocument::getName).toList());
+    }
+
+    @Test
+    void geoPointValueReadsBackUnchanged() {
+        LatLng at = LatLng.newBuilder().setLatitude(37.422).setLongitude(-122.084).build();
+        Document doc = Document.newBuilder()
+                .setName(DOC_NAME)
+                .putFields("at", Value.newBuilder().setGeoPointValue(at).build())
+                .build();
+        service.applyWrite(Write.newBuilder().setUpdate(doc).build(), Instant.now());
+
+        Value stored = service.getDocument(DOC_NAME).orElseThrow().getFields().get("at").toProto();
+
+        assertEquals(Value.ValueTypeCase.GEO_POINT_VALUE, stored.getValueTypeCase());
+        assertEquals(37.422, stored.getGeoPointValue().getLatitude());
+        assertEquals(-122.084, stored.getGeoPointValue().getLongitude());
     }
 
     @Test

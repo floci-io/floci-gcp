@@ -1054,6 +1054,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void isDistinctFromIsAnOperatorNotAFromClause() {
+        assertEquals("SELECT a IS DISTINCT FROM b AS \"d\", a IS NOT DISTINCT FROM NULL AS c FROM \"ds\".\"t\""
+                        + " WHERE a IS DISTINCT FROM b",
+                sql("SELECT a IS DISTINCT FROM b d, a IS NOT DISTINCT FROM NULL AS c FROM ds.t WHERE a IS DISTINCT FROM b"));
+        assertEquals("SELECT a IS DISTINCT FROM b AS f0_ FROM \"ds\".\"t\"", sql("SELECT a IS DISTINCT FROM b FROM ds.t"));
+        assertEquals("SELECT CASE WHEN a IS DISTINCT FROM b THEN 1 END AS k FROM \"ds\".\"t\" AS \"t1\""
+                        + " JOIN \"ds\".\"u\" AS \"t2\" ON t1.a IS NOT DISTINCT FROM t2.a",
+                sql("SELECT CASE WHEN a IS DISTINCT FROM b THEN 1 END AS k FROM ds.t t1 JOIN ds.u t2"
+                        + " ON t1.a IS NOT DISTINCT FROM t2.a"));
+    }
+
+    @Test
     void offsetAsANameIsQuoted() {
         assertEquals("SELECT 1 \"offset\"", sql("SELECT 1 offset"));
         assertEquals("SELECT 1 AS \"offset\"", sql("SELECT 1 AS offset"));

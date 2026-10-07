@@ -1586,6 +1586,35 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void isDistinctFromMatchesBigQuery() {
+        String t = "UNNEST([STRUCT(1 AS a, 1 AS b), (1, 2), (NULL, 2), (NULL, NULL)])";
+        query("{\"query\": \"SELECT a, b, a IS DISTINCT FROM b d, a IS NOT DISTINCT FROM b nd, a IS NOT DISTINCT FROM NULL AS c"
+                + " FROM " + t + " ORDER BY a NULLS FIRST, b NULLS FIRST\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b", "d", "nd", "c")))
+                .body("rows.f.v", equalTo(List.of(
+                        Arrays.asList(null, null, "false", "true", "true"),
+                        Arrays.asList(null, "2", "true", "false", "true"),
+                        List.of("1", "1", "false", "true", "false"),
+                        List.of("1", "2", "true", "false", "false"))));
+        query("{\"query\": \"SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM NULL FROM " + t + "\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_", "f1_")));
+        query("{\"query\": \"SELECT COUNT(*) n FROM " + t + " WHERE a IS DISTINCT FROM b\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        query("{\"query\": \"SELECT COUNT(*) n FROM " + t + " t1 JOIN " + t + " t2 ON t1.a IS NOT DISTINCT FROM t2.a\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("8"));
+        query("{\"query\": \"SELECT CASE WHEN a IS DISTINCT FROM b THEN 'diff' ELSE 'same' END k FROM " + t
+                + " ORDER BY a NULLS FIRST, b NULLS FIRST\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("same"), List.of("diff"), List.of("same"), List.of("diff"))));
+    }
+
+    @Test
+    @Order(5)
     void offsetIsAnOrdinaryName() {
         query("""
                 {"query": "SELECT 1 offset", "useLegacySql": false}

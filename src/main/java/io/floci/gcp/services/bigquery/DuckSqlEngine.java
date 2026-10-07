@@ -380,8 +380,17 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private record Staging(String setup, String emptySetup, long bytesProcessed) {}
 
     /**
+     * Ends the trusted part of the setup. Staging reads table rows from floci-gcp over HTTP, but the
+     * caller's SQL must not: DuckDB's file and URL functions would let a query read another
+     * project's rows from the internal route, or anything else the sidecar can reach. Once this
+     * runs, the session can no longer touch files or URLs, and the setting cannot be changed back.
+     */
+    static final String LOCK_EXTERNAL_ACCESS = "SET enable_external_access = false;\nSET lock_configuration = true;\n";
+
+    /**
      * Setup SQL creating every referenced table in DuckDB. Views are expanded: their own
-     * references are staged first, then the view is created from its translated query.
+     * references are staged first, then the view is created from its translated query. Views come
+     * from callers' SQL, so they are created after {@link #LOCK_EXTERNAL_ACCESS}, with the tables.
      */
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs, Tables tables,
                           String flociEndpoint) {
@@ -392,11 +401,13 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                           Set<InformationSchema.Ref> informationSchema, Tables tables, String flociEndpoint) {
         StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
         StringBuilder emptySetup = new StringBuilder("SET TimeZone = 'UTC';\n");
+        StringBuilder views = new StringBuilder();
         long[] bytes = {0};
         Set<String> schemas = new HashSet<>();
         Set<SqlDialectTranslator.TableRef> staged = new HashSet<>();
         for (SqlDialectTranslator.TableRef ref : refs) {
-            stageOne(projectId, ref, tables, flociEndpoint, setup, emptySetup, schemas, staged, new LinkedHashSet<>(), bytes);
+            stageOne(projectId, ref, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
+                    new LinkedHashSet<>(), bytes);
         }
         if (!informationSchema.isEmpty()) {
             setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA))
@@ -417,12 +428,15 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             setup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), empty, url.toString())).append('\n');
             emptySetup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), true, url.toString())).append('\n');
         }
+        setup.append(LOCK_EXTERNAL_ACCESS).append(views);
+        emptySetup.append(LOCK_EXTERNAL_ACCESS).append(views);
         return new Staging(setup.toString(), emptySetup.toString(), bytes[0]);
     }
 
     private void stageOne(String projectId, SqlDialectTranslator.TableRef ref, Tables tables, String flociEndpoint,
-                          StringBuilder setup, StringBuilder emptySetup, Set<String> schemas, Set<SqlDialectTranslator.TableRef> staged,
-                          Set<SqlDialectTranslator.TableRef> expanding, long[] bytes) {
+                          StringBuilder setup, StringBuilder emptySetup, StringBuilder views, Set<String> schemas,
+                          Set<SqlDialectTranslator.TableRef> staged, Set<SqlDialectTranslator.TableRef> expanding,
+                          long[] bytes) {
         if (staged.contains(ref)) {
             return;
         }
@@ -432,31 +446,28 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         Table table = tables.table(ref.datasetId(), ref.tableId());
         String viewQuery = table.viewQuery();
-        String ddl;
-        String emptyDdl;
-        if (viewQuery != null) {
-            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
-                    ref.datasetId(), SqlDialectTranslator.QueryParameters.none());
-            for (SqlDialectTranslator.TableRef dependency : view.tables()) {
-                stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, schemas, staged, expanding, bytes);
-            }
-            ddl = "CREATE VIEW " + DuckTypes.quoteIdentifier(ref.datasetId()) + "."
-                    + DuckTypes.quoteIdentifier(ref.tableId()) + " AS " + view.sql() + ";";
-            emptyDdl = ddl;
-        } else {
-            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
-            bytes[0] += estimateBytes(rows);
-            ddl = stageTable(projectId, ref, table, rows.isEmpty(), flociEndpoint);
-            emptyDdl = stageTable(projectId, ref, table, true, flociEndpoint);
-        }
         if (schemas.add(ref.datasetId())) {
             setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
                     .append(";\n");
             emptySetup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
                     .append(";\n");
         }
-        setup.append(ddl).append('\n');
-        emptySetup.append(emptyDdl).append('\n');
+        if (viewQuery != null) {
+            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
+                    ref.datasetId(), SqlDialectTranslator.QueryParameters.none());
+            for (SqlDialectTranslator.TableRef dependency : view.tables()) {
+                stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
+                        expanding, bytes);
+            }
+            // Dependencies are appended first, so views stay in an order DuckDB can create them in.
+            views.append("CREATE VIEW ").append(DuckTypes.quoteIdentifier(ref.datasetId())).append('.')
+                    .append(DuckTypes.quoteIdentifier(ref.tableId())).append(" AS ").append(view.sql()).append(";\n");
+        } else {
+            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
+            bytes[0] += estimateBytes(rows);
+            setup.append(stageTable(projectId, ref, table, rows.isEmpty(), flociEndpoint)).append('\n');
+            emptySetup.append(stageTable(projectId, ref, table, true, flociEndpoint)).append('\n');
+        }
         staged.add(ref);
         expanding.remove(ref);
     }

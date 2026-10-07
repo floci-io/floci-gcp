@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -62,6 +64,9 @@ class BigQueryDuckIntegrationTest {
     private static Response query(String body) {
         return given().contentType("application/json").body(body).when().post(BASE + "/queries");
     }
+
+    @Inject
+    DuckSqlEngine engine;
 
     @Test
     @Order(1)
@@ -231,6 +236,38 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2")));
+    }
+
+    @Test
+    @Order(5)
+    void queriesCannotReadFilesOrUrls() {
+        String other = "/bigquery/v2/projects/bq-duck-it-other";
+        given().contentType("application/json").body("{\"datasetReference\": {\"datasetId\": \"vault\"}}")
+                .when().post(other + "/datasets").then().statusCode(200);
+        given().contentType("application/json")
+                .body("{\"tableReference\": {\"tableId\": \"secrets\"}, \"schema\": {\"fields\": [{\"name\": \"v\", \"type\": \"STRING\"}]}}")
+                .when().post(other + "/datasets/vault/tables").then().statusCode(200);
+        given().contentType("application/json").body("{\"rows\": [{\"json\": {\"v\": \"top-secret\"}}]}")
+                .when().post(other + "/datasets/vault/tables/secrets/insertAll").then().statusCode(200);
+        // The address floci-duck itself stages rows from: reachable from the sidecar by construction.
+        String rows = engine.flociEndpoint()
+                + "/_floci-gcp/bigquery/projects/bq-duck-it-other/datasets/vault/tables/secrets/rows.ndjson";
+
+        for (String sql : List.of("SELECT content FROM read_text('" + rows + "')",
+                "SELECT (SELECT content FROM read_text('" + rows + "')) AS c FROM shop.users",
+                "SELECT * FROM '" + rows + "'",
+                "SELECT * FROM read_csv('/etc/hostname')")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"))
+                    .body(not(containsString("top-secret")));
+        }
+        // The tables a query references are still staged over the same route.
+        query("""
+                {"query": "SELECT COUNT(*) FROM shop.users", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
     }
 
     @Test

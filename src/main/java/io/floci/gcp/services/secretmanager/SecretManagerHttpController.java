@@ -362,7 +362,11 @@ public class SecretManagerHttpController {
         if (data == null || data.isEmpty()) {
             return new byte[0];
         }
-        return Base64.getDecoder().decode(data);
+        try {
+            return Base64.getDecoder().decode(data.replace('-', '+').replace('_', '/'));
+        } catch (IllegalArgumentException e) {
+            throw GcpException.invalidArgument("Invalid value at 'payload.data' (TYPE_BYTES): " + e.getMessage());
+        }
     }
 
     @SuppressWarnings("unchecked")

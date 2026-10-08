@@ -21,8 +21,10 @@ The v1 paths are the ones Cloud KMS, Cloud Scheduler, Eventarc, Managed Kafka, S
 Cloud Run v1 use. The v2 paths are the ones Cloud Tasks and Cloud Functions v2 use. Cloud Functions
 only defines list, but serving get on v2 as well does no harm.
 
-List returns one entry per region and always includes the `locations` array, even when it is
-empty. The Terraform `google_cloud_run_locations` data source needs that array to be present.
+List returns one entry per catalog region, plus KMS's `global`, `us`, `europe` and `asia` unless
+the request names a different API (see below). It always includes the `locations` array, even
+when it is empty: the Terraform `google_cloud_run_locations` data source needs that array to be
+present.
 
 ```json
 {
@@ -42,19 +44,24 @@ empty. The Terraform `google_cloud_run_locations` data source needs that array t
   remain. `filter` is ignored.
 - Get returns `NOT_FOUND` for an id that is not in the list.
 
-### Service-specific metadata
+### Which locations each caller sees
 
 On a single port, the path does not say which API is being called. For REST, floci-gcp reads the
-first label of the `Host` header, so this only applies when a client reaches floci-gcp under the
-real hostname (for example through the embedded DNS and TLS on port 443):
+first label of the `Host` header. A client that reaches floci-gcp under the real hostname (for
+example through the embedded DNS and TLS on port 443) gets the exact list for that API:
 
-| Host | Extra behavior |
-|---|---|
-| `cloudkms.*` | Also lists `global`, `us`, `europe` and `asia`. Each entry has a `google.cloud.kms.v1.LocationMetadata` with `hsmAvailable` and `ekmAvailable` set to false, because the emulator keeps software keys only. |
-| `cloudfunctions.*` | Each entry has a `google.cloud.functions.v2.LocationMetadata` with `environments: ["GEN_2"]`. |
+| Host | Locations | Metadata |
+|---|---|---|
+| `cloudkms.*` | catalog regions, `global`, `us`, `europe`, `asia` | `google.cloud.kms.v1.LocationMetadata` with `hsmAvailable` and `ekmAvailable` set to false, because the emulator keeps software keys only |
+| `cloudfunctions.*` | catalog regions | `google.cloud.functions.v2.LocationMetadata` with `environments: ["GEN_2"]` |
+| `run.*`, `cloudtasks.*`, `cloudscheduler.*`, `eventarc.*`, `managedkafka.*`, `secretmanager.*` | catalog regions | none |
 
-The gRPC service is shared by every API on the port. The gRPC bridge does not expose the call
-authority, so gRPC responses never carry service metadata and never list the KMS multi-regions.
+Every other caller gets the catalog regions plus KMS's four extra locations, with no metadata.
+That covers gRPC (the gRPC bridge does not expose the call authority) and any REST host that
+names no API, such as `localhost` or a Docker service name, which is what endpoint overrides
+usually send. KMS clients need those four locations, so the others see them too: for example,
+`gcloud run regions list` through an endpoint override lists `global`, `us`, `europe` and `asia`,
+which Cloud Run does not accept in strict mode.
 
 ## Strict location validation
 

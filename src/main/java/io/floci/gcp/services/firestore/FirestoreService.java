@@ -673,9 +673,10 @@ public class FirestoreService {
                 yield OptionalInt.empty();
             }
             case GEO_POINT_VALUE -> {
-                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null)
+                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null) {
                     yield OptionalInt.of(compareGeoPoints(
                             stored.toProto().getGeoPointValue(), proto.getGeoPointValue()));
+                }
                 yield OptionalInt.empty();
             }
             default -> OptionalInt.empty();
@@ -716,8 +717,9 @@ public class FirestoreService {
                 yield 0;
             }
             case GEO_POINT_VALUE -> {
-                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null)
+                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null) {
                     yield compareGeoPoints(stored.toProto().getGeoPointValue(), proto.getGeoPointValue());
+                }
                 yield 0;
             }
             default -> 0;

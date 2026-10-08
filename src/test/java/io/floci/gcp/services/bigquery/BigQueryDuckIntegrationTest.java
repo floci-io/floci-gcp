@@ -2109,6 +2109,22 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void temporalStringParametersCoerceLikeBigQuery() {
+        query("""
+                {"query": "SELECT DATE '2026-03-05' BETWEEN @from_d AND @to_d AS in_range, TIMESTAMP '2026-03-05 10:00:00' >= @ts AS ts_ge, @from_d AS raw, @from_d = '2026-03-01' AS str_eq",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [
+                   {"name": "from_d", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-01"}},
+                   {"name": "to_d", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-31"}},
+                   {"name": "ts", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-05 09:00:00"}}]}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("BOOLEAN", "BOOLEAN", "STRING", "BOOLEAN")))
+                .body("rows[0].f.v", equalTo(List.of("true", "true", "2026-03-01", "true")));
+    }
+
+    @Test
+    @Order(5)
     void nullArrayIsReturnedAsEmptyArray() {
         query("""
                 {"query": "SELECT CAST(NULL AS ARRAY<INT64>) a, 1 b", "useLegacySql": false}

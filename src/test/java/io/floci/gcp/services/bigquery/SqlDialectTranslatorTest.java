@@ -1485,6 +1485,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void temporalStringParametersStayUntypedLiterals() {
+        List<Map<String, Object>> params = List.of(
+                param("from", "STRING", "2026-03-01"),
+                param("ts", "STRING", "2026-03-05T09:00:00.5Z"),
+                param("code", "STRING", "2026-03"));
+        String out = SqlDialectTranslator.translate("SELECT d FROM ds.t WHERE d >= @from AND ts > @ts AND c = @code",
+                "test-project", null, new SqlDialectTranslator.QueryParameters(params, "NAMED")).sql();
+        assertEquals("SELECT d FROM \"ds\".\"t\" WHERE d >= '2026-03-01' AND ts > '2026-03-05T09:00:00.5Z'"
+                + " AND c = CAST('2026-03' AS VARCHAR)", out);
+    }
+
+    @Test
     void positionalAndArrayParameters() {
         List<Map<String, Object>> params = List.of(Map.of(
                 "parameterType", Map.of("type", "ARRAY", "arrayType", Map.of("type", "INT64")),

@@ -6355,6 +6355,10 @@ final class SqlDialectTranslator {
             this.positional = "POSITIONAL".equalsIgnoreCase(parameterMode);
         }
 
+        /** A STRING parameter value shaped like a DATE, DATETIME or TIMESTAMP literal. */
+        private static final Pattern TEMPORAL_STRING = Pattern.compile(
+                "\\d{4}-\\d{1,2}-\\d{1,2}([ T]\\d{1,2}:\\d{2}(:\\d{2}(\\.\\d{1,9})?)?)?\\s*(Z|UTC|[+-]\\d{1,2}(:?\\d{2})?)?");
+
         static QueryParameters none() {
             return new QueryParameters(List.of(), null);
         }
@@ -6438,6 +6442,10 @@ final class SqlDialectTranslator {
                     case "NUMERIC", "BIGNUMERIC" -> "CAST(" + DuckTypes.quoteLiteral(
                             new BigDecimal(text.trim()).toPlainString()) + " AS DECIMAL(38,9))";
                     case "BYTES" -> "from_base64(" + DuckTypes.quoteLiteral(text) + ")";
+                    // BigQuery coerces a STRING parameter to DATE, DATETIME or TIMESTAMP when compared with
+                    // one. An untyped DuckDB string literal casts implicitly the same way, a VARCHAR does not.
+                    case "STRING" -> TEMPORAL_STRING.matcher(text).matches() ? DuckTypes.quoteLiteral(text)
+                            : "CAST(" + DuckTypes.quoteLiteral(text) + " AS " + duckType + ")";
                     default -> "CAST(" + DuckTypes.quoteLiteral(text) + " AS " + duckType + ")";
                 };
             } catch (NumberFormatException e) {

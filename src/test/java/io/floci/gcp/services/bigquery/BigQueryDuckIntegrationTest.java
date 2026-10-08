@@ -163,6 +163,22 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void stringOperandsOfDateFunctionsAreCoerced() {
+        query("""
+                {"query": "SELECT DATE_ADD(@d, INTERVAL 1 DAY) AS a, DATE_SUB(@d, INTERVAL 1 MONTH) AS s, DATE_DIFF(@d2, @d, DAY) AS dd, DATE_TRUNC(@d, MONTH) AS t, UNIX_SECONDS(TIMESTAMP_ADD(@ts, INTERVAL 1 HOUR)) AS ta, UNIX_SECONDS(TIMESTAMP_TRUNC(@ts, DAY)) AS tt, FORMAT_DATETIME('%Y-%m-%d %H:%M:%S', DATETIME_ADD(@ts, INTERVAL 1 HOUR)) AS da, DATE_ADD('2026-03-01', INTERVAL 2 DAY) AS lit",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [
+                   {"name": "d", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-01"}},
+                   {"name": "d2", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-31"}},
+                   {"name": "ts", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "2026-03-05 09:00:00"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2026-03-02", "2026-02-01", "30", "2026-03-01", "1772704800",
+                        "1772668800", "2026-03-05 10:00:00", "2026-03-03")));
+    }
+
+    @Test
     @Order(4)
     void timestampArrayAndRecordRoundTrip() {
         Response resp = query("""

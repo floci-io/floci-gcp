@@ -9,6 +9,7 @@ import com.google.firestore.v1.Precondition;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
+import com.google.type.LatLng;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -671,6 +672,12 @@ public class FirestoreService {
                 }
                 yield OptionalInt.empty();
             }
+            case GEO_POINT_VALUE -> {
+                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null)
+                    yield OptionalInt.of(compareGeoPoints(
+                            stored.toProto().getGeoPointValue(), proto.getGeoPointValue()));
+                yield OptionalInt.empty();
+            }
             default -> OptionalInt.empty();
         };
     }
@@ -708,8 +715,19 @@ public class FirestoreService {
                 }
                 yield 0;
             }
+            case GEO_POINT_VALUE -> {
+                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null)
+                    yield compareGeoPoints(stored.toProto().getGeoPointValue(), proto.getGeoPointValue());
+                yield 0;
+            }
             default -> 0;
         };
+    }
+
+    /** Firestore orders geo points by latitude, then by longitude. */
+    private static int compareGeoPoints(LatLng a, LatLng b) {
+        int byLatitude = Double.compare(a.getLatitude(), b.getLatitude());
+        return byLatitude != 0 ? byLatitude : Double.compare(a.getLongitude(), b.getLongitude());
     }
 
     private boolean matchesUnaryFilter(StoredDocument doc, StructuredQuery.UnaryFilter uf) {

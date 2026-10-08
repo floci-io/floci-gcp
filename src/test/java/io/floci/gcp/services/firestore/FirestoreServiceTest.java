@@ -1,6 +1,7 @@
 package io.floci.gcp.services.firestore;
 
 import com.google.firestore.v1.ArrayValue;
+import com.google.firestore.v1.Cursor;
 import com.google.firestore.v1.Document;
 import com.google.firestore.v1.DocumentMask;
 import com.google.firestore.v1.DocumentTransform;
@@ -242,6 +243,72 @@ class FirestoreServiceTest {
         assertEquals(Value.ValueTypeCase.GEO_POINT_VALUE, stored.getValueTypeCase());
         assertEquals(37.422, stored.getGeoPointValue().getLatitude());
         assertEquals(-122.084, stored.getGeoPointValue().getLongitude());
+    }
+
+    @Test
+    void orderByGeoPointSortsByLatitudeThenLongitude() {
+        writeGeoPointFixture();
+
+        assertEquals(List.of("south", "origin", "west", "east"),
+                ids(runGeoPointOrder(StructuredQuery.Direction.ASCENDING, null)));
+        assertEquals(List.of("east", "west", "origin", "south"),
+                ids(runGeoPointOrder(StructuredQuery.Direction.DESCENDING, null)));
+    }
+
+    @Test
+    void geoPointCursorStartsAfterTheCursorPoint() {
+        writeGeoPointFixture();
+
+        Cursor startAfterWest = Cursor.newBuilder().addValues(geoPoint(10, -5)).setBefore(false).build();
+
+        assertEquals(List.of("east"),
+                ids(runGeoPointOrder(StructuredQuery.Direction.ASCENDING, startAfterWest)));
+    }
+
+    @Test
+    void rangeFiltersOnGeoPointCompareLatitudeThenLongitude() {
+        writeGeoPointFixture();
+        service.applyWrite(topLevelValueDocument("text", "at",
+                Value.newBuilder().setStringValue("10,-5").build()), Instant.now());
+
+        assertEquals(Set.of("east"), Set.copyOf(ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN, geoPoint(10, -5)))));
+        assertEquals(Set.of("west", "east"), Set.copyOf(ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL, geoPoint(10, -5)))));
+        assertEquals(Set.of("south"), Set.copyOf(ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN, geoPoint(0, 0)))));
+        assertEquals(Set.of("south", "origin"), Set.copyOf(ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL, geoPoint(0, 0)))));
+    }
+
+    private void writeGeoPointFixture() {
+        service.applyWrite(topLevelValueDocument("east", "at", geoPoint(10, 5)), Instant.now());
+        service.applyWrite(topLevelValueDocument("origin", "at", geoPoint(0, 0)), Instant.now());
+        service.applyWrite(topLevelValueDocument("south", "at", geoPoint(-20, 50)), Instant.now());
+        service.applyWrite(topLevelValueDocument("west", "at", geoPoint(10, -5)), Instant.now());
+    }
+
+    private List<StoredDocument> runGeoPointOrder(StructuredQuery.Direction direction, Cursor startAt) {
+        StructuredQuery.Builder query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("at"))
+                        .setDirection(direction));
+        if (startAt != null) {
+            query.setStartAt(startAt);
+        }
+        return service.runQuery(DB + "/documents", query.build());
+    }
+
+    private static Value geoPoint(double latitude, double longitude) {
+        return Value.newBuilder()
+                .setGeoPointValue(LatLng.newBuilder().setLatitude(latitude).setLongitude(longitude))
+                .build();
+    }
+
+    private static List<String> ids(List<StoredDocument> docs) {
+        return docs.stream().map(d -> d.getName().substring(d.getName().lastIndexOf('/') + 1)).toList();
     }
 
     @Test

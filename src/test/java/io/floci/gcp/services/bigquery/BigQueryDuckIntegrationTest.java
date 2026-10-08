@@ -325,6 +325,40 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalidQuery"))
                 .body("error.message", containsString("LIMIT in arguments is not supported on analytic functions"));
+        query("""
+                {"query": "SELECT ARRAY_AGG(CASE WHEN x > ? THEN x ELSE NULL END IGNORE NULLS ORDER BY x LIMIT ?) a FROM UNNEST([3, 1, NULL, 2, 3]) x",
+                 "parameterMode": "POSITIONAL", "useLegacySql": false,
+                 "queryParameters": [{"parameterType": {"type": "INT64"}, "parameterValue": {"value": "1"}},
+                                     {"parameterType": {"type": "INT64"}, "parameterValue": {"value": "2"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("2", "3")));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x LIMIT -1) a FROM UNNEST([3, 1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("LIMIT expects a non-negative integer literal or parameter"));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x LIMIT 1 + 1) a FROM UNNEST([3, 1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("LIMIT expects an integer literal or parameter"));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x LIMIT @n) a FROM UNNEST([3, 1, 2]) x",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "n", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "-1"}}]}
+                """)
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("LIMIT value should not be negative"));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x LIMIT @n) a FROM UNNEST([3, 1, 2]) x",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "n", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "2"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "2")));
     }
 
     @Test

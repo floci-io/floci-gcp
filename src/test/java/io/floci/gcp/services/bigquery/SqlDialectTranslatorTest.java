@@ -173,6 +173,12 @@ class SqlDialectTranslatorTest {
                 () -> sql("SELECT ARRAY_AGG(x LIMIT 1) OVER () AS a FROM ds.t"));
         assertEquals("invalidQuery", e.getReason());
         assertTrue(e.getMessage().contains("LIMIT in arguments is not supported on analytic functions"), e.getMessage());
+        assertEquals("LIMIT expects a non-negative integer literal or parameter",
+                invalid("SELECT ARRAY_AGG(x ORDER BY x LIMIT -1) AS a FROM ds.t").getMessage());
+        assertEquals("LIMIT expects an integer literal or parameter",
+                invalid("SELECT ARRAY_AGG(x ORDER BY x LIMIT 1 + 1) AS a FROM ds.t").getMessage());
+        assertEquals("LIMIT expects an integer literal or parameter",
+                invalid("SELECT ARRAY_AGG(x ORDER BY x LIMIT 1.5) AS a FROM ds.t").getMessage());
     }
 
     @Test

@@ -1085,6 +1085,19 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void implicitAliasAfterAParameterIsKept() {
+        List<Map<String, Object>> named = List.of(param("p", "STRING", "abc"), param("n", "INT64", "5"));
+        assertEquals("SELECT CAST('abc' AS VARCHAR) AS \"x\", CAST(5 AS BIGINT) AS \"n2\"",
+                SqlDialectTranslator.translate("SELECT @p x, @n n2", "test-project", null,
+                        new SqlDialectTranslator.QueryParameters(named, "NAMED")).sql());
+        List<Map<String, Object>> positional = List.of(Map.of(
+                "parameterType", Map.of("type", "INT64"), "parameterValue", Map.of("value", "7")));
+        assertEquals("SELECT CAST(7 AS BIGINT) AS \"y\"",
+                SqlDialectTranslator.translate("SELECT ? y", "test-project", null,
+                        new SqlDialectTranslator.QueryParameters(positional, "POSITIONAL")).sql());
+    }
+
+    @Test
     void intervalDatePartsAreNotAliasesButAnAliasAfterThemIs() {
         assertEquals("SELECT d + INTERVAL 1 DAY AS \"name\" FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL 1 DAY name FROM ds.t"));
         assertEquals("SELECT (d + INTERVAL 1 DAY) AS \"name\" FROM \"ds\".\"t\"", sql("SELECT (d + INTERVAL 1 DAY) name FROM ds.t"));

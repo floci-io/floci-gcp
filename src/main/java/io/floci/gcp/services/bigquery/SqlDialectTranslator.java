@@ -3568,7 +3568,8 @@ final class SqlDialectTranslator {
 
     private static boolean isAliasable(Token beforeLast) {
         return beforeLast.kind == Kind.IDENT || beforeLast.kind == Kind.QIDENT || beforeLast.isPunct(")")
-                || beforeLast.isPunct("]") || beforeLast.kind == Kind.STRING || beforeLast.kind == Kind.NUMBER;
+                || beforeLast.isPunct("]") || beforeLast.kind == Kind.STRING || beforeLast.kind == Kind.NUMBER
+                || beforeLast.kind == Kind.NAMED_PARAM || beforeLast.kind == Kind.POSITIONAL_PARAM;
     }
 
     private static boolean isPath(List<Token> item) {

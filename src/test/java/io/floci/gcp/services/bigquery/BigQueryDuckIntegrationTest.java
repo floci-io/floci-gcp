@@ -149,6 +149,17 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows", hasSize(1))
                 .body("rows[0].f[0].v", equalTo("bo"));
+        query("""
+                {"query": "SELECT @p x, @n n2, @p y, 'lit' z",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [
+                   {"name": "p", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "abc"}},
+                   {"name": "n", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "5"}}
+                 ]}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "n2", "y", "z")))
+                .body("rows[0].f.v", equalTo(List.of("abc", "5", "abc", "lit")));
     }
 
     @Test

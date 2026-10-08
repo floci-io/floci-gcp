@@ -61,6 +61,12 @@ Execution mode applies container `resources.limits` to the Docker container of e
 
 Execution-backed create, template-changing update, and delete run on a bounded background executor. `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_OPERATION_TIMEOUT` caps these operations and fails the LRO with `DEADLINE_EXCEEDED` if Docker startup or metadata deletion does not complete in time. Docker API calls made by the shared container lifecycle manager are also capped by `FLOCI_GCP_DOCKER_API_TIMEOUT`; when that timeout is reached, floci-gcp resets its Docker client before later calls. Delete removes service and revision metadata and completes the LRO before stopping runtime containers, so slow Docker cleanup does not keep Terraform replacement destroys pending; container cleanup is best-effort after the resource is gone and capped by `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT`.
 
+The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path `/run/v2/projects/{project}/locations/{location}/services/{service}` for compatibility. Host-routed requests preserve the original app path and query string, so `GET $uri/api/database?x=1` reaches the container as `/api/database?x=1`. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
+
+`validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.
+
+Deleting a service revision that is the service's `latestReadyRevision` or is named in its `trafficStatuses` fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Other revisions are removed and the completed operation returns the revision with `deleteTime` and `expireTime` set. Runtime containers are not touched by revision delete; retired service revisions have no running container.
+
 ### Security options
 
 Cloud Run lets a container create an unprivileged user namespace (`unshare(CLONE_NEWUSER)`), which rootless sandboxes such as bubblewrap rely on. Docker's default seccomp profile rejects that call with `EPERM`, so floci-gcp workload containers cannot do it by default. Set `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` to pass Docker security options to every Cloud Run workload container (services, job tasks, worker pool replicas, and instances), and to no other container floci-gcp starts:
@@ -74,12 +80,6 @@ Hosts that enforce AppArmor may also need `apparmor=unconfined`, for example `se
 floci-gcp strips whitespace around each entry and drops empty entries, so `seccomp=unconfined, apparmor=unconfined` works. It does not validate the values. Docker checks them only when it creates a workload container. An invalid option such as `foo=bar` does not stop floci-gcp from starting, but every job run and service create then fails with code 13 (`INTERNAL`) and Docker's error message.
 
 For seccomp, `seccomp=unconfined` is the supported value. A custom profile file does not work. `docker run --security-opt seccomp=profile.json` reads the file in the Docker CLI and sends its contents, but floci-gcp passes the value to the Docker API unchanged, and the API expects the profile JSON itself.
-
-The invocation proxy accepts both generated host-routed URLs and the legacy prefixed path `/run/v2/projects/{project}/locations/{location}/services/{service}` for compatibility. Host-routed requests preserve the original app path and query string, so `GET $uri/api/database?x=1` reaches the container as `/api/database?x=1`. The proxy forwards HTTP methods, trailing paths, query strings, request bodies, safe headers, and `X-Forwarded-*` headers to the latest ready revision. Missing services return `404`, services without a ready runtime return `503`, runtime connection failures return `502`, and proxy timeouts return `504`.
-
-`validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.
-
-Deleting a service revision that is the service's `latestReadyRevision` or is named in its `trafficStatuses` fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Other revisions are removed and the completed operation returns the revision with `deleteTime` and `expireTime` set. Runtime containers are not touched by revision delete; retired service revisions have no running container.
 
 ## SDK Usage
 

@@ -92,6 +92,7 @@ nav:
     - Cloud Monitoring: services/cloud-monitoring.md
     - Eventarc: services/eventarc.md
     - Service Usage: services/service-usage.md
+    - Cloud Billing: services/cloud-billing.md
     - Firebase Auth: services/firebase-auth.md
     - BigQuery: services/bigquery.md
   - Contributing:

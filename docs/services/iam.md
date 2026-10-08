@@ -243,6 +243,47 @@ URL signedUrl = storage.signUrl(
 
 `SignBlob` accepts the bytes to sign and returns a stub signature, which is sufficient for local development.
 
+## Custom Roles
+
+Project custom roles (`projects.roles`) are supported over REST:
+
+```bash
+curl -X POST http://localhost:4588/v1/projects/floci-local/roles \
+  -H "Content-Type: application/json" \
+  -d '{"roleId":"bucketCreator","role":{"title":"Bucket creator","includedPermissions":["storage.buckets.create"],"stage":"GA"}}'
+curl http://localhost:4588/v1/projects/floci-local/roles/bucketCreator
+curl -X PATCH "http://localhost:4588/v1/projects/floci-local/roles/bucketCreator?updateMask=title" \
+  -H "Content-Type: application/json" -d '{"title":"Renamed"}'
+curl -X DELETE http://localhost:4588/v1/projects/floci-local/roles/bucketCreator
+curl -X POST http://localhost:4588/v1/projects/floci-local/roles/bucketCreator:undelete \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+Roles carry an `etag` that is checked on `PATCH`, `DELETE` and `:undelete` (`409 ABORTED` on mismatch).
+`DELETE` is a soft delete: the role stays readable with `deleted: true` and is hidden from `list`
+unless `showDeleted=true`, and `:undelete` restores it. Permissions are stored as sent and are not
+validated against a permission catalog. Predefined roles (`roles/*`) and organization roles are not served
+by this API. A custom role name can be used in project policy bindings.
+
+## Terraform Google provider
+
+`google_service_account` and the other service account resources use the provider's
+`iam_beta_custom_endpoint`, not `iam_custom_endpoint`. In provider 8.x there is no
+`GOOGLE_IAM_CUSTOM_ENDPOINT` environment variable at all, so setting it is silently ignored and
+the provider talks to `iam.googleapis.com`. Use the attribute or the matching environment variable:
+
+```hcl
+provider "google" {
+  iam_beta_custom_endpoint = "http://localhost:4588/v1/"
+}
+```
+
+```bash
+export GOOGLE_IAM_BETA_CUSTOM_ENDPOINT=http://localhost:4588/v1/
+```
+
+The trailing version segment is stripped by the provider, so `http://localhost:4588/` works too.
+
 ## Supported Operations
 
 - `CreateServiceAccount`
@@ -257,6 +298,7 @@ URL signedUrl = storage.signUrl(
 - `SetIamPolicy`
 - `TestIamPermissions`
 - `SignBlob`
+- `CreateRole`, `GetRole`, `ListRoles`, `PatchRole`, `DeleteRole`, `UndeleteRole` (project custom roles)
 
 ## Related: Service Account Impersonation
 

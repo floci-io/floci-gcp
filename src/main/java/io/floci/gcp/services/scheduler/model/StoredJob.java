@@ -24,6 +24,10 @@ public class StoredJob {
     private String httpMethod;
     private Map<String, String> httpHeaders;
     private byte[] httpBody;
+    private String httpOauthServiceAccountEmail;
+    private String httpOauthScope;
+    private String httpOidcServiceAccountEmail;
+    private String httpOidcAudience;
 
     // AppEngineHttpTarget fields
     private String appEngineHttpMethod;
@@ -92,6 +96,18 @@ public class StoredJob {
 
     public byte[] getHttpBody() { return httpBody; }
     public void setHttpBody(byte[] b) { this.httpBody = b; }
+
+    public String getHttpOauthServiceAccountEmail() { return httpOauthServiceAccountEmail; }
+    public void setHttpOauthServiceAccountEmail(String e) { this.httpOauthServiceAccountEmail = e; }
+
+    public String getHttpOauthScope() { return httpOauthScope; }
+    public void setHttpOauthScope(String s) { this.httpOauthScope = s; }
+
+    public String getHttpOidcServiceAccountEmail() { return httpOidcServiceAccountEmail; }
+    public void setHttpOidcServiceAccountEmail(String e) { this.httpOidcServiceAccountEmail = e; }
+
+    public String getHttpOidcAudience() { return httpOidcAudience; }
+    public void setHttpOidcAudience(String a) { this.httpOidcAudience = a; }
 
     public String getAppEngineHttpMethod() { return appEngineHttpMethod; }
     public void setAppEngineHttpMethod(String m) { this.appEngineHttpMethod = m; }

@@ -110,6 +110,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | Mock mode, runs queries on a built-in SQL subset instead of the DuckDB sidecar |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Service Usage |
 | `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager (minimal `projects.get`) |
+| `FLOCI_GCP_SERVICES_CLOUDBILLING_ENABLED` | `true` | Cloud Billing (project billing info and synthetic billing accounts) |
 | `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
 | `FLOCI_GCP_SERVICES_EVENTARC_ENABLED` | `true` | Eventarc |
 

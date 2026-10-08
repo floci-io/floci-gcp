@@ -197,6 +197,8 @@ public interface EmulatorConfig {
 
         ResourceManagerServiceConfig resourcemanager();
 
+        CloudBillingServiceConfig cloudbilling();
+
         FirebaseAuthServiceConfig firebaseauth();
 
         BigQueryServiceConfig bigquery();
@@ -251,6 +253,11 @@ public interface EmulatorConfig {
     }
 
     interface ResourceManagerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudBillingServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

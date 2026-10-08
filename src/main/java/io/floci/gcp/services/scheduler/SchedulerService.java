@@ -132,6 +132,8 @@ public class SchedulerService {
         }
         if (all || maskHasTargetUpdate(updateMask)) {
             copyTarget(incoming, existing);
+        } else {
+            applyHttpTargetSubPaths(incoming, existing, updateMask);
         }
 
         existing.setUserUpdateTime(Instant.now().toString());
@@ -222,6 +224,10 @@ public class SchedulerService {
         to.setHttpMethod(from.getHttpMethod());
         to.setHttpHeaders(from.getHttpHeaders());
         to.setHttpBody(from.getHttpBody());
+        to.setHttpOauthServiceAccountEmail(from.getHttpOauthServiceAccountEmail());
+        to.setHttpOauthScope(from.getHttpOauthScope());
+        to.setHttpOidcServiceAccountEmail(from.getHttpOidcServiceAccountEmail());
+        to.setHttpOidcAudience(from.getHttpOidcAudience());
         to.setAppEngineHttpMethod(from.getAppEngineHttpMethod());
         to.setAppEngineRelativeUri(from.getAppEngineRelativeUri());
         to.setAppEngineHeaders(from.getAppEngineHeaders());
@@ -230,6 +236,53 @@ public class SchedulerService {
         to.setAppEngineVersion(from.getAppEngineVersion());
         to.setAppEngineInstance(from.getAppEngineInstance());
         to.setAppEngineHost(from.getAppEngineHost());
+    }
+
+    /**
+     * Applies {@code http_target.*} field-level masks. A masked field missing from the request is cleared,
+     * and oauth_token / oidc_token stay a oneof: setting one clears the other.
+     */
+    private static void applyHttpTargetSubPaths(StoredJob from, StoredJob to, List<String> mask) {
+        boolean uri = maskHas(mask, "http_target.uri", "httpTarget.uri");
+        boolean method = maskHas(mask, "http_target.http_method", "httpTarget.httpMethod");
+        boolean headers = maskHas(mask, "http_target.headers", "httpTarget.headers");
+        boolean body = maskHas(mask, "http_target.body", "httpTarget.body");
+        boolean oauth = maskHas(mask, "http_target.oauth_token", "httpTarget.oauthToken");
+        boolean oidc = maskHas(mask, "http_target.oidc_token", "httpTarget.oidcToken");
+        if (!(uri || method || headers || body || oauth || oidc)) {
+            return;
+        }
+        if (!"HTTP".equals(to.getTargetType())) {
+            throw GcpException.invalidArgument("update_mask http_target.* requires a job with an HTTP target");
+        }
+        if (uri) {
+            to.setHttpUri(from.getHttpUri());
+        }
+        if (method) {
+            to.setHttpMethod(from.getHttpMethod());
+        }
+        if (headers) {
+            to.setHttpHeaders(from.getHttpHeaders());
+        }
+        if (body) {
+            to.setHttpBody(from.getHttpBody());
+        }
+        if (oauth) {
+            to.setHttpOauthServiceAccountEmail(from.getHttpOauthServiceAccountEmail());
+            to.setHttpOauthScope(from.getHttpOauthScope());
+            if (from.getHttpOauthServiceAccountEmail() != null || from.getHttpOauthScope() != null) {
+                to.setHttpOidcServiceAccountEmail(null);
+                to.setHttpOidcAudience(null);
+            }
+        }
+        if (oidc) {
+            to.setHttpOidcServiceAccountEmail(from.getHttpOidcServiceAccountEmail());
+            to.setHttpOidcAudience(from.getHttpOidcAudience());
+            if (from.getHttpOidcServiceAccountEmail() != null || from.getHttpOidcAudience() != null) {
+                to.setHttpOauthServiceAccountEmail(null);
+                to.setHttpOauthScope(null);
+            }
+        }
     }
 
     private static boolean maskHas(List<String> mask, String... paths) {

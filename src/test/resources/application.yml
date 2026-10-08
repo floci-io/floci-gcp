@@ -68,6 +68,8 @@ floci-gcp:
       enabled: true
     resourcemanager:
       enabled: true
+    cloudbilling:
+      enabled: true
     firebaseauth:
       enabled: true
   docker:

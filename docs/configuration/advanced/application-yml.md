@@ -133,6 +133,8 @@ floci-gcp:
       enabled: true
     resourcemanager:
       enabled: true
+    cloudbilling:
+      enabled: true
     firebaseauth:
       enabled: true
     # docker-network:                 # shared Docker network for all spawned sidecars (FLOCI_GCP_SERVICES_DOCKER_NETWORK)

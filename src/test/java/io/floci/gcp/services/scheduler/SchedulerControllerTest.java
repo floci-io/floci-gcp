@@ -1,9 +1,12 @@
 package io.floci.gcp.services.scheduler;
 
 import com.google.cloud.scheduler.v1.CreateJobRequest;
+import com.google.cloud.scheduler.v1.HttpTarget;
 import com.google.cloud.scheduler.v1.Job;
 import com.google.cloud.scheduler.v1.ListJobsRequest;
 import com.google.cloud.scheduler.v1.ListJobsResponse;
+import com.google.cloud.scheduler.v1.OAuthToken;
+import com.google.cloud.scheduler.v1.OidcToken;
 import com.google.cloud.scheduler.v1.PubsubTarget;
 import com.google.protobuf.ByteString;
 import io.floci.gcp.core.storage.InMemoryStorage;
@@ -19,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,6 +86,25 @@ class SchedulerControllerTest {
         assertTrue(observer.values.isEmpty());
         StatusRuntimeException sre = assertInstanceOf(StatusRuntimeException.class, observer.error);
         assertEquals(Status.Code.INVALID_ARGUMENT, sre.getStatus().getCode());
+    }
+
+    @Test
+    void httpTargetOauthAndOidcTokensRoundTrip() {
+        HttpTarget oauth = HttpTarget.newBuilder().setUri("https://compute.googleapis.com/compute/v1/start")
+                .setOauthToken(OAuthToken.newBuilder().setServiceAccountEmail("sa@p1.iam.gserviceaccount.com")
+                        .setScope("https://www.googleapis.com/auth/cloud-platform")).build();
+        Job stored = SchedulerController.toJobProto(SchedulerController.fromJobProto(
+                Job.newBuilder().setName(PARENT + "/jobs/oauth").setSchedule("0 8 * * 6").setHttpTarget(oauth).build()));
+        assertEquals(oauth.getOauthToken(), stored.getHttpTarget().getOauthToken());
+        assertFalse(stored.getHttpTarget().hasOidcToken());
+
+        HttpTarget oidc = HttpTarget.newBuilder().setUri("https://run.example/x")
+                .setOidcToken(OidcToken.newBuilder().setServiceAccountEmail("sa@p1.iam.gserviceaccount.com")
+                        .setAudience("https://run.example")).build();
+        Job oidcJob = SchedulerController.toJobProto(SchedulerController.fromJobProto(
+                Job.newBuilder().setName(PARENT + "/jobs/oidc").setSchedule("0 8 * * 6").setHttpTarget(oidc).build()));
+        assertEquals(oidc.getOidcToken(), oidcJob.getHttpTarget().getOidcToken());
+        assertFalse(oidcJob.getHttpTarget().hasOauthToken());
     }
 
     private static final class RecordingObserver<T> implements StreamObserver<T> {

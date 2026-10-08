@@ -158,6 +158,7 @@ GCP's official emulators are fragmented: each service ships its own binary, runs
 | Cloud Scheduler | ✅ | ❌ |
 | Cloud Monitoring | ✅ | ❌ |
 | Service Usage | ✅ | ❌ |
+| Cloud Billing | ✅ | ❌ |
 | Identity Platform / Firebase Auth | ✅ | ❌ |
 | BigQuery | ✅ | ❌ |
 | Eventarc | ✅ | ❌ |
@@ -179,7 +180,7 @@ flowchart LR
         end
 
         subgraph REST ["HTTP API services"]
-            B["Cloud Storage\nPub/Sub\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Scheduler\nCloud Monitoring\nIAM and IAM Credentials\nSTS\nDatastore\nManaged Kafka\nCloud Run and Functions\nCloud SQL\nGKE\nBigQuery\nEventarc\nService Usage and Resource Manager\nFirebase Auth"]
+            B["Cloud Storage\nPub/Sub\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Scheduler\nCloud Monitoring\nIAM and IAM Credentials\nSTS\nDatastore\nManaged Kafka\nCloud Run and Functions\nCloud SQL\nGKE\nBigQuery\nEventarc\nService Usage, Resource Manager and Cloud Billing\nFirebase Auth"]
         end
 
         subgraph DockerControl ["Docker-backed control planes"]
@@ -217,7 +218,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Databases | Cloud SQL for PostgreSQL and MySQL |
 | Analytics | BigQuery |
 | Observability | Cloud Logging, Cloud Monitoring |
-| API management | Service Usage, Cloud Resource Manager (`projects.get` and IAM policy mixins) |
+| API management | Service Usage, Cloud Resource Manager (`projects.get` and IAM policy mixins), Cloud Billing |
 
 <details>
 <summary>Detailed service notes</summary>
@@ -245,6 +246,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud Scheduler** | gRPC + REST JSON | Cron jobs with Pub/Sub, HTTP, and App Engine targets; `Pause`/`Resume`/`RunJob`; unix-cron + time zones; background tick fires due jobs (Pub/Sub publishes into the local backend) |
 | **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries` with GCP validation rules) and read (`ListTimeSeries` with alignment/reduction subset and pagination) |
 | **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services`; includes Cloud Resource Manager v1 `projects.get` and project IAM policy mixins for provider project lookups |
+| **Cloud Billing** | REST JSON | `projects.getBillingInfo`/`updateBillingInfo` and `billingAccounts.get`/`list`/`projects.list` (`cloudbilling.googleapis.com` v1); any well-formed account ID is accepted as an open account; backs Terraform `data.google_project` and `google_project` billing reads |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
 | **BigQuery** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) running GoogleSQL (joins, aggregation, window functions, CTEs, `UNNEST`, parameters, dry runs) on a DuckDB sidecar |
 

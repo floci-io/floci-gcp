@@ -106,4 +106,77 @@ class SchedulerServiceTest {
         StoredJob ran = service.runJob(NAME);
         assertNotNull(ran.getLastAttemptTime(), "runJob must record a last-attempt time");
     }
+
+    private StoredJob httpOauthJob(String jobId) {
+        StoredJob job = new StoredJob();
+        job.setName(jobId);
+        job.setSchedule("*/5 * * * *");
+        job.setTargetType("HTTP");
+        job.setHttpUri("https://example.test/a");
+        job.setHttpMethod("POST");
+        job.setHttpOauthServiceAccountEmail("old@p1.iam.gserviceaccount.com");
+        job.setHttpOauthScope("scope-old");
+        return job;
+    }
+
+    private StoredJob incomingHttp() {
+        StoredJob incoming = new StoredJob();
+        incoming.setName(NAME);
+        incoming.setTargetType("HTTP");
+        return incoming;
+    }
+
+    @Test
+    void updateJobOauthTokenMaskReplacesOauthSettingsOnly() {
+        service.createJob(PARENT, httpOauthJob("j1"));
+        StoredJob incoming = incomingHttp();
+        incoming.setHttpOauthServiceAccountEmail("new@p1.iam.gserviceaccount.com");
+        incoming.setHttpOauthScope("scope-new");
+        StoredJob updated = service.updateJob(incoming, List.of("http_target.oauth_token"));
+        assertEquals("new@p1.iam.gserviceaccount.com", updated.getHttpOauthServiceAccountEmail());
+        assertEquals("scope-new", updated.getHttpOauthScope());
+        assertEquals("https://example.test/a", updated.getHttpUri());
+        assertEquals("POST", updated.getHttpMethod());
+    }
+
+    @Test
+    void updateJobOauthTokenMaskWithAbsentTokenClearsIt() {
+        service.createJob(PARENT, httpOauthJob("j1"));
+        StoredJob updated = service.updateJob(incomingHttp(), List.of("httpTarget.oauthToken"));
+        assertNull(updated.getHttpOauthServiceAccountEmail());
+        assertNull(updated.getHttpOauthScope());
+        assertEquals("https://example.test/a", updated.getHttpUri());
+    }
+
+    @Test
+    void updateJobOidcTokenMaskReplacesOauthTokenAsOneOf() {
+        service.createJob(PARENT, httpOauthJob("j1"));
+        StoredJob incoming = incomingHttp();
+        incoming.setHttpOidcServiceAccountEmail("oidc@p1.iam.gserviceaccount.com");
+        incoming.setHttpOidcAudience("aud");
+        StoredJob updated = service.updateJob(incoming, List.of("http_target.oidc_token"));
+        assertEquals("oidc@p1.iam.gserviceaccount.com", updated.getHttpOidcServiceAccountEmail());
+        assertEquals("aud", updated.getHttpOidcAudience());
+        assertNull(updated.getHttpOauthServiceAccountEmail());
+        assertNull(updated.getHttpOauthScope());
+    }
+
+    @Test
+    void updateJobHttpSubPathMasksLeaveOtherFieldsUntouched() {
+        service.createJob(PARENT, httpOauthJob("j1"));
+        StoredJob incoming = incomingHttp();
+        incoming.setHttpUri("https://example.test/b");
+        StoredJob updated = service.updateJob(incoming, List.of("http_target.uri"));
+        assertEquals("https://example.test/b", updated.getHttpUri());
+        assertEquals("POST", updated.getHttpMethod());
+        assertEquals("old@p1.iam.gserviceaccount.com", updated.getHttpOauthServiceAccountEmail());
+    }
+
+    @Test
+    void updateJobHttpSubPathMaskOnNonHttpJobIsRejected() {
+        service.createJob(PARENT, pubsubJob("j1"));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.updateJob(incomingHttp(), List.of("http_target.oauth_token")));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
 }

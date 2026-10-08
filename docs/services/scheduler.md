@@ -27,6 +27,8 @@ overriding the API endpoint / transport channel and disabling credentials:
 - Jobs: `CreateJob`, `GetJob`, `ListJobs`, `UpdateJob`, `DeleteJob`, `PauseJob`, `ResumeJob`, `RunJob`.
 - Targets: `PubsubTarget` (publishes into the local Pub/Sub backend), `HttpTarget` (real outbound
   HTTP request), `AppEngineHttpTarget` (recorded: there is no App Engine backend to dispatch to).
+  `HttpTarget.oauth_token` and `oidc_token` are stored and returned unchanged; no token is minted
+  or attached to the outbound request.
 - `schedule` is standard five-field unix-cron, interpreted in `time_zone` (default UTC).
 - Output-only `state`, `schedule_time`, `last_attempt_time`, and `status` are populated.
 

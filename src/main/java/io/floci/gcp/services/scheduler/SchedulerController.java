@@ -11,6 +11,8 @@ import com.google.cloud.scheduler.v1.HttpTarget;
 import com.google.cloud.scheduler.v1.Job;
 import com.google.cloud.scheduler.v1.ListJobsRequest;
 import com.google.cloud.scheduler.v1.ListJobsResponse;
+import com.google.cloud.scheduler.v1.OAuthToken;
+import com.google.cloud.scheduler.v1.OidcToken;
 import com.google.cloud.scheduler.v1.PauseJobRequest;
 import com.google.cloud.scheduler.v1.PubsubTarget;
 import com.google.cloud.scheduler.v1.ResumeJobRequest;
@@ -181,6 +183,13 @@ public class SchedulerController extends CloudSchedulerGrpc.CloudSchedulerImplBa
                 job.setHttpHeaders(t.getHeadersMap());
             }
             job.setHttpBody(t.getBody().toByteArray());
+            if (t.hasOauthToken()) {
+                job.setHttpOauthServiceAccountEmail(emptyToNull(t.getOauthToken().getServiceAccountEmail()));
+                job.setHttpOauthScope(emptyToNull(t.getOauthToken().getScope()));
+            } else if (t.hasOidcToken()) {
+                job.setHttpOidcServiceAccountEmail(emptyToNull(t.getOidcToken().getServiceAccountEmail()));
+                job.setHttpOidcAudience(emptyToNull(t.getOidcToken().getAudience()));
+            }
         } else if (proto.hasAppEngineHttpTarget()) {
             AppEngineHttpTarget t = proto.getAppEngineHttpTarget();
             job.setTargetType("APP_ENGINE");
@@ -246,6 +255,25 @@ public class SchedulerController extends CloudSchedulerGrpc.CloudSchedulerImplBa
             }
             if (stored.getHttpBody() != null) {
                 t.setBody(ByteString.copyFrom(stored.getHttpBody()));
+            }
+            if (stored.getHttpOauthServiceAccountEmail() != null || stored.getHttpOauthScope() != null) {
+                OAuthToken.Builder token = OAuthToken.newBuilder();
+                if (stored.getHttpOauthServiceAccountEmail() != null) {
+                    token.setServiceAccountEmail(stored.getHttpOauthServiceAccountEmail());
+                }
+                if (stored.getHttpOauthScope() != null) {
+                    token.setScope(stored.getHttpOauthScope());
+                }
+                t.setOauthToken(token.build());
+            } else if (stored.getHttpOidcServiceAccountEmail() != null || stored.getHttpOidcAudience() != null) {
+                OidcToken.Builder token = OidcToken.newBuilder();
+                if (stored.getHttpOidcServiceAccountEmail() != null) {
+                    token.setServiceAccountEmail(stored.getHttpOidcServiceAccountEmail());
+                }
+                if (stored.getHttpOidcAudience() != null) {
+                    token.setAudience(stored.getHttpOidcAudience());
+                }
+                t.setOidcToken(token.build());
             }
             b.setHttpTarget(t.build());
         } else if ("APP_ENGINE".equals(stored.getTargetType())) {

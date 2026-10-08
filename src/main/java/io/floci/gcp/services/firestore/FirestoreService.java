@@ -32,12 +32,14 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -86,16 +88,12 @@ public class FirestoreService {
     public record WriteCommitResult(String updateTime) {}
 
     public WriteCommitResult applyWrite(Write write, Instant commitTime) {
-        synchronized (writeLock) {
-            validateFieldPaths(write);
-            checkPrecondition(write);
-            return applyWriteUnchecked(write, commitTime);
-        }
+        return commit(List.of(write), null, commitTime).getFirst();
     }
 
     /**
-     * Applies a commit atomically: transaction read-set validation and all write
-     * preconditions are checked against the pre-commit state before any write lands.
+     * Validate against the pre-commit state, then stage every write and transform.
+     * Persistent storage publishes and persists the prepared batch as one snapshot.
      */
     public List<WriteCommitResult> commit(List<Write> writes, byte[] transactionId, Instant commitTime) {
         synchronized (writeLock) {
@@ -104,9 +102,22 @@ public class FirestoreService {
                 validateFieldPaths(write);
                 checkPrecondition(write);
             }
+            Set<String> targets = new HashSet<>();
+            Map<String, StoredDocument> candidate = new HashMap<>();
+            for (Write write : writes) {
+                String name = writeTargetName(write);
+                if (!name.isEmpty() && targets.add(name)) {
+                    documentStore.get(name).ifPresent(doc -> candidate.put(name, doc));
+                }
+            }
             List<WriteCommitResult> results = new ArrayList<>(writes.size());
             for (Write write : writes) {
-                results.add(applyWriteUnchecked(write, commitTime));
+                results.add(applyWriteUnchecked(write, commitTime, candidate));
+            }
+            if (!targets.isEmpty()) {
+                Set<String> deletes = new HashSet<>(targets);
+                deletes.removeAll(candidate.keySet());
+                documentStore.applyBatch(candidate, deletes);
             }
             discardTransaction(transactionId);
             return results;
@@ -177,7 +188,8 @@ public class FirestoreService {
         return "";
     }
 
-    private WriteCommitResult applyWriteUnchecked(Write write, Instant commitTime) {
+    private WriteCommitResult applyWriteUnchecked(Write write, Instant commitTime,
+                                                 Map<String, StoredDocument> candidate) {
         String now = commitTime.toString();
 
         if (write.hasUpdate()) {
@@ -186,7 +198,7 @@ public class FirestoreService {
             Map<String, StoredValue> incomingFields = convertFields(doc.getFieldsMap());
 
             if (write.hasUpdateMask()) {
-                Optional<StoredDocument> existing = documentStore.get(name);
+                Optional<StoredDocument> existing = Optional.ofNullable(candidate.get(name));
                 Map<String, StoredValue> merged = new LinkedHashMap<>(
                         existing.map(StoredDocument::getFields).orElse(new LinkedHashMap<>()));
 
@@ -201,55 +213,56 @@ public class FirestoreService {
                 }
 
                 String createTime = existing.map(StoredDocument::getCreateTime).orElse(now);
-                documentStore.put(name, new StoredDocument(name, createTime, now, merged));
+                candidate.put(name, new StoredDocument(name, createTime, now, merged));
             } else {
-                String createTime = documentStore.get(name)
+                String createTime = Optional.ofNullable(candidate.get(name))
                         .map(StoredDocument::getCreateTime).orElse(now);
-                documentStore.put(name, new StoredDocument(name, createTime, now, incomingFields));
+                candidate.put(name, new StoredDocument(name, createTime, now, incomingFields));
             }
 
             // Apply field transforms (server timestamps etc.) after the update
-            applyTransforms(name, write, now);
+            applyTransforms(name, write, now, candidate);
 
             return new WriteCommitResult(now);
         }
 
         if (!write.getDelete().isEmpty()) {
-            documentStore.delete(write.getDelete());
+            candidate.remove(write.getDelete());
             return new WriteCommitResult(null);
         }
 
         // standalone transform
         if (write.hasTransform()) {
             String docName = write.getTransform().getDocument();
-            applyDocumentTransform(docName, write.getTransform().getFieldTransformsList(), now);
+            applyDocumentTransform(docName, write.getTransform().getFieldTransformsList(), now, candidate);
             return new WriteCommitResult(now);
         }
 
         return new WriteCommitResult(now);
     }
 
-    private void applyTransforms(String name, Write write, String now) {
+    private void applyTransforms(String name, Write write, String now, Map<String, StoredDocument> candidate) {
         if (write.getUpdateTransformsCount() == 0) return;
-        Optional<StoredDocument> existing = documentStore.get(name);
+        Optional<StoredDocument> existing = Optional.ofNullable(candidate.get(name));
         existing.ifPresent(doc -> {
             Map<String, StoredValue> fields = new LinkedHashMap<>(doc.getFields());
             for (DocumentTransform.FieldTransform transform : write.getUpdateTransformsList()) {
                 applyFieldTransform(fields, transform, now);
             }
-            documentStore.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
+            candidate.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
         });
     }
 
-    private void applyDocumentTransform(String name, List<com.google.firestore.v1.DocumentTransform.FieldTransform> transforms, String now) {
-        Optional<StoredDocument> existing = documentStore.get(name);
+    private void applyDocumentTransform(String name, List<com.google.firestore.v1.DocumentTransform.FieldTransform> transforms,
+                                        String now, Map<String, StoredDocument> candidate) {
+        Optional<StoredDocument> existing = Optional.ofNullable(candidate.get(name));
         if (existing.isEmpty()) return;
         StoredDocument doc = existing.get();
         Map<String, StoredValue> fields = new LinkedHashMap<>(doc.getFields());
         for (DocumentTransform.FieldTransform transform : transforms) {
             applyFieldTransform(fields, transform, now);
         }
-        documentStore.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
+        candidate.put(name, new StoredDocument(name, doc.getCreateTime(), now, fields));
     }
 
     private void applyFieldTransform(Map<String, StoredValue> fields,

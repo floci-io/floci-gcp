@@ -1,6 +1,7 @@
 package io.floci.gcp.core.storage;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -18,6 +19,16 @@ public interface StorageBackend<K, V> {
     Optional<V> get(K key);
 
     void delete(K key);
+
+    /**
+     * Apply a prepared set of puts and deletes. Persistent storage overrides this
+     * compatibility implementation to persist and publish one atomic snapshot.
+     * Other storage modes retain their existing per-operation behavior.
+     */
+    default void applyBatch(Map<K, V> puts, Set<K> deletes) {
+        puts.forEach(this::put);
+        deletes.forEach(this::delete);
+    }
 
     /**
      * Return a new mutable list of values whose keys pass the filter. Callers may sort,

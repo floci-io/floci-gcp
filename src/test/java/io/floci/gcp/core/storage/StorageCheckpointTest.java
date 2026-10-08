@@ -46,6 +46,13 @@ class StorageCheckpointTest {
         Path invalidParent = tempDir.resolve("not-a-directory-" + mode);
         Files.writeString(invalidParent, "file");
         StorageBackend<String, String> storage = open(mode, invalidParent.resolve("store"), STRING_MAP, 60_000);
+        if (mode == StorageMode.PERSISTENT) {
+            // Write-through persistent storage must reject the mutation itself;
+            // a later checkpoint cannot repair or acknowledge unknown disk state.
+            assertThrows(StorageException.class, () -> storage.put("key", "value"));
+            assertThrows(StorageException.class, storage::checkpoint);
+            return;
+        }
         storage.put("key", "value");
 
         assertThrows(StorageException.class, storage::checkpoint);

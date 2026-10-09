@@ -354,7 +354,7 @@ public class ComputeService {
     static String singular(String collection) {
         return switch (collection) {
             case "addresses" -> "address"; case "targetHttpProxies" -> "targetHttpProxy";
-            case "urlMaps" -> "urlMap"; default -> collection.substring(0, collection.length() - 1);
+            case "urlMaps" -> "urlMap"; case "resourcePolicies" -> "resourcePolicy"; default -> collection.substring(0, collection.length() - 1);
         };
     }
     public static String required(ObjectNode body, String field) {

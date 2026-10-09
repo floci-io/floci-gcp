@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class ProtoJsonBytesTest {
+class ProtoJsonBytesServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"+/8=", "+/8", "-_8=", "-_8"})

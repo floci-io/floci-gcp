@@ -174,6 +174,34 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void parenthesizedQueriesAndNestedCtesRun() {
+        query("""
+                {"query": "(SELECT 1 + 1)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_")))
+                .body("rows[0].f.v", equalTo(List.of("2")));
+        query("""
+                {"query": "(SELECT 1 x) UNION ALL (SELECT 2 x) ORDER BY x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query("""
+                {"query": "(WITH s AS (SELECT 1 x) SELECT x + 1 FROM s)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_")))
+                .body("rows[0].f.v", equalTo(List.of("2")));
+        query("""
+                {"query": "SELECT *, (WITH s AS (SELECT 1 x) SELECT x FROM s) y FROM (WITH s AS (SELECT 1 x) SELECT x FROM s)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "y")))
+                .body("rows[0].f.v", equalTo(List.of("1", "1")));
+    }
+
+    @Test
+    @Order(5)
     void jsonTypeReturnsBigQueryTypeNames() {
         query("""
                 {"query": "SELECT JSON_TYPE(JSON '{\\"a\\": 1}'), JSON_TYPE(JSON '[1, 2]'), JSON_TYPE(JSON '\\"s\\"'), JSON_TYPE(JSON '20'), JSON_TYPE(JSON '-3'), JSON_TYPE(JSON '1.5'), JSON_TYPE(JSON '18446744073709551615'), JSON_TYPE(JSON 'true'), JSON_TYPE(JSON 'null'), JSON_TYPE(CAST(NULL AS JSON))", "useLegacySql": false}

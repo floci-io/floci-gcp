@@ -1219,6 +1219,22 @@ class PubSubServiceTest {
         unregister.run();
     }
 
+    @Test
+    void seekWithOutOfRangeTimeIsRejectedAndKeepsInFlightMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+
+        Timestamp invalid = Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build();
+        assertThrows(GcpException.class, () -> service.seek("projects/p1/subscriptions/s1", null, invalid));
+
+        assertEquals(0, service.pull("projects/p1/subscriptions/s1", 10).size());
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
     private static Timestamp secondsFromNow(long seconds) {
         return Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond() + seconds).build();
     }

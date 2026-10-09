@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
@@ -734,8 +735,16 @@ public class PubSubService {
         if (snapshotName != null) {
             getSnapshot(snapshotName);
         }
+        // Validate before touching either collection, so a bad time can't strand in-flight messages.
+        Instant cutoff = null;
+        if (time != null) {
+            if (!Timestamps.isValid(time)) {
+                throw GcpException.invalidArgument("Invalid seek time: " + time);
+            }
+            cutoff = Instant.ofEpochSecond(time.getSeconds(), time.getNanos());
+        }
         ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subscriptionName);
-        if (time == null) {
+        if (cutoff == null) {
             // Clear delivered to simulate seeking back to snapshot position
             if (deliveredMap != null) {
                 deliveredMap.clear();
@@ -746,11 +755,12 @@ public class PubSubService {
         // messages published at or after it become unacknowledged again, including in-flight ones.
         ConcurrentLinkedDeque<StoredMessage> queue =
                 queues.computeIfAbsent(subscriptionName, k -> new ConcurrentLinkedDeque<>());
-        queue.removeIf(msg -> isBefore(msg.getPublishTime(), time));
+        Instant seekTime = cutoff;
+        queue.removeIf(msg -> isBefore(msg.getPublishTime(), seekTime));
         if (deliveredMap != null) {
             for (String ackId : List.copyOf(deliveredMap.keySet())) {
                 StoredMessage msg = deliveredMap.remove(ackId);
-                if (msg != null && !isBefore(msg.getPublishTime(), time)) {
+                if (msg != null && !isBefore(msg.getPublishTime(), seekTime)) {
                     queue.addFirst(msg);
                 }
             }
@@ -760,13 +770,12 @@ public class PubSubService {
         }
     }
 
-    private static boolean isBefore(String publishTime, Timestamp time) {
+    private static boolean isBefore(String publishTime, Instant time) {
         if (publishTime == null) {
             return false;
         }
         try {
-            Instant published = Instant.parse(publishTime);
-            return published.isBefore(Instant.ofEpochSecond(time.getSeconds(), time.getNanos()));
+            return Instant.parse(publishTime).isBefore(time);
         } catch (DateTimeParseException e) {
             // publish() always stores Instant.toString(), so this only happens with corrupt state.
             // Keeping the message is the safe side: a seek must never lose data it can't date.

@@ -345,7 +345,7 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `ListSnapshots`
 - `UpdateSnapshot`
 - `DeleteSnapshot`
-- `Seek`
+- `Seek` (a seek to a time only affects unacknowledged messages, because acknowledged messages are not retained here even with `retain_acked_messages`; a seek to a snapshot does not restore its position yet)
 
 **IAM (`google.iam.v1.IAMPolicy` mixin: stored, never enforced):**
 

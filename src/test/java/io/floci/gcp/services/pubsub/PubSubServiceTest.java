@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -1233,6 +1234,42 @@ class PubSubServiceTest {
         assertEquals(0, service.pull("projects/p1/subscriptions/s1", 10).size());
         service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
         assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void seekToPastTimeRedeliversInPublishOrder() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        List<PubsubMessage> batch = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            batch.add(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("o" + i)).build());
+        }
+        service.publish("projects/p1/topics/t1", batch);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("o8")).build()));
+        assertEquals(9, service.pull("projects/p1/subscriptions/s1", 10).size());
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+
+        List<String> redelivered = service.pull("projects/p1/subscriptions/s1", 10).stream()
+                .map(m -> m.getMessage().getData().toStringUtf8())
+                .toList();
+        assertEquals(List.of("o0", "o1", "o2", "o3", "o4", "o5", "o6", "o7", "o8"), redelivered);
+    }
+
+    @Test
+    void seekToExactPublishTimeKeepsTheMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("at")).build()));
+        Timestamp publishTime = service.pull("projects/p1/subscriptions/s1", 10).get(0).getMessage().getPublishTime();
+
+        service.seek("projects/p1/subscriptions/s1", null, publishTime);
+
+        List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, messages.size());
+        assertEquals("at", messages.get(0).getMessage().getData().toStringUtf8());
     }
 
     private static Timestamp secondsFromNow(long seconds) {

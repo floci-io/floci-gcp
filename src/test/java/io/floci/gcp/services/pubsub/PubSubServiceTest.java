@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
@@ -20,12 +21,14 @@ import org.junit.jupiter.api.BeforeEach;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -1123,5 +1126,153 @@ class PubSubServiceTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void seekToTimePurgesMessagesPublishedBeforeIt() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("old")).build()));
+
+        Timestamp seekTime = Timestamp.newBuilder()
+                .setSeconds(Instant.now().getEpochSecond() + 60)
+                .build();
+        service.seek("projects/p1/subscriptions/s1", null, seekTime);
+
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("new")).build()));
+
+        List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, messages.size());
+        assertEquals("new", messages.get(0).getMessage().getData().toStringUtf8());
+    }
+
+    @Test
+    void seekToPastTimeRedeliversUnackedMessagesPublishedAfterIt() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        Timestamp seekTime = Timestamp.newBuilder()
+                .setSeconds(Instant.now().getEpochSecond() - 60)
+                .build();
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("in-flight")).build()));
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+
+        service.seek("projects/p1/subscriptions/s1", null, seekTime);
+
+        List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, messages.size());
+        assertEquals("in-flight", messages.get(0).getMessage().getData().toStringUtf8());
+    }
+
+    @Test
+    void ackBeforeSeekKeepsMessageAcknowledged() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("acked")).build()));
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 10);
+        service.acknowledge("projects/p1/subscriptions/s1", List.of(first.get(0).getAckId()));
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+
+        assertEquals(0, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void ackAfterSeekWithOldAckIdDoesNotDropRedeliveredMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        String oldAckId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        service.acknowledge("projects/p1/subscriptions/s1", List.of(oldAckId));
+
+        List<ReceivedMessage> again = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, again.size());
+        assertNotEquals(oldAckId, again.get(0).getAckId());
+    }
+
+    @Test
+    void seekThatRequeuesMessagesWakesStreamingListeners() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        service.pull("projects/p1/subscriptions/s1", 10);
+        AtomicInteger wakeups = new AtomicInteger();
+        Runnable unregister = service.registerMessageListener("projects/p1/subscriptions/s1", wakeups::incrementAndGet);
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(60));
+        assertEquals(0, wakeups.get());
+
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("n")).build()));
+        service.pull("projects/p1/subscriptions/s1", 10);
+        wakeups.set(0);
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        assertEquals(1, wakeups.get());
+        unregister.run();
+    }
+
+    @Test
+    void seekWithOutOfRangeTimeIsRejectedAndKeepsInFlightMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+
+        Timestamp invalid = Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build();
+        assertThrows(GcpException.class, () -> service.seek("projects/p1/subscriptions/s1", null, invalid));
+
+        assertEquals(0, service.pull("projects/p1/subscriptions/s1", 10).size());
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void seekToPastTimeRedeliversInPublishOrder() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        List<PubsubMessage> batch = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            batch.add(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("o" + i)).build());
+        }
+        service.publish("projects/p1/topics/t1", batch);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("o8")).build()));
+        assertEquals(9, service.pull("projects/p1/subscriptions/s1", 10).size());
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+
+        List<String> redelivered = service.pull("projects/p1/subscriptions/s1", 10).stream()
+                .map(m -> m.getMessage().getData().toStringUtf8())
+                .toList();
+        assertEquals(List.of("o0", "o1", "o2", "o3", "o4", "o5", "o6", "o7", "o8"), redelivered);
+    }
+
+    @Test
+    void seekToExactPublishTimeKeepsTheMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("at")).build()));
+        Timestamp publishTime = service.pull("projects/p1/subscriptions/s1", 10).get(0).getMessage().getPublishTime();
+
+        service.seek("projects/p1/subscriptions/s1", null, publishTime);
+
+        List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, messages.size());
+        assertEquals("at", messages.get(0).getMessage().getData().toStringUtf8());
+    }
+
+    private static Timestamp secondsFromNow(long seconds) {
+        return Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond() + seconds).build();
     }
 }

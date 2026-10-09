@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
@@ -32,6 +33,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.Base64;
@@ -40,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Map;
@@ -727,16 +730,92 @@ public class PubSubService {
         iamService.deleteResourceAndPolicy(snapshotName, () -> snapshotStore.delete(snapshotName));
     }
 
-    public void seek(String subscriptionName, String snapshotName) {
-        LOG.infof("seek subscription=%s snapshot=%s", subscriptionName, snapshotName);
+    public void seek(String subscriptionName, String snapshotName, Timestamp time) {
+        LOG.infof("seek subscription=%s snapshot=%s time=%s", subscriptionName, snapshotName, describe(time));
         getSubscription(subscriptionName);
         if (snapshotName != null) {
             getSnapshot(snapshotName);
         }
-        // Minimal: clear delivered to simulate seeking back to snapshot position
+        // Validate before touching either collection, so a bad time can't strand in-flight messages.
+        Instant cutoff = null;
+        if (time != null) {
+            if (!Timestamps.isValid(time)) {
+                throw GcpException.invalidArgument("Invalid seek time: " + describe(time));
+            }
+            cutoff = Instant.ofEpochSecond(time.getSeconds(), time.getNanos());
+        }
         ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subscriptionName);
+        if (cutoff == null) {
+            // Clear delivered to simulate seeking back to snapshot position
+            if (deliveredMap != null) {
+                deliveredMap.clear();
+            }
+            return;
+        }
+        // Seek to a time: messages published before it count as acknowledged and are dropped,
+        // messages published at or after it become unacknowledged again, including in-flight ones.
+        ConcurrentLinkedDeque<StoredMessage> queue =
+                queues.computeIfAbsent(subscriptionName, k -> new ConcurrentLinkedDeque<>());
+        Instant seekTime = cutoff;
+        queue.removeIf(msg -> isBefore(msg.getPublishTime(), seekTime));
         if (deliveredMap != null) {
-            deliveredMap.clear();
+            List<StoredMessage> requeued = new ArrayList<>();
+            for (String ackId : List.copyOf(deliveredMap.keySet())) {
+                StoredMessage msg = deliveredMap.remove(ackId);
+                if (msg != null && !isBefore(msg.getPublishTime(), seekTime)) {
+                    requeued.add(msg);
+                }
+            }
+            // deliveredMap iterates in ack id hash order; put redelivered messages back in publish order.
+            requeued.sort(PUBLISH_ORDER);
+            for (int i = requeued.size() - 1; i >= 0; i--) {
+                queue.addFirst(requeued.get(i));
+            }
+        }
+        if (!queue.isEmpty()) {
+            notifyListeners(subscriptionName);
+        }
+    }
+
+    private static final Comparator<StoredMessage> PUBLISH_ORDER = Comparator
+            .comparing((StoredMessage m) -> publishInstant(m.getPublishTime()))
+            .thenComparingLong(m -> messageIdOrder(m.getMessageId()));
+
+    private static Instant publishInstant(String publishTime) {
+        if (publishTime == null) {
+            return Instant.MAX;
+        }
+        try {
+            return Instant.parse(publishTime);
+        } catch (DateTimeParseException e) {
+            return Instant.MAX;
+        }
+    }
+
+    private static long messageIdOrder(String messageId) {
+        try {
+            return Long.parseLong(messageId);
+        } catch (NumberFormatException e) {
+            // Ids come from messageIdCounter, so this only orders corrupt state; sort it last.
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private static String describe(Timestamp time) {
+        return time == null ? "none" : "seconds=" + time.getSeconds() + " nanos=" + time.getNanos();
+    }
+
+    private static boolean isBefore(String publishTime, Instant time) {
+        if (publishTime == null) {
+            return false;
+        }
+        try {
+            return Instant.parse(publishTime).isBefore(time);
+        } catch (DateTimeParseException e) {
+            // publish() always stores Instant.toString(), so this only happens with corrupt state.
+            // Keeping the message is the safe side: a seek must never lose data it can't date.
+            LOG.warnf("seek: cannot parse publishTime=%s, keeping message: %s", publishTime, e.getMessage());
+            return false;
         }
     }
 

@@ -1,7 +1,10 @@
 package io.floci.gcp.services.pubsub;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.SeekRequest;
+import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Subscription;
@@ -13,6 +16,7 @@ import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -142,6 +146,45 @@ class PubSubSubscriberControllerTest {
         assertEquals(Status.Code.INVALID_ARGUMENT,
                 ((StatusRuntimeException) error).getStatus().getCode());
         assertTrue(responseObserver.values.isEmpty());
+    }
+
+    @Test
+    void seekOverGrpcWithTimeDropsMessagesPublishedBeforeIt() {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("before"))
+                .build()));
+
+        RecordingObserver<SeekResponse> responseObserver = new RecordingObserver<>();
+        controller.seek(SeekRequest.newBuilder()
+                .setSubscription(subscription)
+                .setTime(Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond() + 60))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals(1, responseObserver.values.size());
+        assertTrue(service.pull(subscription, 10).isEmpty(), "a message published before the seek time is acknowledged");
+    }
+
+    @Test
+    void seekOverGrpcWithInvalidTimeReturnsOneLineInvalidArgument() {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+
+        RecordingObserver<SeekResponse> responseObserver = new RecordingObserver<>();
+        controller.seek(SeekRequest.newBuilder()
+                .setSubscription(subscription)
+                .setTime(Timestamp.newBuilder().setSeconds(1L << 62))
+                .build(), responseObserver);
+
+        Status status = ((StatusRuntimeException) responseObserver.error.get()).getStatus();
+        assertEquals(Status.Code.INVALID_ARGUMENT, status.getCode());
+        assertEquals("Invalid seek time: seconds=4611686018427387904 nanos=0", status.getDescription());
     }
 
     private static final class RecordingObserver<T> implements StreamObserver<T> {

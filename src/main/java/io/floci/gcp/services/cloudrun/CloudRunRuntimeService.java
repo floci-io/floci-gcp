@@ -281,7 +281,8 @@ public class CloudRunRuntimeService {
         builder.withDockerNetwork(Optional.empty())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
-                .withLabels(workloadLabels(project, location, resourceName));
+                .withLabels(workloadLabels(project, location, resourceName))
+                .withSecurityOpts(configuredSecurityOpts());
 
         builder.withEnv(env.entrySet().stream()
                 .map(e -> e.getKey() + "=" + e.getValue())
@@ -1110,6 +1111,13 @@ public class CloudRunRuntimeService {
                 SERVICE_TOKEN, lastSegment(resourceName), project, location);
         labels.put(RESOURCE_NAME_LABEL, resourceName);
         return labels;
+    }
+
+    private List<String> configuredSecurityOpts() {
+        return config.services().cloudrun().execution().securityOpts().orElse(List.of()).stream()
+                .map(String::strip)
+                .filter(opt -> !opt.isEmpty())
+                .toList();
     }
 
     /**

@@ -125,6 +125,7 @@ floci-gcp:
         cleanup-timeout: 15s
         url-host-suffix:
         max-worker-instances: 1
+        security-opts:                # FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS=seccomp=unconfined
     cloudfunctions:
       enabled: true
     monitoring:

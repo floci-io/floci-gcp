@@ -177,6 +177,28 @@ class CloudRunRuntimeServiceTest {
     }
 
     @Test
+    void workloadSpecUsesDockerDefaultSecurityProfileUnlessConfigured() {
+        Container container = Container.newBuilder().setImage("alpine:3.22").build();
+
+        ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",
+                "projects/p1/locations/us-central1/jobs/userns", "task-0", container, Map.of(), null, List.of());
+
+        assertEquals(List.of(), spec.securityOpts());
+    }
+
+    @Test
+    void workloadSpecAppliesConfiguredSecurityOpts() {
+        when(config.services().cloudrun().execution().securityOpts())
+                .thenReturn(Optional.of(List.of("seccomp=unconfined", " apparmor=unconfined", " ")));
+        Container container = Container.newBuilder().setImage("alpine:3.22").build();
+
+        ContainerSpec spec = runtimeService.buildWorkloadSpec("p1", "us-central1",
+                "projects/p1/locations/us-central1/jobs/userns", "task-0", container, Map.of(), null, List.of());
+
+        assertEquals(List.of("seccomp=unconfined", "apparmor=unconfined"), spec.securityOpts());
+    }
+
+    @Test
     void ingressUsesHttp11ByDefaultAndH2cWhenExplicitlyConfigured() {
         Container defaultContainer = Container.newBuilder()
                 .addPorts(ContainerPort.newBuilder().setContainerPort(8080))

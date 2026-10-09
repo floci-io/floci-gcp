@@ -13,6 +13,7 @@ floci-gcp emulates the Cloud Run Admin API v2 control plane over REST JSON using
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_CLEANUP_TIMEOUT` | `15s` | Maximum time to wait for best-effort Docker cleanup after an operation is already resolved |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_URL_HOST_SUFFIX` | `localhost.floci.io` or `FLOCI_GCP_HOSTNAME` | Host suffix used for generated Cloud Run execution URLs |
 | `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_MAX_WORKER_INSTANCES` | `1` | Maximum replica containers run per worker pool (see [Worker Pools](#worker-pools)) |
+| `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` | unset | Comma-separated Docker security options for every workload container (see [Security options](#security-options)) |
 
 ## Supported API Surface
 
@@ -65,6 +66,20 @@ The invocation proxy accepts both generated host-routed URLs and the legacy pref
 `validateOnly=true` returns a successful completed operation without storing or deleting resources. Validate-only operations are not retained for later operation get/list calls.
 
 Deleting a service revision that is the service's `latestReadyRevision` or is named in its `trafficStatuses` fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Other revisions are removed and the completed operation returns the revision with `deleteTime` and `expireTime` set. Runtime containers are not touched by revision delete; retired service revisions have no running container.
+
+### Security options
+
+Cloud Run lets a container create an unprivileged user namespace (`unshare(CLONE_NEWUSER)`), which rootless sandboxes such as bubblewrap rely on. Docker's default seccomp profile rejects that call with `EPERM`, so floci-gcp workload containers cannot do it by default. Set `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` to pass Docker security options to every Cloud Run workload container (services, job tasks, worker pool replicas, and instances), and to no other container floci-gcp starts:
+
+```bash
+FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS=seccomp=unconfined
+```
+
+Hosts that enforce AppArmor may also need `apparmor=unconfined`, for example `seccomp=unconfined,apparmor=unconfined`. Leaving the variable unset keeps Docker's default profile, because running arbitrary images unconfined on the host's Docker daemon is a poor default.
+
+floci-gcp strips whitespace around each entry and drops empty entries, so `seccomp=unconfined, apparmor=unconfined` works. It does not validate the values. Docker checks them only when it creates a workload container. An invalid option such as `foo=bar` does not stop floci-gcp from starting, but every job run and service create then fails with code 13 (`INTERNAL`) and Docker's error message.
+
+For seccomp, `seccomp=unconfined` is the supported value. A custom profile file does not work. `docker run --security-opt seccomp=profile.json` reads the file in the Docker CLI and sends its contents, but floci-gcp passes the value to the Docker API unchanged, and the API expects the profile JSON itself.
 
 ## SDK Usage
 

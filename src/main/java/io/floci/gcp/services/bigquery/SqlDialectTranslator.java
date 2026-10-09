@@ -1798,12 +1798,15 @@ final class SqlDialectTranslator {
                 depth++;
             } else if (t.isPunct(")") || t.isPunct("]")) {
                 depth--;
-            } else if (depth == 0 && (t.isKeyword("IGNORE") || t.isKeyword("RESPECT"))) {
+            } else if (depth > 0 || isPrecededByDot(k)) {
+                // A field name after a dot may be a keyword: `t.limit`, `t.ignore`.
+                continue;
+            } else if (t.isKeyword("IGNORE") || t.isKeyword("RESPECT")) {
                 int nulls = nextSignificant(k + 1, close);
                 if (nulls >= 0 && tokens.get(nulls).isKeyword("NULLS")) {
                     modifier = k;
                 }
-            } else if (depth == 0 && t.isKeyword("LIMIT")) {
+            } else if (t.isKeyword("LIMIT")) {
                 limit = k;
             }
         }

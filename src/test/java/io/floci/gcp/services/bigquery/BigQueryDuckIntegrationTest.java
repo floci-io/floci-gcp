@@ -303,6 +303,19 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void arrayAggFieldsNamedLikeKeywordsAreFields() {
+        query("""
+                {"query": "SELECT ARRAY_AGG(t.limit ORDER BY t.limit) AS a, ARRAY_AGG(t.limit ORDER BY t.limit DESC LIMIT 1) AS b, ARRAY_AGG(t.ignore ORDER BY t.ignore DESC) AS c, ARRAY_AGG(t.respect IGNORE NULLS ORDER BY t.ignore) AS d FROM UNNEST([STRUCT(2 AS `limit`, 1 AS `ignore`, 5 AS `respect`), STRUCT(1 AS `limit`, 3 AS `ignore`, CAST(NULL AS INT64) AS `respect`)]) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "2")))
+                .body("rows[0].f[1].v.v", equalTo(List.of("2")))
+                .body("rows[0].f[2].v.v", equalTo(List.of("3", "1")))
+                .body("rows[0].f[3].v.v", equalTo(List.of("5")));
+    }
+
+    @Test
+    @Order(5)
     void arrayAggLimitMatchesBigQuery() {
         query("""
                 {"query": "SELECT ARRAY_AGG(x IGNORE NULLS ORDER BY x DESC LIMIT 2) top2, ARRAY_AGG(x IGNORE NULLS ORDER BY x LIMIT 1) lowest, ARRAY_AGG(DISTINCT x IGNORE NULLS ORDER BY x LIMIT 2) d, ARRAY_AGG(x LIMIT 0) z FROM UNNEST([3, 1, NULL, 2, 3]) x", "useLegacySql": false}

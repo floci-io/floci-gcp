@@ -24,6 +24,7 @@ import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.StorageBackend;
@@ -94,6 +95,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     private final TaskRunner dockerRunner;
     private final CloudRunJobsRuntime runtime;
     private final Clock clock;
+    private final LocationCatalog locations;
     private final ConcurrentHashMap<String, CloudRunExecutionCoordinator> coordinators = new ConcurrentHashMap<>();
     private final Set<CloudRunExecutionCoordinator> live = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> jobLocks = new ConcurrentHashMap<>();
@@ -110,7 +112,8 @@ public class CloudRunJobsService implements ContainerTeardown {
                                LongRunningOperationsService operations,
                                IamService iamService,
                                EmulatorConfig config,
-                               CloudRunJobsRuntime runtime) {
+                               CloudRunJobsRuntime runtime,
+                               LocationCatalog locations) {
         this(storageFactory.createGlobal("cloudrun-jobs", "cloudrun-jobs.json",
                         new TypeReference<Map<String, String>>() {}),
                 storageFactory.createGlobal("cloudrun-executions", "cloudrun-executions.json",
@@ -119,7 +122,7 @@ public class CloudRunJobsService implements ContainerTeardown {
                         new TypeReference<Map<String, String>>() {}),
                 storageFactory.createGlobal("cloudrun-execution-tombstones", "cloudrun-execution-tombstones.json",
                         new TypeReference<Map<String, String>>() {}),
-                operations, iamService, config, runtime, runtime, Clock.systemUTC());
+                operations, iamService, config, runtime, runtime, Clock.systemUTC(), locations);
     }
 
     CloudRunJobsService(StorageBackend<String, String> jobStore,
@@ -131,7 +134,8 @@ public class CloudRunJobsService implements ContainerTeardown {
                         EmulatorConfig config,
                         TaskRunner dockerRunner,
                         CloudRunJobsRuntime runtime,
-                        Clock clock) {
+                        Clock clock,
+                        LocationCatalog locations) {
         this.jobStore = jobStore;
         this.executionStore = executionStore;
         this.taskStore = taskStore;
@@ -142,6 +146,7 @@ public class CloudRunJobsService implements ContainerTeardown {
         this.dockerRunner = dockerRunner;
         this.runtime = runtime;
         this.clock = clock;
+        this.locations = locations;
     }
 
     void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent event) {
@@ -175,6 +180,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     // ── Jobs ────────────────────────────────────────────────────────────────
 
     public Operation createJob(String project, String location, String jobId, String body, boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         Job requested = ProtoJson.merge(body, Job.newBuilder()).build();
         String id = firstPresent(jobId, CloudRunRuntimeService.lastSegment(requested.getName()));
         if (id == null) {
@@ -206,6 +212,7 @@ public class CloudRunJobsService implements ContainerTeardown {
     }
 
     public ListJobsResponse listJobs(String project, String location, int pageSize, String pageToken) {
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = parent(project, location) + "/jobs/";
         List<Job> jobs = jobStore.scan(key -> key.startsWith(prefix)).stream()
                 .map(CloudRunJobsService::parseJob)

@@ -21,6 +21,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.StorageBackend;
@@ -91,6 +92,7 @@ public class CloudRunInstancesService implements ContainerTeardown {
     private final CloudRunInstancesRuntime runtime;
     private final CloudRunUrlService urlService;
     private final boolean mock;
+    private final LocationCatalog locations;
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentHashMap<String, InstanceSlot> slots = new ConcurrentHashMap<>();
     private final ExecutorService workExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -102,11 +104,12 @@ public class CloudRunInstancesService implements ContainerTeardown {
                                     CloudRunService cloudRunService,
                                     CloudRunInstancesRuntime runtime,
                                     CloudRunUrlService urlService,
-                                    EmulatorConfig config) {
+                                    EmulatorConfig config,
+                                    LocationCatalog locations) {
         this(storageFactory.createGlobal("cloudrun-instances", "cloudrun-instances.json",
                         new TypeReference<Map<String, String>>() {}),
                 operations, iamService, cloudRunService::serviceExists, runtime, urlService,
-                config.services().cloudrun().mock());
+                config.services().cloudrun().mock(), locations);
     }
 
     CloudRunInstancesService(StorageBackend<String, String> instanceStore,
@@ -115,7 +118,8 @@ public class CloudRunInstancesService implements ContainerTeardown {
                              Predicate<String> serviceExists,
                              CloudRunInstancesRuntime runtime,
                              CloudRunUrlService urlService,
-                             boolean mock) {
+                             boolean mock,
+                             LocationCatalog locations) {
         this.instanceStore = instanceStore;
         this.operations = operations;
         this.iamService = iamService;
@@ -123,6 +127,7 @@ public class CloudRunInstancesService implements ContainerTeardown {
         this.runtime = runtime;
         this.urlService = urlService;
         this.mock = mock;
+        this.locations = locations;
     }
 
     /**
@@ -152,6 +157,7 @@ public class CloudRunInstancesService implements ContainerTeardown {
 
     public Operation createInstance(String project, String location, String instanceId, String body,
                                     boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         Instance requested = ProtoJson.merge(body, Instance.newBuilder()).build();
         String id = instanceId == null || instanceId.isBlank() ? generateUniqueId(project, location) : instanceId;
         String name = parent(project, location) + "/instances/" + id;
@@ -173,6 +179,7 @@ public class CloudRunInstancesService implements ContainerTeardown {
     }
 
     public ListInstancesResponse listInstances(String project, String location, int pageSize, String pageToken) {
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = parent(project, location) + "/instances/";
         List<Instance> instances = instanceStore.scan(key -> key.startsWith(prefix)).stream()
                 .map(CloudRunInstancesService::parse)

@@ -7,7 +7,9 @@ import com.google.protobuf.Any;
 import com.google.protobuf.Message;
 import com.google.protobuf.Timestamp;
 import com.google.rpc.Status;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
 import io.floci.gcp.services.iam.IamService;
@@ -224,7 +226,8 @@ class CloudRunInstancesServiceTest {
         verify(runtime).stopAll();
 
         CloudRunInstancesRuntime mockRuntime = mock(CloudRunInstancesRuntime.class);
-        new CloudRunInstancesService(store, operations, iamService, name -> false, mockRuntime, urlService, true)
+        EmulatorConfig c = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        new CloudRunInstancesService(store, operations, iamService, name -> false, mockRuntime, urlService, true, new LocationCatalog(c))
                 .stopManagedContainers();
         verify(mockRuntime, never()).stopAll();
     }
@@ -343,7 +346,8 @@ class CloudRunInstancesServiceTest {
     }
 
     private CloudRunInstancesService dockerService() {
-        return new CloudRunInstancesService(store, operations, iamService, name -> false, runtime, urlService, false);
+        EmulatorConfig c = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        return new CloudRunInstancesService(store, operations, iamService, name -> false, runtime, urlService, false, new LocationCatalog(c));
     }
 
     private Instance awaitComplete(Operation operation) throws Exception {

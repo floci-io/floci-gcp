@@ -30,6 +30,7 @@ import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.StorageBackend;
@@ -108,6 +109,7 @@ public class CloudRunWorkerPoolsService {
     private final IamService iamService;
     private final EmulatorConfig config;
     private final CloudRunWorkerPoolRuntime workerRuntime;
+    private final LocationCatalog locations;
     private final Map<String, Object> poolLocks = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<Void>> reconcileTails = new ConcurrentHashMap<>();
     private final ExecutorService reconcileExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -123,12 +125,13 @@ public class CloudRunWorkerPoolsService {
                                       LongRunningOperationsService operations,
                                       IamService iamService,
                                       EmulatorConfig config,
-                                      CloudRunWorkerPoolRuntime workerRuntime) {
+                                      CloudRunWorkerPoolRuntime workerRuntime,
+                                      LocationCatalog locations) {
         this(storageFactory.createGlobal("cloudrun-worker-pools", "cloudrun-worker-pools.json",
                         new TypeReference<Map<String, String>>() {}),
                 storageFactory.createGlobal("cloudrun-revisions", "cloudrun-revisions.json",
                         new TypeReference<Map<String, String>>() {}),
-                operations, iamService, config, workerRuntime);
+                operations, iamService, config, workerRuntime, locations);
     }
 
     CloudRunWorkerPoolsService(StorageBackend<String, String> workerPoolStore,
@@ -136,13 +139,15 @@ public class CloudRunWorkerPoolsService {
                                LongRunningOperationsService operations,
                                IamService iamService,
                                EmulatorConfig config,
-                               CloudRunWorkerPoolRuntime workerRuntime) {
+                               CloudRunWorkerPoolRuntime workerRuntime,
+                               LocationCatalog locations) {
         this.workerPoolStore = workerPoolStore;
         this.revisionStore = revisionStore;
         this.operations = operations;
         this.iamService = iamService;
         this.config = config;
         this.workerRuntime = workerRuntime;
+        this.locations = locations;
     }
 
     void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent event) {
@@ -194,6 +199,7 @@ public class CloudRunWorkerPoolsService {
 
     public Operation createWorkerPool(String project, String location, String workerPoolId,
                                       String body, boolean validateOnly) {
+        locations.requireLocation(location, LocationCatalog.Kind.REGION);
         WorkerPool requested = ProtoJson.merge(body, WorkerPool.newBuilder()).build();
         String id = firstPresent(workerPoolId, GcpResourceNames.lastSegment(requested.getName()));
         if (id == null) {
@@ -212,6 +218,7 @@ public class CloudRunWorkerPoolsService {
     }
 
     public ListWorkerPoolsResponse listWorkerPools(String project, String location, int pageSize, String pageToken) {
+        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
         String prefix = parent(project, location) + "/workerPools/";
         List<WorkerPool> pools = workerPoolStore.scan(key -> key.startsWith(prefix)).stream()
                 .map(CloudRunWorkerPoolsService::parsePool)

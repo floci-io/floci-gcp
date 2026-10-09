@@ -72,7 +72,7 @@ text, so this wording is floci-gcp's own.
 
 | API | Checked on | Accepted locations |
 |---|---|---|
-| Cloud Run v2 | service create, service list | catalog regions |
+| Cloud Run v2 | service, job, worker pool, instance create and list | catalog regions |
 | Cloud Functions v2 | function create, function list | catalog regions |
 | Cloud KMS | key ring create, key ring list | catalog regions, `global`, `us`, `europe`, `asia` |
 | Cloud Tasks | queue create, queue list | catalog regions |

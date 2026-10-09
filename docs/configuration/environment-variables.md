@@ -72,7 +72,7 @@ See [Locations](../services/locations.md).
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_GCP_LOCATIONS_STRICT` | `false` | Reject unknown locations on regional create and list calls (Cloud Run services, Cloud Functions, KMS, Cloud Tasks, Cloud Scheduler, Eventarc, Managed Kafka, GKE), and location combinations that cannot exist (such as a Cloud SQL `settings.locationPreference.zone` outside the instance region), with `INVALID_ARGUMENT`. Off by default: such requests are accepted as sent |
+| `FLOCI_GCP_LOCATIONS_STRICT` | `false` | Reject unknown locations on regional create and list calls (Cloud Run resources, Cloud Functions, KMS, Cloud Tasks, Cloud Scheduler, Eventarc, Managed Kafka, GKE), and location combinations that cannot exist (such as a Cloud SQL `settings.locationPreference.zone` outside the instance region), with `INVALID_ARGUMENT`. Off by default: such requests are accepted as sent |
 | `FLOCI_GCP_SERVICES_COMPUTE_REGIONS` | _(unset)_ | Optional comma-separated Compute Engine region allow-list. Unset serves every catalog region with its real zones |
 
 ---

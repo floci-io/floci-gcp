@@ -12,6 +12,7 @@ import com.google.protobuf.Message;
 import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageFactory;
@@ -73,8 +74,9 @@ class CloudRunWorkerPoolsServiceTest {
         Operation leftoverOperation = operations.pending("projects/p/locations/gone",
                 WorkerPool.newBuilder().setName("projects/p/locations/gone/workerPools/old").build());
         Operation otherOperation = operations.pending(PARENT, Revision.newBuilder().setName(REVISION).build());
+        EmulatorConfig c = config(false);
         CloudRunWorkerPoolsService service = new CloudRunWorkerPoolsService(pools, revisions, operations, null,
-                config(false), runtime);
+                c, runtime, new LocationCatalog(c));
 
         try {
             service.recoverAfterRestart();
@@ -106,8 +108,9 @@ class CloudRunWorkerPoolsServiceTest {
         pools.put(POOL, ProtoJson.print(reconcilingPool()));
         revisions.put(REVISION, ProtoJson.print(Revision.newBuilder().setName(REVISION).setReconciling(true).build()));
         Operation poolOperation = operations.pending(PARENT, reconcilingPool());
+        EmulatorConfig c = config(true);
         CloudRunWorkerPoolsService service = new CloudRunWorkerPoolsService(pools, revisions, operations, null,
-                config(true), runtime);
+                c, runtime, new LocationCatalog(c));
 
         try {
             service.recoverAfterRestart();
@@ -285,7 +288,8 @@ class CloudRunWorkerPoolsServiceTest {
             invocation.<Runnable>getArgument(1).run();
             return null;
         }).when(iamService).deleteResourceAndPolicy(anyString(), any());
-        return new CloudRunWorkerPoolsService(pools, revisions, operations, iamService, config(false), runtime);
+        EmulatorConfig c = config(false);
+        return new CloudRunWorkerPoolsService(pools, revisions, operations, iamService, c, runtime, new LocationCatalog(c));
     }
 
     private static WorkerPool awaitSettled(CloudRunWorkerPoolsService service) {

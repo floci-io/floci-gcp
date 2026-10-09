@@ -14,6 +14,7 @@ import com.google.protobuf.Duration;
 import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
@@ -628,13 +629,18 @@ class CloudRunJobsServiceTest {
         }
 
         CloudRunJobsService service(EmulatorConfig config, CloudRunExecutionCoordinator.TaskRunner runner) {
+            EmulatorConfig safeConfig = config;
+            if (safeConfig == null) {
+                safeConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+                when(safeConfig.services().cloudrun().mock()).thenReturn(true);
+            }
             IamService iamService = mock(IamService.class);
             doAnswer(invocation -> {
                 invocation.<Runnable>getArgument(1).run();
                 return null;
             }).when(iamService).deleteResourceAndPolicy(anyString(), any());
             return new CloudRunJobsService(jobs, executions, tasks, tombstones, operations, iamService,
-                    config, runner, null, Clock.systemUTC());
+                    safeConfig, runner, null, Clock.systemUTC(), new LocationCatalog(safeConfig));
         }
     }
 

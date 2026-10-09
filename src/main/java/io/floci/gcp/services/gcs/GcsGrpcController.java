@@ -37,6 +37,7 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsComposeSource;
+import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
@@ -300,7 +301,7 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
         try {
             String bucket = GcsGrpcMapper.bucketId(request.getBucket());
             requireRead(bucket, request.getObject());
-            var download = service.getObjectForDownload(bucket, request.getObject(),
+            GcsObjectDownload download = service.getObjectForDownload(bucket, request.getObject(),
                     request.getGeneration() == 0 ? null : Long.toString(request.getGeneration()),
                     GcsCustomerEncryption.none());
             checkObjectPreconditions(download.meta(),

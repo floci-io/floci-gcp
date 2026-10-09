@@ -468,7 +468,7 @@ public class PubSubService {
                     ? Map.of() : stored.getAttributes();
 
             int fanOut = 0;
-            for (var entry : subStore.keys()) {
+            for (String entry : subStore.keys()) {
                 StoredSubscription sub = subStore.get(entry).orElse(null);
                 if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())
                         && matchesFilter(sub, attributes)) {

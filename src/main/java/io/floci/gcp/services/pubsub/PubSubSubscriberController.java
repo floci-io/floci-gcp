@@ -355,7 +355,8 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         LOG.infof("seek subscription=%s", request.getSubscription());
         try {
             String snapshotName = request.hasSnapshot() ? request.getSnapshot() : null;
-            service.seek(request.getSubscription(), snapshotName);
+            Timestamp time = request.hasTime() ? request.getTime() : null;
+            service.seek(request.getSubscription(), snapshotName, time);
             responseObserver.onNext(SeekResponse.getDefaultInstance());
             responseObserver.onCompleted();
         } catch (Exception e) {

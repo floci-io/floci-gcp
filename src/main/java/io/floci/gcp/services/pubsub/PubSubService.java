@@ -727,16 +727,47 @@ public class PubSubService {
         iamService.deleteResourceAndPolicy(snapshotName, () -> snapshotStore.delete(snapshotName));
     }
 
-    public void seek(String subscriptionName, String snapshotName) {
-        LOG.infof("seek subscription=%s snapshot=%s", subscriptionName, snapshotName);
+    public void seek(String subscriptionName, String snapshotName, Timestamp time) {
+        LOG.infof("seek subscription=%s snapshot=%s time=%s", subscriptionName, snapshotName, time);
         getSubscription(subscriptionName);
         if (snapshotName != null) {
             getSnapshot(snapshotName);
         }
-        // Minimal: clear delivered to simulate seeking back to snapshot position
         ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subscriptionName);
+        if (time == null) {
+            // Clear delivered to simulate seeking back to snapshot position
+            if (deliveredMap != null) {
+                deliveredMap.clear();
+            }
+            return;
+        }
+        // Seek to a time: messages published before it count as acknowledged and are dropped,
+        // messages published at or after it become unacknowledged again, including in-flight ones.
+        ConcurrentLinkedDeque<StoredMessage> queue =
+                queues.computeIfAbsent(subscriptionName, k -> new ConcurrentLinkedDeque<>());
+        queue.removeIf(msg -> isBefore(msg.getPublishTime(), time));
         if (deliveredMap != null) {
-            deliveredMap.clear();
+            for (String ackId : List.copyOf(deliveredMap.keySet())) {
+                StoredMessage msg = deliveredMap.remove(ackId);
+                if (msg != null && !isBefore(msg.getPublishTime(), time)) {
+                    queue.addFirst(msg);
+                }
+            }
+        }
+        if (!queue.isEmpty()) {
+            notifyListeners(subscriptionName);
+        }
+    }
+
+    private static boolean isBefore(String publishTime, Timestamp time) {
+        if (publishTime == null) {
+            return false;
+        }
+        try {
+            Instant published = Instant.parse(publishTime);
+            return published.isBefore(Instant.ofEpochSecond(time.getSeconds(), time.getNanos()));
+        } catch (Exception e) {
+            return false;
         }
     }
 

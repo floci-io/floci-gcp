@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKey;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKeyVersion;
 import io.floci.gcp.services.cloudkms.model.StoredKeyRing;
@@ -341,7 +342,7 @@ public class CloudKmsHttpController {
             if (body != null && body.get("digest") instanceof Map<?, ?> d) {
                 Object sha256 = ((Map<String, Object>) d).get("sha256");
                 if (sha256 instanceof String s) {
-                    digest = decodeBytes(s, "digest.sha256");
+                    digest = ProtoJsonBytes.decode(s, "digest.sha256");
                 }
             }
             byte[] data = decodeField(body, "data");
@@ -467,19 +468,7 @@ public class CloudKmsHttpController {
         if (body == null || !(body.get(field) instanceof String s) || s.isEmpty()) {
             return new byte[0];
         }
-        return decodeBytes(s, field);
-    }
-
-    /**
-     * proto3 JSON accepts a bytes field in standard or URL-safe base64, with or without padding;
-     * gcloud sends URL-safe. The basic decoder already treats padding as optional.
-     */
-    private static byte[] decodeBytes(String value, String field) {
-        try {
-            return Base64.getDecoder().decode(value.replace('-', '+').replace('_', '/'));
-        } catch (IllegalArgumentException e) {
-            throw GcpException.invalidArgument("Invalid value at '" + field + "' (TYPE_BYTES): " + e.getMessage());
-        }
+        return ProtoJsonBytes.decode(s, field);
     }
 
     private static long crc32c(byte[] data) {

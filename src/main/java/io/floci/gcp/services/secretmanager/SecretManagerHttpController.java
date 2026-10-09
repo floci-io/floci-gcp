@@ -1,6 +1,7 @@
 package io.floci.gcp.services.secretmanager;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.services.iam.IamPolicyCodec;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
@@ -362,11 +363,7 @@ public class SecretManagerHttpController {
         if (data == null || data.isEmpty()) {
             return new byte[0];
         }
-        try {
-            return Base64.getDecoder().decode(data.replace('-', '+').replace('_', '/'));
-        } catch (IllegalArgumentException e) {
-            throw GcpException.invalidArgument("Invalid value at 'payload.data' (TYPE_BYTES): " + e.getMessage());
-        }
+        return ProtoJsonBytes.decode(data, "payload.data");
     }
 
     @SuppressWarnings("unchecked")

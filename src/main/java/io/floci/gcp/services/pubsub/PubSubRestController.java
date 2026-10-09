@@ -5,6 +5,7 @@ import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.services.iam.IamPolicyCodec;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
@@ -414,7 +415,7 @@ public class PubSubRestController {
                 PubsubMessage.Builder builder = PubsubMessage.newBuilder();
                 String data = stringValue(map, "data");
                 if (data != null) {
-                    builder.setData(ByteString.copyFrom(decodeBytes(data, "messages[" + i + "].data")));
+                    builder.setData(ByteString.copyFrom(ProtoJsonBytes.decode(data, "messages[" + i + "].data")));
                 }
                 Map<String, String> attributes = stringMap(map, "attributes");
                 if (attributes != null) {
@@ -428,18 +429,6 @@ public class PubSubRestController {
             }
         }
         return messages;
-    }
-
-    /**
-     * proto3 JSON accepts a bytes field in standard or URL-safe base64, with or without padding.
-     * The basic decoder already treats padding as optional.
-     */
-    private static byte[] decodeBytes(String value, String field) {
-        try {
-            return Base64.getDecoder().decode(value.replace('-', '+').replace('_', '/'));
-        } catch (IllegalArgumentException e) {
-            throw GcpException.invalidArgument("Invalid value at '" + field + "' (TYPE_BYTES): " + e.getMessage());
-        }
     }
 
     private static List<String> updateMaskPaths(String updateMask) {

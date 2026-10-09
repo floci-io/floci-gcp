@@ -9,6 +9,7 @@ import com.google.protobuf.NullValue;
 import com.google.protobuf.Timestamp;
 import com.google.type.LatLng;
 
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
@@ -140,8 +141,62 @@ public class StoredProperty {
             case "string" -> filterValue.hasStringValue()
                     && stringValue != null && stringValue.equals(filterValue.getStringValue());
             case "null" -> filterValue.hasNullValue();
+            case "timestamp" -> matchesTimestamp(filterValue);
+            case "bytes" -> filterValue.hasBlobValue()
+                    && stringValue != null
+                    && stringValue.equals(Base64.getEncoder().encodeToString(
+                            filterValue.getBlobValue().toByteArray()));
+            case "key" -> filterValue.hasKeyValue()
+                    && stringValue != null
+                    && stringValue.equals(keyToString(filterValue.getKeyValue()));
+            case "array" -> matchesArray(filterValue);
+            case "entity" -> matchesEntity(filterValue);
             default -> false;
         };
+    }
+
+    private boolean matchesTimestamp(Value filterValue) {
+        if (stringValue == null || !filterValue.hasTimestampValue()) {
+            return false;
+        }
+        try {
+            Instant stored = Instant.parse(stringValue);
+            Timestamp timestamp = filterValue.getTimestampValue();
+            Instant filter = Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
+            return stored.equals(filter);
+        } catch (DateTimeException expected) {
+            // An unparseable or out-of-range timestamp is not equal, and the query must not fail.
+            return false;
+        }
+    }
+
+    private boolean matchesArray(Value filterValue) {
+        if (arrayValues == null) {
+            return false;
+        }
+        for (StoredProperty element : arrayValues) {
+            if (element != null && element.matchesEqual(filterValue)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesEntity(Value filterValue) {
+        if (entityProperties == null || !filterValue.hasEntityValue()) {
+            return false;
+        }
+        Map<String, Value> filterProperties = filterValue.getEntityValue().getPropertiesMap();
+        if (!entityProperties.keySet().equals(filterProperties.keySet())) {
+            return false;
+        }
+        for (Map.Entry<String, StoredProperty> entry : entityProperties.entrySet()) {
+            StoredProperty property = entry.getValue();
+            if (property == null || !property.matchesEqual(filterProperties.get(entry.getKey()))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String keyToString(Key key) {

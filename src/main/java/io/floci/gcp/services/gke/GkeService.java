@@ -121,6 +121,7 @@ public class GkeService {
                 .hostToken("container")
                 .pathPrefix("/container")
                 .resourceClasses(KubernetesController.class, KubernetesProjectController.class)
+                .api("container.googleapis.com", "Kubernetes Engine API")
                 .build());
     }
 

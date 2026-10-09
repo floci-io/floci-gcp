@@ -49,6 +49,7 @@ public class ResourceManagerService {
                 .enabled(config.services().resourcemanager().enabled())
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(ResourceManagerController.class, ResourceManagerIamController.class)
+                .api("cloudresourcemanager.googleapis.com", "Cloud Resource Manager API")
                 .build());
         iamService.registerPolicyResourceResolver("projects/*", this::requireProjectForPolicy);
     }

@@ -132,6 +132,7 @@ public class PubSubService {
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(PubSubPublisherController.class, PubSubSubscriberController.class,
                         PubSubRestController.class)
+                .api("pubsub.googleapis.com", "Cloud Pub/Sub API")
                 .build());
         grpcServerManager.bind(new PubSubPublisherController(this));
         grpcServerManager.bind(new PubSubSubscriberController(this));

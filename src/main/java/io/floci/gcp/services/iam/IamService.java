@@ -92,6 +92,7 @@ public class IamService {
                 .storageKey("iam")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(IamController.class)
+                .api("iam.googleapis.com", "Identity and Access Management (IAM) API")
                 .build());
         // Serves the google.iam.v1.IAMPolicy mixin for all services; not gated on
         // the iam REST toggle so Pub/Sub IAM keeps working when iam is disabled.

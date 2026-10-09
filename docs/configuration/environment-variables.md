@@ -119,6 +119,8 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_BIGQUERY_ENABLED` | `true` | BigQuery |
 | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | Mock mode, runs queries on a built-in SQL subset instead of the DuckDB sidecar |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Service Usage |
+| `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENFORCE` | `false` | Reject calls to APIs not enabled in the project with 403 `SERVICE_DISABLED` (see [Service Usage](../services/service-usage.md#enforcing-api-enablement)) |
+| `FLOCI_GCP_SERVICES_SERVICEUSAGE_DEFAULT_ENABLED` | GCP default set | Comma-separated APIs treated as enabled in every project until disabled; only used with enforcement |
 | `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager (minimal `projects.get`) |
 | `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
 | `FLOCI_GCP_SERVICES_EVENTARC_ENABLED` | `true` | Eventarc |

@@ -79,6 +79,8 @@ public class CloudKmsService {
                 .storageKey("kms")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(CloudKmsController.class)
+                .api("cloudkms.googleapis.com", "Cloud Key Management Service (KMS) API",
+                        CloudKmsHttpController.class)
                 .build());
         grpcServerManager.bind(new CloudKmsController(this));
     }

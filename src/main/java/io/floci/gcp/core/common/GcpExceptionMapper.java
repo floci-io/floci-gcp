@@ -1,5 +1,6 @@
 package io.floci.gcp.core.common;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -9,6 +10,7 @@ import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Maps {@link GcpException} to the canonical GCP REST error shape:
@@ -73,7 +75,13 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
     public record ErrorDetail(@JsonProperty("code") int code,
                               @JsonProperty("message") String message,
                               @JsonProperty("status") String status,
-                              @JsonProperty("errors") List<ErrorItem> errors) {
+                              @JsonProperty("errors") List<ErrorItem> errors,
+                              @JsonInclude(JsonInclude.Include.NON_NULL)
+                              @JsonProperty("details") List<Map<String, Object>> details) {
+
+        public ErrorDetail(int code, String message, String status, List<ErrorItem> errors) {
+            this(code, message, status, errors, null);
+        }
 
         /** Builds a detail with the matching legacy {@code errors[]} entry derived from {@code status}. */
         public static ErrorDetail of(int code, String message, String status) {

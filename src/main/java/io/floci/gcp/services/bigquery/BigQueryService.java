@@ -114,6 +114,7 @@ public class BigQueryService {
                 .resourceClasses(BigQueryController.class, BigQueryInternalController.class,
                         BigQueryUploadController.class, BigQueryReadController.class,
                         BigQueryWriteController.class)
+                .api("bigquery.googleapis.com", "BigQuery API")
                 .build());
     }
 

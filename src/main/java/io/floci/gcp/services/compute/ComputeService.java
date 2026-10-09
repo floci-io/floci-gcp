@@ -51,7 +51,8 @@ public class ComputeService {
                 .filter(r -> !r.isEmpty() && !locations.isRegion(r))
                 .forEach(r -> LOG.warnf("Ignoring unknown region %s in floci-gcp.services.compute.regions", r)));
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
-                .storageKey("compute").resourceClasses(ComputeController.class).build());
+                .storageKey("compute").resourceClasses(ComputeController.class)
+                .api("compute.googleapis.com", "Compute Engine API").build());
     }
     private ComputeProject state(String project) {
         if (project == null || !project.matches("[A-Za-z0-9][A-Za-z0-9:.-]{0,127}")) {

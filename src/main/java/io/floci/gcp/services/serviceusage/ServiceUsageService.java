@@ -19,6 +19,7 @@ import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.common.ServiceStateProvider;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
@@ -32,9 +33,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
 
 @ApplicationScoped
-public class ServiceUsageService {
+public class ServiceUsageService implements ServiceStateProvider {
 
     private static final Logger LOG = Logger.getLogger(ServiceUsageService.class);
 
@@ -47,6 +50,7 @@ public class ServiceUsageService {
     private final LongRunningOperationsService operations;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
+    private final Set<String> defaultEnabled;
 
     @Inject
     public ServiceUsageService(StorageFactory storageFactory,
@@ -58,15 +62,25 @@ public class ServiceUsageService {
         this.operations = operations;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
+        EmulatorConfig.ServiceUsageServiceConfig serviceUsage = config.services().serviceusage();
+        this.defaultEnabled = serviceUsage.enforce() ? Set.copyOf(serviceUsage.defaultEnabled()) : Set.of();
     }
 
     ServiceUsageService(StorageBackend<String, String> stateStore,
                         LongRunningOperationsService operations,
                         EmulatorConfig config) {
+        this(stateStore, operations, config, Set.of());
+    }
+
+    ServiceUsageService(StorageBackend<String, String> stateStore,
+                        LongRunningOperationsService operations,
+                        EmulatorConfig config,
+                        Set<String> defaultEnabled) {
         this.stateStore = stateStore;
         this.operations = operations;
         this.serviceRegistry = null;
         this.config = config;
+        this.defaultEnabled = Set.copyOf(defaultEnabled);
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -75,7 +89,13 @@ public class ServiceUsageService {
                 .storageKey("serviceusage")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(ServiceUsageController.class, ServiceUsageOperationsController.class)
+                .api("serviceusage.googleapis.com", "Service Usage API")
                 .build());
+    }
+
+    @Override
+    public boolean isServiceEnabled(String project, String apiName) {
+        return readState(serviceName(project, apiName)) == State.ENABLED;
     }
 
     public Operation enable(String project, String serviceId) {
@@ -110,8 +130,10 @@ public class ServiceUsageService {
         }
         int effectivePageSize = pageSize <= 0 ? DEFAULT_PAGE_SIZE : pageSize;
         String prefix = "projects/" + project + "/services/";
-        List<Service> services = stateStore.keys().stream()
-                .filter(k -> k.startsWith(prefix))
+        List<Service> services = Stream.concat(
+                        stateStore.keys().stream().filter(k -> k.startsWith(prefix)),
+                        defaultEnabled.stream().map(id -> prefix + id))
+                .distinct()
                 .map(name -> buildService(project, name.substring(prefix.length()), readState(name)))
                 .filter(s -> wanted == null || s.getState() == wanted)
                 .sorted(Comparator.comparing(Service::getName))
@@ -182,7 +204,8 @@ public class ServiceUsageService {
     private State readState(String name) {
         return stateStore.get(name)
                 .map(State::valueOf)
-                .orElse(State.DISABLED);
+                .orElseGet(() -> defaultEnabled.contains(name.substring(name.lastIndexOf('/') + 1))
+                        ? State.ENABLED : State.DISABLED);
     }
 
     private Service buildService(String project, String serviceId, State state) {

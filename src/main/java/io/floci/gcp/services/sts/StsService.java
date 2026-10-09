@@ -49,6 +49,7 @@ public class StsService {
 				.storageKey("credential-tokens")
 				.protocol(ServiceProtocol.REST)
 				.resourceClasses(StsController.class)
+				.api("sts.googleapis.com", "Security Token Service API")
 				.build());
 	}
 

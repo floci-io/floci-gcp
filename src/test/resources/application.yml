@@ -65,6 +65,7 @@ floci-gcp:
       mock: true
     serviceusage:
       enabled: true
+      enforce: false
     resourcemanager:
       enabled: true
     firebaseauth:

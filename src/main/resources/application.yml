@@ -158,6 +158,35 @@ floci-gcp:
       docker-network:
     serviceusage:
       enabled: true
+      # Reject calls to APIs that are not ENABLED in Service Usage for the caller's project
+      # (403 PERMISSION_DENIED, reason SERVICE_DISABLED), like real GCP.
+      enforce: false
+      # APIs treated as ENABLED in every project until explicitly disabled (GCP's default set
+      # for new projects). Only consulted when enforce is true.
+      default-enabled:
+        - analyticshub.googleapis.com
+        - apptopology.googleapis.com
+        - bigquery.googleapis.com
+        - bigqueryconnection.googleapis.com
+        - bigquerydatapolicy.googleapis.com
+        - bigquerydatatransfer.googleapis.com
+        - bigquerymigration.googleapis.com
+        - bigqueryreservation.googleapis.com
+        - bigquerystorage.googleapis.com
+        - cloudapis.googleapis.com
+        - cloudtrace.googleapis.com
+        - dataform.googleapis.com
+        - dataplex.googleapis.com
+        - datastore.googleapis.com
+        - logging.googleapis.com
+        - monitoring.googleapis.com
+        - servicemanagement.googleapis.com
+        - serviceusage.googleapis.com
+        - sql-component.googleapis.com
+        - storage-api.googleapis.com
+        - storage-component.googleapis.com
+        - storage.googleapis.com
+        - telemetry.googleapis.com
     resourcemanager:
       enabled: true
     firebaseauth:

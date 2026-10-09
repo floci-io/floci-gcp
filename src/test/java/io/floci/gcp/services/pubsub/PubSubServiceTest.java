@@ -1166,4 +1166,60 @@ class PubSubServiceTest {
         assertEquals(1, messages.size());
         assertEquals("in-flight", messages.get(0).getMessage().getData().toStringUtf8());
     }
+
+    @Test
+    void ackBeforeSeekKeepsMessageAcknowledged() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("acked")).build()));
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 10);
+        service.acknowledge("projects/p1/subscriptions/s1", List.of(first.get(0).getAckId()));
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+
+        assertEquals(0, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void ackAfterSeekWithOldAckIdDoesNotDropRedeliveredMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        String oldAckId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        service.acknowledge("projects/p1/subscriptions/s1", List.of(oldAckId));
+
+        List<ReceivedMessage> again = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, again.size());
+        assertNotEquals(oldAckId, again.get(0).getAckId());
+    }
+
+    @Test
+    void seekThatRequeuesMessagesWakesStreamingListeners() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m")).build()));
+        service.pull("projects/p1/subscriptions/s1", 10);
+        AtomicInteger wakeups = new AtomicInteger();
+        Runnable unregister = service.registerMessageListener("projects/p1/subscriptions/s1", wakeups::incrementAndGet);
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(60));
+        assertEquals(0, wakeups.get());
+
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("n")).build()));
+        service.pull("projects/p1/subscriptions/s1", 10);
+        wakeups.set(0);
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+        assertEquals(1, wakeups.get());
+        unregister.run();
+    }
+
+    private static Timestamp secondsFromNow(long seconds) {
+        return Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond() + seconds).build();
+    }
 }

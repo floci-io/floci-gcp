@@ -32,6 +32,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.Base64;
@@ -766,7 +767,10 @@ public class PubSubService {
         try {
             Instant published = Instant.parse(publishTime);
             return published.isBefore(Instant.ofEpochSecond(time.getSeconds(), time.getNanos()));
-        } catch (Exception e) {
+        } catch (DateTimeParseException e) {
+            // publish() always stores Instant.toString(), so this only happens with corrupt state.
+            // Keeping the message is the safe side: a seek must never lose data it can't date.
+            LOG.warnf("seek: cannot parse publishTime=%s, keeping message: %s", publishTime, e.getMessage());
             return false;
         }
     }

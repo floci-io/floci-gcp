@@ -74,7 +74,7 @@ final class SqlDialectTranslator {
             "TIME_ADD", "TIMESTAMP_SUB", "DATETIME_SUB", "TIME_SUB", "DATE_ADD", "DATE_SUB",
             "TIMESTAMP_DIFF", "DATETIME_DIFF", "DATE_DIFF", "TIME_DIFF", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
             "DATE_TRUNC", "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME",
-            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP");
+            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP", "ARRAY_AGG");
 
     /**
      * Words DuckDB reserves (or restricts) that GoogleSQL allows as plain column names; they
@@ -1487,6 +1487,9 @@ final class SqlDialectTranslator {
             case "STRUCT" -> {
                 return renderStruct(open, close);
             }
+            case "ARRAY_AGG" -> {
+                return renderArrayAgg(original, open, close);
+            }
             default -> {
                 // fall through to argument-based shims
             }
@@ -1777,6 +1780,91 @@ final class SqlDialectTranslator {
     }
 
     // ── Token helpers ───────────────────────────────────────────────────────
+
+    /**
+     * {@code ARRAY_AGG([DISTINCT] expr [{IGNORE|RESPECT} NULLS] [ORDER BY …] [LIMIT n])}: DuckDB has no
+     * null modifier and no LIMIT inside {@code array_agg}. {@code RESPECT NULLS} is the default and is
+     * dropped; {@code IGNORE NULLS} becomes an aggregate {@code FILTER} on the aggregated expression;
+     * {@code LIMIT n} keeps the first n elements with {@code list_slice}. BigQuery rejects all of them on
+     * the analytic form. Returns null without any of them, so the call is rendered as before.
+     */
+    private String renderArrayAgg(String original, int open, int close) {
+        int modifier = -1;
+        int limit = -1;
+        int depth = 0;
+        for (int k = open + 1; k < close; k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            } else if (depth > 0 || isPrecededByDot(k)) {
+                // A field name after a dot may be a keyword: `t.limit`, `t.ignore`.
+                continue;
+            } else if (t.isKeyword("IGNORE") || t.isKeyword("RESPECT")) {
+                int nulls = nextSignificant(k + 1, close);
+                if (nulls >= 0 && tokens.get(nulls).isKeyword("NULLS")) {
+                    modifier = k;
+                }
+            } else if (t.isKeyword("LIMIT")) {
+                limit = k;
+            }
+        }
+        if (modifier < 0 && limit < 0) {
+            return null;
+        }
+        int over = nextSignificant(close + 1, tokens.size());
+        if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
+            throw invalidQuery(modifier >= 0
+                    ? "Analytic function array_agg does not support IGNORE NULLS or RESPECT NULLS."
+                    : "LIMIT in arguments is not supported on analytic functions");
+        }
+        int bodyEnd = limit >= 0 ? limit : close;
+        String call;
+        if (modifier < 0) {
+            call = original + "(" + render(open + 1, bodyEnd).trim() + ")";
+        } else {
+            // Each range is rendered once, in source order: rendering consumes positional parameters.
+            int expressionStart = nextSignificant(open + 1, modifier);
+            if (expressionStart >= 0 && tokens.get(expressionStart).isKeyword("DISTINCT")) {
+                expressionStart++;
+            }
+            String distinct = render(open + 1, expressionStart).trim();
+            String expression = render(expressionStart, modifier).trim();
+            String rest = render(nextSignificant(modifier + 1, close) + 1, bodyEnd).trim();
+            String body = (distinct + " " + expression + " " + rest).trim();
+            call = original + "(" + body + ")";
+            if (tokens.get(modifier).isKeyword("IGNORE")) {
+                call += " FILTER (WHERE (" + expression + ") IS NOT NULL)";
+            }
+        }
+        if (limit >= 0) {
+            call = "list_slice(" + call + ", 1, " + arrayAggLimit(limit, close) + ")";
+        }
+        return call;
+    }
+
+    /**
+     * The {@code LIMIT} of an {@code ARRAY_AGG}: BigQuery takes only a non-negative integer literal or a
+     * query parameter, and rejects a negative parameter value when the query runs.
+     */
+    private String arrayAggLimit(int limit, int close) {
+        List<Token> value = significant(limit + 1, close);
+        if (value.size() == 1 && value.getFirst().kind == Kind.NUMBER && value.getFirst().text.matches("\\d+")) {
+            return value.getFirst().text;
+        }
+        if (value.size() == 2 && value.getFirst().isPunct("-") && value.get(1).kind == Kind.NUMBER
+                && value.get(1).text.matches("\\d+")) {
+            throw invalidQuery("LIMIT expects a non-negative integer literal or parameter");
+        }
+        if (value.size() == 1 && (value.getFirst().kind == Kind.NAMED_PARAM
+                || value.getFirst().kind == Kind.POSITIONAL_PARAM)) {
+            String parameter = render(limit + 1, close).trim();
+            return "(CASE WHEN (" + parameter + ") < 0 THEN error('LIMIT value should not be negative') ELSE ("
+                    + parameter + ") END)";
+        }
+        throw invalidQuery("LIMIT expects an integer literal or parameter");
+    }
 
     private List<String> arguments(int open, int close) {
         List<String> args = new ArrayList<>();

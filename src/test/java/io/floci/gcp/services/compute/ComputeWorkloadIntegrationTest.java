@@ -1,6 +1,7 @@
 package io.floci.gcp.services.compute;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +36,7 @@ class ComputeWorkloadIntegrationTest extends ComputeTestSupport {
     }
     @Test void g2WorkstationWithVirtualWorkstationGpu() throws Exception {
         String root = root(), zone = "/zones/us-central1-a";
-        var machineTypes = given().get(root + zone + "/machineTypes").jsonPath();
+        JsonPath machineTypes = given().get(root + zone + "/machineTypes").jsonPath();
         String g2 = "items.find { it.name == 'g2-standard-8' }";
         assertEquals(8, machineTypes.getInt(g2 + ".guestCpus"));
         assertEquals(32768, machineTypes.getInt(g2 + ".memoryMb"));
@@ -51,7 +52,7 @@ class ComputeWorkloadIntegrationTest extends ComputeTestSupport {
                 "scheduling", Map.of("onHostMaintenance", "TERMINATE"),
                 "disks", List.of(Map.of("boot", true, "initializeParams", Map.of("diskSizeGb", "50"))));
         done(root, post(root + zone + "/instances", vm));
-        var created = given().get(root + zone + "/instances/workstation").jsonPath();
+        JsonPath created = given().get(root + zone + "/instances/workstation").jsonPath();
         assertTrue(created.getString("machineType").endsWith("/machineTypes/g2-standard-8"));
         assertTrue(created.getString("guestAccelerators[0].acceleratorType").endsWith("/acceleratorTypes/nvidia-l4-vws"));
         assertEquals(1, created.getInt("guestAccelerators[0].acceleratorCount"));

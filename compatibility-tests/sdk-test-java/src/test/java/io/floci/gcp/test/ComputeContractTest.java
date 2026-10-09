@@ -12,6 +12,20 @@ import static org.assertj.core.api.Assertions.*;
 
 class ComputeContractTest {
     private static String endpoint() { return TestFixtures.endpoint() + "/"; }
+    @Test void g2VirtualWorkstationCatalogMatchesDocumentedShape() throws Exception {
+        String project = TestFixtures.uniqueName("java-g2"), zone = "us-central1-a";
+        NoCredentialsProvider auth = NoCredentialsProvider.create();
+        try (MachineTypesClient machines = MachineTypesClient.create(MachineTypesSettings.newBuilder().setEndpoint(endpoint()).setCredentialsProvider(auth).build());
+             AcceleratorTypesClient accelerators = AcceleratorTypesClient.create(AcceleratorTypesSettings.newBuilder().setEndpoint(endpoint()).setCredentialsProvider(auth).build())) {
+            MachineType machine = machines.get(project, zone, "g2-standard-8");
+            assertThat(machine.getGuestCpus()).isEqualTo(8);
+            assertThat(machine.getMemoryMb()).isEqualTo(32768);
+            assertThat(machine.getAcceleratorsList()).hasSize(1);
+            assertThat(machine.getAccelerators(0).getGuestAcceleratorType()).isEqualTo("nvidia-l4");
+            assertThat(machine.getAccelerators(0).getGuestAcceleratorCount()).isEqualTo(1);
+            assertThat(accelerators.get(project, zone, "nvidia-l4-vws").getName()).isEqualTo("nvidia-l4-vws");
+        }
+    }
     @Test void lifecycleImagesSnapshotsAndRetainedDisks() throws Exception {
         String project = TestFixtures.uniqueName("java-compute"), zone = "us-central1-a";
         NoCredentialsProvider auth = NoCredentialsProvider.create();

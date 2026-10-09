@@ -529,9 +529,15 @@ public class CloudKmsHttpController {
         }
     }
 
-    /** The digest to sign: the one supplied, else the SHA-256 of the data, as the gRPC controller does. */
+    /**
+     * The digest to sign: the one supplied, else the SHA-256 of the data, as the gRPC controller does.
+     * The proto lets a request carry one or the other, never both.
+     */
     private static byte[] resolveDigest(byte[] digest, byte[] data) {
         if (digest.length > 0) {
+            if (data.length > 0) {
+                throw GcpException.invalidArgument("Only one of digest or data may be supplied for AsymmetricSign");
+            }
             return digest;
         }
         if (data.length > 0) {

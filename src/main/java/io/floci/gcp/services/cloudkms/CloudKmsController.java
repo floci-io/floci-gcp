@@ -469,6 +469,9 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     private static byte[] resolveDigest(AsymmetricSignRequest request) {
         ByteString sha256 = request.getDigest().getSha256();
         if (!sha256.isEmpty()) {
+            if (!request.getData().isEmpty()) {
+                throw GcpException.invalidArgument("Only one of digest or data may be supplied for AsymmetricSign");
+            }
             return sha256.toByteArray();
         }
         if (!request.getData().isEmpty()) {

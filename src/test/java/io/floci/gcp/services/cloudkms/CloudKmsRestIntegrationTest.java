@@ -253,6 +253,19 @@ class CloudKmsRestIntegrationTest {
     }
 
     @Test
+    void asymmetricSignRejectsDigestAndDataTogether() throws Exception {
+        String key = createKey("sign-both", "ASYMMETRIC_SIGN", "EC_SIGN_P256_SHA256");
+        byte[] data = "payload".getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
+
+        json()
+                .body("{\"digest\": {\"sha256\": \"" + b64(digest) + "\"}, \"data\": \"" + b64(data) + "\"}")
+                .when().post(key + "/cryptoKeyVersions/1:asymmetricSign")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    @Test
     void asymmetricDecryptVerifiesTheCiphertextChecksum() throws Exception {
         String key = createKey("decrypt", "ASYMMETRIC_DECRYPT", "RSA_DECRYPT_OAEP_2048_SHA256");
         String version = key + "/cryptoKeyVersions/1";

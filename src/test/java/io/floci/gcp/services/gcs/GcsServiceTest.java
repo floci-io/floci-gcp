@@ -283,6 +283,16 @@ class GcsServiceTest {
     }
 
     @Test
+    void listBucketsRequiresProject() {
+        service.createBucket("bucket-one", "p1", BASE_URL, Map.of());
+
+        GcpException ex = assertThrows(GcpException.class, () -> service.listBuckets(null));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("required", ex.getReason());
+        assertThrows(GcpException.class, () -> service.listBuckets(""));
+    }
+
+    @Test
     void putObjectStoredAndRetrievable() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
         byte[] data = "hello".getBytes(StandardCharsets.UTF_8);

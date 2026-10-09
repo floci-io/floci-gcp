@@ -623,9 +623,12 @@ public class GcsService {
 
     public List<GcsBucket> listBuckets(String projectId) {
         LOG.debugf("listBuckets project=%s", projectId);
+        if (projectId == null || projectId.isBlank()) {
+            throw GcpException.invalidArgument("Required parameter: project").withReason("required");
+        }
         List<GcsBucket> buckets = bucketStore.scan(k -> true).stream()
                 .map(this::withProjectDefaults)
-                .filter(b -> projectId == null || matchesProject(b, projectId))
+                .filter(b -> matchesProject(b, projectId))
                 .toList();
         LOG.debugf("listBuckets project=%s count=%d", projectId, buckets.size());
         return buckets;

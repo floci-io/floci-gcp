@@ -424,6 +424,16 @@ class GcsGrpcControllerTest {
     }
 
     @Test
+    void listBucketsRequiresParent() {
+        createBucket("list-parent-bucket");
+
+        RecordingObserver<ListBucketsResponse> listed = new RecordingObserver<>();
+        controller.listBuckets(ListBucketsRequest.newBuilder().build(), listed);
+
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(listed.error).getCode());
+    }
+
+    @Test
     void classicWriteAndRangeReadShareServiceState() {
         createBucket("classic-bucket");
         byte[] payload = "hello grpc storage".getBytes(StandardCharsets.UTF_8);

@@ -394,6 +394,23 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void notMatchedClausesReadBareColumnsFromTheSource() {
+        assertEquals("MERGE INTO \"ds\".\"t\" AS \"T\" USING \"ds\".\"s\" AS \"S\" ON S.id = T.id"
+                        + " WHEN MATCHED THEN UPDATE SET \"v\" = S.\"v\""
+                        + " WHEN NOT MATCHED THEN INSERT (\"id\", \"v\") VALUES (\"S\".\"id\", \"S\".\"v\")"
+                        + " RETURNING merge_action",
+                dml("MERGE ds.t AS T USING ds.s AS S ON S.id = T.id WHEN MATCHED THEN UPDATE SET `v` = S.`v`"
+                        + " WHEN NOT MATCHED THEN INSERT (`id`, `v`) VALUES (`id`, `v`)"));
+        assertEquals("MERGE INTO \"ds\".\"t\" USING \"ds\".\"s\" ON t.id = s.id"
+                        + " WHEN NOT MATCHED AND \"s\".v > 1 THEN INSERT (id, v, d)"
+                        + " VALUES (\"s\".id + 1, UPPER(CAST(\"s\".v AS VARCHAR)), \"s\".d + INTERVAL 1 DAY)"
+                        + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE RETURNING merge_action",
+                dml("MERGE ds.t USING ds.s ON t.id = s.id WHEN NOT MATCHED AND v > 1 THEN INSERT (id, v, d)"
+                        + " VALUES (id + 1, UPPER(CAST(v AS STRING)), d + INTERVAL 1 DAY)"
+                        + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE"));
+    }
+
+    @Test
     void insertSelectStagesTheSourceTable() {
         SqlDialectTranslator.Translation t = SqlDialectTranslator.translateDml(
                 "INSERT INTO ds.t SELECT * FROM ds.src WHERE x > 1", "test-project", "ds",

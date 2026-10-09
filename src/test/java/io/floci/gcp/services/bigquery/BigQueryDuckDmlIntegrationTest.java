@@ -142,6 +142,31 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
+    @Order(3)
+    void mergeInsertValuesReadTheSourceRow() {
+        query("CREATE TABLE shop.incremental AS SELECT 1 AS id, 'a' AS name").then().statusCode(200);
+        // The statement dbt-bigquery generates for an incremental model with a unique_key.
+        query("MERGE shop.incremental AS DBT_INTERNAL_DEST USING (SELECT * FROM UNNEST([STRUCT(1 AS id, 'b' AS name),"
+                + " STRUCT(2 AS id, 'c' AS name)])) AS DBT_INTERNAL_SOURCE ON (DBT_INTERNAL_SOURCE.id = DBT_INTERNAL_DEST.id)"
+                + " WHEN MATCHED THEN UPDATE SET `id` = DBT_INTERNAL_SOURCE.`id`, `name` = DBT_INTERNAL_SOURCE.`name`"
+                + " WHEN NOT MATCHED THEN INSERT (`id`, `name`) VALUES (`id`, `name`)")
+                .then().statusCode(200)
+                .body("dmlStats.insertedRowCount", equalTo("1"))
+                .body("dmlStats.updatedRowCount", equalTo("1"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1", "b"), List.of("2", "c")),
+                rows("SELECT id, name FROM shop.incremental ORDER BY id"));
+
+        query("CREATE TABLE shop.incoming AS SELECT * FROM UNNEST([STRUCT(2 AS id, 'x' AS name), STRUCT(3 AS id, 'd' AS name)])")
+                .then().statusCode(200);
+        query("MERGE shop.incremental t USING shop.incoming ON t.id = incoming.id"
+                + " WHEN NOT MATCHED AND name != 'x' THEN INSERT (id, name) VALUES (id * 10, UPPER(name))")
+                .then().statusCode(200)
+                .body("dmlStats.insertedRowCount", equalTo("1"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1", "b"), List.of("2", "c"), List.of("30", "D")),
+                rows("SELECT id, name FROM shop.incremental ORDER BY id"));
+    }
+
+    @Test
     @Order(4)
     void ctasAndViews() {
         query("CREATE TABLE shop.pricey AS SELECT id, name, price FROM shop.items WHERE price > 1")

@@ -56,6 +56,7 @@ public class IamCredentialsService {
                 .storageKey("iamcredentials")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(IamCredentialsController.class)
+                .api("iamcredentials.googleapis.com", "IAM Service Account Credentials API")
                 .build());
     }
 

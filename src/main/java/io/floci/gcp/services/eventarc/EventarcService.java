@@ -104,6 +104,7 @@ public class EventarcService {
                 .storageKey("eventarc")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(EventarcController.class)
+                .api("eventarc.googleapis.com", "Eventarc API")
                 .build());
     }
 

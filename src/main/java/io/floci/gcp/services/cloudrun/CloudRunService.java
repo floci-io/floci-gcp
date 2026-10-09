@@ -161,6 +161,7 @@ public class CloudRunService {
                         CloudRunUrlRoutingFilter.class, CloudRunJobsController.class,
                         CloudRunWorkerPoolsController.class,
                         CloudRunInstancesController.class, CloudRunInstanceInvocationController.class)
+                .api("run.googleapis.com", "Cloud Run Admin API")
                 .build());
     }
 

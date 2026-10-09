@@ -16,16 +16,26 @@ public class ServiceRegistry {
 
     private final List<ServiceDescriptor> descriptors = new ArrayList<>();
     private final Map<Class<?>, ServiceDescriptor> byResourceClass = new LinkedHashMap<>();
+    private final Map<Class<?>, ServiceDescriptor> byApiResourceClass = new LinkedHashMap<>();
 
     public void register(ServiceDescriptor descriptor) {
         descriptors.add(descriptor);
         for (Class<?> rc : descriptor.resourceClasses()) {
             byResourceClass.put(rc, descriptor);
+            byApiResourceClass.put(rc, descriptor);
+        }
+        for (Class<?> rc : descriptor.apiResourceClasses()) {
+            byApiResourceClass.put(rc, descriptor);
         }
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> clazz) {
         return Optional.ofNullable(byResourceClass.get(clazz));
+    }
+
+    /** Descriptor whose googleapis service owns {@code clazz}, including API-only REST resources. */
+    public Optional<ServiceDescriptor> byApiResourceClass(Class<?> clazz) {
+        return Optional.ofNullable(byApiResourceClass.get(clazz));
     }
 
     /**

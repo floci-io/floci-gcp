@@ -82,6 +82,7 @@ public class FirebaseAuthService {
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(FirebaseAuthController.class, SecureTokenController.class,
                         FirebaseAuthEmulatorController.class)
+                .api("identitytoolkit.googleapis.com", "Identity Toolkit API")
                 .build());
     }
 

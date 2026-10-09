@@ -1,8 +1,14 @@
 package io.floci.gcp.lifecycle;
 
+import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.core.common.ServiceUsageGate;
+import io.floci.gcp.core.common.ServiceUsageGrpcInterceptor;
 import io.floci.gcp.services.iam.authorization.IamGrpcAuthorizationInterceptor;
 import io.grpc.BindableService;
+import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
+import io.grpc.ServerServiceDefinition;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.Router;
@@ -26,16 +32,23 @@ public class GrpcServerManager {
     private final Router router;
     private final Instance<BindableService> services;
     private final IamGrpcAuthorizationInterceptor authorization;
+    private final ServiceRegistry serviceRegistry;
+    private final ServiceUsageGate serviceUsageGate;
+    private final String defaultProjectId;
 
     private GrpcIoServer grpcServer;
 
     @Inject
     GrpcServerManager(Vertx vertx, Router router, Instance<BindableService> services,
-            IamGrpcAuthorizationInterceptor authorization) {
+            IamGrpcAuthorizationInterceptor authorization, ServiceRegistry serviceRegistry,
+            ServiceUsageGate serviceUsageGate, EmulatorConfig config) {
         this.vertx = vertx;
         this.router = router;
         this.services = services;
         this.authorization = authorization;
+        this.serviceRegistry = serviceRegistry;
+        this.serviceUsageGate = serviceUsageGate;
+        this.defaultProjectId = config.defaultProjectId();
     }
 
     @PostConstruct
@@ -66,8 +79,15 @@ public class GrpcServerManager {
         });
     }
 
-    public void bind(BindableService service) {
-        BindableService intercepted = () -> ServerInterceptors.intercept(service, authorization);
-        GrpcIoServiceBridge.bridge(intercepted).bind(grpcServer);
+    public void bind(BindableService service, ServerInterceptor... interceptors) {
+        ServerServiceDefinition authorized = ServerInterceptors.intercept(
+                ServerInterceptors.intercept(service, interceptors), authorization);
+        // The interceptor applied last runs first, so a disabled API answers SERVICE_DISABLED before IAM runs.
+        ServerServiceDefinition gated = serviceRegistry.byResourceClass(service.getClass())
+                .filter(serviceUsageGate::gates)
+                .map(descriptor -> ServerInterceptors.intercept(authorized,
+                        new ServiceUsageGrpcInterceptor(serviceUsageGate, descriptor, defaultProjectId)))
+                .orElse(authorized);
+        GrpcIoServiceBridge.bridge(() -> gated).bind(grpcServer);
     }
 }

@@ -35,8 +35,6 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import io.grpc.BindableService;
-import io.grpc.ServerInterceptors;
 import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
@@ -210,12 +208,11 @@ public class GcsService {
                         GcsBatchController.class, GcsGrpcController.class,
                         GcsProjectController.class,
                         GcsHmacKeyController.class)
+                .api("storage.googleapis.com", "Cloud Storage API")
                 .build());
         if (config.services().gcs().enabled()) {
-            GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
-            BindableService intercepted = () -> ServerInterceptors.intercept(
-                    controller, grpcAuthorizationInterceptor);
-            grpcServerManager.bind(intercepted);
+            grpcServerManager.bind(new GcsGrpcController(this, config, authorizationService),
+                    grpcAuthorizationInterceptor);
         }
     }
 

@@ -72,6 +72,7 @@ public class DatastoreService {
                 .storageKey("datastore")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(DatastoreController.class)
+                .api("datastore.googleapis.com", "Cloud Datastore API", DatastoreHttpController.class)
                 .build());
         grpcServerManager.bind(new DatastoreController(this));
     }

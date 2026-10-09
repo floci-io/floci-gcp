@@ -79,6 +79,7 @@ public class SecretManagerService {
                 .storageKey("secretmanager")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(SecretManagerController.class)
+                .api("secretmanager.googleapis.com", "Secret Manager API", SecretManagerHttpController.class)
                 .build());
         grpcServerManager.bind(new SecretManagerController(this));
         registerPolicyResolver();

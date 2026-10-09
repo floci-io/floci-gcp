@@ -6,6 +6,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
+import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.gcs.model.GcsRewriteResult;
@@ -13,7 +14,19 @@ import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -264,7 +277,7 @@ public class GcsObjectController {
         iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         if ("media".equals(alt)) {
-            var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+            GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
             if (readPreconditionsFail(download.meta(), ifGenerationMatch, ifGenerationNotMatch,
                     ifMetagenerationMatch, ifMetagenerationNotMatch)) {
                 return notModified(download.meta());

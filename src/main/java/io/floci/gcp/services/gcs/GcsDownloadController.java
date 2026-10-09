@@ -2,6 +2,7 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.iam.GcsIamAuthorizationService;
+import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -40,7 +41,7 @@ public class GcsDownloadController {
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
         iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath);
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
-        var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+        GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
     }
 }

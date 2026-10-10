@@ -938,19 +938,11 @@ public class GcsService {
             String archiveKey = key + "\0" + live.getGeneration();
             GcsObjectMeta archived = cloneMeta(live);
             archived.setIsLatest(false);
+            if (archived.getTimeDeleted() == null) {
+                archived.setTimeDeleted(nowTimestamp());
+            }
             objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
             objectMetaStore.put(archiveKey, archived);
-            long markerGen = nextGeneration();
-            GcsObjectMeta marker = new GcsObjectMeta();
-            marker.setName(objectName);
-            marker.setBucket(bucket);
-            marker.setGeneration(String.valueOf(markerGen));
-            marker.setIsLatest(true);
-            String now = nowTimestamp();
-            marker.setTimeDeleted(now);
-            marker.setTimeCreated(now);
-            marker.setUpdated(now);
-            objectMetaStore.put(key + "\0" + markerGen, marker);
         }
         GcsObjectMeta deletedMeta = live;
         softDelete(bucket, objectName, live);

@@ -958,6 +958,23 @@ class GcsServiceTest {
     }
 
     @Test
+    void versionedDeleteLeavesOnlyTheNoncurrentGeneration() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("versioning", Map.of("enabled", true)));
+        GcsObjectMeta live = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        assertTrue(service.deleteObject("bucket", "obj.txt"));
+
+        List<GcsObjectMeta> versions = service.listObjectVersions("bucket", null);
+        assertEquals(1, versions.size());
+        GcsObjectMeta only = versions.get(0);
+        assertEquals(live.getGeneration(), only.getGeneration());
+        assertFalse(Boolean.TRUE.equals(only.getIsLatest()));
+        assertNotNull(only.getTimeDeleted());
+    }
+
+    @Test
     void listObjectsReturnsAll() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
         service.putObject("bucket", "a/1.txt", "text/plain", new byte[]{1},

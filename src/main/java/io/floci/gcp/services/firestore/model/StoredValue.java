@@ -11,6 +11,7 @@ import com.google.type.LatLng;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -54,8 +55,7 @@ public class StoredValue {
             }
             case TIMESTAMP_VALUE -> {
                 sv.type = "timestamp";
-                Timestamp ts = v.getTimestampValue();
-                sv.stringValue = Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos()).toString();
+                sv.stringValue = toInstant(v.getTimestampValue()).toString();
             }
             case BYTES_VALUE -> {
                 sv.type = "bytes";
@@ -152,8 +152,7 @@ public class StoredValue {
                 if (!"timestamp".equals(type) || stringValue == null) { return false; }
                 try {
                     Instant a = Instant.parse(stringValue);
-                    Timestamp ts = proto.getTimestampValue();
-                    Instant b = Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+                    Instant b = toInstant(proto.getTimestampValue());
                     return a.equals(b);
                 } catch (Exception e) {
                     return false;
@@ -178,6 +177,14 @@ public class StoredValue {
             }
             default -> { return false; }
         }
+    }
+
+    /**
+     * Firestore timestamps are precise only to microseconds; any additional precision is
+     * rounded down, both when a value is stored and when it is compared.
+     */
+    public static Instant toInstant(Timestamp ts) {
+        return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos()).truncatedTo(ChronoUnit.MICROS);
     }
 
     private boolean matchesNumber(BigDecimal number) {

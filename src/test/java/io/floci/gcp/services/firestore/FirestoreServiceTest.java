@@ -230,6 +230,67 @@ class FirestoreServiceTest {
     }
 
     @Test
+    void timestampValueIsRoundedDownToMicrosecondsOnWrite() {
+        Timestamp at = Timestamp.newBuilder().setSeconds(1756555200).setNanos(123_456_789).build();
+        Value nested = Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                .addValues(Value.newBuilder().setTimestampValue(at))).build();
+        Document doc = Document.newBuilder()
+                .setName(DOC_NAME)
+                .putFields("at", Value.newBuilder().setTimestampValue(at).build())
+                .putFields("history", nested)
+                .build();
+        service.applyWrite(Write.newBuilder().setUpdate(doc).build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+
+        Timestamp expected = at.toBuilder().setNanos(123_456_000).build();
+        assertEquals(expected, stored.getFields().get("at").toProto().getTimestampValue());
+        assertEquals(expected, stored.getFields().get("history").toProto()
+                .getArrayValue().getValues(0).getTimestampValue());
+    }
+
+    @Test
+    void timestampFiltersIgnorePrecisionBelowMicroseconds() {
+        writeSubMicrosecondTimestampFixture();
+        Value probe = timestamp(1756555200, 456);
+
+        assertEquals(List.of("written"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.EQUAL, probe)));
+        assertEquals(List.of("nextMicro"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.NOT_EQUAL, probe)));
+        assertEquals(List.of(), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN, probe)));
+        assertEquals(List.of("written", "nextMicro"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL, probe)));
+    }
+
+    @Test
+    void timestampCursorIgnoresPrecisionBelowMicroseconds() {
+        writeSubMicrosecondTimestampFixture();
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("at"))
+                        .setDirection(StructuredQuery.Direction.ASCENDING))
+                .setStartAt(Cursor.newBuilder().addValues(timestamp(1756555200, 456)).setBefore(true))
+                .build();
+
+        assertEquals(List.of("written", "nextMicro"), ids(service.runQuery(DB + "/documents", query)));
+    }
+
+    private void writeSubMicrosecondTimestampFixture() {
+        service.applyWrite(topLevelValueDocument("written", "at", timestamp(1756555200, 123)), Instant.now());
+        service.applyWrite(topLevelValueDocument("nextMicro", "at", timestamp(1756555200, 1_000)), Instant.now());
+    }
+
+    private static Value timestamp(long seconds, int nanos) {
+        return Value.newBuilder()
+                .setTimestampValue(Timestamp.newBuilder().setSeconds(seconds).setNanos(nanos))
+                .build();
+    }
+
+    @Test
     void geoPointValueReadsBackUnchanged() {
         LatLng at = LatLng.newBuilder().setLatitude(37.422).setLongitude(-122.084).build();
         Document doc = Document.newBuilder()

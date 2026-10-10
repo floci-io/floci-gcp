@@ -664,9 +664,7 @@ public class FirestoreService {
                 if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
                     try {
                         Instant a = Instant.parse(stored.getStringValue());
-                        Instant b = Instant.ofEpochSecond(
-                                proto.getTimestampValue().getSeconds(),
-                                proto.getTimestampValue().getNanos());
+                        Instant b = StoredValue.toInstant(proto.getTimestampValue());
                         yield OptionalInt.of(a.compareTo(b));
                     } catch (Exception ignored) {}
                 }
@@ -708,9 +706,7 @@ public class FirestoreService {
                 if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
                     try {
                         Instant a = Instant.parse(stored.getStringValue());
-                        Instant b = Instant.ofEpochSecond(
-                                proto.getTimestampValue().getSeconds(),
-                                proto.getTimestampValue().getNanos());
+                        Instant b = StoredValue.toInstant(proto.getTimestampValue());
                         yield a.compareTo(b);
                     } catch (Exception ignored) {}
                 }

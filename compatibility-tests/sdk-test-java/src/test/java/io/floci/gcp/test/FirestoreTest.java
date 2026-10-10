@@ -2,6 +2,7 @@ package io.floci.gcp.test;
 
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
+import com.google.cloud.firestore.FieldValue;
 import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.Precondition;
 import com.google.cloud.firestore.Query;
@@ -278,6 +279,29 @@ class FirestoreTest {
             matching.delete().get();
             different.delete().get();
             missing.delete().get();
+        }
+    }
+
+    @Test
+    @Order(12)
+    void updateNestedFieldPathMergesIntoMap() throws ExecutionException, InterruptedException {
+        DocumentReference docRef = firestore.collection(COLLECTION).document(TestFixtures.uniqueName("nested-update"));
+        docRef.set(Map.of("properties", Map.of("seed", "s"))).get();
+
+        try {
+            docRef.update(Map.of("properties.key1", "val1")).get();
+            DocumentSnapshot afterSet = docRef.get().get();
+            assertThat(afterSet.get("properties")).isEqualTo(Map.of("seed", "s", "key1", "val1"));
+
+            docRef.update(Map.of("properties.key1", FieldValue.delete())).get();
+            DocumentSnapshot afterDelete = docRef.get().get();
+            assertThat(afterDelete.get("properties")).isEqualTo(Map.of("seed", "s"));
+
+            docRef.update(Map.of("properties.count", FieldValue.increment(2))).get();
+            DocumentSnapshot afterIncrement = docRef.get().get();
+            assertThat(afterIncrement.get("properties")).isEqualTo(Map.of("seed", "s", "count", 2L));
+        } finally {
+            docRef.delete().get();
         }
     }
 }

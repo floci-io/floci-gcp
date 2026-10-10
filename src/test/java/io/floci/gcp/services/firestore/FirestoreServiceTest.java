@@ -1035,6 +1035,37 @@ class FirestoreServiceTest {
     }
 
     @Test
+    void updateMaskCreatesMissingParentMaps() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME)
+                        .putFields("settings", mapOf("theme", mapOf("color",
+                                Value.newBuilder().setStringValue("blue").build()))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("settings.theme.color"))
+                .build(), Instant.now());
+
+        StoredDocument stored = service.getDocument(DOC_NAME).orElseThrow();
+        assertEquals("blue", stored.getFields().get("settings").getMapValue().get("theme")
+                .getMapValue().get("color").getStringValue());
+        assertEquals(Set.of("x", "y"), stored.getFields().get("m").getMapValue().keySet());
+    }
+
+    @Test
+    void updateMaskWithDottedPathDoesNotMutatePreviouslyReadDocument() {
+        service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
+        StoredDocument before = service.getDocument(DOC_NAME).orElseThrow();
+
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(DOC_NAME)
+                        .putFields("m", mapOf("z", intValue(3))))
+                .setUpdateMask(DocumentMask.newBuilder().addFieldPaths("m.z"))
+                .build(), Instant.now());
+
+        assertEquals(Set.of("x", "y"), before.getFields().get("m").getMapValue().keySet());
+    }
+
+    @Test
     void emptyUpdateMaskWithTransformKeepsExistingFields() {
         service.applyWrite(Write.newBuilder().setUpdate(profileDocument()).build(), Instant.now());
 

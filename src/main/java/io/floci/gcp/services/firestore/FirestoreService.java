@@ -260,7 +260,7 @@ public class FirestoreService {
                 && transform.getSetToServerValue() == com.google.firestore.v1.DocumentTransform.FieldTransform.ServerValue.REQUEST_TIME) {
             StoredValue ts = new StoredValue();
             ts.setType("timestamp");
-            ts.setStringValue(now);
+            ts.setStringValue(StoredValue.toInstant(now).toString());
             putAtPath(fields, path, ts);
         } else if (transform.hasIncrement()) {
             Value inc = transform.getIncrement();
@@ -663,7 +663,7 @@ public class FirestoreService {
             case TIMESTAMP_VALUE -> {
                 if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
                     try {
-                        Instant a = Instant.parse(stored.getStringValue());
+                        Instant a = StoredValue.toInstant(stored.getStringValue());
                         Instant b = StoredValue.toInstant(proto.getTimestampValue());
                         yield OptionalInt.of(a.compareTo(b));
                     } catch (Exception ignored) {}
@@ -705,7 +705,7 @@ public class FirestoreService {
             case TIMESTAMP_VALUE -> {
                 if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
                     try {
-                        Instant a = Instant.parse(stored.getStringValue());
+                        Instant a = StoredValue.toInstant(stored.getStringValue());
                         Instant b = StoredValue.toInstant(proto.getTimestampValue());
                         yield a.compareTo(b);
                     } catch (Exception ignored) {}

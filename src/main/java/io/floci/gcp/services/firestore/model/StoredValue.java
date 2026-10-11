@@ -151,7 +151,7 @@ public class StoredValue {
             case TIMESTAMP_VALUE -> {
                 if (!"timestamp".equals(type) || stringValue == null) { return false; }
                 try {
-                    Instant a = Instant.parse(stringValue);
+                    Instant a = toInstant(stringValue);
                     Instant b = toInstant(proto.getTimestampValue());
                     return a.equals(b);
                 } catch (Exception e) {
@@ -185,6 +185,14 @@ public class StoredValue {
      */
     public static Instant toInstant(Timestamp ts) {
         return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos()).truncatedTo(ChronoUnit.MICROS);
+    }
+
+    /**
+     * Parses a stored timestamp at microsecond precision. A value stored with nanoseconds, such
+     * as one persisted before writes were truncated, then compares equal to its own read-back value.
+     */
+    public static Instant toInstant(String stored) {
+        return Instant.parse(stored).truncatedTo(ChronoUnit.MICROS);
     }
 
     private boolean matchesNumber(BigDecimal number) {

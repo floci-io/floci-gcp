@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -277,6 +278,76 @@ class FirestoreServiceTest {
                 .build();
 
         assertEquals(List.of("written", "nextMicro"), ids(service.runQuery(DB + "/documents", query)));
+    }
+
+    @Test
+    void serverTimestampIsStoredAtMicrosecondsAndMatchesItsReadBackValue() {
+        String name = DB + "/documents/customers/stamped";
+        service.applyWrite(Write.newBuilder()
+                .setUpdate(Document.newBuilder().setName(name))
+                .addUpdateTransforms(DocumentTransform.FieldTransform.newBuilder()
+                        .setFieldPath("at")
+                        .setSetToServerValue(DocumentTransform.FieldTransform.ServerValue.REQUEST_TIME))
+                .build(), Instant.ofEpochSecond(1756555200, 123_456_789));
+
+        Value readBack = service.getDocument(name).orElseThrow().getFields().get("at").toProto();
+
+        assertEquals(List.of("stamped"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.EQUAL, readBack)));
+        assertEquals(123_456_000, readBack.getTimestampValue().getNanos());
+    }
+
+    @Test
+    void storedTimestampWithNanosecondsMatchesItsOwnReadBackValue() {
+        storeTimestampDocument("legacy", Instant.ofEpochSecond(1756555200, 123_456_789));
+        Value readBack = service.getDocument(DB + "/documents/customers/legacy").orElseThrow()
+                .getFields().get("at").toProto();
+
+        assertEquals(List.of("legacy"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.EQUAL, readBack)));
+        assertEquals(List.of("legacy"), ids(runTopLevelFilter("at",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL, readBack)));
+        StructuredQuery endAt = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("at"))
+                        .setDirection(StructuredQuery.Direction.ASCENDING))
+                .setEndAt(Cursor.newBuilder().addValues(readBack).setBefore(false))
+                .build();
+        assertEquals(List.of("legacy"), ids(service.runQuery(DB + "/documents", endAt)));
+    }
+
+    @Test
+    void serverTimestampsStoredInTheSameMicrosecondSortAsEqual() {
+        storeTimestampDocument("a", Instant.ofEpochSecond(1756555200, 123_456_700));
+        storeTimestampDocument("b", Instant.ofEpochSecond(1756555200, 123_456_200));
+
+        assertEquals(List.of("a", "b"), ids(orderByTimestampThenName(StructuredQuery.Direction.ASCENDING)));
+        assertEquals(List.of("b", "a"), ids(orderByTimestampThenName(StructuredQuery.Direction.DESCENDING)));
+    }
+
+    /** Stores a timestamp with its nanoseconds intact, as a document persisted before truncation was. */
+    private void storeTimestampDocument(String id, Instant at) {
+        String name = DB + "/documents/customers/" + id;
+        StoredValue value = new StoredValue();
+        value.setType("timestamp");
+        value.setStringValue(at.toString());
+        storage.put(name, new StoredDocument(name, at.toString(), at.toString(), Map.of("at", value)));
+    }
+
+    private List<StoredDocument> orderByTimestampThenName(StructuredQuery.Direction nameDirection) {
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("at"))
+                        .setDirection(StructuredQuery.Direction.ASCENDING))
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("__name__"))
+                        .setDirection(nameDirection))
+                .build();
+        return service.runQuery(DB + "/documents", query);
     }
 
     private void writeSubMicrosecondTimestampFixture() {

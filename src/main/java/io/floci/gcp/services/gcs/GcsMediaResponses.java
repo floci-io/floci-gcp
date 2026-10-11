@@ -4,8 +4,12 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.ws.rs.core.Response;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.StringJoiner;
+import java.util.zip.GZIPInputStream;
 
 final class GcsMediaResponses {
 
@@ -42,7 +46,7 @@ final class GcsMediaResponses {
         if (rangeHeader == null || rangeHeader.isBlank()) {
             builder = Response.ok(data);
         } else {
-            var range = parseRange(rangeHeader, data.length);
+            Range range = parseRange(rangeHeader, data.length);
             builder = Response.status(Response.Status.PARTIAL_CONTENT)
                     .entity(Arrays.copyOfRange(data, range.start(), range.end() + 1))
                     .header("Content-Range", "bytes " + range.start() + "-" + range.end() + "/" + data.length);
@@ -112,9 +116,9 @@ final class GcsMediaResponses {
         if (data == null || data.length < 2 || (data[0] & 0xff) != 0x1f || (data[1] & 0xff) != 0x8b) {
             return null;
         }
-        try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(data))) {
+        try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(data))) {
             return in.readAllBytes();
-        } catch (java.io.IOException e) {
+        } catch (IOException e) {
             return null;
         }
     }
@@ -128,9 +132,9 @@ final class GcsMediaResponses {
                 meta.getContentEncoding() != null ? meta.getContentEncoding() : "identity");
         addHeaderIfPresent(builder, "x-goog-storage-class", meta.getStorageClass());
         addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
-        var metadata = meta.getMetadata();
+        Map<String, String> metadata = meta.getMetadata();
         if (metadata != null) {
-            for (var entry : metadata.entrySet()) {
+            for (Map.Entry<String, String> entry : metadata.entrySet()) {
                 if (isValidHeaderName(entry.getKey()) && isValidHeaderValue(entry.getValue())) {
                     builder.header(META_HEADER_PREFIX + entry.getKey(), entry.getValue());
                 }
@@ -147,7 +151,7 @@ final class GcsMediaResponses {
 
     // Real GCS lists crc32c before md5 and omits md5 for composite objects.
     private static String hashHeader(GcsObjectMeta meta) {
-        var parts = new StringJoiner(",");
+        StringJoiner parts = new StringJoiner(",");
         if (meta.getCrc32c() != null) {
             parts.add("crc32c=" + meta.getCrc32c());
         }
@@ -166,7 +170,7 @@ final class GcsMediaResponses {
         if (key == null || key.isEmpty()) {
             return false;
         }
-        for (var i = 0; i < key.length(); i++) {
+        for (int i = 0; i < key.length(); i++) {
             if (!isTokenChar(key.charAt(i))) {
                 return false;
             }
@@ -183,8 +187,8 @@ final class GcsMediaResponses {
         if (value == null) {
             return false;
         }
-        for (var i = 0; i < value.length(); i++) {
-            var c = value.charAt(i);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
             if ((c < 0x20 || c > 0x7E) && c != '\t') {
                 return false;
             }

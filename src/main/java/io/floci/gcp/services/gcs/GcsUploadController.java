@@ -12,13 +12,18 @@ import io.floci.gcp.services.gcs.model.ResumableChunkOutcome;
 import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -129,11 +134,11 @@ public class GcsUploadController {
     // System metadata objects.insert accepts on the upload URL. Today that is only
     // contentEncoding; GCS ignores the other fields there.
     private static GcsObjectMeta systemMetadataFromQuery(UriInfo uriInfo) {
-        var contentEncoding = uriInfo.getQueryParameters().getFirst("contentEncoding");
+        String contentEncoding = uriInfo.getQueryParameters().getFirst("contentEncoding");
         if (contentEncoding == null || contentEncoding.isBlank()) {
             return null;
         }
-        var meta = new GcsObjectMeta();
+        GcsObjectMeta meta = new GcsObjectMeta();
         meta.setContentEncoding(contentEncoding);
         return meta;
     }
@@ -340,16 +345,16 @@ public class GcsUploadController {
     }
 
     private static Map<String, String> extractUserMetadata(Map<?, ?> requestMetadata) {
-        var value = requestMetadata.get("metadata");
+        Object value = requestMetadata.get("metadata");
         if (value == null) {
             return null;
         }
         if (!(value instanceof Map<?, ?> entries)) {
             throw GcpException.invalidArgument("metadata must be an object with string values");
         }
-        var userMetadata = new LinkedHashMap<String, String>();
-        for (var entry : entries.entrySet()) {
-            var entryValue = entry.getValue();
+        Map<String, String> userMetadata = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : entries.entrySet()) {
+            Object entryValue = entry.getValue();
             if (entryValue == null) {
                 continue;
             }

@@ -64,7 +64,7 @@ final class GcsCustomTime {
         if (value.getNanos() < 0 || value.getNanos() > 999_999_999 || value.getSeconds() < MIN_SECONDS) {
             throw GcpException.internal(INTERNAL);
         }
-        var nanos = BigInteger.valueOf(value.getSeconds()).multiply(NANOS_PER_SECOND)
+        BigInteger nanos = BigInteger.valueOf(value.getSeconds()).multiply(NANOS_PER_SECOND)
                 .add(BigInteger.valueOf(value.getNanos()))
                 .max(INT64_MIN).min(INT64_MAX);
         return Instant.EPOCH.plusNanos(nanos.longValueExact()).toString();
@@ -74,8 +74,8 @@ final class GcsCustomTime {
         if (previous == null) {
             return;
         }
-        var before = Instant.parse(previous);
-        var after = Instant.parse(next);
+        Instant before = Instant.parse(previous);
+        Instant after = Instant.parse(next);
         if (after.isBefore(before)) {
             throw GcpException.invalidArgument("Custom time cannot be decreased. Previously: "
                     + errorFormat(before) + ". Attempting to set: " + errorFormat(after) + ".");
@@ -84,7 +84,7 @@ final class GcsCustomTime {
 
     // The message renders the fraction without trailing zeros and with an explicit +00:00.
     private static String errorFormat(Instant instant) {
-        var text = new StringBuilder(ERROR_SECONDS.format(instant));
+        StringBuilder text = new StringBuilder(ERROR_SECONDS.format(instant));
         if (instant.getNano() != 0) {
             text.append('.').append(String.format("%09d", instant.getNano()).replaceFirst("0+$", ""));
         }

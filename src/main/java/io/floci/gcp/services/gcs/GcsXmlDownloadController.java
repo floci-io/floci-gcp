@@ -4,12 +4,24 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.RequestBaseUrl;
 import io.floci.gcp.core.common.XmlBuilder;
+import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
 import io.floci.gcp.services.iam.GcsIamAuthorizationService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -24,7 +36,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -87,7 +98,7 @@ public class GcsXmlDownloadController {
         GcsSignedUrl.checkNotExpired(uriInfo);
         authorize(() -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath));
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
-        var download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
+        GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
     }
 
@@ -277,10 +288,10 @@ public class GcsXmlDownloadController {
     }
 
     private static Map<String, String> googMetaHeaders(HttpHeaders headers) {
-        var prefix = GcsMediaResponses.META_HEADER_PREFIX;
-        var metadata = new LinkedHashMap<String, String>();
-        for (var headerName : headers.getRequestHeaders().keySet()) {
-            var lower = headerName.toLowerCase(Locale.ROOT);
+        String prefix = GcsMediaResponses.META_HEADER_PREFIX;
+        Map<String, String> metadata = new LinkedHashMap<>();
+        for (String headerName : headers.getRequestHeaders().keySet()) {
+            String lower = headerName.toLowerCase(Locale.ROOT);
             if (lower.startsWith(prefix) && lower.length() > prefix.length()) {
                 metadata.put(lower.substring(prefix.length()), headers.getHeaderString(headerName));
             }

@@ -92,6 +92,8 @@ public class IamService {
                 .storageKey("iam")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(IamController.class)
+                .api("iam.googleapis.com", "Identity and Access Management (IAM) API")
+                .usageAdapter(new IamServiceUsageAdapter(this))
                 .build());
         // Serves the google.iam.v1.IAMPolicy mixin for all services; not gated on
         // the iam REST toggle so Pub/Sub IAM keeps working when iam is disabled.
@@ -566,6 +568,16 @@ public class IamService {
                 .orElseThrow(() -> GcpException.permissionDenied(
                         "Permission denied on resource (or it may not exist): projects/-/serviceAccounts/"
                                 + emailOrId));
+    }
+
+    /** The project that owns an account addressed with the {@code -} project wildcard. */
+    Optional<String> owningProject(String emailOrId) {
+        try {
+            return Optional.of(resolve(WILDCARD_PROJECT, emailOrId).project());
+        } catch (GcpException expected) {
+            // An account that does not exist has no owner.
+            return Optional.empty();
+        }
     }
 
     // GCP account IDs must start with a letter, so an all-digit identifier is tried as a unique ID

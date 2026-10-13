@@ -40,7 +40,11 @@ public class ProjectContextFilter implements ContainerRequestFilter {
         requestContext.setProjectId(resolveProjectId(ctx));
     }
 
-    private String resolveProjectId(ContainerRequestContext ctx) {
+    public String defaultProjectId() {
+        return defaultProjectId;
+    }
+
+    public String resolveProjectId(ContainerRequestContext ctx) {
         String path = ctx.getUriInfo().getPath();
         if (path != null) {
             Matcher m = PATH_PROJECT.matcher(path);

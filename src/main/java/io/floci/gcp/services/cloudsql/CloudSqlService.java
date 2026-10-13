@@ -121,6 +121,7 @@ public class CloudSqlService {
                 .resourceClasses(CloudSqlController.class, CloudSqlV1Beta4Controller.class,
                         CloudSqlLegacyController.class, CloudSqlGlobalController.class,
                         CloudSqlV1Beta4GlobalController.class, CloudSqlLegacyGlobalController.class)
+                .api("sqladmin.googleapis.com", "Cloud SQL Admin API")
                 .build());
         if (config.services().cloudsql().enabled()) {
             backfillBuiltInUsers();

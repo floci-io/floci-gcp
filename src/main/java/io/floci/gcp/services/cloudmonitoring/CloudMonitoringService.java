@@ -116,6 +116,7 @@ public class CloudMonitoringService {
                 .storageKey("monitoring")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(CloudMonitoringController.class, CloudMonitoringHttpController.class)
+                .api("monitoring.googleapis.com", "Cloud Monitoring API")
                 .build());
         grpcServerManager.bind(new CloudMonitoringController(this));
     }

@@ -63,6 +63,7 @@ public class SchedulerService {
                 .storageKey("cloudscheduler")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(SchedulerController.class)
+                .api("cloudscheduler.googleapis.com", "Cloud Scheduler API", SchedulerHttpController.class)
                 .build());
         grpcServerManager.bind(new SchedulerController(this));
     }

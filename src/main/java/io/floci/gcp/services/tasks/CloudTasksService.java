@@ -65,6 +65,7 @@ public class CloudTasksService {
                 .storageKey("cloudtasks")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(CloudTasksController.class)
+                .api("cloudtasks.googleapis.com", "Cloud Tasks API")
                 .build());
         grpcServerManager.bind(new CloudTasksController(this));
     }

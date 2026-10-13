@@ -78,6 +78,8 @@ public class FirestoreService {
                 .storageKey("firestore")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(FirestoreController.class)
+                .api("firestore.googleapis.com", "Cloud Firestore API")
+                .usageAdapter(new FirestoreServiceUsageAdapter())
                 .build());
         grpcServerManager.bind(new FirestoreController(this));
     }

@@ -204,7 +204,9 @@ public class BigQueryStorageWrite implements Resettable {
 
     void onStart(@Observes StartupEvent event) {
         if (config.services().bigquery().enabled()) {
-            grpcServerManager.bind(new BigQueryWriteController(this));
+            grpcServerManager.bindForApi(new BigQueryWriteController(this),
+                    "bigquerystorage.googleapis.com", "BigQuery Storage API",
+                    new BigQueryStorageServiceUsageAdapter());
         }
     }
 

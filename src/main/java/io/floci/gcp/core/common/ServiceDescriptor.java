@@ -2,6 +2,14 @@ package io.floci.gcp.core.common;
 
 import java.util.Set;
 
+/**
+ * @param apiName googleapis service name (e.g. {@code pubsub.googleapis.com}) checked against
+ *                Service Usage state when {@code floci-gcp.services.serviceusage.enforcement-enabled} is on
+ * @param apiTitle service title used in the SERVICE_DISABLED message (e.g. {@code Cloud Pub/Sub API})
+ * @param apiResourceClasses extra REST resources gated only by Service Usage enforcement,
+ *                           not by the {@code enabled} flag
+ * @param usageAdapter service-owned project resolution and denial rendering for that enforcement
+ */
 public record ServiceDescriptor(
         String name,
         boolean enabled,
@@ -11,7 +19,11 @@ public record ServiceDescriptor(
         ServiceProtocol protocol,
         Set<Class<?>> resourceClasses,
         String hostToken,
-        String pathPrefix
+        String pathPrefix,
+        String apiName,
+        String apiTitle,
+        Set<Class<?>> apiResourceClasses,
+        ServiceUsageAdapter usageAdapter
 ) {
 
     public static Builder builder(String name) {
@@ -28,6 +40,10 @@ public record ServiceDescriptor(
         private Set<Class<?>> resourceClasses = Set.of();
         private String hostToken;
         private String pathPrefix;
+        private String apiName;
+        private String apiTitle;
+        private Set<Class<?>> apiResourceClasses = Set.of();
+        private ServiceUsageAdapter usageAdapter = ServiceUsageAdapter.GENERIC;
 
         private Builder(String name) {
             this.name = name;
@@ -42,9 +58,19 @@ public record ServiceDescriptor(
         public Builder hostToken(String hostToken) { this.hostToken = hostToken; return this; }
         public Builder pathPrefix(String pathPrefix) { this.pathPrefix = pathPrefix; return this; }
 
+        public Builder api(String apiName, String apiTitle, Class<?>... extraResourceClasses) {
+            this.apiName = apiName;
+            this.apiTitle = apiTitle;
+            this.apiResourceClasses = Set.of(extraResourceClasses);
+            return this;
+        }
+
+        public Builder usageAdapter(ServiceUsageAdapter usageAdapter) { this.usageAdapter = usageAdapter; return this; }
+
         public ServiceDescriptor build() {
             return new ServiceDescriptor(name, enabled, storageKey, storageMode,
-                    storageFlushIntervalMs, protocol, resourceClasses, hostToken, pathPrefix);
+                    storageFlushIntervalMs, protocol, resourceClasses, hostToken, pathPrefix,
+                    apiName, apiTitle, apiResourceClasses, usageAdapter);
         }
     }
 }

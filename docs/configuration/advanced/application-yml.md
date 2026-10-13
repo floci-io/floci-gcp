@@ -134,6 +134,8 @@ floci-gcp:
       docker-network:                 # overrides services.docker-network for k3s sidecars
     serviceusage:
       enabled: true
+      enforcement-enabled: false      # true rejects calls to APIs not ENABLED for the project (403 SERVICE_DISABLED)
+      # default-enabled: [...]        # APIs ENABLED in every project until disabled; defaults to GCP's new-project set
     resourcemanager:
       enabled: true
     firebaseauth:

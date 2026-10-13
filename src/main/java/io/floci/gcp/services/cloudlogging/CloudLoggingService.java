@@ -62,6 +62,8 @@ public class CloudLoggingService {
                 .storageKey("logging")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(CloudLoggingController.class)
+                .api("logging.googleapis.com", "Cloud Logging API", CloudLoggingHttpController.class)
+                .usageAdapter(new CloudLoggingServiceUsageAdapter())
                 .build());
         grpcServerManager.bind(new CloudLoggingController(this));
     }

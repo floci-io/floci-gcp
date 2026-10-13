@@ -183,7 +183,8 @@ class BigQueryDuckDmlIntegrationTest {
 
         query(target).then().statusCode(200);
         query(merge + " AND EXTRACT(DAY FROM d) = 5 AND d > DATE '2026-01-01'"
-                + " AND TIMESTAMP_TRUNC(TIMESTAMP(d), DAY, 'UTC') = TIMESTAMP(d) THEN INSERT (id, d)"
+                + " AND TIMESTAMP_TRUNC(TIMESTAMP(d), DAY, 'UTC') = TIMESTAMP(d)"
+                + " AND DATE_TRUNC(CASE WHEN [d, d] IS NOT NULL THEN d ELSE d END, MONTH) = DATE_TRUNC(d, MONTH) THEN INSERT (id, d)"
                 + " VALUES (id, DATE_TRUNC(d, MONTH))").then().statusCode(200);
         assertEquals(List.of(List.of("1", "2026-03-01")), rows("SELECT id, d FROM shop.merge_t ORDER BY id"));
 

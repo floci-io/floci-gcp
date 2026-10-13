@@ -593,7 +593,12 @@ final class SqlDialectTranslator {
                 argumentIndexes.push(new int[] {0});
                 continue;
             }
-            if (t.isPunct(")")) {
+            if (t.isPunct("[")) {
+                calls.push("");
+                argumentIndexes.push(new int[] {0});
+                continue;
+            }
+            if (t.isPunct(")") || t.isPunct("]")) {
                 calls.poll();
                 argumentIndexes.poll();
                 continue;

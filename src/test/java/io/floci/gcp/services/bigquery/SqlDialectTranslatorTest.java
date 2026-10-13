@@ -485,6 +485,10 @@ class SqlDialectTranslatorTest {
                 + " AND DATE_DIFF(d, day, DAY) > 0 AND DATE_TRUNC(date, MONTH) = d THEN INSERT (id) VALUES (id)");
         assertTrue(dateNamedColumns.contains("\"S\".day") && dateNamedColumns.contains("\"S\".date"), dateNamedColumns);
         assertFalse(dateNamedColumns.contains("\"S\".DAY") || dateNamedColumns.contains("\"S\".MONTH"), dateNamedColumns);
+        String arrayInDatePart = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED"
+                + " AND DATE_TRUNC(CASE WHEN [d, d2] IS NOT NULL THEN d ELSE d2 END, MONTH) = d THEN INSERT (id) VALUES (id)");
+        assertTrue(arrayInDatePart.contains("[\"S\".d, \"S\".d2]") && arrayInDatePart.contains("'month'"), arrayInDatePart);
+        assertFalse(arrayInDatePart.contains("\"S\".MONTH") || arrayInDatePart.contains("\"s\".month"), arrayInDatePart);
 
         String subquery = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v)"
                 + " VALUES (id, (SELECT v FROM ds.lookup LIMIT 1))");

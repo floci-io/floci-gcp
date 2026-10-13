@@ -58,6 +58,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.hasKey;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -272,6 +273,9 @@ class BigQueryWriteGrpcIntegrationTest {
                 Arrays.asList("ada", "36", "1700000000123456", "2024-01-01", "2024-01-02T03:04:05.000006", "-12.5",
                         List.of(Map.of("v", "a"), Map.of("v", "b")), Map.of("f", List.of(Map.of("v", "London"))), "9.5"),
                 Arrays.asList("bob", null, null, null, null, null, List.of(), null, null)), tableRows());
+        // A NULL cell keeps its "v" key, which the Python client reads unconditionally.
+        given().when().get(BASE + "/datasets/writes/tables/events/data")
+                .then().body("rows[1].f[1]", hasKey("v"));
     }
 
     @Test

@@ -182,7 +182,8 @@ class BigQueryDuckDmlIntegrationTest {
         String merge = "MERGE shop.merge_t T USING shop.merge_s S ON T.id = S.id WHEN NOT MATCHED";
 
         query(target).then().statusCode(200);
-        query(merge + " AND EXTRACT(DAY FROM d) = 5 AND d > DATE '2026-01-01' THEN INSERT (id, d)"
+        query(merge + " AND EXTRACT(DAY FROM d) = 5 AND d > DATE '2026-01-01'"
+                + " AND TIMESTAMP_TRUNC(TIMESTAMP(d), DAY, 'UTC') = TIMESTAMP(d) THEN INSERT (id, d)"
                 + " VALUES (id, DATE_TRUNC(d, MONTH))").then().statusCode(200);
         assertEquals(List.of(List.of("1", "2026-03-01")), rows("SELECT id, d FROM shop.merge_t ORDER BY id"));
 

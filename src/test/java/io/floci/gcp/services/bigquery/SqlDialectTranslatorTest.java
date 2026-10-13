@@ -475,6 +475,12 @@ class SqlDialectTranslatorTest {
                 + " AND d > DATE '2026-01-01' THEN INSERT (id, d) VALUES (id, DATE_TRUNC(d, MONTH))");
         assertTrue(dates.contains("\"S\".d") && dates.contains("\"S\".id"), dates);
         assertFalse(dates.contains("\"S\".DAY") || dates.contains("\"S\".DATE") || dates.contains("\"S\".MONTH"), dates);
+        String moreDates = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED"
+                + " AND TIMESTAMP_TRUNC(ts, DAY, 'UTC') IS NOT NULL AND d + INTERVAL '0-1' YEAR TO MONTH > d"
+                + " AND DATE_DIFF(d, d2, ISOWEEK) = 0 THEN INSERT (id) VALUES (id)");
+        assertTrue(moreDates.contains("date_trunc('day', \"S\".ts)") && moreDates.contains("YEAR TO MONTH")
+                && moreDates.contains("\"S\".d2"), moreDates);
+        assertFalse(moreDates.contains("\"S\".MONTH") || moreDates.contains("\"S\".ISOWEEK"), moreDates);
 
         String subquery = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v)"
                 + " VALUES (id, (SELECT v FROM ds.lookup LIMIT 1))");

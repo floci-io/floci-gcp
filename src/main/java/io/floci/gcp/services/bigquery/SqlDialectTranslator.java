@@ -563,8 +563,9 @@ final class SqlDialectTranslator {
      * Bare column names in {@code [from, to)}: an identifier that is not a keyword, a function name, part
      * of a dotted path, a name introduced by AS (a type or field alias), or a word following an operand
      * ({@code DAY} in {@code INTERVAL 1 DAY}). Also not a column: the type of a typed literal
-     * ({@code DATE '2026-01-01'}), a date part ({@code EXTRACT(DAY FROM d)}, the last argument of
-     * {@code DATE_TRUNC}, {@code DATE_DIFF} and the like, the weekday in {@code WEEK(MONDAY)}), and the
+     * ({@code DATE '2026-01-01'}), a date part ({@code EXTRACT(DAY FROM d)}, a part argument of
+     * {@code DATE_TRUNC}, {@code DATE_DIFF} and the like, the end of an interval range, the weekday in
+     * {@code WEEK(MONDAY)}), and the
      * types inside {@code ARRAY<...>}, {@code STRUCT<...>} and {@code RANGE<...>}. The {@code INSERT}
      * column list names target columns and is skipped, and so is a subquery, whose bare names belong to
      * its own tables.
@@ -619,8 +620,9 @@ final class SqlDialectTranslator {
                 continue;
             }
             String call = calls.peek();
-            if ("WEEK".equals(call) || (call != null && DATE_PART_FUNCTIONS.contains(call) && p != null && p.isPunct(",")
-                    && n != null && n.isPunct(")"))) {
+            boolean datePart = DATE_PART_NAMES.contains(t.upper()) && p != null
+                    && (p.isKeyword("TO") || (p.isPunct(",") && call != null && DATE_PART_FUNCTIONS.contains(call)));
+            if ("WEEK".equals(call) || datePart) {
                 continue;
             }
             columns.add(i);
@@ -630,9 +632,17 @@ final class SqlDialectTranslator {
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
             "VALUES", "ROW", "UPDATE", "DELETE");
 
-    /** Functions whose last argument is a date part ({@code DATE_TRUNC(d, MONTH)}), not a column. */
+    /**
+     * Functions that take a date part after the first argument ({@code DATE_TRUNC(d, MONTH)},
+     * {@code TIMESTAMP_TRUNC(ts, DAY, 'UTC')}); there, and after {@code TO} in an interval range
+     * ({@code INTERVAL '0-1' YEAR TO MONTH}), a date part name is not a column.
+     */
     private static final Set<String> DATE_PART_FUNCTIONS = Set.of("DATE_TRUNC", "DATETIME_TRUNC",
             "TIMESTAMP_TRUNC", "TIME_TRUNC", "DATE_DIFF", "DATETIME_DIFF", "TIMESTAMP_DIFF", "TIME_DIFF", "LAST_DAY");
+
+    private static final Set<String> DATE_PART_NAMES = Set.of("MICROSECOND", "MILLISECOND", "SECOND", "MINUTE",
+            "HOUR", "DAY", "DAYOFWEEK", "DAYOFYEAR", "WEEK", "ISOWEEK", "MONTH", "QUARTER", "YEAR", "ISOYEAR",
+            "DATE", "DATETIME", "TIME");
 
     private int previousSignificantIndex(int index) {
         for (int k = index - 1; k >= 0; k--) {

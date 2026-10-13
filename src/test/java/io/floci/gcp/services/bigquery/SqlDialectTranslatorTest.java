@@ -166,6 +166,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void anonymousColumnsBelowTheResultKeepTheirPosition() {
+        assertEquals("SELECT * FROM (SELECT 1 + 1 AS \"$col1\", 2 AS x, 3 + 3 AS \"$col3\")",
+                sql("SELECT * FROM (SELECT 1 + 1, 2 AS x, 3 + 3)"));
+        assertEquals("WITH s AS (SELECT 1 + 1 AS \"$col1\") SELECT * FROM \"s\"",
+                sql("WITH s AS (SELECT 1 + 1) SELECT * FROM s"));
+        assertEquals("SELECT 1 + 1 AS \"$col1\", * FROM (SELECT 2 + 2 AS \"$col1\")",
+                sql("SELECT 1 + 1, * FROM (SELECT 2 + 2)"));
+        assertEquals("SELECT (SELECT 1 + 1 AS \"$col1\") AS v, 1 + 1 AS f0_", sql("SELECT (SELECT 1 + 1) AS v, 1 + 1"));
+        assertEquals("SELECT 1 + 1 AS f0_ UNION ALL SELECT 2 + 2", sql("SELECT 1 + 1 UNION ALL SELECT 2 + 2"));
+    }
+
+    @Test
     void starAndImplicitAliasesKeepTheirNames() {
         assertEquals("SELECT * EXCLUDE (secret), UPPER(name) AS \"upper_name\" FROM \"ds\".\"t\"",
                 sql("SELECT * EXCEPT (secret), UPPER(name) upper_name FROM ds.t"));

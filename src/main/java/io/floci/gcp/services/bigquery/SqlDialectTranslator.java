@@ -1163,13 +1163,84 @@ final class SqlDialectTranslator {
 
     /**
      * BigQuery names unaliased, non-column expressions in the outermost select list
-     * {@code f0_}, {@code f1_}, … ; DuckDB would name them after the expression text.
+     * {@code f0_}, {@code f1_}, … ; DuckDB would name them after the expression text. In a nested
+     * select list (subquery, CTE, scalar subquery) such a column stays anonymous: BigQuery calls it
+     * {@code $col<position>} and names it {@code f<n>_} only if a {@code *} brings it into the result,
+     * numbered with the result's other anonymous columns. Those get {@code AS "$col<position>"} here
+     * and are numbered once the query has run and the output order is known; so are the outermost
+     * list's own anonymous columns when that list expands a {@code *}.
      */
     private void nameAnonymousColumns() {
-        int select = firstTopLevelSelect();
-        if (select < 0) {
+        int outermost = firstTopLevelSelect();
+        if (outermost < 0) {
             return;
         }
+        int outerDepth = 0;
+        for (int i = 0; i < outermost; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                outerDepth++;
+            } else if (tokens.get(i).isPunct(")")) {
+                outerDepth--;
+            }
+        }
+        // Later branches of a top-level set operation take their column names from the first one.
+        List<Integer> selects = new ArrayList<>();
+        int depth = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (t.isKeyword("SELECT") && (i == outermost || depth > outerDepth)) {
+                selects.add(i);
+            }
+        }
+        // From the last SELECT back: names are inserted after a SELECT, so earlier ones keep their index.
+        for (int k = selects.size() - 1; k >= 0; k--) {
+            int select = selects.get(k);
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            boolean positional = select != outermost || items.stream().anyMatch(this::expandsStar);
+            List<int[]> anonymous = new ArrayList<>();
+            for (int position = 0; position < items.size(); position++) {
+                int[] item = items.get(position);
+                if (needsGeneratedName(item[0], item[1])) {
+                    int last = item[1] - 1;
+                    while (tokens.get(last).kind == Kind.SPACE) {
+                        last--;
+                    }
+                    anonymous.add(new int[] {last + 1, position + 1});
+                }
+            }
+            // Insert from the back so earlier indexes stay valid.
+            for (int n = anonymous.size() - 1; n >= 0; n--) {
+                String alias = positional ? " AS " + DuckTypes.quoteIdentifier("$col" + anonymous.get(n)[1])
+                        : " AS f" + n + "_";
+                tokens.add(anonymous.get(n)[0], Token.raw(alias));
+            }
+        }
+    }
+
+    /** True for a {@code *}, {@code t.*} or {@code * EXCEPT/REPLACE (...)} select item. */
+    private boolean expandsStar(int[] item) {
+        List<Token> significant = significant(item[0], item[1]);
+        for (int k = 0; k < significant.size(); k++) {
+            if (significant.get(k).isPunct("*") && (k == significant.size() - 1
+                    || significant.get(k + 1).isKeyword("EXCEPT") || significant.get(k + 1).isKeyword("REPLACE"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The items of the select list that starts at {@code select}, as {@code [start, end)} token ranges,
+     * or null for {@code SELECT AS STRUCT} / {@code AS VALUE}, whose fields are named differently.
+     */
+    private List<int[]> selectItems(int select) {
         int start = select + 1;
         int first = nextSignificant(start, tokens.size());
         while (first >= 0 && (tokens.get(first).isKeyword("DISTINCT") || tokens.get(first).isKeyword("ALL"))) {
@@ -1177,7 +1248,7 @@ final class SqlDialectTranslator {
             first = nextSignificant(start, tokens.size());
         }
         if (first >= 0 && tokens.get(first).isKeyword("AS")) {
-            return; // SELECT AS STRUCT / AS VALUE
+            return null;
         }
         int end = start;
         int depth = 0;
@@ -1201,21 +1272,7 @@ final class SqlDialectTranslator {
             }
         }
         items.add(new int[] {itemStart, end});
-
-        List<Integer> insertAt = new ArrayList<>();
-        for (int[] item : items) {
-            if (needsGeneratedName(item[0], item[1])) {
-                int last = item[1] - 1;
-                while (tokens.get(last).kind == Kind.SPACE) {
-                    last--;
-                }
-                insertAt.add(last + 1);
-            }
-        }
-        // Insert from the back so earlier indexes stay valid.
-        for (int k = insertAt.size() - 1; k >= 0; k--) {
-            tokens.add(insertAt.get(k), Token.raw(" AS f" + k + "_"));
-        }
+        return items;
     }
 
     /**

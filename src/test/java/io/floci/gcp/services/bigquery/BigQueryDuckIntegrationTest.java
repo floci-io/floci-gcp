@@ -207,6 +207,38 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void anonymousSubqueryColumnsAreNamedInTheResultLikeBigQuery() {
+        assertResultColumns("SELECT * FROM (SELECT 1 + 1)", List.of("f0_"), List.of("2"));
+        assertResultColumns("SELECT * FROM (SELECT 1 + 1, 'a' || 'b')", List.of("f0_", "f1_"), List.of("2", "ab"));
+        assertResultColumns("SELECT * FROM (SELECT 1 + 1, 2 AS x, 3 + 3)", List.of("f0_", "x", "f1_"),
+                List.of("2", "2", "6"));
+        assertResultColumns("SELECT * FROM (SELECT * FROM (SELECT 1 + 1))", List.of("f0_"), List.of("2"));
+        assertResultColumns("WITH s AS (SELECT 1 + 1) SELECT * FROM s", List.of("f0_"), List.of("2"));
+        assertResultColumns("SELECT t.* FROM (SELECT 1 + 1) t", List.of("f0_"), List.of("2"));
+        assertResultColumns("SELECT * FROM (SELECT 1)", List.of("f0_"), List.of("1"));
+        assertResultColumns("SELECT *, 9 + 9 FROM (SELECT 2 + 2, 3 AS x)", List.of("f0_", "x", "f1_"),
+                List.of("4", "3", "18"));
+        assertResultColumns("SELECT * FROM (SELECT 1 + 1 UNION ALL SELECT 2 + 2) ORDER BY 1", List.of("f0_"),
+                List.of("2"));
+        assertResultColumns("SELECT (SELECT 1 + 1) AS v, 1 + 1", List.of("v", "f0_"), List.of("2", "2"));
+        for (String sql : List.of("SELECT 1 + 1, * FROM (SELECT 2 + 2)",
+                "SELECT * FROM (SELECT 1 + 1) a, (SELECT 2 + 2) b")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Duplicate column names in the result are not supported."
+                            + " Found duplicate(s): $col1"));
+        }
+    }
+
+    private static void assertResultColumns(String sql, List<String> names, List<String> firstRow) {
+        query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(names))
+                .body("rows[0].f.v", equalTo(firstRow));
+    }
+
+    @Test
+    @Order(5)
     void jsonTypeReturnsBigQueryTypeNames() {
         query("""
                 {"query": "SELECT JSON_TYPE(JSON '{\\"a\\": 1}'), JSON_TYPE(JSON '[1, 2]'), JSON_TYPE(JSON '\\"s\\"'), JSON_TYPE(JSON '20'), JSON_TYPE(JSON '-3'), JSON_TYPE(JSON '1.5'), JSON_TYPE(JSON '18446744073709551615'), JSON_TYPE(JSON 'true'), JSON_TYPE(JSON 'null'), JSON_TYPE(CAST(NULL AS JSON))", "useLegacySql": false}

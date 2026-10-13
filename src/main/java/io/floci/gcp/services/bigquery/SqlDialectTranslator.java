@@ -467,10 +467,11 @@ final class SqlDialectTranslator {
         }
         List<Integer> columns = new ArrayList<>();
         int depth = 0;
+        int caseDepth = 0;
         int clauseStart = -1;
         for (int i = from; i <= tokens.size(); i++) {
             Token t = i < tokens.size() ? tokens.get(i) : null;
-            boolean clauseEnds = t == null || (depth == 0 && t.isKeyword("WHEN"));
+            boolean clauseEnds = t == null || (depth == 0 && caseDepth == 0 && t.isKeyword("WHEN"));
             if (clauseEnds && clauseStart >= 0) {
                 collectBareColumns(clauseStart, i, columns);
                 clauseStart = -1;
@@ -482,7 +483,11 @@ final class SqlDialectTranslator {
                 depth++;
             } else if (t.isPunct(")")) {
                 depth--;
-            } else if (depth == 0 && t.isKeyword("WHEN")) {
+            } else if (t.isKeyword("CASE")) {
+                caseDepth++;
+            } else if (t.isKeyword("END") && caseDepth > 0) {
+                caseDepth--;
+            } else if (depth == 0 && caseDepth == 0 && t.isKeyword("WHEN")) {
                 clauseStart = notMatchedByTargetBody(i);
             }
         }
@@ -557,16 +562,42 @@ final class SqlDialectTranslator {
     /**
      * Bare column names in {@code [from, to)}: an identifier that is not a keyword, a function name, part
      * of a dotted path, a name introduced by AS (a type or field alias), or a word following an operand
-     * ({@code DAY} in {@code INTERVAL 1 DAY}). The {@code INSERT} column list names target columns and
-     * is skipped.
+     * ({@code DAY} in {@code INTERVAL 1 DAY}). Also not a column: the type of a typed literal
+     * ({@code DATE '2026-01-01'}), a date part ({@code EXTRACT(DAY FROM d)}, the last argument of
+     * {@code DATE_TRUNC}, {@code DATE_DIFF} and the like, the weekday in {@code WEEK(MONDAY)}), and the
+     * types inside {@code ARRAY<...>}, {@code STRUCT<...>} and {@code RANGE<...>}. The {@code INSERT}
+     * column list names target columns and is skipped, and so is a subquery, whose bare names belong to
+     * its own tables.
      */
     private void collectBareColumns(int from, int to, List<Integer> columns) {
+        Deque<String> calls = new ArrayDeque<>();
         for (int i = from; i < to; i++) {
             Token t = tokens.get(i);
             if (t.isKeyword("INSERT")) {
                 int open = nextSignificant(i + 1, to);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
                     i = matchingParen(open);
+                }
+                continue;
+            }
+            if (t.isPunct("(")) {
+                int first = nextSignificant(i + 1, to);
+                if (first >= 0 && (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH"))) {
+                    i = matchingParen(i);
+                    continue;
+                }
+                int callee = previousSignificantIndex(i);
+                calls.push(callee >= 0 && tokens.get(callee).kind == Kind.IDENT ? tokens.get(callee).upper() : "");
+                continue;
+            }
+            if (t.isPunct(")")) {
+                calls.poll();
+                continue;
+            }
+            if (t.isKeyword("ARRAY") || t.isKeyword("STRUCT") || t.isKeyword("RANGE")) {
+                int open = nextSignificant(i + 1, to);
+                if (open >= 0 && tokens.get(open).isPunct("<")) {
+                    i = closingAngle(open, to);
                 }
                 continue;
             }
@@ -577,15 +608,19 @@ final class SqlDialectTranslator {
                 continue;
             }
             int next = nextSignificant(i + 1, tokens.size());
-            if (next >= 0 && (tokens.get(next).isPunct("(") || tokens.get(next).isPunct("."))) {
+            Token n = next >= 0 ? tokens.get(next) : null;
+            if (n != null && (n.isPunct("(") || n.isPunct(".") || n.kind == Kind.STRING || n.kind == Kind.BYTES
+                    || n.isKeyword("FROM"))) {
                 continue;
             }
-            int previous = i - 1;
-            while (previous >= 0 && tokens.get(previous).kind == Kind.SPACE) {
-                previous--;
-            }
+            int previous = previousSignificantIndex(i);
             Token p = previous >= 0 ? tokens.get(previous) : null;
-            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || p.isPunct("<") || endsMergeOperand(p))) {
+            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || endsMergeOperand(p))) {
+                continue;
+            }
+            String call = calls.peek();
+            if ("WEEK".equals(call) || (call != null && DATE_PART_FUNCTIONS.contains(call) && p != null && p.isPunct(",")
+                    && n != null && n.isPunct(")"))) {
                 continue;
             }
             columns.add(i);
@@ -594,6 +629,38 @@ final class SqlDialectTranslator {
 
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
             "VALUES", "ROW", "UPDATE", "DELETE");
+
+    /** Functions whose last argument is a date part ({@code DATE_TRUNC(d, MONTH)}), not a column. */
+    private static final Set<String> DATE_PART_FUNCTIONS = Set.of("DATE_TRUNC", "DATETIME_TRUNC",
+            "TIMESTAMP_TRUNC", "TIME_TRUNC", "DATE_DIFF", "DATETIME_DIFF", "TIMESTAMP_DIFF", "TIME_DIFF", "LAST_DAY");
+
+    private int previousSignificantIndex(int index) {
+        for (int k = index - 1; k >= 0; k--) {
+            if (tokens.get(k).kind != Kind.SPACE && tokens.get(k).kind != Kind.RAW) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    /** Index of the {@code >} that closes the type bracket opened at {@code open}; {@code >>} closes two. */
+    private int closingAngle(int open, int to) {
+        int depth = 0;
+        for (int i = open; i < to; i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("<")) {
+                depth++;
+            } else if (t.isPunct(">")) {
+                depth--;
+            } else if (t.isPunct(">>")) {
+                depth -= 2;
+            }
+            if (depth <= 0) {
+                return i;
+            }
+        }
+        return to - 1;
+    }
 
     /** True when {@code t} can end an operand, so a word right after it is not a column reference. */
     private static boolean endsMergeOperand(Token t) {

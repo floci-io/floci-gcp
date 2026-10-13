@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -466,6 +467,29 @@ class SqlDialectTranslatorTest {
                 dml("MERGE ds.t USING ds.s ON t.id = s.id WHEN NOT MATCHED AND v > 1 THEN INSERT (id, v, d)"
                         + " VALUES (id + 1, UPPER(CAST(v AS STRING)), d + INTERVAL 1 DAY)"
                         + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE"));
+    }
+
+    @Test
+    void notMatchedClausesLeaveDatePartsSubqueriesTypesAndCaseAlone() {
+        String dates = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND EXTRACT(DAY FROM d) = 5"
+                + " AND d > DATE '2026-01-01' THEN INSERT (id, d) VALUES (id, DATE_TRUNC(d, MONTH))");
+        assertTrue(dates.contains("\"S\".d") && dates.contains("\"S\".id"), dates);
+        assertFalse(dates.contains("\"S\".DAY") || dates.contains("\"S\".DATE") || dates.contains("\"S\".MONTH"), dates);
+
+        String subquery = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v)"
+                + " VALUES (id, (SELECT v FROM ds.lookup LIMIT 1))");
+        assertTrue(subquery.contains("\"S\".id") && subquery.contains("(SELECT v FROM"), subquery);
+        assertFalse(subquery.contains("\"S\".v"), subquery);
+
+        String compare = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND a < b"
+                + " AND CAST(v AS ARRAY<STRUCT<x INT64, y STRING>>) IS NOT NULL THEN INSERT (id) VALUES (id)");
+        assertTrue(compare.contains("\"S\".a < \"S\".b") && compare.contains("\"S\".v"), compare);
+        assertFalse(compare.contains("\"S\".x") || compare.contains("\"S\".y"), compare);
+
+        String caseWhen = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND CASE WHEN flag THEN TRUE"
+                + " ELSE FALSE END THEN INSERT (id, flag) VALUES (id, flag)");
+        assertTrue(caseWhen.contains("CASE WHEN \"S\".flag THEN") && caseWhen.contains("VALUES (\"S\".id, \"S\".flag)"),
+                caseWhen);
     }
 
     @Test

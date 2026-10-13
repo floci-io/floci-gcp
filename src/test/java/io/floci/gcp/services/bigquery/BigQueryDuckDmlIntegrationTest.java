@@ -171,6 +171,37 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
+    @Order(3)
+    void notMatchedClausesKeepDatePartsSubqueriesComparisonsAndCaseWorking() {
+        String target = "CREATE OR REPLACE TABLE shop.merge_t (id INT64, d DATE, a INT64, b INT64, flag BOOL, v STRING)";
+        query("CREATE TABLE shop.merge_s AS SELECT * FROM UNNEST(["
+                + "STRUCT(1 AS id, DATE '2026-03-05' AS d, 1 AS a, 2 AS b, TRUE AS flag, 'from_source' AS v),"
+                + " STRUCT(2 AS id, DATE '2026-03-10' AS d, 5 AS a, 3 AS b, FALSE AS flag, 'from_source2' AS v)])")
+                .then().statusCode(200);
+        query("CREATE TABLE shop.lookup AS SELECT 'from_lookup' AS v").then().statusCode(200);
+        String merge = "MERGE shop.merge_t T USING shop.merge_s S ON T.id = S.id WHEN NOT MATCHED";
+
+        query(target).then().statusCode(200);
+        query(merge + " AND EXTRACT(DAY FROM d) = 5 AND d > DATE '2026-01-01' THEN INSERT (id, d)"
+                + " VALUES (id, DATE_TRUNC(d, MONTH))").then().statusCode(200);
+        assertEquals(List.of(List.of("1", "2026-03-01")), rows("SELECT id, d FROM shop.merge_t ORDER BY id"));
+
+        query(target).then().statusCode(200);
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT v FROM shop.lookup LIMIT 1))").then().statusCode(200);
+        assertEquals(List.of(List.of("1", "from_lookup"), List.of("2", "from_lookup")),
+                rows("SELECT id, v FROM shop.merge_t ORDER BY id"));
+
+        query(target).then().statusCode(200);
+        query(merge + " AND a < b THEN INSERT (id, a, b) VALUES (id, a, b)").then().statusCode(200);
+        assertEquals(List.of(List.of("1", "1", "2")), rows("SELECT id, a, b FROM shop.merge_t ORDER BY id"));
+
+        query(target).then().statusCode(200);
+        query(merge + " AND CASE WHEN flag THEN TRUE ELSE FALSE END THEN INSERT (id, flag) VALUES (id, flag)")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "true")), rows("SELECT id, flag FROM shop.merge_t ORDER BY id"));
+    }
+
+    @Test
     @Order(4)
     void ctasAndViews() {
         String ctasJob = query("CREATE TABLE shop.pricey AS SELECT id, name, price FROM shop.items WHERE price > 1")

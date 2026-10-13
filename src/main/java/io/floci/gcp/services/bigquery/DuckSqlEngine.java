@@ -73,14 +73,71 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
         if (result.columns() == null) {
             List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
-            return new Result(schemaOf(columns), fetch(sql, staging.setup(), flociEndpoint, columns), "SELECT",
+            return new Result(schemaOf(columns),
+                    rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
                     staging.bytesProcessed());
         }
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
                 .toList());
-        return new Result(schemaOf(columns), decodeRows(result.rows(), columns), "SELECT",
-                staging.bytesProcessed());
+        return new Result(schemaOf(columns), rejectNullArrayElements(columns, decodeRows(result.rows(), columns)),
+                "SELECT", staging.bytesProcessed());
+    }
+
+    /**
+     * BigQuery lets an array hold NULL elements while the query runs, but fails the query when a
+     * result row would contain one, naming the field and then each field that encloses it.
+     */
+    private static List<Map<String, Object>> rejectNullArrayElements(List<Column> columns,
+                                                                      List<Map<String, Object>> rows) {
+        List<TableFieldSchema> fields = columns.stream().map(Column::field).toList();
+        for (Map<String, Object> row : rows) {
+            String path = nullElementPath(fields, row, "");
+            if (path != null) {
+                StringBuilder message = new StringBuilder("Array cannot have a null element");
+                String enclosing = path;
+                while (true) {
+                    message.append("; error in writing field ").append(enclosing);
+                    int dot = enclosing.lastIndexOf('.');
+                    if (dot < 0) {
+                        break;
+                    }
+                    enclosing = enclosing.substring(0, dot);
+                }
+                throw SqlDialectTranslator.invalidQuery(message.toString());
+            }
+        }
+        return rows;
+    }
+
+    /** The dotted path of the first array holding a NULL element in {@code record}, or null. */
+    private static String nullElementPath(List<TableFieldSchema> fields, Map<?, ?> record, String prefix) {
+        for (TableFieldSchema field : fields) {
+            String path = prefix + field.getName();
+            Object value = record.get(field.getName());
+            List<?> values = List.of();
+            if ("REPEATED".equals(field.getMode()) && value instanceof List<?> list) {
+                values = list;
+                for (Object element : list) {
+                    if (element == null) {
+                        return path;
+                    }
+                }
+            } else if (value != null) {
+                values = List.of(value);
+            }
+            if (field.getFields() != null) {
+                for (Object element : values) {
+                    if (element instanceof Map<?, ?> nested) {
+                        String found = nullElementPath(field.getFields(), nested, path + ".");
+                        if (found != null) {
+                            return found;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     @Override

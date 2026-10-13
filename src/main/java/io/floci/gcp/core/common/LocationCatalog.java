@@ -155,16 +155,7 @@ public class LocationCatalog {
     }
 
     public static String locationOf(String name) {
-        if (name == null) {
-            return null;
-        }
-        int start = name.indexOf("/locations/");
-        if (start < 0) {
-            return null;
-        }
-        start += "/locations/".length();
-        int end = name.indexOf('/', start);
-        return end < 0 ? name.substring(start) : name.substring(start, end);
+        return GcpResourceNames.parseLocation(name);
     }
 
     private static JsonNode load() {

@@ -42,6 +42,27 @@ class GcpResourceNamesTest {
     }
 
     @Test
+    void parseProject_matchesWholeSegmentsOnly() {
+        assertNull(GcpResourceNames.parseProject("subprojects/x/topics/t"));
+        assertEquals("p", GcpResourceNames.parseProject("//cloudresourcemanager.googleapis.com/projects/p"));
+        assertEquals("p", GcpResourceNames.parseProject("subprojects/x/projects/p/topics/t"));
+    }
+
+    @Test
+    void parseLocation_matchesWholeSegmentsOnly() {
+        assertNull(GcpResourceNames.parseLocation("projects/p/sublocations/us-east1/things/t"));
+        assertEquals("global", GcpResourceNames.parseLocation("locations/global"));
+        assertEquals("us-east1", GcpResourceNames.parseLocation("projects/p/locations/us-east1"));
+    }
+
+    @Test
+    void projectIdOf_stripsThePrefixAndKeepsABareId() {
+        assertEquals("p", GcpResourceNames.projectIdOf("projects/p"));
+        assertEquals("p", GcpResourceNames.projectIdOf("p"));
+        assertEquals("", GcpResourceNames.projectIdOf("projects/"));
+    }
+
+    @Test
     void parseProject_deepPath() {
         assertEquals("p", GcpResourceNames.parseProject("projects/p/databases/(default)/documents/col/doc"));
     }

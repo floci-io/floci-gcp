@@ -2,6 +2,7 @@ package io.floci.gcp.services.resourcemanager;
 
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
@@ -67,7 +68,7 @@ public class ResourceManagerService {
     }
 
     private void requireProjectForPolicy(String resource) {
-        getProject(resource.substring("projects/".length()));
+        getProject(GcpResourceNames.projectIdOf(resource));
     }
 
     /** Stable per-project timestamp, like the deterministic projectNumber — real project createTimes are immutable. */

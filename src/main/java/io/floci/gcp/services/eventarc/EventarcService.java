@@ -170,7 +170,7 @@ public class EventarcService {
             if (e.getGrpcCode() == io.grpc.Status.Code.NOT_FOUND && allowMissing) {
                 // Treat as create
                 String project = GcpResourceNames.parseProject(name);
-                String location = parseLocation(name);
+                String location = GcpResourceNames.parseLocation(name);
                 String triggerId = GcpResourceNames.lastSegment(name);
                 return createTrigger(project, location, triggerId, body, validateOnly);
             }
@@ -265,7 +265,7 @@ public class EventarcService {
         String id = GcpResourceNames.lastSegment(name);
         if ("storage.googleapis.com".equals(id) || "pubsub.googleapis.com".equals(id)) {
             String project = GcpResourceNames.parseProject(name);
-            String location = parseLocation(name);
+            String location = GcpResourceNames.parseLocation(name);
             return Provider.newBuilder()
                     .setName(name)
                     .setDisplayName("storage.googleapis.com".equals(id) ? "Cloud Storage" : "Cloud Pub/Sub")
@@ -483,19 +483,6 @@ public class EventarcService {
             idx = name.indexOf("/channels/");
         }
         return idx < 0 ? name : name.substring(0, idx);
-    }
-
-    private static String parseLocation(String resourceName) {
-        if (resourceName == null) {
-            return null;
-        }
-        int start = resourceName.indexOf("locations/");
-        if (start < 0) {
-            return null;
-        }
-        start += "locations/".length();
-        int end = resourceName.indexOf('/', start);
-        return end < 0 ? resourceName.substring(start) : resourceName.substring(start, end);
     }
 
     private static Timestamp timestampNow() {

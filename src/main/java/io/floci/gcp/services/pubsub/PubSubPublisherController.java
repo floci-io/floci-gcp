@@ -16,6 +16,7 @@ import com.google.pubsub.v1.PublisherGrpc;
 import com.google.pubsub.v1.Topic;
 import com.google.pubsub.v1.UpdateTopicRequest;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
 import io.grpc.stub.StreamObserver;
@@ -63,7 +64,7 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
     public void listTopics(ListTopicsRequest request, StreamObserver<ListTopicsResponse> responseObserver) {
         LOG.debugf("listTopics project=%s", request.getProject());
         try {
-            String project = extractProjectId(request.getProject());
+            String project = GcpResourceNames.projectIdOf(request.getProject());
             List<StoredTopic> all = service.listTopics(project);
             PageToken.Page<StoredTopic> page = PageToken.paginate(all,
                     request.getPageSize(), request.getPageToken());
@@ -152,10 +153,4 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
         }
     }
 
-    private static String extractProjectId(String parent) {
-        if (parent.startsWith("projects/")) {
-            return parent.substring("projects/".length());
-        }
-        return parent;
-    }
 }

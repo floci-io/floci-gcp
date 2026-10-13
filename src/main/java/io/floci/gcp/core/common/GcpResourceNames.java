@@ -2,7 +2,8 @@ package io.floci.gcp.core.common;
 
 /**
  * Utilities for parsing and building GCP resource name strings
- * (e.g. {@code projects/{project}/topics/{topic}}).
+ * (e.g. {@code projects/{project}/topics/{topic}}). Extracting the project or the location of a
+ * name belongs here; a service keeps only the strict validation of its own full resource names.
  */
 public final class GcpResourceNames {
 
@@ -23,28 +24,35 @@ public final class GcpResourceNames {
 
     /** Extracts the project ID from a resource name segment {@code projects/{project}/...}. */
     public static String parseProject(String resourceName) {
-        if (resourceName == null) {
-            return null;
-        }
-        int start = resourceName.indexOf("projects/");
-        if (start < 0) {
-            return null;
-        }
-        start += "projects/".length();
-        int end = resourceName.indexOf('/', start);
-        return end < 0 ? resourceName.substring(start) : resourceName.substring(start, end);
+        return segmentAfter(resourceName, "projects");
     }
 
     /** Extracts the location from a resource name segment {@code .../locations/{location}/...}. */
     public static String parseLocation(String resourceName) {
+        return segmentAfter(resourceName, "locations");
+    }
+
+    /** The project ID of a {@code projects/{project}} reference; a bare ID is returned unchanged. */
+    public static String projectIdOf(String project) {
+        return project.startsWith("projects/") ? project.substring("projects/".length()) : project;
+    }
+
+    // Matches the collection as a whole segment, so "sublocations/x" is not a location.
+    private static String segmentAfter(String resourceName, String collection) {
         if (resourceName == null) {
             return null;
         }
-        int start = resourceName.indexOf("locations/");
-        if (start < 0) {
-            return null;
+        String marker = collection + "/";
+        int start;
+        if (resourceName.startsWith(marker)) {
+            start = marker.length();
+        } else {
+            int at = resourceName.indexOf("/" + marker);
+            if (at < 0) {
+                return null;
+            }
+            start = at + 1 + marker.length();
         }
-        start += "locations/".length();
         int end = resourceName.indexOf('/', start);
         return end < 0 ? resourceName.substring(start) : resourceName.substring(start, end);
     }

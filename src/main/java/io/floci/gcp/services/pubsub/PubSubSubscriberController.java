@@ -30,6 +30,7 @@ import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.UpdateSnapshotRequest;
 import com.google.pubsub.v1.UpdateSubscriptionRequest;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
@@ -87,7 +88,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             StreamObserver<ListSubscriptionsResponse> responseObserver) {
         LOG.debugf("listSubscriptions project=%s", request.getProject());
         try {
-            String project = extractProjectId(request.getProject());
+            String project = GcpResourceNames.projectIdOf(request.getProject());
             List<StoredSubscription> all = service.listSubscriptions(project);
             PageToken.Page<StoredSubscription> page = PageToken.paginate(all,
                     request.getPageSize(), request.getPageToken());
@@ -322,7 +323,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     public void listSnapshots(ListSnapshotsRequest request, StreamObserver<ListSnapshotsResponse> responseObserver) {
         LOG.debugf("listSnapshots project=%s", request.getProject());
         try {
-            String project = extractProjectId(request.getProject());
+            String project = GcpResourceNames.projectIdOf(request.getProject());
             List<StoredSnapshot> all = service.listSnapshots(project);
             PageToken.Page<StoredSnapshot> page = PageToken.paginate(all,
                     request.getPageSize(), request.getPageToken());
@@ -445,10 +446,4 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         return builder.build();
     }
 
-    private static String extractProjectId(String parent) {
-        if (parent.startsWith("projects/")) {
-            return parent.substring("projects/".length());
-        }
-        return parent;
-    }
 }

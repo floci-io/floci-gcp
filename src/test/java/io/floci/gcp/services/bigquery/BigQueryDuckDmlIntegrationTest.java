@@ -200,6 +200,14 @@ class BigQueryDuckDmlIntegrationTest {
         query(merge + " AND CASE WHEN flag THEN TRUE ELSE FALSE END THEN INSERT (id, flag) VALUES (id, flag)")
                 .then().statusCode(200);
         assertEquals(List.of(List.of("1", "true")), rows("SELECT id, flag FROM shop.merge_t ORDER BY id"));
+
+        query("CREATE TABLE shop.days_s AS SELECT 1 AS id, DATE '2026-03-05' AS d, DATE '2026-03-01' AS day"
+                + " UNION ALL SELECT 2, DATE '2026-03-01', DATE '2026-03-05'").then().statusCode(200);
+        query("CREATE TABLE shop.days_t (id INT64, d DATE, day DATE)").then().statusCode(200);
+        query("MERGE shop.days_t T USING shop.days_s S ON T.id = S.id"
+                + " WHEN NOT MATCHED AND DATE_DIFF(d, day, DAY) > 0 THEN INSERT (id, day) VALUES (id, day)")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "2026-03-01")), rows("SELECT id, day FROM shop.days_t ORDER BY id"));
     }
 
     @Test

@@ -572,6 +572,7 @@ final class SqlDialectTranslator {
      */
     private void collectBareColumns(int from, int to, List<Integer> columns) {
         Deque<String> calls = new ArrayDeque<>();
+        Deque<int[]> argumentIndexes = new ArrayDeque<>();
         for (int i = from; i < to; i++) {
             Token t = tokens.get(i);
             if (t.isKeyword("INSERT")) {
@@ -589,10 +590,16 @@ final class SqlDialectTranslator {
                 }
                 int callee = previousSignificantIndex(i);
                 calls.push(callee >= 0 && tokens.get(callee).kind == Kind.IDENT ? tokens.get(callee).upper() : "");
+                argumentIndexes.push(new int[] {0});
                 continue;
             }
             if (t.isPunct(")")) {
                 calls.poll();
+                argumentIndexes.poll();
+                continue;
+            }
+            if (t.isPunct(",") && !argumentIndexes.isEmpty()) {
+                argumentIndexes.peek()[0]++;
                 continue;
             }
             if (t.isKeyword("ARRAY") || t.isKeyword("STRUCT") || t.isKeyword("RANGE")) {
@@ -620,9 +627,11 @@ final class SqlDialectTranslator {
                 continue;
             }
             String call = calls.peek();
-            boolean datePart = DATE_PART_NAMES.contains(t.upper()) && p != null
-                    && (p.isKeyword("TO") || (p.isPunct(",") && call != null && DATE_PART_FUNCTIONS.contains(call)));
-            if ("WEEK".equals(call) || datePart) {
+            Integer partArgument = call == null ? null : DATE_PART_ARGUMENT.get(call);
+            boolean datePartArgument = partArgument != null && argumentIndexes.peek()[0] == partArgument
+                    && p != null && p.isPunct(",") && n != null && (n.isPunct(")") || n.isPunct(","));
+            boolean intervalRangeEnd = p != null && p.isKeyword("TO") && DATE_PART_NAMES.contains(t.upper());
+            if ("WEEK".equals(call) || datePartArgument || intervalRangeEnd) {
                 continue;
             }
             columns.add(i);
@@ -633,13 +642,15 @@ final class SqlDialectTranslator {
             "VALUES", "ROW", "UPDATE", "DELETE");
 
     /**
-     * Functions that take a date part after the first argument ({@code DATE_TRUNC(d, MONTH)},
-     * {@code TIMESTAMP_TRUNC(ts, DAY, 'UTC')}); there, and after {@code TO} in an interval range
-     * ({@code INTERVAL '0-1' YEAR TO MONTH}), a date part name is not a column.
+     * The 0-based argument that holds the date part ({@code DATE_TRUNC(d, MONTH)},
+     * {@code TIMESTAMP_TRUNC(ts, DAY, 'UTC')}, {@code DATE_DIFF(a, b, DAY)}); the other arguments are
+     * expressions, so a column named {@code day} there is still a column.
      */
-    private static final Set<String> DATE_PART_FUNCTIONS = Set.of("DATE_TRUNC", "DATETIME_TRUNC",
-            "TIMESTAMP_TRUNC", "TIME_TRUNC", "DATE_DIFF", "DATETIME_DIFF", "TIMESTAMP_DIFF", "TIME_DIFF", "LAST_DAY");
+    private static final Map<String, Integer> DATE_PART_ARGUMENT = Map.of("DATE_TRUNC", 1, "DATETIME_TRUNC", 1,
+            "TIMESTAMP_TRUNC", 1, "TIME_TRUNC", 1, "LAST_DAY", 1, "DATE_DIFF", 2, "DATETIME_DIFF", 2,
+            "TIMESTAMP_DIFF", 2, "TIME_DIFF", 2);
 
+    /** Date part names; after {@code TO} in an interval range ({@code INTERVAL '0-1' YEAR TO MONTH}) one is not a column. */
     private static final Set<String> DATE_PART_NAMES = Set.of("MICROSECOND", "MILLISECOND", "SECOND", "MINUTE",
             "HOUR", "DAY", "DAYOFWEEK", "DAYOFYEAR", "WEEK", "ISOWEEK", "MONTH", "QUARTER", "YEAR", "ISOYEAR",
             "DATE", "DATETIME", "TIME");

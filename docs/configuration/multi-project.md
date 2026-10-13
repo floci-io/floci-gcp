@@ -13,15 +13,33 @@ projects/my-project/databases/(default)/documents/...
 projects/my-project/secrets/my-secret
 ```
 
-floci-gcp extracts the project ID from each request and uses it to namespace all storage keys via `ProjectAwareStorageBackend`. Two requests with different project IDs see completely independent data sets.
+floci-gcp keeps projects apart in one of two ways, depending on the service:
+
+- **By resource name.** Most services store each resource under its full name, which starts
+  with `projects/{project}/`. Pub/Sub, Firestore, Datastore, Secret Manager, Cloud KMS, Cloud
+  Tasks, Cloud Scheduler, Cloud Run, GKE, Eventarc, Managed Kafka, IAM and Cloud Logging work
+  this way.
+- **By request project.** BigQuery, Cloud SQL, Cloud Monitoring and Cloud Functions resolve the
+  project of each request and prefix every stored key with it.
+- **Cloud Storage** follows GCP: bucket names are global, so a name taken in one project cannot
+  be created in another. Each bucket records the project that owns it, and listing buckets
+  returns only those of the project you ask for.
+
+Either way, two requests that name different projects see independent data. A project does not
+have to be created first: any project ID you use exists.
 
 ## Project ID Resolution Order
 
-floci-gcp resolves the project ID in this order:
+For REST requests floci-gcp resolves the project in this order:
 
 1. URL path segment: `projects/{project}/...`
-2. `x-goog-request-params` header: `project=...`
-3. `FLOCI_GCP_DEFAULT_PROJECT_ID` fallback (default: `floci-local`)
+2. `project` query parameter (for example `GET /storage/v1/b?project=my-project`)
+3. `x-goog-request-params` header: `project=...`
+4. `FLOCI_GCP_DEFAULT_PROJECT_ID` fallback (default: `floci-local`)
+
+gRPC requests carry the project in the resource names of the request message
+(`projects/{project}/topics/{topic}`) or in a `project_id` field, and each service reads it from
+there.
 
 ## Working with Multiple Projects
 
@@ -92,3 +110,48 @@ environment:
     gcloud pubsub topics list --project=project-a
     gcloud pubsub topics list --project=project-b
     ```
+
+## Project IDs and Project Numbers
+
+Every project has a stable 12-digit project number derived from its ID, so the same ID always
+gets the same number and no setup is needed. Resource Manager reports it
+(`GET /v1/projects/{project}`), Cloud Storage uses it in bucket resources (`projectNumber`,
+`projects/{projectNumber}`), and Firebase Auth uses it in `securetoken` responses.
+
+Cloud Storage accepts either the ID or the number when listing buckets. Other services expect
+the project ID in resource names.
+
+## The `-` Wildcard
+
+Where GCP documents `-` as a wildcard, floci-gcp accepts it:
+
+| Request | Meaning |
+|---|---|
+| `projects/-/serviceAccounts/{EMAIL_ADDRESS\|UNIQUE_ID}` (IAM) | The project that owns the account. A missing account returns `403 PERMISSION_DENIED`, as on GCP. |
+| `projects/{project}/locations/-/clusters` and `.../operations` (GKE) | Every location. |
+| `projects/{project}/locations/-/functions` (Cloud Functions) | Every location. |
+| `.../services/-/revisions` (Cloud Run) | Every service. Listing services with `locations/-` is rejected with `INVALID_ARGUMENT`, as on GCP. |
+
+## Persistence
+
+In the `persistent`, `hybrid` and `wal` [storage modes](storage.md) the project is saved with
+every resource (in its name, as a key prefix, or as the owner of a bucket), so projects stay
+isolated across restarts.
+
+## Opt-in Modes
+
+By default floci-gcp is lenient: any project exists, any location is accepted, and no policy is
+evaluated. These settings make it stricter. All are off by default.
+
+| Setting | Environment variable | Effect |
+|---|---|---|
+| `floci-gcp.locations.strict` | `FLOCI_GCP_LOCATIONS_STRICT` | Reject locations that are not in the catalog with `INVALID_ARGUMENT`. See [Locations](../services/locations.md). |
+| `floci-gcp.services.iam.authorization-mode=enforce` | `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | Evaluate stored IAM allow policies for the services that support it. See [IAM](../services/iam.md#opt-in-enforcement). |
+
+## Known Gaps
+
+- No organizations or folders: every project stands alone, and there are no organization policies.
+- Outside Cloud Storage bucket listing, a project number in a resource name is not mapped to
+  its project ID, so `projects/{number}/...` and `projects/{id}/...` address different data.
+- Project numbers are derived from the ID. They are stable, but they are not the numbers real
+  GCP would assign.

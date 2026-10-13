@@ -132,7 +132,7 @@ Opt-in `floci-gcp.services.iam.authorization-mode=enforce` also evaluates stored
 
 ### Project ID as multi-tenancy key
 
-GCP resource names follow `projects/{project}/...`. The project ID is the multi-tenancy boundary. All storage keys are namespaced by project ID via `ProjectAwareStorageBackend`.
+GCP resource names follow `projects/{project}/...`. The project ID is the multi-tenancy boundary. A service isolates projects in one of two ways: a global store (`StorageFactory.createGlobal`) keyed by the full `projects/{project}/...` resource name, which is what most services use, or a project-aware store (`StorageFactory.create`), where `ProjectAwareStorageBackend` prefixes every key with the request's project. Cloud Storage is the one exception: bucket names are global in GCP, so buckets and objects are keyed by bucket name and the owning project is a field of the bucket. The second kind reads the project from `RequestContext`, which only REST requests set; from gRPC or background code use `forProject(...)`.
 
 Resolution order in `ProjectContextFilter`:
 1. URL path segment `projects/{project}/...`
@@ -173,7 +173,7 @@ Rules:
 - Always use `StorageFactory`
 - Do not instantiate storage implementations directly inside services
 - Respect lifecycle hooks for load and flush behavior
-- Storage keys are namespaced by GCP project ID via `ProjectAwareStorageBackend`
+- Every stored key carries the GCP project (Cloud Storage buckets, whose names are global in GCP, are the exception): either the key is the full `projects/{project}/...` resource name in a global store (`createGlobal`), or the store is project-aware (`create`) and `ProjectAwareStorageBackend` adds the prefix. Never key a global store by a bare resource ID
 
 Important nuance:
 

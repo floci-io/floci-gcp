@@ -32,7 +32,9 @@ import java.util.regex.Pattern;
 public class ServiceEnabledFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ServiceEnabledFilter.class);
-    private static final Pattern CUSTOM_METHOD_ON_PROJECT = Pattern.compile("/projects/([^/]+):[A-Za-z]+$");
+    // Only the first projects/ segment is the route's own: a later one belongs to a proxied path.
+    private static final Pattern CUSTOM_METHOD_ON_PROJECT =
+            Pattern.compile("^(?:(?!/projects/).)*/projects/([^/]+):[A-Za-z]+$");
 
     @Context
     ResourceInfo resourceInfo;

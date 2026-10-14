@@ -333,6 +333,20 @@ class ServiceUsageEnforcementIntegrationTest {
     }
 
     @Test
+    void customMethodLaterInTheProxiedPathDoesNotChangeTheCheckedProject() {
+        String owner = "su-enforce-run-owner";
+        String other = "su-enforce-run-other";
+        enable(other, "run.googleapis.com");
+
+        given().urlEncodingEnabled(false)
+                .when().get("/run/v2/projects/" + owner + "/locations/us-central1/services/app/projects/"
+                        + other + ":lookup")
+                .then().statusCode(403)
+                .body("error.details[0].metadata.service", equalTo("run.googleapis.com"))
+                .body("error.details[0].metadata.consumer", equalTo("projects/" + owner));
+    }
+
+    @Test
     void everyLogEntryDestinationIsChecked() {
         String enabled = "su-enforce-entries-on";
         String disabled = "su-enforce-entries-off";

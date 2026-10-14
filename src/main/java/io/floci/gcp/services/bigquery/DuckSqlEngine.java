@@ -116,7 +116,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
                 request.projectId(), request.defaultDatasetId(),
-                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
+                ref -> columnNames(tables, ref));
 
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
@@ -470,6 +471,24 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         staged.add(ref);
         expanding.remove(ref);
+    }
+
+    /** Lower-cased column names of a table, or null when it does not exist or has no schema. */
+    private static Set<String> columnNames(Tables tables, SqlDialectTranslator.TableRef ref) {
+        Table table;
+        try {
+            table = tables.table(ref.datasetId(), ref.tableId());
+        } catch (GcpException e) {
+            return null;
+        }
+        if (table == null || table.getSchema() == null || table.getSchema().getFields() == null) {
+            return null;
+        }
+        Set<String> names = new HashSet<>();
+        for (TableFieldSchema field : table.getSchema().getFields()) {
+            names.add(field.getName().toLowerCase(Locale.ROOT));
+        }
+        return names;
     }
 
     private static TableSchema schemaOf(List<Column> columns) {

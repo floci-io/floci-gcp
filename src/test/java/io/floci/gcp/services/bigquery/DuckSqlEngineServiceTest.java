@@ -26,9 +26,30 @@ class DuckSqlEngineServiceTest {
 
     @Test
     void callerSqlRunsAfterExternalAccessIsLocked() {
+        String setup = setupForAViewQuery(false);
+        int staging = setup.indexOf("read_json(");
+        int lock = setup.indexOf(DuckSqlEngine.LOCK_EXTERNAL_ACCESS);
+        int createView = setup.indexOf("CREATE VIEW");
+        assertTrue(staging >= 0 && lock > staging, "tables are staged before external access is locked: " + setup);
+        assertTrue(createView > lock, "views come from caller SQL, so they are created after the lock: " + setup);
+    }
+
+    @Test
+    void dryRunCallerSqlRunsAfterExternalAccessIsLocked() {
+        String setup = setupForAViewQuery(true);
+        int staging = setup.indexOf("CREATE TABLE");
+        int lock = setup.indexOf(DuckSqlEngine.LOCK_EXTERNAL_ACCESS);
+        int createView = setup.indexOf("CREATE VIEW");
+        assertTrue(staging >= 0 && lock > staging, "empty tables are created before external access is locked: " + setup);
+        assertTrue(createView > lock, "views come from caller SQL, so they are created after the lock: " + setup);
+    }
+
+    /** The setup SQL sent to the sidecar for {@code SELECT a FROM ds.v}, where view {@code ds.v} reads table {@code ds.t}. */
+    private static String setupForAViewQuery(boolean dryRun) {
         DuckClient client = mock(DuckClient.class);
         when(client.query(anyString(), anyString(), anyString(), isNull()))
-                .thenReturn(new DuckClient.DuckResult(List.of(new DuckClient.DuckColumn("a", "BIGINT")), List.of(), null));
+                .thenReturn(new DuckClient.DuckResult(List.of(new DuckClient.DuckColumn("a", "BIGINT")),
+                        List.of(Map.of("column_name", "a", "column_type", "BIGINT")), null));
         DuckSqlEngine engine = engine(client);
 
         BigQuerySqlEngine.Tables tables = mock(BigQuerySqlEngine.Tables.class);
@@ -39,17 +60,12 @@ class DuckSqlEngineServiceTest {
         view.setViewDefinition(Map.of("query", "SELECT a FROM ds.t"));
         when(tables.table("ds", "v")).thenReturn(view);
 
-        engine.execute(new BigQuerySqlEngine.Request("proj", "SELECT a FROM ds.v", "ds", List.of(), "NAMED", false),
+        engine.execute(new BigQuerySqlEngine.Request("proj", "SELECT a FROM ds.v", "ds", List.of(), "NAMED", dryRun),
                 tables);
 
         ArgumentCaptor<String> setupCaptor = ArgumentCaptor.forClass(String.class);
         verify(client).query(anyString(), setupCaptor.capture(), anyString(), isNull());
-        String setup = setupCaptor.getValue();
-        int staging = setup.indexOf("read_json(");
-        int lock = setup.indexOf(DuckSqlEngine.LOCK_EXTERNAL_ACCESS);
-        int createView = setup.indexOf("CREATE VIEW");
-        assertTrue(staging >= 0 && lock > staging, "tables are staged before external access is locked: " + setup);
-        assertTrue(createView > lock, "views come from caller SQL, so they are created after the lock: " + setup);
+        return setupCaptor.getValue();
     }
 
     private static Table tableWithColumnA() {

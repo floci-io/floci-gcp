@@ -7,6 +7,7 @@ import com.google.api.gax.rpc.PermissionDeniedException;
 import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.run.v2.Container;
+import com.google.cloud.run.v2.ContainerPort;
 import com.google.cloud.run.v2.CreateServiceRequest;
 import com.google.cloud.run.v2.DeleteRevisionRequest;
 import com.google.cloud.run.v2.DeleteServiceRequest;
@@ -240,7 +241,8 @@ class CloudRunIamEnforcementTest {
 
             Service updated = caller.updateServiceAsync(UpdateServiceRequest.newBuilder()
                     .setService(Service.newBuilder().setName(allowed).setTemplate(RevisionTemplate.newBuilder()
-                            .addContainers(Container.newBuilder().setImage("nginx:1.27"))))
+                            .addContainers(Container.newBuilder().setImage("nginx:1.27")
+                                    .addPorts(ContainerPort.newBuilder().setContainerPort(80)))))
                     .setUpdateMask(FieldMask.newBuilder().addPaths("template")).build())
                     .get(30, TimeUnit.SECONDS);
             assertThat(updated.getLatestReadyRevision()).isNotEqualTo(oldRevision);
@@ -357,7 +359,8 @@ class CloudRunIamEnforcementTest {
     private static void create(ServicesClient client, String parent, String id) throws Exception {
         client.createServiceAsync(CreateServiceRequest.newBuilder().setParent(parent).setServiceId(id)
                 .setService(Service.newBuilder().setTemplate(RevisionTemplate.newBuilder()
-                        .addContainers(Container.newBuilder().setImage("nginx:latest")))).build())
+                        .addContainers(Container.newBuilder().setImage("nginx:latest")
+                                .addPorts(ContainerPort.newBuilder().setContainerPort(80))))).build())
                 .get(30, TimeUnit.SECONDS);
     }
 }

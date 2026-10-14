@@ -112,7 +112,7 @@ public class SecretManagerService {
         String name = "projects/" + project + "/secrets/" + secretId;
         LOG.infof("createSecret name=%s", name);
         synchronized (secretLock(name)) {
-            return authorized("CreateSecret", "projects/" + project, () -> {
+            return authorized("CreateSecret", "projects/" + project, name, () -> {
                 try {
                     resumePendingDeletion(name);
                 } catch (StorageException e) {
@@ -374,6 +374,11 @@ public class SecretManagerService {
     }
 
     private <T> T authorized(String operationName, String target, Supplier<T> action) {
+        return authorized(operationName, target, null, action);
+    }
+
+    private <T> T authorized(String operationName, String target, String additionalPolicyResource,
+            Supplier<T> action) {
         if (authorization == null) {
             return action.get();
         }
@@ -382,10 +387,16 @@ public class SecretManagerService {
                 .map(check -> check.resource())
                 .findFirst()
                 .orElseGet(() -> iamAdapter.requireResource(target));
-        return authorization.withPolicyLocks(resource, () -> {
+        Supplier<T> checked = () -> {
             authorization.authorizeCurrent(iamAdapter, operation);
             return action.get();
-        });
+        };
+        if (additionalPolicyResource != null) {
+            IamResource secret = IamResource.projectChild("secretmanager.googleapis.com", "Secret",
+                    additionalPolicyResource, additionalPolicyResource);
+            return authorization.withPolicyLocks(List.of(resource, secret), checked);
+        }
+        return authorization.withPolicyLocks(resource, checked);
     }
 
     private static Object[] createSecretLocks() {

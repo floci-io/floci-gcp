@@ -6,6 +6,8 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.services.iam.IamResource;
+import io.floci.gcp.services.iam.IamResourceHierarchy;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -27,10 +29,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
@@ -39,12 +43,83 @@ class SecretManagerServiceTest {
     private SecretManagerService service;
 
     @Test
+    void creationRecoveryDoesNotHoldProjectPolicyWhileWaitingForSecretPolicy() throws Exception {
+        String project = "projects/p1";
+        String name = project + "/secrets/recovery-0";
+        IamService policies = IamServices.inMemory();
+        IamResourceHierarchy hierarchy = new IamResourceHierarchy();
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        CountDownLatch createEnteredLocks = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            IamResource resource = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            createEnteredLocks.countDown();
+            return policies.withPolicyLocks(hierarchy.policyResourcesFor(resource), action::get);
+        }).when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> {
+            List<IamResource> resources = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            createEnteredLocks.countDown();
+            List<String> policyResources = resources.stream()
+                    .flatMap(resource -> hierarchy.policyResourcesFor(resource).stream())
+                    .distinct().toList();
+            return policies.withPolicyLocks(policyResources, action::get);
+        }).when(authorization).withPolicyLocks(anyList(), any());
+
+        InMemoryStorage<String, String> deletions = new InMemoryStorage<>();
+        deletions.put(name, name);
+        SecretManagerService tested = new SecretManagerService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), deletions, policies, authorization,
+                new SecretManagerIamAuthorizationAdapter());
+        CountDownLatch secretPolicyHeld = new CountDownLatch(1);
+        CountDownLatch releaseSecretPolicy = new CountDownLatch(1);
+        AtomicReference<Thread> createThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(3)) {
+            Future<?> holder = executor.submit(() -> policies.withPolicyLock(name, () -> {
+                secretPolicyHeld.countDown();
+                try {
+                    assertTrue(releaseSecretPolicy.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+                return null;
+            }));
+            assertTrue(secretPolicyHeld.await(5, TimeUnit.SECONDS));
+            try {
+                Future<StoredSecret> create = executor.submit(() -> {
+                    createThread.set(Thread.currentThread());
+                    return tested.createSecret("p1", "recovery-0", "automatic");
+                });
+                assertTrue(createEnteredLocks.await(5, TimeUnit.SECONDS));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (createThread.get().getState() != Thread.State.BLOCKED && !create.isDone()) {
+                    assertTrue(System.nanoTime() < deadline);
+                    Thread.onSpinWait();
+                }
+                assertFalse(create.isDone());
+                Future<Boolean> projectAvailable = executor.submit(
+                        () -> policies.withPolicyLock(project, () -> true));
+                assertTrue(projectAvailable.get(1, TimeUnit.SECONDS));
+                releaseSecretPolicy.countDown();
+                assertEquals(name, create.get(5, TimeUnit.SECONDS).getName());
+                holder.get(5, TimeUnit.SECONDS);
+            } finally {
+                releaseSecretPolicy.countDown();
+            }
+        }
+    }
+
+    @Test
     void accessCannotReadReplacementAfterEarlierAuthorization() throws Exception {
         IamAuthorizationService authorization = mock(IamAuthorizationService.class);
         CountDownLatch accessAuthorized = new CountDownLatch(1);
         CountDownLatch finishAuthorization = new CountDownLatch(1);
         doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
                 .when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
+                .when(authorization).withPolicyLocks(anyList(), any());
         doAnswer(invocation -> {
             IamOperation operation = invocation.getArgument(1);
             if (operation.name().equals("AccessSecretVersion")) {

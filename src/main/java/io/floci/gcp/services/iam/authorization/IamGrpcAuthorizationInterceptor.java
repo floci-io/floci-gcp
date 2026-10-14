@@ -1,9 +1,10 @@
 package io.floci.gcp.services.iam.authorization;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.iam.v1.GetIamPolicyRequest;
+import com.google.iam.v1.SetIamPolicyRequest;
+import com.google.iam.v1.TestIamPermissionsRequest;
 import com.google.protobuf.Message;
-import com.google.protobuf.util.JsonFormat;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpGrpcController;
 import io.grpc.Context;
@@ -66,11 +67,16 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                             if (!(message instanceof Message proto)) {
                                 throw GcpException.failedPrecondition("IAM requires a protobuf resource mapping: " + service);
                             }
-                            JsonNode request = mapper.readTree(JsonFormat.printer().print(proto));
                             String method = call.getMethodDescriptor().getBareMethodName();
                             IamOperation operation = null;
                             if (mixin) {
-                                String resource = request.path("resource").asText();
+                                String resource = switch (proto) {
+                                    case GetIamPolicyRequest get -> get.getResource();
+                                    case SetIamPolicyRequest set -> set.getResource();
+                                    case TestIamPermissionsRequest test -> test.getResource();
+                                    default -> throw GcpException.failedPrecondition(
+                                            "IAM requires a resource mapping: " + method);
+                                };
                                 adapter = registry.resource(resource);
                                 if (adapter.isEmpty()) {
                                     if (authorization.get().applies(credential)) {
@@ -82,9 +88,10 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     operation = new IamOperation(method, resource);
                                 }
                             } else {
+                                IamOperation mapped = adapter.orElseThrow().grpcOperation(method, proto, mapper);
                                 if (service.equals("google.pubsub.v1.Subscriber")
                                         && method.equals("StreamingPull")) {
-                                    String requestedSubscription = request.path("subscription").asText();
+                                    String requestedSubscription = mapped.resource();
                                     if (streamingSubscription == null) {
                                         if (requestedSubscription.isBlank()) {
                                             throw GcpException.invalidArgument(
@@ -97,7 +104,7 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     }
                                     operation = new IamOperation("streamingPull", streamingSubscription);
                                 } else {
-                                    operation = adapter.orElseThrow().grpcOperation(method, request);
+                                    operation = mapped;
                                 }
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {

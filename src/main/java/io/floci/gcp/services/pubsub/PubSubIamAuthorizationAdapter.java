@@ -1,6 +1,32 @@
 package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.Message;
+import com.google.pubsub.v1.AcknowledgeRequest;
+import com.google.pubsub.v1.CreateSnapshotRequest;
+import com.google.pubsub.v1.DeleteSnapshotRequest;
+import com.google.pubsub.v1.DeleteSubscriptionRequest;
+import com.google.pubsub.v1.DeleteTopicRequest;
+import com.google.pubsub.v1.DetachSubscriptionRequest;
+import com.google.pubsub.v1.GetSnapshotRequest;
+import com.google.pubsub.v1.GetSubscriptionRequest;
+import com.google.pubsub.v1.GetTopicRequest;
+import com.google.pubsub.v1.ListSnapshotsRequest;
+import com.google.pubsub.v1.ListSubscriptionsRequest;
+import com.google.pubsub.v1.ListTopicSubscriptionsRequest;
+import com.google.pubsub.v1.ListTopicsRequest;
+import com.google.pubsub.v1.ModifyAckDeadlineRequest;
+import com.google.pubsub.v1.ModifyPushConfigRequest;
+import com.google.pubsub.v1.PublishRequest;
+import com.google.pubsub.v1.PullRequest;
+import com.google.pubsub.v1.SeekRequest;
+import com.google.pubsub.v1.StreamingPullRequest;
+import com.google.pubsub.v1.Subscription;
+import com.google.pubsub.v1.Topic;
+import com.google.pubsub.v1.UpdateSnapshotRequest;
+import com.google.pubsub.v1.UpdateSubscriptionRequest;
+import com.google.pubsub.v1.UpdateTopicRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
@@ -125,6 +151,40 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             case "DeleteSnapshot" -> named("deleteSnapshot", request, "snapshot");
             case "Seek" -> new IamOperation("seek", required(request.path("subscription").asText(),
                     "subscription"), request.path("snapshot").asText());
+            default -> throw unsupported("gRPC operation " + method);
+        };
+    }
+
+    @Override
+    public IamOperation grpcOperation(String method, Message request, ObjectMapper mapper) {
+        return switch (method) {
+            case "CreateTopic" -> new IamOperation("createTopic", required(((Topic) request).getName(), "name"));
+            case "GetTopic" -> new IamOperation("getTopic", required(((GetTopicRequest) request).getTopic(), "topic"));
+            case "ListTopics" -> new IamOperation("listTopics", required(((ListTopicsRequest) request).getProject(), "project"));
+            case "UpdateTopic" -> new IamOperation("updateTopic", required(((UpdateTopicRequest) request).getTopic().getName(), "topic.name"));
+            case "DeleteTopic" -> new IamOperation("deleteTopic", required(((DeleteTopicRequest) request).getTopic(), "topic"));
+            case "Publish" -> new IamOperation("publish", required(((PublishRequest) request).getTopic(), "topic"));
+            case "ListTopicSubscriptions" -> new IamOperation("listTopicSubscriptions", required(((ListTopicSubscriptionsRequest) request).getTopic(), "topic"));
+            case "DetachSubscription" -> new IamOperation("detachSubscription", required(((DetachSubscriptionRequest) request).getSubscription(), "subscription"));
+            case "CreateSubscription" -> {
+                Subscription subscription = (Subscription) request;
+                yield new IamOperation("createSubscription", required(subscription.getName(), "name"), required(subscription.getTopic(), "topic"));
+            }
+            case "GetSubscription" -> new IamOperation("getSubscription", required(((GetSubscriptionRequest) request).getSubscription(), "subscription"));
+            case "ListSubscriptions" -> new IamOperation("listSubscriptions", required(((ListSubscriptionsRequest) request).getProject(), "project"));
+            case "UpdateSubscription" -> new IamOperation("updateSubscription", required(((UpdateSubscriptionRequest) request).getSubscription().getName(), "subscription.name"));
+            case "DeleteSubscription" -> new IamOperation("deleteSubscription", required(((DeleteSubscriptionRequest) request).getSubscription(), "subscription"));
+            case "Pull" -> new IamOperation("pull", required(((PullRequest) request).getSubscription(), "subscription"));
+            case "Acknowledge" -> new IamOperation("acknowledge", required(((AcknowledgeRequest) request).getSubscription(), "subscription"));
+            case "ModifyPushConfig" -> new IamOperation("modifyPushConfig", required(((ModifyPushConfigRequest) request).getSubscription(), "subscription"));
+            case "ModifyAckDeadline" -> new IamOperation("modifyAckDeadline", required(((ModifyAckDeadlineRequest) request).getSubscription(), "subscription"));
+            case "StreamingPull" -> new IamOperation("streamingPull", ((StreamingPullRequest) request).getSubscription());
+            case "CreateSnapshot" -> new IamOperation("createSnapshot", required(((CreateSnapshotRequest) request).getName(), "name"), required(((CreateSnapshotRequest) request).getSubscription(), "subscription"));
+            case "GetSnapshot" -> new IamOperation("getSnapshot", required(((GetSnapshotRequest) request).getSnapshot(), "snapshot"));
+            case "ListSnapshots" -> new IamOperation("listSnapshots", required(((ListSnapshotsRequest) request).getProject(), "project"));
+            case "UpdateSnapshot" -> new IamOperation("updateSnapshot", required(((UpdateSnapshotRequest) request).getSnapshot().getName(), "snapshot.name"));
+            case "DeleteSnapshot" -> new IamOperation("deleteSnapshot", required(((DeleteSnapshotRequest) request).getSnapshot(), "snapshot"));
+            case "Seek" -> new IamOperation("seek", required(((SeekRequest) request).getSubscription(), "subscription"), ((SeekRequest) request).getSnapshot());
             default -> throw unsupported("gRPC operation " + method);
         };
     }

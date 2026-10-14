@@ -2,6 +2,9 @@ package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.protobuf.Message;
+import com.google.protobuf.util.JsonFormat;
+import com.google.pubsub.v1.StreamingPullRequest;
 import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import jakarta.ws.rs.Path;
@@ -24,7 +27,7 @@ class PubSubIamAuthorizationAdapterServiceTest {
     private static final String SNAPSHOT = PROJECT + "/snapshots/snapshot";
 
     @Test
-    void everyImplementedRestAndGrpcHandlerHasAnAuthorizationMapping() {
+    void everyImplementedRestAndGrpcHandlerHasAnAuthorizationMapping() throws Exception {
         PubSubService service = mock(PubSubService.class);
         when(service.getSubscription(SUBSCRIPTION))
                 .thenReturn(new StoredSubscription(SUBSCRIPTION, TOPIC, 10));
@@ -67,6 +70,18 @@ class PubSubIamAuthorizationAdapterServiceTest {
                 IamOperation operation = adapter.grpcOperation(name, request);
                 assertFalse(operation.resource().isBlank(), name);
                 adapter.checks(operation);
+                Message proto;
+                if (name.equals("StreamingPull")) {
+                    proto = StreamingPullRequest.newBuilder().setSubscription(SUBSCRIPTION).build();
+                } else {
+                    Message defaultInstance = (Message) method.getParameterTypes()[0]
+                            .getMethod("getDefaultInstance").invoke(null);
+                    Message.Builder builder = defaultInstance.newBuilderForType();
+                    JsonFormat.parser().ignoringUnknownFields().merge(request.toString(), builder);
+                    proto = builder.build();
+                }
+                IamOperation typed = adapter.grpcOperation(name, proto, mapper);
+                assertEquals(operation, typed, name);
                 grpcHandlers++;
             }
         }

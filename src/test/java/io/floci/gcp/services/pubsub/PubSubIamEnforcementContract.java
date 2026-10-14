@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -437,7 +438,13 @@ abstract class PubSubIamEnforcementContract {
         service.createTopic(topic);
         service.createSubscription(subscription, topic, 10);
         grant(subscription, "roles/pubsub.subscriber", null);
-        service.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("initial")).build()));
+        List<PubsubMessage> messages = new ArrayList<>();
+        PubsubMessage initial = PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("initial")).build();
+        for (int i = 0; i < 1000; i++) {
+            messages.add(initial);
+        }
+        messages.add(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("queued")).build());
+        service.publish(topic, messages);
 
         CountDownLatch closed = new CountDownLatch(1);
         CountDownLatch delivered = new CountDownLatch(1);
@@ -450,8 +457,7 @@ abstract class PubSubIamEnforcementContract {
 
         assertTrue(closed.await(5, TimeUnit.SECONDS));
         assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(error.get()).getCode());
-        service.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("queued")).build()));
-        assertEquals(1, service.pull(subscription, 1).size());
+        assertEquals("queued", service.pull(subscription, 1).getFirst().getMessage().getData().toStringUtf8());
     }
 
     private StreamObserver<StreamingPullRequest> streamingRequests(CountDownLatch closed,

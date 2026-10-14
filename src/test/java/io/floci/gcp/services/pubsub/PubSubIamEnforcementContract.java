@@ -460,6 +460,35 @@ abstract class PubSubIamEnforcementContract {
         assertEquals("queued", service.pull(subscription, 1).getFirst().getMessage().getData().toStringUtf8());
     }
 
+    @Test
+    void streamingPullStopsListenerDeliveryAfterPolicyRevocation() throws InterruptedException {
+        if (!enforced()) {
+            return;
+        }
+        String topic = project + "/topics/listener-revoked";
+        String subscription = project + "/subscriptions/listener-revoked";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        grant(subscription, "roles/pubsub.subscriber", null);
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("initial")).build()));
+
+        CountDownLatch closed = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        StreamObserver<StreamingPullRequest> requests = streamingRequests(closed, error, delivered);
+        requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+        assertTrue(delivered.await(5, TimeUnit.SECONDS));
+
+        policies.setPolicy(subscription, new StoredPolicy());
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("queued")).build()));
+
+        assertTrue(closed.await(5, TimeUnit.SECONDS));
+        assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(error.get()).getCode());
+        assertEquals("queued", service.pull(subscription, 1).getFirst().getMessage().getData().toStringUtf8());
+    }
+
     private StreamObserver<StreamingPullRequest> streamingRequests(CountDownLatch closed,
             AtomicReference<Throwable> error) {
         return streamingRequests(closed, error, null);

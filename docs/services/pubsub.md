@@ -41,7 +41,9 @@ policy, so a condition on `resource.name` can scope creation. Subscription creat
 `pubsub.topics.get`; `DetachSubscription` requires
 `pubsub.topics.detachSubscription` on the subscription's topic. `StreamingPull`
 requires `pubsub.subscriptions.consume` on the subscription named in its first
-message. Later messages must omit the subscription name.
+message. Later messages must omit the subscription name. Active streams check
+that permission again before delivering newly available messages and close if
+the grant has been revoked.
 
 Supported predefined roles are `roles/pubsub.admin`, `roles/pubsub.editor`,
 `roles/pubsub.viewer`, `roles/pubsub.publisher`, and `roles/pubsub.subscriber`.

@@ -27,6 +27,8 @@ import java.util.Optional;
 public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
     static final Context.Key<String> AUTHORIZATION = Context.key("iam-authorization");
     static final Context.Key<Boolean> GRPC_REQUEST = Context.key("iam-grpc-request");
+    private static final Context.Key<StreamingPullDelivery> STREAMING_PULL_DELIVERY =
+            Context.key("iam-streaming-pull-delivery");
     private static final Metadata.Key<String> AUTHORIZATION_HEADER =
             Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
     private static final String IAM_POLICY_SERVICE = "google.iam.v1.IAMPolicy";
@@ -43,11 +45,35 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
         this.mapper = mapper;
     }
 
+    @FunctionalInterface
+    public interface StreamingPullDelivery {
+        void run(String subscription, Runnable delivery);
+    }
+
+    public static StreamingPullDelivery streamingPullDelivery() {
+        return STREAMING_PULL_DELIVERY.get();
+    }
+
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
             Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         String credential = headers.get(AUTHORIZATION_HEADER);
         Context context = Context.current().withValue(AUTHORIZATION, credential).withValue(GRPC_REQUEST, true);
+        if (call.getMethodDescriptor().getFullMethodName().equals("google.pubsub.v1.Subscriber/StreamingPull")) {
+            IamAuthorizationAdapter adapter = registry.grpc("google.pubsub.v1.Subscriber").orElseThrow();
+            context = context.withValue(STREAMING_PULL_DELIVERY, (subscription, delivery) -> {
+                IamAuthorizationService service = authorization.get();
+                if (!service.applies(credential, adapter)) {
+                    delivery.run();
+                    return;
+                }
+                service.withPolicyLocks(adapter.requireResource(subscription), () -> {
+                    service.authorize(credential, adapter, new IamOperation("streamingPull", subscription));
+                    delivery.run();
+                    return null;
+                });
+            });
+        }
         return Contexts.interceptCall(context, call, headers, (contextCall, contextHeaders) -> {
             ServerCall.Listener<ReqT> listener = next.startCall(contextCall, contextHeaders);
             return new SimpleForwardingServerCallListener<>(listener) {

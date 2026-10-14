@@ -238,6 +238,35 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
+    @Order(3)
+    void correlatedSubqueriesInNotMatchedClausesFailLikeBigQuery() {
+        query("CREATE TABLE shop.corr_s AS SELECT 1 AS id, 'a' AS k, 'src1' AS v UNION ALL SELECT 2, 'b', 'src2'")
+                .then().statusCode(200);
+        query("CREATE TABLE shop.corr_t (id INT64, k STRING, v STRING)").then().statusCode(200);
+        query("CREATE TABLE shop.corr_lookup AS SELECT 'a' AS lk, 'name_a' AS name UNION ALL SELECT 'b', 'name_b'")
+                .then().statusCode(200);
+        query("CREATE TABLE shop.corr_lookup_k AS SELECT 'a' AS k, 'inner_a' AS name UNION ALL SELECT 'zzz', 'inner_zzz'")
+                .then().statusCode(200);
+        String merge = "MERGE shop.corr_t T USING shop.corr_s S ON T.id = S.id WHEN NOT MATCHED";
+
+        query(merge + " THEN INSERT (id, k, v) VALUES (id, k, (SELECT name FROM shop.corr_lookup WHERE lk = k))")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
+        query(merge + " AND EXISTS (SELECT 1 FROM shop.corr_lookup WHERE lk = k AND name = 'name_b')"
+                + " THEN INSERT (id, k) VALUES (id, k)")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in WHEN clause."));
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT name FROM shop.corr_lookup_k l WHERE l.k = S.k))")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
+
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM shop.corr_lookup_k WHERE k = 'a'))")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "inner_a"), List.of("2", "inner_a")),
+                rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
+    }
+
+    @Test
     @Order(4)
     void ctasAndViews() {
         String ctasJob = query("CREATE TABLE shop.pricey AS SELECT id, name, price FROM shop.items WHERE price > 1")

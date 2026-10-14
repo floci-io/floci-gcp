@@ -565,7 +565,8 @@ final class SqlDialectTranslator {
      * ({@code DAY} in {@code INTERVAL 1 DAY}). Also not a column: the type of a typed literal
      * ({@code DATE '2026-01-01'}), a date part ({@code EXTRACT(DAY FROM d)}, a part argument of
      * {@code DATE_TRUNC}, {@code DATE_DIFF} and the like, the end of an interval range, the weekday in
-     * {@code WEEK(MONDAY)}), and the
+     * {@code WEEK(MONDAY)}), a function called without parentheses ({@code CURRENT_DATE}), the
+     * {@code TIME ZONE} of {@code AT TIME ZONE}, the name of a named argument ({@code make_valid => TRUE}), and the
      * types inside {@code ARRAY<...>}, {@code STRUCT<...>} and {@code RANGE<...>}. The {@code INSERT}
      * column list names target columns and is skipped, and so is a subquery, whose bare names belong to
      * its own tables.
@@ -622,13 +623,19 @@ final class SqlDialectTranslator {
             }
             int next = nextSignificant(i + 1, tokens.size());
             Token n = next >= 0 ? tokens.get(next) : null;
-            if (n != null && (n.isPunct("(") || n.isPunct(".") || n.kind == Kind.STRING || n.kind == Kind.BYTES
-                    || n.isKeyword("FROM"))) {
+            if (n != null && (n.isPunct("(") || n.isPunct(".") || n.isPunct("=>") || n.kind == Kind.STRING
+                    || n.kind == Kind.BYTES || n.isKeyword("FROM"))) {
+                continue;
+            }
+            if (t.kind == Kind.IDENT && PARENLESS_FUNCTIONS.contains(t.upper())) {
                 continue;
             }
             int previous = previousSignificantIndex(i);
             Token p = previous >= 0 ? tokens.get(previous) : null;
-            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || endsMergeOperand(p))) {
+            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || p.isKeyword("AT") || endsMergeOperand(p))) {
+                continue;
+            }
+            if (t.isKeyword("ZONE") && p != null && p.isKeyword("TIME")) {
                 continue;
             }
             String call = calls.peek();
@@ -645,6 +652,10 @@ final class SqlDialectTranslator {
 
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
             "VALUES", "ROW", "UPDATE", "DELETE");
+
+    /** Functions BigQuery lets you call without parentheses. */
+    private static final Set<String> PARENLESS_FUNCTIONS = Set.of("CURRENT_DATE", "CURRENT_DATETIME", "CURRENT_TIME",
+            "CURRENT_TIMESTAMP");
 
     /**
      * The 0-based argument that holds the date part ({@code DATE_TRUNC(d, MONTH)},

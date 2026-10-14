@@ -202,6 +202,19 @@ class BigQueryDuckDmlIntegrationTest {
                 .then().statusCode(200);
         assertEquals(List.of(List.of("1", "true")), rows("SELECT id, flag FROM shop.merge_t ORDER BY id"));
 
+        for (String now : List.of("CURRENT_DATE", "CURRENT_TIMESTAMP")) {
+            query(target).then().statusCode(200);
+            query(merge + " THEN INSERT (id, v) VALUES (id, CAST(" + now + " AS STRING))").then().statusCode(200);
+            assertEquals(List.of(List.of("1", "true"), List.of("2", "true")),
+                    rows("SELECT id, v IS NOT NULL FROM shop.merge_t ORDER BY id"));
+        }
+
+        query(target).then().statusCode(200);
+        query(merge + " THEN INSERT (id, v) VALUES (id, CAST(EXTRACT(DATE FROM TIMESTAMP(d) AT TIME ZONE 'UTC') AS STRING))")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "2026-03-05"), List.of("2", "2026-03-10")),
+                rows("SELECT id, v FROM shop.merge_t ORDER BY id"));
+
         query("CREATE TABLE shop.days_s AS SELECT 1 AS id, DATE '2026-03-05' AS d, DATE '2026-03-01' AS day"
                 + " UNION ALL SELECT 2, DATE '2026-03-01', DATE '2026-03-05'").then().statusCode(200);
         query("CREATE TABLE shop.days_t (id INT64, d DATE, day DATE)").then().statusCode(200);

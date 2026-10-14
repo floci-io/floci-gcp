@@ -504,6 +504,22 @@ class SqlDialectTranslatorTest {
                 + " ELSE FALSE END THEN INSERT (id, flag) VALUES (id, flag)");
         assertTrue(caseWhen.contains("CASE WHEN \"S\".flag THEN") && caseWhen.contains("VALUES (\"S\".id, \"S\".flag)"),
                 caseWhen);
+
+        String parenless = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND d <= CURRENT_DATE"
+                + " THEN INSERT (id, ts, dt, tm, d) VALUES (id, CURRENT_TIMESTAMP, CURRENT_DATETIME, CURRENT_TIME,"
+                + " CURRENT_DATE)");
+        assertTrue(parenless.contains("\"S\".d <=") && parenless.contains("VALUES (\"S\".id"), parenless);
+        assertFalse(parenless.toLowerCase().contains("\"s\".current"), parenless);
+
+        String atTimeZone = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, d)"
+                + " VALUES (id, EXTRACT(DATE FROM TIMESTAMP(ts) AT TIME ZONE 'UTC'))");
+        assertTrue(atTimeZone.contains("\"S\".ts") && atTimeZone.contains("AT TIME ZONE 'UTC'"), atTimeZone);
+        assertFalse(atTimeZone.contains("\"S\".TIME") || atTimeZone.contains("\"S\".ZONE"), atTimeZone);
+
+        String namedArgument = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, g)"
+                + " VALUES (id, ST_GEOGFROMTEXT(w, make_valid => TRUE))");
+        assertTrue(namedArgument.contains("\"S\".w") && namedArgument.contains("make_valid => TRUE"), namedArgument);
+        assertFalse(namedArgument.contains("\"S\".make_valid"), namedArgument);
     }
 
     @Test

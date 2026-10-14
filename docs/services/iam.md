@@ -20,12 +20,13 @@ which mode is active and the supported service list.
 | Surface | IAM enforcement in `enforce` mode |
 |---|---|
 | Resource Manager v1 project metadata and project policies | REST JSON; project policies also use the shared IAM gRPC mixin |
+| Cloud Run v2 services and revisions | REST JSON service management and service policies; service policies also use the shared IAM gRPC mixin. See [Cloud Run IAM enforcement](cloud-run.md#iam-enforcement-for-services) |
 | GCS buckets | Supported REST bucket metadata, IAM-policy, retention-lock, storage-layout, and notification operations; bucket `testIamPermissions` filters its response |
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
 | Pub/Sub | **Not IAM-enforced.** Service enforcement is deferred |
 | Secret Manager | **Not IAM-enforced.** Service enforcement is deferred |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
-| IAM service-account/key management, IAM Credentials, Cloud Run, all other services | **Not IAM-enforced**, including any policies those services store |
+| IAM service-account/key management, IAM Credentials, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
 Valid **Floci-issued service-account tokens** activate IAM evaluation on every
 supported surface. Mint one through the existing IAM Credentials

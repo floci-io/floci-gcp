@@ -162,6 +162,7 @@ public class CloudRunService {
                         CloudRunWorkerPoolsController.class,
                         CloudRunInstancesController.class, CloudRunInstanceInvocationController.class)
                 .build());
+        iamService.registerPolicyResourceResolver("projects/*/locations/*/services/*", this::getService);
     }
 
     @PreDestroy

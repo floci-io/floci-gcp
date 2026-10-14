@@ -618,19 +618,13 @@ class CloudRunWorkerPoolsRestIntegrationTest {
         String pool = poolPath(project, "wp");
         createPool(project, "wp");
 
-        String servicePolicyEtag = given()
-                .urlEncodingEnabled(false)
-                .when().get(parentPath(project) + "/services/any:getIamPolicy")
-                .then()
-                .statusCode(200)
-                .extract().path("etag");
-        given()
+        String poolPolicyEtag = given()
                 .urlEncodingEnabled(false)
                 .when().get(pool + ":getIamPolicy")
                 .then()
                 .statusCode(200)
-                .body("etag", equalTo(servicePolicyEtag))
-                .body("bindings", nullValue());
+                .body("bindings", nullValue())
+                .extract().path("etag");
 
         given()
                 .urlEncodingEnabled(false)
@@ -641,7 +635,7 @@ class CloudRunWorkerPoolsRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("bindings[0].role", equalTo("roles/run.developer"))
-                .body("etag", not(equalTo(servicePolicyEtag)));
+                .body("etag", not(equalTo(poolPolicyEtag)));
 
         given()
                 .urlEncodingEnabled(false)

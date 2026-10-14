@@ -61,7 +61,7 @@ public class DatastoreHttpController {
     DatastoreService service;
 
     @POST
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     @Consumes("application/x-protobuf")
     @Produces("application/x-protobuf")
     public Response handle(@PathParam("rest") String rest, byte[] body) {

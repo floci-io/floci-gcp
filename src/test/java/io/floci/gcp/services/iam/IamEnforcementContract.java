@@ -349,6 +349,38 @@ abstract class IamEnforcementContract {
     }
 
     @Test
+    void projectLifecycleRoutesAreAuthorized() {
+        String visible = project.substring("projects/".length());
+        String hidden = visible + "-h";
+        request().contentType("application/json").body(Map.of("projectId", hidden, "name", "Hidden Project"))
+                .post("/v1/projects").then().statusCode(200);
+        grant(project, "roles/browser", null);
+
+        request().header("Authorization", credential).queryParam("filter", "id:" + visible)
+                .get("/v1/projects").then().statusCode(200).body("projects.projectId", equalTo(List.of(visible)));
+        request().header("Authorization", credential).queryParam("filter", "id:" + hidden)
+                .get("/v1/projects").then().statusCode(200)
+                .body("projects.projectId", equalTo(enforced() ? List.of() : List.of(hidden)));
+
+        request().header("Authorization", credential).contentType("application/json").body(Map.of())
+                .post("/v1/" + project + ":getAncestry").then().statusCode(200);
+        restDenied(request().header("Authorization", credential).contentType("application/json").body(Map.of())
+                .post("/v1/projects/" + hidden + ":getAncestry"));
+
+        Response undelete = request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of()).post("/v1/" + project + ":undelete");
+        if (enforced()) {
+            undelete.then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+        } else {
+            assertNotEquals(403, undelete.statusCode());
+        }
+
+        Response create = request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of("projectId", visible + "-c", "name", "Created Project")).post("/v1/projects");
+        restDenied(create);
+    }
+
+    @Test
     void deferredPubSubRemainsPermissiveWithRecognizedCredentials() {
         String topic = project + "/topics/deferred";
         request().contentType("application/json").body(Map.of()).put("/v1/" + topic).then().statusCode(200);

@@ -24,7 +24,8 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
 
     @Override
     public Set<Class<?>> restControllers() {
-        return Set.of(ResourceManagerController.class, ResourceManagerIamController.class);
+        return Set.of(ResourceManagerController.class, ResourceManagerProjectsController.class,
+                ResourceManagerIamController.class, ResourceManagerOperationsController.class);
     }
 
     @Override
@@ -34,8 +35,16 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
 
     @Override
     public IamOperation restOperation(String method, Map<String, String> path, JsonNode body) {
-        return new IamOperation(Character.toUpperCase(method.charAt(0)) + method.substring(1),
-                "projects/" + path.get("project"));
+        String name = Character.toUpperCase(method.charAt(0)) + method.substring(1);
+        if (path.containsKey("project")) {
+            return new IamOperation(name, "projects/" + path.get("project"));
+        }
+        if (path.containsKey("operation")) {
+            // Creation operations are named cp.{projectNumber}; polling one reads the project it created.
+            return new IamOperation(name, "projects/" + path.get("operation").substring("cp.".length()));
+        }
+        return new IamOperation(name, "CreateProject".equals(name)
+                ? "projects/" + body.path("projectId").asText("") : "projects");
     }
 
     @Override
@@ -47,6 +56,16 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
     public List<IamPermissionCheck> checks(IamOperation operation) {
         String permission = switch (operation.name()) {
             case "GetProject" -> "resourcemanager.projects.get";
+            case "UpdateProject" -> "resourcemanager.projects.update";
+            case "DeleteProject" -> "resourcemanager.projects.delete";
+            case "UndeleteProject" -> "resourcemanager.projects.undelete";
+            case "GetAncestry" -> "resourcemanager.projects.get";
+            // GCP checks create on the parent organization or folder, whose policies are not modelled,
+            // so no grant on the new project satisfies it and service accounts are denied.
+            case "CreateProject" -> "resourcemanager.projects.create";
+            case "GetOperation" -> "resourcemanager.projects.get";
+            // List returns only the projects the caller may get; ResourceManagerService filters them.
+            case "ListProjects" -> null;
             case "GetIamPolicy" -> "resourcemanager.projects.getIamPolicy";
             case "SetIamPolicy" -> "resourcemanager.projects.setIamPolicy";
             // Permission queries are evaluated separately; the GET variants return 405.

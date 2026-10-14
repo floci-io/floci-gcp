@@ -15,6 +15,8 @@ import com.google.longrunning.Operation;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.ProjectRecord;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
@@ -49,6 +51,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     private final StorageBackend<String, String> stateStore;
     private final LongRunningOperationsService operations;
     private final ServiceRegistry serviceRegistry;
+    private final ProjectRegistry projectRegistry;
     private final EmulatorConfig config;
     private final Set<String> defaultEnabled;
 
@@ -56,11 +59,13 @@ public class ServiceUsageService implements ServiceStateProvider {
     public ServiceUsageService(StorageFactory storageFactory,
                                LongRunningOperationsService operations,
                                ServiceRegistry serviceRegistry,
+                               ProjectRegistry projectRegistry,
                                EmulatorConfig config) {
         this.stateStore = storageFactory.createGlobal("serviceusage", "serviceusage.json",
                 new TypeReference<Map<String, String>>() {});
         this.operations = operations;
         this.serviceRegistry = serviceRegistry;
+        this.projectRegistry = projectRegistry;
         this.config = config;
         EmulatorConfig.ServiceUsageServiceConfig serviceUsage = config.services().serviceusage();
         this.defaultEnabled = serviceUsage.enforcementEnabled() ? Set.copyOf(serviceUsage.defaultEnabled()) : Set.of();
@@ -69,16 +74,18 @@ public class ServiceUsageService implements ServiceStateProvider {
     ServiceUsageService(StorageBackend<String, String> stateStore,
                         LongRunningOperationsService operations,
                         EmulatorConfig config) {
-        this(stateStore, operations, config, Set.of());
+        this(stateStore, operations, config, Set.of(), null);
     }
 
     ServiceUsageService(StorageBackend<String, String> stateStore,
                         LongRunningOperationsService operations,
                         EmulatorConfig config,
-                        Set<String> defaultEnabled) {
+                        Set<String> defaultEnabled,
+                        ProjectRegistry projectRegistry) {
         this.stateStore = stateStore;
         this.operations = operations;
         this.serviceRegistry = null;
+        this.projectRegistry = projectRegistry;
         this.config = config;
         this.defaultEnabled = Set.copyOf(defaultEnabled);
     }
@@ -95,7 +102,7 @@ public class ServiceUsageService implements ServiceStateProvider {
 
     @Override
     public boolean isServiceEnabled(String project, String apiName) {
-        return readState(serviceName(project, apiName)) == State.ENABLED;
+        return readState(project, apiName) == State.ENABLED;
     }
 
     public Operation enable(String project, String serviceId) {
@@ -108,7 +115,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     public Operation disable(String project, String serviceId) {
         requireServiceId(serviceId);
         String name = serviceName(project, serviceId);
-        if (readState(name) != State.ENABLED) {
+        if (readState(project, serviceId) != State.ENABLED) {
             throw GcpException.failedPrecondition(
                     "Service " + serviceId + " is not enabled for consumer projects/" + project + ".");
         }
@@ -119,8 +126,7 @@ public class ServiceUsageService implements ServiceStateProvider {
 
     public Service get(String project, String serviceId) {
         requireServiceId(serviceId);
-        String name = serviceName(project, serviceId);
-        return buildService(project, serviceId, readState(name));
+        return buildService(project, serviceId, readState(project, serviceId));
     }
 
     public ListServicesResponse list(String project, int pageSize, String pageToken, String filter) {
@@ -129,12 +135,12 @@ public class ServiceUsageService implements ServiceStateProvider {
             throw GcpException.invalidArgument("Requested page size cannot exceed " + MAX_PAGE_SIZE + ".");
         }
         int effectivePageSize = pageSize <= 0 ? DEFAULT_PAGE_SIZE : pageSize;
-        String prefix = "projects/" + project + "/services/";
+        String prefix = stateKey(project, "");
         List<Service> services = Stream.concat(
-                        stateStore.keys().stream().filter(k -> k.startsWith(prefix)),
-                        defaultEnabled.stream().map(id -> prefix + id))
+                        stateStore.keys().stream().filter(k -> k.startsWith(prefix)).map(k -> k.substring(prefix.length())),
+                        defaultEnabled.stream())
                 .distinct()
-                .map(name -> buildService(project, name.substring(prefix.length()), readState(name)))
+                .map(serviceId -> buildService(project, serviceId, readState(project, serviceId)))
                 .filter(s -> wanted == null || s.getState() == wanted)
                 .sorted(Comparator.comparing(Service::getName))
                 .toList();
@@ -184,7 +190,8 @@ public class ServiceUsageService implements ServiceStateProvider {
                 throw GcpException.invalidArgument(
                         "Service name " + name + " does not match parent projects/" + project + ".");
             }
-            response.addServices(buildService(project, name.substring(prefix.length()), readState(name)));
+            String serviceId = name.substring(prefix.length());
+            response.addServices(buildService(project, serviceId, readState(project, serviceId)));
         }
         return response.build();
     }
@@ -197,15 +204,23 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     private Service writeState(String project, String serviceId, State state) {
-        stateStore.put(serviceName(project, serviceId), state.name());
+        stateStore.put(stateKey(project, serviceId), state.name());
         return buildService(project, serviceId, state);
     }
 
-    private State readState(String name) {
-        return stateStore.get(name)
+    private State readState(String project, String serviceId) {
+        return stateStore.get(stateKey(project, serviceId))
                 .map(State::valueOf)
-                .orElseGet(() -> defaultEnabled.contains(name.substring(name.lastIndexOf('/') + 1))
-                        ? State.ENABLED : State.DISABLED);
+                .orElseGet(() -> defaultEnabled.contains(serviceId) ? State.ENABLED : State.DISABLED);
+    }
+
+    /** State is kept under the project ID, so a registered project's number reads and writes the same record. */
+    private String stateKey(String project, String serviceId) {
+        String projectId = project;
+        if (projectRegistry != null && ProjectRegistry.isNumber(project)) {
+            projectId = projectRegistry.find(project).map(ProjectRecord::getProjectId).orElse(project);
+        }
+        return serviceName(projectId, serviceId);
     }
 
     private Service buildService(String project, String serviceId, State state) {

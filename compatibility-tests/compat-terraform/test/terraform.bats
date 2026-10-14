@@ -395,6 +395,38 @@ setup() {
     assert_output --partial 'run.googleapis.com'
 }
 
+# ── Resource Manager + Cloud Billing Spot Checks ─────────────────────────────
+
+@test "Terraform: google_project created and ACTIVE" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/floci-compat-proj"
+    assert_success
+    assert_output --partial '"projectId":"floci-compat-proj"'
+    assert_output --partial '"lifecycleState":"ACTIVE"'
+    assert_output --partial '"env":"compat"'
+}
+
+@test "Terraform: google_project number resolves to the project" {
+    number=$(terraform output -raw created_project_number 2>/dev/null)
+    [ -n "$number" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${number}"
+    assert_success
+    assert_output --partial '"projectId":"floci-compat-proj"'
+}
+
+@test "Terraform: google_project billing account linked" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/floci-compat-proj/billingInfo"
+    assert_success
+    assert_output --partial '"billingAccountName":"billingAccounts/000000-AAAAAA-BBBBBB"'
+    assert_output --partial '"billingEnabled":true'
+}
+
+@test "Terraform: google_project plans no changes after apply" {
+    run terraform plan -detailed-exitcode -target=google_project.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
 # ── Pub/Sub Spot Checks ───────────────────────────────────────────────────────
 
 @test "Terraform: Pub/Sub topic created" {

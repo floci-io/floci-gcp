@@ -14,6 +14,7 @@ Variable names follow the config path, uppercased with dots and dashes replaced 
 | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL embedded in service responses (GCS object URLs, pre-signed URLs, etc.) |
 | `FLOCI_GCP_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_GCP_BASE_URL`. Set to the Compose/container service name so other containers can reach floci-gcp by DNS |
 | `FLOCI_GCP_DEFAULT_PROJECT_ID` | `floci-local` | Default GCP project ID used when no project is specified in the request |
+| `FLOCI_GCP_PROJECTS_STRICT` | `false` | Only the default project and projects created via Resource Manager exist; REST requests for other projects return 403 `PERMISSION_DENIED` ([details](../services/resource-manager.md#strict-mode)) |
 | `FLOCI_GCP_MAX_REQUEST_SIZE` | `512` | Maximum request body size, in **megabytes** (applies to uploads, e.g. GCS objects) |
 
 ---
@@ -122,7 +123,8 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Service Usage |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENFORCEMENT_ENABLED` | `false` | Reject calls to APIs not enabled in the project with 403 `SERVICE_DISABLED` (see [Service Usage](../services/service-usage.md#enforcing-api-enablement)) |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_DEFAULT_ENABLED` | GCP default set | Comma-separated APIs treated as enabled in every project until disabled; only used with enforcement |
-| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager (minimal `projects.get`) |
+| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager v1 projects API |
+| `FLOCI_GCP_SERVICES_CLOUDBILLING_ENABLED` | `true` | Cloud Billing stub (project billing info) |
 | `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
 | `FLOCI_GCP_SERVICES_EVENTARC_ENABLED` | `true` | Eventarc |
 

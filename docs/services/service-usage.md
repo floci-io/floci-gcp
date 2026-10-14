@@ -18,7 +18,7 @@ enable/disable state matter.
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Enable/disable Service Usage |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENFORCEMENT_ENABLED` | `false` | Reject calls to APIs that are not enabled in the caller's project |
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_DEFAULT_ENABLED` | GCP default set (below) | APIs treated as enabled in every project until disabled (enforcement only) |
-| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Enable/disable the Cloud Resource Manager project lookup (see below) |
+| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Enable/disable [Resource Manager](resource-manager.md) |
 
 ## Endpoints
 
@@ -78,8 +78,10 @@ field that only holds data, such as an object name, is not read, and neither is 
 reference to another API's resource, such as the KMS key of an object or the Pub/Sub
 topic of a Scheduler job. Every request message of a stream is checked, so a routing
 header or an earlier message does not admit a project it does not name. Requests that
-name no project at all are checked against `floci-gcp.default-project-id`. The `consumer`
-metadata and the message carry the project ID.
+name no project at all are checked against `floci-gcp.default-project-id`. A project
+number of a known project shares the state of its project ID, for the check and for
+`services.enable` and `services.disable` alike. The `consumer` metadata and the message carry
+the project as the request names it.
 
 Some requests act on a project they do not name, and are checked against that project:
 
@@ -151,22 +153,9 @@ endpoints, CORS preflight (`OPTIONS`) requests, and emulator-only endpoints
 
 The Terraform/Pulumi Google providers verify a project exists via
 `cloudresourcemanager.v1.Projects.GetProject` before reading `google_project_service`.
-floci-gcp therefore serves a minimal Cloud Resource Manager v1 surface:
-
-| Method | Path |
-|---|---|
-| `GET` | `/v1/projects/{projectId}` |
-| `POST` | `/v1/projects/{projectId}:getIamPolicy` |
-| `POST` | `/v1/projects/{projectId}:setIamPolicy` |
-| `POST` | `/v1/projects/{projectId}:testIamPermissions` |
-
-Every project ID resolves to an `ACTIVE` project with a stable synthetic
-`projectNumber` (the emulator's multi-tenancy is keyed by project ID; projects are never
-created or deleted).
-
-Project-level IAM policies are stored with stable empty-policy and rotating write
-etags for Terraform/OpenTofu read-modify-write flows. IAM bindings are not
-enforced by the emulator; they do not restrict access to emulated resources.
+floci-gcp serves the Cloud Resource Manager v1 projects API for this; see
+[Resource Manager](resource-manager.md) for the endpoints, the project registry and
+strict mode.
 
 ## Quick Start
 

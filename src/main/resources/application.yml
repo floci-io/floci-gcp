@@ -61,6 +61,10 @@ floci-gcp:
   default-project-id: floci-local
   locations:
     strict: false  # FLOCI_GCP_LOCATIONS_STRICT, reject unknown locations on regional create/list calls and locations that do not belong together (e.g. a Cloud SQL zone outside the instance region) with INVALID_ARGUMENT
+  projects:
+    # When true, only the default project and projects created via Resource Manager exist;
+    # REST requests for other projects return 403 PERMISSION_DENIED.
+    strict: false
   storage:
     mode: memory
     persistent-path: ./data
@@ -189,6 +193,8 @@ floci-gcp:
         - storage.googleapis.com
         - telemetry.googleapis.com
     resourcemanager:
+      enabled: true
+    cloudbilling:
       enabled: true
     firebaseauth:
       enabled: true

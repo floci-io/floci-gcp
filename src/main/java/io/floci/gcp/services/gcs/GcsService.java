@@ -720,6 +720,7 @@ public class GcsService {
                 String archiveKey = key + "\0" + existing.getGeneration();
                 GcsObjectMeta archived = cloneMeta(existing);
                 archived.setIsLatest(false);
+                archived.setTimeDeleted(now);
                 objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
                 objectMetaStore.put(archiveKey, archived);
             }

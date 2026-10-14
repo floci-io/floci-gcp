@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -965,6 +966,85 @@ class GcsServiceTest {
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.getObjectMeta("bucket", "obj.txt"));
         assertEquals("NOT_FOUND", ex.getGcpStatus());
+    }
+
+    @Test
+    void versionedOverwriteArchivesTimestampBytesAndMetadataOnce() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("versioning", Map.of("enabled", true)));
+        byte[] firstData = "first payload".getBytes(StandardCharsets.UTF_8);
+        GcsObjectMeta first = service.putObject("bucket", "obj.txt", "text/plain", firstData,
+                GcsCustomerEncryption.none(), Map.of("client", "first"), BASE_URL);
+        assertNull(first.getTimeDeleted());
+        Instant beforeOverwrite = Instant.now().truncatedTo(ChronoUnit.MICROS);
+
+        byte[] secondData = "second payload".getBytes(StandardCharsets.UTF_8);
+        GcsObjectMeta second = service.putObject("bucket", "obj.txt", "text/csv", secondData,
+                GcsCustomerEncryption.none(), Map.of("client", "second"), BASE_URL);
+        Instant afterOverwrite = Instant.now();
+
+        GcsObjectMeta archivedFirst = service.getObjectMeta("bucket", "obj.txt", first.getGeneration());
+        assertNotNull(archivedFirst.getTimeDeleted());
+        Instant firstTimeDeleted = Instant.parse(archivedFirst.getTimeDeleted());
+        assertFalse(firstTimeDeleted.isBefore(beforeOverwrite));
+        assertFalse(firstTimeDeleted.isAfter(afterOverwrite));
+        assertFalse(Boolean.TRUE.equals(archivedFirst.getIsLatest()));
+        assertEquals(first.getGeneration(), archivedFirst.getGeneration());
+        assertEquals(first.getTimeCreated(), archivedFirst.getTimeCreated());
+        assertEquals(first.getUpdated(), archivedFirst.getUpdated());
+        assertEquals(first.getContentType(), archivedFirst.getContentType());
+        assertEquals(first.getMetadata(), archivedFirst.getMetadata());
+        assertEquals(first.getMd5Hash(), archivedFirst.getMd5Hash());
+        assertEquals(first.getCrc32c(), archivedFirst.getCrc32c());
+        assertArrayEquals(firstData, service.getObjectData(
+                "bucket", "obj.txt", first.getGeneration(), GcsCustomerEncryption.none()));
+        assertNull(first.getTimeDeleted());
+        assertNull(second.getTimeDeleted());
+        assertTrue(Boolean.TRUE.equals(second.getIsLatest()));
+        assertEquals(second.getGeneration(), service.getObjectMeta("bucket", "obj.txt").getGeneration());
+        assertArrayEquals(secondData, service.getObjectData("bucket", "obj.txt"));
+
+        String originalArchiveTime = archivedFirst.getTimeDeleted();
+        Instant beforeNextOverwrite = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        GcsObjectMeta third = service.putObject("bucket", "obj.txt", "application/json", new byte[]{3},
+                GcsCustomerEncryption.none(), BASE_URL);
+        Instant afterNextOverwrite = Instant.now();
+
+        GcsObjectMeta archivedSecond = service.getObjectMeta("bucket", "obj.txt", second.getGeneration());
+        assertNotNull(archivedSecond.getTimeDeleted());
+        Instant secondTimeDeleted = Instant.parse(archivedSecond.getTimeDeleted());
+        assertFalse(secondTimeDeleted.isBefore(beforeNextOverwrite));
+        assertFalse(secondTimeDeleted.isAfter(afterNextOverwrite));
+        assertEquals(second.getTimeCreated(), archivedSecond.getTimeCreated());
+        assertEquals(second.getMetadata(), archivedSecond.getMetadata());
+        assertArrayEquals(secondData, service.getObjectData(
+                "bucket", "obj.txt", second.getGeneration(), GcsCustomerEncryption.none()));
+        assertEquals(originalArchiveTime,
+                service.getObjectMeta("bucket", "obj.txt", first.getGeneration()).getTimeDeleted());
+        assertArrayEquals(firstData, service.getObjectData(
+                "bucket", "obj.txt", first.getGeneration(), GcsCustomerEncryption.none()));
+        assertNull(third.getTimeDeleted());
+        assertEquals(third.getGeneration(), service.getObjectMeta("bucket", "obj.txt").getGeneration());
+        assertEquals(3, service.listObjectVersions("bucket", null).size());
+    }
+
+    @Test
+    void nonversionedOverwriteKeepsOnlyTheLiveGenerationWithoutTimeDeleted() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        GcsObjectMeta first = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        GcsObjectMeta replacement = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        assertNull(replacement.getTimeDeleted());
+        assertTrue(Boolean.TRUE.equals(replacement.getIsLatest()));
+        assertEquals(replacement.getGeneration(), service.getObjectMeta("bucket", "obj.txt").getGeneration());
+        assertArrayEquals(new byte[]{2}, service.getObjectData("bucket", "obj.txt"));
+        assertEquals(1, service.listObjectVersions("bucket", null).size());
+        GcpException missing = assertThrows(GcpException.class,
+                () -> service.getObjectMeta("bucket", "obj.txt", first.getGeneration()));
+        assertEquals("NOT_FOUND", missing.getGcpStatus());
     }
 
     @Test

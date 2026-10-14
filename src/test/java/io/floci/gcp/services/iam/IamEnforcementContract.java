@@ -240,7 +240,7 @@ abstract class IamEnforcementContract {
     @Test
     void unknownRoleForAnotherPrincipalDoesNotBlockTheCaller() {
         Map<String, Object> unrelated = Map.of(
-                "role", "roles/pubsub.publisher",
+                "role", "roles/custom.unimplemented",
                 "members", List.of("serviceAccount:publisher@other.iam.gserviceaccount.com"));
         Map<String, Object> callerGrant = Map.of(
                 "role", "roles/browser",
@@ -257,7 +257,7 @@ abstract class IamEnforcementContract {
     @Test
     void unknownRoleForCallerDoesNotBlockKnownGrantOrValidateItsCondition() {
         Map<String, Object> unsupported = Map.of(
-                "role", "roles/pubsub.publisher",
+                "role", "roles/custom.unimplemented",
                 "members", List.of(member),
                 "condition", Map.of("title", "unsupported", "expression", "resource.name.matches('.*')"));
         Map<String, Object> callerGrant = Map.of(
@@ -295,17 +295,16 @@ abstract class IamEnforcementContract {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"unimplemented/resource", "topics/deferred", "secrets/deferred"})
+    @ValueSource(strings = {"unimplemented/resource", "schemas/deferred", "secrets/deferred"})
     void sharedIamMixinRejectsUnmappedResourceKindsLoudly(String suffix) {
         String unknown = project + "/" + suffix;
         if (enforced()) {
             StatusRuntimeException exception = assertThrows(StatusRuntimeException.class, () -> grpcRead(authenticated, unknown));
             assertEquals(Status.Code.FAILED_PRECONDITION, exception.getStatus().getCode());
             assertTrue(exception.getMessage().contains(unknown));
-        } else if (suffix.startsWith("unimplemented")) {
+        } else if (suffix.startsWith("unimplemented") || suffix.startsWith("schemas")) {
             grpcRead(authenticated, unknown);
         } else {
-            // Existing resource resolvers reject absent topics and secrets in disabled mode.
             assertEquals(Status.Code.NOT_FOUND, assertThrows(StatusRuntimeException.class,
                     () -> grpcRead(authenticated, unknown)).getStatus().getCode());
         }
@@ -341,12 +340,18 @@ abstract class IamEnforcementContract {
     }
 
     @Test
-    void deferredServicesRemainPermissiveWithRecognizedCredentials() {
+    void secretManagerRemainsPermissiveWithRecognizedCredentials() {
         String topic = project + "/topics/deferred";
         request().contentType("application/json").body(Map.of()).put("/v1/" + topic).then().statusCode(200);
-        request().header("Authorization", credential).get("/v1/" + topic).then().statusCode(200);
-        assertEquals(topic, PublisherGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
-                .getTopic(GetTopicRequest.newBuilder().setTopic(topic).build()).getName());
+        if (enforced()) {
+            request().header("Authorization", credential).get("/v1/" + topic).then().statusCode(403);
+            grpcDenied(() -> PublisherGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .getTopic(GetTopicRequest.newBuilder().setTopic(topic).build()));
+        } else {
+            request().header("Authorization", credential).get("/v1/" + topic).then().statusCode(200);
+            assertEquals(topic, PublisherGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .getTopic(GetTopicRequest.newBuilder().setTopic(topic).build()).getName());
+        }
         String secret = project + "/secrets/deferred";
         request().contentType("application/json").queryParam("secretId", "deferred")
                 .body(Map.of("replication", Map.of("automatic", Map.of())))

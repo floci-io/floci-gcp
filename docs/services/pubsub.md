@@ -17,6 +17,55 @@ export PUBSUB_EMULATOR_HOST=localhost:4588
 
 GCP Pub/Sub SDK clients use this variable to route requests to floci-gcp instead of `pubsub.googleapis.com`.
 
+## IAM enforcement
+
+With `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, Floci-issued
+service-account credentials are checked against topic, subscription, snapshot,
+and inherited project policies. Anonymous and external credentials retain the
+emulator's setup bypass. The default `disabled` mode leaves operations permissive.
+
+REST JSON and gRPC topic and subscription data methods check the corresponding
+`pubsub.topics.*` or `pubsub.subscriptions.*` permission. Policy reads and writes
+check the resource's `getIamPolicy` or `setIamPolicy` permission; `testIamPermissions`
+filters its response. The gRPC transport also checks snapshot methods,
+`ListTopicSubscriptions`, `DetachSubscription`, `ModifyPushConfig`,
+`ModifyAckDeadline`, and `StreamingPull`. Topic creation checks
+`pubsub.topics.create` using the proposed topic name and its inherited project
+policy, so a condition on `resource.name` can scope creation. Subscription creation checks
+`pubsub.subscriptions.create` on the containing project and
+`pubsub.topics.attachSubscription` on its topic. Snapshot creation checks
+`pubsub.snapshots.create` on the containing project and
+`pubsub.subscriptions.consume` on its subscription. Seek requires
+`pubsub.subscriptions.consume` and, when seeking to a snapshot,
+`pubsub.snapshots.seek`. `ListTopicSubscriptions` requires
+`pubsub.topics.get`; `DetachSubscription` requires
+`pubsub.topics.detachSubscription` on the subscription's topic. `StreamingPull`
+requires `pubsub.subscriptions.consume` on the subscription named in its first
+message. Later messages must omit the subscription name.
+
+Supported predefined roles are `roles/pubsub.admin`, `roles/pubsub.editor`,
+`roles/pubsub.viewer`, `roles/pubsub.publisher`, and `roles/pubsub.subscriber`.
+Admin grants the implemented Pub/Sub permissions. Editor excludes IAM policy
+read and write; viewer grants implemented metadata reads and lists; publisher
+grants topic publish; subscriber grants subscription consume, topic attachment,
+and snapshot seek. Project basic roles contribute corresponding supported
+Pub/Sub permissions.
+
+Version 3 policy conditions can use the shared restricted profile: `resource.name`,
+`resource.type`, `resource.service`, and `request.time`, with supported string,
+logical, and time comparisons. Pub/Sub resource names are
+`projects/{project}/topics/{topic}`, `projects/{project}/subscriptions/{subscription}`,
+and `projects/{project}/snapshots/{snapshot}`. Types are
+`pubsub.googleapis.com/Topic`, `pubsub.googleapis.com/Subscription`, and
+`pubsub.googleapis.com/Snapshot`. A list call evaluates its project resource,
+so a condition limited to one child name does not grant listing.
+
+Permission names and multi-resource checks follow Google's
+[Pub/Sub access-control reference](https://cloud.google.com/pubsub/docs/access-control).
+Role slices follow the [Pub/Sub predefined-role catalog](https://cloud.google.com/iam/docs/roles-permissions/pubsub).
+Request fields and StreamingPull's first-message rule follow the
+[Pub/Sub v1 proto](https://github.com/googleapis/googleapis/blob/master/google/pubsub/v1/pubsub.proto).
+
 ## REST / Terraform Endpoint
 
 Terraform's Google provider can use the REST endpoint with:
@@ -274,11 +323,9 @@ subscriptionAdminClient.seek(SeekRequest.newBuilder()
 
 ## IAM Policies
 
-IAM policies on topics, subscriptions, and snapshots are **stored and returned,
-never enforced**. `setIamPolicy` followed by `getIamPolicy` returns exactly the
-bindings that were set, including `condition` blocks, which are stored verbatim
-and never evaluated, but no request is ever denied because of a policy. Do not
-build authorization tests on top of the emulator.
+IAM policies on topics, subscriptions, and snapshots are stored and returned.
+In `enforce` mode, supported Pub/Sub methods evaluate them for Floci-issued
+service-account credentials, including supported version 3 conditions.
 
 Policy semantics:
 
@@ -291,10 +338,9 @@ Policy semantics:
   `google_pubsub_topic_iam_member` behave as they do against real GCP. Omitting
   the etag performs a blind write.
 - Deleting a resource deletes its policy; recreating the same name starts empty.
-- `testIamPermissions` echoes the requested permissions for an existing
-  resource, never consulting stored bindings. For a resource that does not
-  exist it fails open with an empty permission set, not `NOT_FOUND`, matching
-  the service config.
+- `testIamPermissions` returns the caller's granted permissions in `enforce`
+  mode. In `disabled` mode and for bypass callers, it echoes the requested
+  permissions. A missing resource returns an empty permission set.
 - Schemas are not implemented, so schema IAM paths are not served.
 
 Over gRPC these methods are served by the standalone `google.iam.v1.IAMPolicy`
@@ -347,8 +393,8 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `DeleteSnapshot`
 - `Seek` (a seek to a time only affects unacknowledged messages, because acknowledged messages are not retained here even with `retain_acked_messages`; a seek to a snapshot does not restore its position yet)
 
-**IAM (`google.iam.v1.IAMPolicy` mixin: stored, never enforced):**
+**IAM (`google.iam.v1.IAMPolicy` mixin):**
 
 - `GetIamPolicy`
 - `SetIamPolicy`
-- `TestIamPermissions` (echoes requested permissions; empty set for missing resources)
+- `TestIamPermissions` (filters granted permissions in `enforce` mode; empty set for missing resources)

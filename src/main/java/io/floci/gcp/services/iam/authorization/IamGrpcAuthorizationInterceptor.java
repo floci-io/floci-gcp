@@ -51,6 +51,7 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
             ServerCall.Listener<ReqT> listener = next.startCall(contextCall, contextHeaders);
             return new SimpleForwardingServerCallListener<>(listener) {
                 private boolean rejected;
+                private String streamingSubscription;
 
                 @Override
                 public void onMessage(ReqT message) {
@@ -81,7 +82,23 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     operation = new IamOperation(method, resource);
                                 }
                             } else {
-                                operation = adapter.orElseThrow().grpcOperation(method, request);
+                                if (service.equals("google.pubsub.v1.Subscriber")
+                                        && method.equals("StreamingPull")) {
+                                    String requestedSubscription = request.path("subscription").asText();
+                                    if (streamingSubscription == null) {
+                                        if (requestedSubscription.isBlank()) {
+                                            throw GcpException.invalidArgument(
+                                                    "StreamingPull requires a subscription in its first request");
+                                        }
+                                        streamingSubscription = requestedSubscription;
+                                    } else if (!requestedSubscription.isBlank()) {
+                                        throw GcpException.invalidArgument(
+                                                "StreamingPull subscription must only be set in the first request");
+                                    }
+                                    operation = new IamOperation("streamingPull", streamingSubscription);
+                                } else {
+                                    operation = adapter.orElseThrow().grpcOperation(method, request);
+                                }
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {
                                 authorization.get().authorize(credential, adapter.get(), operation);

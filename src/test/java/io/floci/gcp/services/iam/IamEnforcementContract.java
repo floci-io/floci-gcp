@@ -485,6 +485,32 @@ abstract class IamEnforcementContract {
         }
     }
 
+    @Test
+    void sharedIamSecretPolicyWriteIsVisibleThroughSecretManager() {
+        String secret = createSecret("shared-policy");
+        grant(secret, "roles/secretmanager.admin", null);
+        IAMPolicyGrpc.IAMPolicyBlockingStub shared = IAMPolicyGrpc.newBlockingStub(authenticated)
+                .withDeadlineAfter(5, TimeUnit.SECONDS);
+        Policy viewer = Policy.newBuilder().addBindings(Binding.newBuilder()
+                .setRole("roles/secretmanager.viewer").addMembers(member)).build();
+
+        Policy saved = shared.setIamPolicy(SetIamPolicyRequest.newBuilder()
+                .setResource(secret).setPolicy(viewer).build());
+        assertEquals("roles/secretmanager.viewer", saved.getBindings(0).getRole());
+        assertEquals(saved, SecretManagerServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(5, TimeUnit.SECONDS)
+                .getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(secret).build()));
+        assertEquals(saved, grpcRead(authenticated, secret));
+
+        Runnable secondWrite = () -> shared.setIamPolicy(SetIamPolicyRequest.newBuilder()
+                .setResource(secret).setPolicy(viewer).build());
+        if (enforced()) {
+            grpcDenied(secondWrite);
+        } else {
+            secondWrite.run();
+        }
+    }
+
     private String createSecret(String id) {
         return request().contentType("application/json").queryParam("secretId", id)
                 .body(Map.of("replication", Map.of("automatic", Map.of())))

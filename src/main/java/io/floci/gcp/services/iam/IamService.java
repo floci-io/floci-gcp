@@ -14,6 +14,8 @@ import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
+import io.floci.gcp.services.secretmanager.SecretManagerIamAuthorizationAdapter;
+import io.floci.gcp.services.secretmanager.SecretManagerService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -57,15 +59,21 @@ public class IamService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final Instance<IamAuthorizationService> authorization;
+    private final Instance<SecretManagerService> secretManager;
+    private final SecretManagerIamAuthorizationAdapter secretManagerIamAdapter;
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
-            GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization) {
+            GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization,
+            Instance<SecretManagerService> secretManager,
+            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.authorization = authorization;
+        this.secretManager = secretManager;
+        this.secretManagerIamAdapter = secretManagerIamAdapter;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -84,6 +92,8 @@ public class IamService {
         this.config = null;
         this.grpcServerManager = null;
         this.authorization = null;
+        this.secretManager = null;
+        this.secretManagerIamAdapter = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -95,7 +105,7 @@ public class IamService {
                 .build());
         // Serves the google.iam.v1.IAMPolicy mixin for all services; not gated on
         // the iam REST toggle so Pub/Sub IAM keeps working when iam is disabled.
-        grpcServerManager.bind(new IamPolicyGrpcController(this));
+        grpcServerManager.bind(new IamPolicyGrpcController(this, secretManager, secretManagerIamAdapter));
     }
 
     // ── Service Accounts ───────────────────────────────────────────────────────

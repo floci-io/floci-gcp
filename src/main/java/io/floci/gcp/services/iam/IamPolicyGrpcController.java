@@ -7,7 +7,10 @@ import com.google.iam.v1.SetIamPolicyRequest;
 import com.google.iam.v1.TestIamPermissionsRequest;
 import com.google.iam.v1.TestIamPermissionsResponse;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.services.secretmanager.SecretManagerIamAuthorizationAdapter;
+import io.floci.gcp.services.secretmanager.SecretManagerService;
 import io.grpc.stub.StreamObserver;
+import jakarta.enterprise.inject.Instance;
 import org.jboss.logging.Logger;
 
 /**
@@ -24,16 +27,27 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
     private static final Logger LOG = Logger.getLogger(IamPolicyGrpcController.class);
 
     private final IamService iamService;
+    private final Instance<SecretManagerService> secretManager;
+    private final SecretManagerIamAuthorizationAdapter secretManagerIamAdapter;
 
     public IamPolicyGrpcController(IamService iamService) {
+        this(iamService, null, null);
+    }
+
+    public IamPolicyGrpcController(IamService iamService, Instance<SecretManagerService> secretManager,
+            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter) {
         this.iamService = iamService;
+        this.secretManager = secretManager;
+        this.secretManagerIamAdapter = secretManagerIamAdapter;
     }
 
     @Override
     public void getIamPolicy(GetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("getIamPolicy resource=%s", request.getResource());
         try {
-            Policy policy = IamPolicyCodec.toProtoPolicy(iamService.getPolicy(request.getResource()));
+            Policy policy = isSecret(request.getResource())
+                    ? secretManager.get().getIamPolicy(request.getResource())
+                    : IamPolicyCodec.toProtoPolicy(iamService.getPolicy(request.getResource()));
             responseObserver.onNext(policy);
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -46,8 +60,10 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
     public void setIamPolicy(SetIamPolicyRequest request, StreamObserver<Policy> responseObserver) {
         LOG.debugf("setIamPolicy resource=%s", request.getResource());
         try {
-            Policy policy = IamPolicyCodec.toProtoPolicy(iamService.setPolicy(
-                    request.getResource(), IamPolicyCodec.toStoredPolicy(request.getPolicy())));
+            Policy policy = isSecret(request.getResource())
+                    ? secretManager.get().setIamPolicy(request.getResource(), request.getPolicy())
+                    : IamPolicyCodec.toProtoPolicy(iamService.setPolicy(
+                            request.getResource(), IamPolicyCodec.toStoredPolicy(request.getPolicy())));
             responseObserver.onNext(policy);
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -62,13 +78,20 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
         LOG.debugf("testIamPermissions resource=%s", request.getResource());
         try {
             responseObserver.onNext(TestIamPermissionsResponse.newBuilder()
-                    .addAllPermissions(iamService.testPermissions(
-                            request.getResource(), request.getPermissionsList()))
+                    .addAllPermissions(isSecret(request.getResource())
+                            ? secretManager.get().testIamPermissions(
+                                    request.getResource(), request.getPermissionsList())
+                            : iamService.testPermissions(request.getResource(), request.getPermissionsList()))
                     .build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("testIamPermissions failed: %s", e.getMessage());
             GcpGrpcController.grpcError(responseObserver, e);
         }
+    }
+
+    private boolean isSecret(String resource) {
+        return secretManagerIamAdapter != null && secretManagerIamAdapter.resource(resource)
+                .filter(target -> target.name().equals(target.policyResource())).isPresent();
     }
 }

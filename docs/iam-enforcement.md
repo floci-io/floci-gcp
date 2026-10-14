@@ -8,9 +8,10 @@ An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
 secrets and versions, and GCS bucket/object operations are integrated. Cloud Run
-service-policy methods also use the shared IAM gRPC API. Secret Manager secret
-policy methods work over REST and gRPC. GCS invokes the shared evaluator from its service-level authorization
-path so JSON filtering does not bypass its lock-sensitive lifecycle coordination.
+service-policy methods use REST and the shared IAM gRPC API. Secret Manager secret
+policy methods work over REST and gRPC. GCS invokes the shared evaluator from its
+service-level authorization path so JSON filtering does not bypass its
+lock-sensitive lifecycle coordination.
 Pub/Sub IAM enforcement is not supported.
 
 ## Service extension contract
@@ -98,8 +99,8 @@ locks across authorization and the secret or version operation.
 
 ## Upstream evidence
 
-The Resource Manager v1, Cloud Run v2, and Secret Manager v1 protocol and role contracts are defined
-by these upstream references:
+The Resource Manager v1, Cloud Run v2, and Secret Manager v1 protocol and role
+contracts are defined by these upstream references:
 
 - [Resource Manager v1 project get](https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/get)
   [project policy constraints](https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/setIamPolicy),

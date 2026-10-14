@@ -972,6 +972,11 @@ class GcsServiceTest {
         assertEquals(live.getGeneration(), only.getGeneration());
         assertFalse(Boolean.TRUE.equals(only.getIsLatest()));
         assertNotNull(only.getTimeDeleted());
+        assertArrayEquals(new byte[]{1}, service.getObjectData(
+                "bucket", "obj.txt", live.getGeneration(), GcsCustomerEncryption.none()));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.getObjectData("bucket", "obj.txt"));
+        assertEquals("NOT_FOUND", ex.getGcpStatus());
     }
 
     @Test

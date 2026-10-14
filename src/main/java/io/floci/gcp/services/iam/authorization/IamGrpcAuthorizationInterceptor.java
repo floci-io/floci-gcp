@@ -2,10 +2,14 @@ package io.floci.gcp.services.iam.authorization;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.iam.v1.GetIamPolicyRequest;
+import com.google.iam.v1.SetIamPolicyRequest;
+import com.google.iam.v1.TestIamPermissionsRequest;
 import com.google.protobuf.Message;
 import com.google.protobuf.util.JsonFormat;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.services.secretmanager.SecretManagerIamAuthorizationAdapter;
 import io.grpc.Context;
 import io.grpc.Contexts;
 import io.grpc.ForwardingServerCallListener.SimpleForwardingServerCallListener;
@@ -65,11 +69,16 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                             if (!(message instanceof Message proto)) {
                                 throw GcpException.failedPrecondition("IAM requires a protobuf resource mapping: " + service);
                             }
-                            JsonNode request = mapper.readTree(JsonFormat.printer().print(proto));
                             String method = call.getMethodDescriptor().getBareMethodName();
                             IamOperation operation = null;
                             if (mixin) {
-                                String resource = request.path("resource").asText();
+                                String resource = switch (proto) {
+                                    case GetIamPolicyRequest request -> request.getResource();
+                                    case SetIamPolicyRequest request -> request.getResource();
+                                    case TestIamPermissionsRequest request -> request.getResource();
+                                    default -> throw GcpException.failedPrecondition(
+                                            "IAM requires a resource mapping: " + service);
+                                };
                                 adapter = registry.resource(resource);
                                 if (adapter.isEmpty()) {
                                     if (authorization.get().applies(credential)) {
@@ -81,7 +90,13 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     operation = new IamOperation(method, resource);
                                 }
                             } else {
-                                operation = adapter.orElseThrow().grpcOperation(method, request);
+                                IamAuthorizationAdapter selected = adapter.orElseThrow();
+                                if (selected instanceof SecretManagerIamAuthorizationAdapter secretManager) {
+                                    operation = secretManager.grpcOperation(method, proto);
+                                } else {
+                                    JsonNode request = mapper.readTree(JsonFormat.printer().print(proto));
+                                    operation = selected.grpcOperation(method, request);
+                                }
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {
                                 authorization.get().authorize(credential, adapter.get(), operation);

@@ -1,6 +1,22 @@
 package io.floci.gcp.services.secretmanager;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.DeleteSecretRequest;
+import com.google.cloud.secretmanager.v1.DestroySecretVersionRequest;
+import com.google.cloud.secretmanager.v1.DisableSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.EnableSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.GetSecretRequest;
+import com.google.cloud.secretmanager.v1.GetSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.ListSecretVersionsRequest;
+import com.google.cloud.secretmanager.v1.ListSecretsRequest;
+import com.google.cloud.secretmanager.v1.UpdateSecretRequest;
+import com.google.iam.v1.GetIamPolicyRequest;
+import com.google.iam.v1.SetIamPolicyRequest;
+import com.google.iam.v1.TestIamPermissionsRequest;
+import com.google.protobuf.Message;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -68,6 +84,30 @@ public class SecretManagerIamAuthorizationAdapter implements IamAuthorizationAda
             case "UpdateSecret" -> request.path("secret").path("name").asText();
             case "GetIamPolicy", "SetIamPolicy", "TestIamPermissions" -> request.path("resource").asText();
             default -> request.path("name").asText();
+        };
+        return new IamOperation(method, target);
+    }
+
+    public IamOperation grpcOperation(String method, Message request) {
+        String target = switch (request) {
+            case CreateSecretRequest value -> value.getParent();
+            case ListSecretsRequest value -> value.getParent();
+            case AddSecretVersionRequest value -> value.getParent();
+            case ListSecretVersionsRequest value -> value.getParent();
+            case UpdateSecretRequest value -> value.getSecret().getName();
+            case GetIamPolicyRequest value -> value.getResource();
+            case SetIamPolicyRequest value -> value.getResource();
+            case TestIamPermissionsRequest value -> value.getResource();
+            default -> switch (request) {
+                case GetSecretRequest value -> value.getName();
+                case DeleteSecretRequest value -> value.getName();
+                case GetSecretVersionRequest value -> value.getName();
+                case AccessSecretVersionRequest value -> value.getName();
+                case EnableSecretVersionRequest value -> value.getName();
+                case DisableSecretVersionRequest value -> value.getName();
+                case DestroySecretVersionRequest value -> value.getName();
+                default -> throw unsupported("operation " + method);
+            };
         };
         return new IamOperation(method, target);
     }

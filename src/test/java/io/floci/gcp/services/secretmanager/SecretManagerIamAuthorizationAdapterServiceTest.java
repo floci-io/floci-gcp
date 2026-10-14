@@ -1,5 +1,9 @@
 package io.floci.gcp.services.secretmanager;
 
+import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.Secret;
+import com.google.cloud.secretmanager.v1.UpdateSecretRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -24,6 +28,16 @@ class SecretManagerIamAuthorizationAdapterServiceTest {
     private static final String SECRET = PROJECT + "/secrets/s";
     private static final String VERSION = SECRET + "/versions/1";
     private final SecretManagerIamAuthorizationAdapter adapter = new SecretManagerIamAuthorizationAdapter();
+
+    @Test
+    void grpcRequestsMapWithoutProtobufJsonReflection() {
+        assertEquals(new IamOperation("CreateSecret", PROJECT), adapter.grpcOperation("CreateSecret",
+                CreateSecretRequest.newBuilder().setParent(PROJECT).build()));
+        assertEquals(new IamOperation("UpdateSecret", SECRET), adapter.grpcOperation("UpdateSecret",
+                UpdateSecretRequest.newBuilder().setSecret(Secret.newBuilder().setName(SECRET)).build()));
+        assertEquals(new IamOperation("AccessSecretVersion", VERSION), adapter.grpcOperation("AccessSecretVersion",
+                AccessSecretVersionRequest.newBuilder().setName(VERSION).build()));
+    }
 
     @Test
     void everyImplementedMethodHasAnExplicitPermissionOrPermissionQuery() {

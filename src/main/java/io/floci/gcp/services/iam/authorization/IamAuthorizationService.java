@@ -93,6 +93,10 @@ public class IamAuthorizationService {
         authorize(authorization, adapter, adapter.checks(operation));
     }
 
+    public void authorizeCurrent(IamAuthorizationAdapter adapter, IamOperation operation) {
+        authorize(currentAuthorization(), adapter, operation);
+    }
+
     public void authorize(String authorization, IamAuthorizationAdapter adapter, IamPermissionCheck check) {
         authorize(authorization, adapter, List.of(check));
     }

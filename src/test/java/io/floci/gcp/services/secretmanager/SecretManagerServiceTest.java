@@ -5,7 +5,10 @@ import com.google.iam.v1.Policy;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageException;
+import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.IamServices;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
@@ -24,12 +27,58 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 class SecretManagerServiceTest {
 
     private SecretManagerService service;
+
+    @Test
+    void accessCannotReadReplacementAfterEarlierAuthorization() throws Exception {
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        CountDownLatch accessAuthorized = new CountDownLatch(1);
+        CountDownLatch finishAuthorization = new CountDownLatch(1);
+        doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
+                .when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> {
+            IamOperation operation = invocation.getArgument(1);
+            if (operation.name().equals("AccessSecretVersion")) {
+                accessAuthorized.countDown();
+                assertTrue(finishAuthorization.await(5, TimeUnit.SECONDS));
+            }
+            return null;
+        }).when(authorization).authorizeCurrent(any(), any());
+
+        SecretManagerService tested = new SecretManagerService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), IamServices.inMemory(),
+                authorization, new SecretManagerIamAuthorizationAdapter());
+        String name = "projects/p1/secrets/recreated";
+        String version = name + "/versions/1";
+        tested.createSecret("p1", "recreated", "automatic");
+        tested.addSecretVersion(name, new byte[]{1}, null);
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<StoredSecretVersion> access = executor.submit(() -> tested.accessSecretVersion(version));
+            assertTrue(accessAuthorized.await(5, TimeUnit.SECONDS));
+            Future<?> replace = executor.submit(() -> {
+                tested.deleteSecret(name);
+                tested.createSecret("p1", "recreated", "automatic");
+                tested.addSecretVersion(name, new byte[]{2}, null);
+            });
+            assertTimeoutPreemptively(Duration.ofMillis(200), () -> assertFalse(replace.isDone()));
+            finishAuthorization.countDown();
+            assertArrayEquals(new byte[]{1}, access.get(5, TimeUnit.SECONDS).getPayload());
+            replace.get(5, TimeUnit.SECONDS);
+            assertArrayEquals(new byte[]{2}, tested.accessSecretVersion(version).getPayload());
+        } finally {
+            finishAuthorization.countDown();
+        }
+    }
 
     @BeforeEach
     void setUp() {

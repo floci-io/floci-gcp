@@ -11,8 +11,11 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
-import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.IamResource;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
@@ -27,6 +30,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class SecretManagerService {
@@ -43,14 +47,19 @@ public class SecretManagerService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final IamService iamService;
+    private final IamAuthorizationService authorization;
+    private final SecretManagerIamAuthorizationAdapter iamAdapter;
 
     @Inject
     public SecretManagerService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService,
+            IamAuthorizationService authorization, SecretManagerIamAuthorizationAdapter iamAdapter) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.iamService = iamService;
+        this.authorization = authorization;
+        this.iamAdapter = iamAdapter;
         this.secretStore = storageFactory.createGlobal("secretmanager-secrets", "secretmanager-secrets.json",
                 new TypeReference<Map<String, StoredSecret>>() {});
         this.versionStore = storageFactory.createGlobal("secretmanager-versions", "secretmanager-versions.json",
@@ -62,6 +71,13 @@ public class SecretManagerService {
     SecretManagerService(StorageBackend<String, StoredSecret> secretStore,
             StorageBackend<String, StoredSecretVersion> versionStore,
             StorageBackend<String, String> pendingDeletionStore, IamService iamService) {
+        this(secretStore, versionStore, pendingDeletionStore, iamService, null, null);
+    }
+
+    SecretManagerService(StorageBackend<String, StoredSecret> secretStore,
+            StorageBackend<String, StoredSecretVersion> versionStore,
+            StorageBackend<String, String> pendingDeletionStore, IamService iamService,
+            IamAuthorizationService authorization, SecretManagerIamAuthorizationAdapter iamAdapter) {
         this.secretStore = secretStore;
         this.versionStore = versionStore;
         this.pendingDeletionStore = pendingDeletionStore;
@@ -69,6 +85,8 @@ public class SecretManagerService {
         this.config = null;
         this.grpcServerManager = null;
         this.iamService = iamService;
+        this.authorization = authorization;
+        this.iamAdapter = iamAdapter;
         registerPolicyResolver();
     }
 
@@ -94,24 +112,26 @@ public class SecretManagerService {
         String name = "projects/" + project + "/secrets/" + secretId;
         LOG.infof("createSecret name=%s", name);
         synchronized (secretLock(name)) {
-            try {
-                resumePendingDeletion(name);
-            } catch (StorageException e) {
-                throw GcpException.unavailable("Pending secret deletion could not be recovered. Retry the request.");
-            }
-            if (secretStore.get(name).isPresent()) {
-                throw GcpException.alreadyExists("Secret already exists: " + name);
-            }
-            StoredSecret secret = new StoredSecret(name, Instant.now().toString(), replicationType);
-            secretStore.put(name, secret);
-            return secret;
+            return authorized("CreateSecret", "projects/" + project, () -> {
+                try {
+                    resumePendingDeletion(name);
+                } catch (StorageException e) {
+                    throw GcpException.unavailable("Pending secret deletion could not be recovered. Retry the request.");
+                }
+                if (secretStore.get(name).isPresent()) {
+                    throw GcpException.alreadyExists("Secret already exists: " + name);
+                }
+                StoredSecret secret = new StoredSecret(name, Instant.now().toString(), replicationType);
+                secretStore.put(name, secret);
+                return secret;
+            });
         }
     }
 
     public StoredSecret getSecret(String name) {
         LOG.debugf("getSecret name=%s", name);
         synchronized (secretLock(name)) {
-            return requireSecretExists(name);
+            return authorized("GetSecret", name, () -> requireSecretExists(name));
         }
     }
 
@@ -126,38 +146,42 @@ public class SecretManagerService {
     public List<StoredSecret> listSecrets(String project) {
         LOG.debugf("listSecrets project=%s", project);
         String prefix = "projects/" + project + "/secrets/";
-        return secretStore.scan(k -> k.startsWith(prefix) && pendingDeletionStore.get(k).isEmpty());
+        return authorized("ListSecrets", "projects/" + project,
+                () -> secretStore.scan(k -> k.startsWith(prefix) && pendingDeletionStore.get(k).isEmpty()));
     }
 
     public StoredSecret updateSecret(String name) {
         LOG.debugf("updateSecret name=%s", name);
         synchronized (secretLock(name)) {
-            return requireSecretExists(name);
+            return authorized("UpdateSecret", name, () -> requireSecretExists(name));
         }
     }
 
     public void deleteSecret(String name) {
         LOG.infof("deleteSecret name=%s", name);
         synchronized (secretLock(name)) {
-            if (pendingDeletionStore.get(name).isPresent()) {
-                try {
-                    resumePendingDeletion(name);
-                } catch (StorageException e) {
-                    throw GcpException.unavailable("Pending secret deletion could not be recovered. Retry the request.");
+            authorized("DeleteSecret", name, () -> {
+                if (pendingDeletionStore.get(name).isPresent()) {
+                    try {
+                        resumePendingDeletion(name);
+                    } catch (StorageException e) {
+                        throw GcpException.unavailable("Pending secret deletion could not be recovered. Retry the request.");
+                    }
+                    return null;
                 }
-                return;
-            }
-            if (secretStore.get(name).isEmpty()) {
-                throw GcpException.notFound("Secret not found: " + name);
-            }
-            try {
-                pendingDeletionStore.put(name, name);
-                pendingDeletionStore.checkpoint();
-                completeDeletion(name);
-                clearPendingDeletion(name);
-            } catch (StorageException e) {
-                throw GcpException.unavailable("Secret deletion could not be made durable. Retry the request.");
-            }
+                if (secretStore.get(name).isEmpty()) {
+                    throw GcpException.notFound("Secret not found: " + name);
+                }
+                try {
+                    pendingDeletionStore.put(name, name);
+                    pendingDeletionStore.checkpoint();
+                    completeDeletion(name);
+                    clearPendingDeletion(name);
+                } catch (StorageException e) {
+                    throw GcpException.unavailable("Secret deletion could not be made durable. Retry the request.");
+                }
+                return null;
+            });
         }
     }
 
@@ -204,22 +228,26 @@ public class SecretManagerService {
 
     public Policy getIamPolicy(String resource) {
         synchronized (secretLock(resource)) {
-            requireSecretExists(resource);
-            return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
+            return authorized("GetIamPolicy", resource, () -> {
+                requireSecretExists(resource);
+                return IamPolicyCodec.toProtoPolicy(iamService.getPolicy(resource));
+            });
         }
     }
 
     public Policy setIamPolicy(String resource, Policy policy) {
         synchronized (secretLock(resource)) {
-            requireSecretExists(resource);
-            StoredPolicy stored = IamPolicyCodec.toStoredPolicy(policy);
-            return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, stored));
+            return authorized("SetIamPolicy", resource, () -> {
+                requireSecretExists(resource);
+                StoredPolicy stored = IamPolicyCodec.toStoredPolicy(policy);
+                return IamPolicyCodec.toProtoPolicy(iamService.setPolicy(resource, stored));
+            });
         }
     }
 
     public List<String> testIamPermissions(String resource, List<String> permissions) {
         synchronized (secretLock(resource)) {
-            return iamService.testPermissions(resource, permissions);
+            return authorized("TestIamPermissions", resource, () -> iamService.testPermissions(resource, permissions));
         }
     }
 
@@ -228,13 +256,15 @@ public class SecretManagerService {
     public StoredSecretVersion addSecretVersion(String secretName, byte[] payload, Long dataCrc32c) {
         LOG.infof("addSecretVersion secret=%s", secretName);
         synchronized (secretLock(secretName)) {
-            requireSecretExists(secretName);
-            int versionNumber = nextVersionNumber(secretName);
-            String versionName = secretName + "/versions/" + versionNumber;
-            StoredSecretVersion version = new StoredSecretVersion(versionName, versionNumber,
-                    Instant.now().toString(), payload, dataCrc32c);
-            versionStore.put(versionName, version);
-            return version;
+            return authorized("AddSecretVersion", secretName, () -> {
+                requireSecretExists(secretName);
+                int versionNumber = nextVersionNumber(secretName);
+                String versionName = secretName + "/versions/" + versionNumber;
+                StoredSecretVersion version = new StoredSecretVersion(versionName, versionNumber,
+                        Instant.now().toString(), payload, dataCrc32c);
+                versionStore.put(versionName, version);
+                return version;
+            });
         }
     }
 
@@ -242,17 +272,21 @@ public class SecretManagerService {
         LOG.debugf("getSecretVersion name=%s", versionedName);
         String secretName = secretNameForVersion(versionedName);
         synchronized (secretLock(secretName)) {
-            requireSecretExists(secretName);
-            return resolveVersion(versionedName);
+            return authorized("GetSecretVersion", versionedName, () -> {
+                requireSecretExists(secretName);
+                return resolveVersion(versionedName);
+            });
         }
     }
 
     public List<StoredSecretVersion> listSecretVersions(String secretName) {
         LOG.debugf("listSecretVersions secret=%s", secretName);
         synchronized (secretLock(secretName)) {
-            requireSecretExists(secretName);
-            String prefix = secretName + "/versions/";
-            return versionStore.scan(k -> k.startsWith(prefix));
+            return authorized("ListSecretVersions", secretName, () -> {
+                requireSecretExists(secretName);
+                String prefix = secretName + "/versions/";
+                return versionStore.scan(k -> k.startsWith(prefix));
+            });
         }
     }
 
@@ -260,31 +294,33 @@ public class SecretManagerService {
         LOG.debugf("accessSecretVersion name=%s", versionedName);
         String secretName = secretNameForVersion(versionedName);
         synchronized (secretLock(secretName)) {
-            requireSecretExists(secretName);
-            StoredSecretVersion version = resolveVersion(versionedName);
-            if ("DESTROYED".equals(version.getState())) {
-                throw GcpException.notFound("Secret version is destroyed: " + version.getName());
-            }
-            if ("DISABLED".equals(version.getState())) {
-                throw GcpException.invalidArgument("Secret version is disabled: " + version.getName());
-            }
-            return version;
+            return authorized("AccessSecretVersion", versionedName, () -> {
+                requireSecretExists(secretName);
+                StoredSecretVersion version = resolveVersion(versionedName);
+                if ("DESTROYED".equals(version.getState())) {
+                    throw GcpException.notFound("Secret version is destroyed: " + version.getName());
+                }
+                if ("DISABLED".equals(version.getState())) {
+                    throw GcpException.invalidArgument("Secret version is disabled: " + version.getName());
+                }
+                return version;
+            });
         }
     }
 
     public StoredSecretVersion disableSecretVersion(String versionedName) {
         LOG.infof("disableSecretVersion name=%s", versionedName);
-        return updateSecretVersion(versionedName, version -> version.setState("DISABLED"));
+        return updateSecretVersion("DisableSecretVersion", versionedName, version -> version.setState("DISABLED"));
     }
 
     public StoredSecretVersion enableSecretVersion(String versionedName) {
         LOG.infof("enableSecretVersion name=%s", versionedName);
-        return updateSecretVersion(versionedName, version -> version.setState("ENABLED"));
+        return updateSecretVersion("EnableSecretVersion", versionedName, version -> version.setState("ENABLED"));
     }
 
     public StoredSecretVersion destroySecretVersion(String versionedName) {
         LOG.infof("destroySecretVersion name=%s", versionedName);
-        return updateSecretVersion(versionedName, version -> {
+        return updateSecretVersion("DestroySecretVersion", versionedName, version -> {
             version.setState("DESTROYED");
             version.setPayload(null);
             version.setDestroyTime(Instant.now().toString());
@@ -311,15 +347,17 @@ public class SecretManagerService {
                 .orElseThrow(() -> GcpException.notFound("Version not found: " + versionedName));
     }
 
-    private StoredSecretVersion updateSecretVersion(String versionedName,
+    private StoredSecretVersion updateSecretVersion(String operationName, String versionedName,
             java.util.function.Consumer<StoredSecretVersion> update) {
         String secretName = secretNameForVersion(versionedName);
         synchronized (secretLock(secretName)) {
-            requireSecretExists(secretName);
-            StoredSecretVersion version = resolveVersion(versionedName);
-            update.accept(version);
-            versionStore.put(version.getName(), version);
-            return version;
+            return authorized(operationName, versionedName, () -> {
+                requireSecretExists(secretName);
+                StoredSecretVersion version = resolveVersion(versionedName);
+                update.accept(version);
+                versionStore.put(version.getName(), version);
+                return version;
+            });
         }
     }
 
@@ -333,6 +371,21 @@ public class SecretManagerService {
 
     private Object secretLock(String name) {
         return secretLocks[Math.floorMod(name.hashCode(), secretLocks.length)];
+    }
+
+    private <T> T authorized(String operationName, String target, Supplier<T> action) {
+        if (authorization == null) {
+            return action.get();
+        }
+        IamOperation operation = new IamOperation(operationName, target);
+        IamResource resource = iamAdapter.checks(operation).stream()
+                .map(check -> check.resource())
+                .findFirst()
+                .orElseGet(() -> iamAdapter.requireResource(target));
+        return authorization.withPolicyLocks(resource, () -> {
+            authorization.authorizeCurrent(iamAdapter, operation);
+            return action.get();
+        });
     }
 
     private static Object[] createSecretLocks() {

@@ -1,13 +1,21 @@
 package io.floci.gcp.services.iam;
 
+import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.DestroySecretVersionRequest;
 import com.google.cloud.secretmanager.v1.GetSecretRequest;
+import com.google.cloud.secretmanager.v1.Replication;
+import com.google.cloud.secretmanager.v1.Secret;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceGrpc;
+import com.google.cloud.secretmanager.v1.SecretPayload;
 import com.google.iam.v1.Binding;
 import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.IAMPolicyGrpc;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.SetIamPolicyRequest;
 import com.google.iam.v1.TestIamPermissionsRequest;
+import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.PublisherGrpc;
 import com.google.type.Expr;
@@ -295,7 +303,7 @@ abstract class IamEnforcementContract {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"unimplemented/resource", "topics/deferred", "secrets/deferred"})
+    @ValueSource(strings = {"unimplemented/resource", "topics/deferred"})
     void sharedIamMixinRejectsUnmappedResourceKindsLoudly(String suffix) {
         String unknown = project + "/" + suffix;
         if (enforced()) {
@@ -341,19 +349,158 @@ abstract class IamEnforcementContract {
     }
 
     @Test
-    void deferredServicesRemainPermissiveWithRecognizedCredentials() {
+    void deferredPubSubRemainsPermissiveWithRecognizedCredentials() {
         String topic = project + "/topics/deferred";
         request().contentType("application/json").body(Map.of()).put("/v1/" + topic).then().statusCode(200);
         request().header("Authorization", credential).get("/v1/" + topic).then().statusCode(200);
         assertEquals(topic, PublisherGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
                 .getTopic(GetTopicRequest.newBuilder().setTopic(topic).build()).getName());
-        String secret = project + "/secrets/deferred";
-        request().contentType("application/json").queryParam("secretId", "deferred")
+    }
+
+    @Test
+    void secretPayloadAndPolicyAreScopedAcrossRestAndGrpc() {
+        String allowed = createSecret("allowed");
+        String sibling = createSecret("sibling");
+        String allowedVersion = addVersion(allowed);
+        String siblingVersion = addVersion(sibling);
+        grant(allowed, "roles/secretmanager.secretAccessor", null);
+
+        request().header("Authorization", credential).get("/v1/" + allowedVersion + ":access")
+                .then().statusCode(200);
+        SecretManagerServiceGrpc.SecretManagerServiceBlockingStub stub = secretStub();
+        assertEquals("payload", stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName(allowedVersion).build()).getPayload().getData().toStringUtf8());
+
+        restDenied(request().header("Authorization", credential).get("/v1/" + siblingVersion + ":access"));
+        grpcDenied(() -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName(siblingVersion).build()));
+        restDenied(request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of()).post("/v1/" + siblingVersion + ":destroy"));
+        grpcDenied(() -> stub.destroySecretVersion(DestroySecretVersionRequest.newBuilder()
+                .setName(siblingVersion).build()));
+        if (enforced()) {
+            assertEquals("payload", SecretManagerServiceGrpc.newBlockingStub(channel)
+                    .accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                            .setName(siblingVersion).build()).getPayload().getData().toStringUtf8());
+        }
+        restDenied(request().header("Authorization", credential).get("/v1/" + allowed));
+        grpcDenied(() -> stub.getSecret(GetSecretRequest.newBuilder().setName(allowed).build()));
+
+        Map<String, Object> replacement = Map.of("policy", policy("roles/secretmanager.admin", null));
+        restDenied(request().header("Authorization", credential).contentType("application/json")
+                .body(replacement).post("/v1/" + allowed + ":setIamPolicy"));
+        grpcDenied(() -> stub.setIamPolicy(SetIamPolicyRequest.newBuilder().setResource(allowed)
+                .setPolicy(Policy.newBuilder().addBindings(Binding.newBuilder()
+                        .setRole("roles/secretmanager.admin").addMembers(member))).build()));
+        if (enforced()) {
+            assertEquals("roles/secretmanager.secretAccessor", request().get("/v1/" + allowed + ":getIamPolicy")
+                    .jsonPath().getString("bindings[0].role"));
+        }
+
+        List<String> expected = enforced() ? List.of("secretmanager.versions.access")
+                : List.of("secretmanager.versions.access", "secretmanager.secrets.delete");
+        List<String> requested = List.of("secretmanager.versions.access", "secretmanager.secrets.delete");
+        assertEquals(expected, stub.testIamPermissions(TestIamPermissionsRequest.newBuilder()
+                .setResource(allowed).addAllPermissions(requested).build()).getPermissionsList());
+        assertEquals(expected, request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of("permissions", requested)).post("/v1/" + allowed + ":testIamPermissions")
+                .jsonPath().getList("permissions", String.class));
+    }
+
+    @Test
+    void projectConditionControlsSecretCreationBeforeMutation() {
+        grant(project, "roles/secretmanager.admin", "resource.name == '" + project + "'");
+        String restName = project + "/secrets/created-rest";
+        request().header("Authorization", credential).contentType("application/json")
+                .queryParam("secretId", "created-rest")
                 .body(Map.of("replication", Map.of("automatic", Map.of())))
                 .post("/v1/" + project + "/secrets").then().statusCode(200);
-        request().header("Authorization", credential).get("/v1/" + secret).then().statusCode(200);
-        assertEquals(secret, SecretManagerServiceGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
-                .getSecret(GetSecretRequest.newBuilder().setName(secret).build()).getName());
+        assertEquals(restName, request().get("/v1/" + restName).jsonPath().getString("name"));
+        String grpcName = project + "/secrets/created-grpc";
+        assertEquals(grpcName, secretStub().createSecret(CreateSecretRequest.newBuilder()
+                .setParent(project).setSecretId("created-grpc").setSecret(Secret.newBuilder()
+                        .setReplication(Replication.newBuilder().setAutomatic(Replication.Automatic.getDefaultInstance())))
+                .build()).getName());
+
+        grant(project, "roles/secretmanager.admin", "resource.name == 'excluded'");
+        restDenied(request().header("Authorization", credential).contentType("application/json")
+                .queryParam("secretId", "denied-rest")
+                .body(Map.of("replication", Map.of("automatic", Map.of())))
+                .post("/v1/" + project + "/secrets"));
+        grpcDenied(() -> secretStub().createSecret(CreateSecretRequest.newBuilder()
+                .setParent(project).setSecretId("denied-grpc").setSecret(Secret.newBuilder()
+                        .setReplication(Replication.newBuilder().setAutomatic(Replication.Automatic.getDefaultInstance())))
+                .build()));
+        if (enforced()) {
+            assertEquals(404, request().get("/v1/" + project + "/secrets/denied-rest").statusCode());
+            assertEquals(404, request().get("/v1/" + project + "/secrets/denied-grpc").statusCode());
+        }
+    }
+
+    @Test
+    void projectConditionScopesVersionPayloadByResourceName() {
+        String allowedVersion = addVersion(createSecret("condition-allowed"));
+        String siblingVersion = addVersion(createSecret("condition-sibling"));
+        String allowedSecret = allowedVersion.substring(0, allowedVersion.indexOf("/versions/"));
+        grant(project, "roles/secretmanager.secretAccessor",
+                "resource.service == 'secretmanager.googleapis.com'"
+                        + " && resource.type == 'secretmanager.googleapis.com/SecretVersion'"
+                        + " && resource.name.startsWith('" + allowedSecret + "/versions/')");
+
+        request().header("Authorization", credential).get("/v1/" + allowedVersion + ":access")
+                .then().statusCode(200);
+        assertEquals("payload", secretStub().accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName(allowedVersion).build()).getPayload().getData().toStringUtf8());
+        restDenied(request().header("Authorization", credential).get("/v1/" + siblingVersion + ":access"));
+        grpcDenied(() -> secretStub().accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName(siblingVersion).build()));
+    }
+
+    @Test
+    void secretManagerEditorCanAddVersionsButCannotReadPayload() {
+        String secret = createSecret("editor-scope");
+        grant(secret, "roles/secretmanager.editor", null);
+        SecretPayload payload = SecretPayload.newBuilder().setData(ByteString.copyFromUtf8("editor-data")).build();
+        String version = secretStub().addSecretVersion(AddSecretVersionRequest.newBuilder()
+                .setParent(secret).setPayload(payload).build()).getName();
+        assertEquals(version, request().get("/v1/" + version).jsonPath().getString("name"));
+        restDenied(request().header("Authorization", credential).get("/v1/" + version + ":access"));
+        grpcDenied(() -> secretStub().accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName(version).build()));
+    }
+
+    @Test
+    void sharedIamMixinRejectsSecretVersionPolicyWrites() {
+        String version = addVersion(createSecret("version-policy"));
+        grant(project, "roles/secretmanager.admin", null);
+        Runnable write = () -> IAMPolicyGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS)
+                .setIamPolicy(SetIamPolicyRequest.newBuilder().setResource(version)
+                        .setPolicy(Policy.newBuilder().addBindings(Binding.newBuilder()
+                                .setRole("roles/secretmanager.secretAccessor").addMembers(member))).build());
+        if (enforced()) {
+            StatusRuntimeException error = assertThrows(StatusRuntimeException.class, write::run);
+            assertEquals(Status.Code.FAILED_PRECONDITION, error.getStatus().getCode());
+        } else {
+            write.run();
+        }
+    }
+
+    private String createSecret(String id) {
+        return request().contentType("application/json").queryParam("secretId", id)
+                .body(Map.of("replication", Map.of("automatic", Map.of())))
+                .post("/v1/" + project + "/secrets").then().statusCode(200)
+                .extract().jsonPath().getString("name");
+    }
+
+    private String addVersion(String secret) {
+        return SecretManagerServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                .addSecretVersion(AddSecretVersionRequest.newBuilder().setParent(secret)
+                        .setPayload(SecretPayload.newBuilder().setData(ByteString.copyFromUtf8("payload")))
+                        .build()).getName();
+    }
+
+    private SecretManagerServiceGrpc.SecretManagerServiceBlockingStub secretStub() {
+        return SecretManagerServiceGrpc.newBlockingStub(authenticated).withDeadlineAfter(5, TimeUnit.SECONDS);
     }
 
     private Channel withCredential(String token) {

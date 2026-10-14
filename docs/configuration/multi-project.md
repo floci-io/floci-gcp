@@ -15,12 +15,14 @@ projects/my-project/secrets/my-secret
 
 floci-gcp keeps projects apart in one of two ways, depending on the service:
 
-- **By resource name.** Most services store each resource under its full name, which starts
-  with `projects/{project}/`. Pub/Sub, Firestore, Datastore, Secret Manager, Cloud KMS, Cloud
-  Tasks, Cloud Scheduler, Cloud Run, GKE, Eventarc, Managed Kafka, IAM and Cloud Logging work
-  this way.
+- **By resource name.** Most services store each resource under a key that names its project,
+  normally the full resource name, which starts with `projects/{project}/`. Pub/Sub, Firestore,
+  Datastore, Secret Manager, Cloud KMS, Cloud Tasks, Cloud Scheduler, Cloud Run, GKE, Eventarc,
+  Managed Kafka, IAM and Cloud Logging work this way. GKE operations are the exception: they
+  are stored by operation ID and matched to a project through their `selfLink`.
 - **By request project.** BigQuery, Cloud SQL, Cloud Monitoring and Cloud Functions resolve the
-  project of each request and prefix every stored key with it.
+  project of each request and prefix every stored key with it. BigQuery Storage Write API
+  streams are stored under their full name instead.
 - **Cloud Storage** follows GCP: bucket names are global, so a name taken in one project cannot
   be created in another. Each bucket records the project that owns it, and listing buckets
   returns only those of the project you ask for.

@@ -132,7 +132,7 @@ Opt-in `floci-gcp.services.iam.authorization-mode=enforce` also evaluates stored
 
 ### Project ID as multi-tenancy key
 
-GCP resource names follow `projects/{project}/...`. The project ID is the multi-tenancy boundary. A service isolates projects in one of two ways: a global store (`StorageFactory.createGlobal`) keyed by the full `projects/{project}/...` resource name, which is what most services use, or a project-aware store (`StorageFactory.create`), where `ProjectAwareStorageBackend` prefixes every key with the request's project. Cloud Storage is the one exception: bucket names are global in GCP, so buckets and objects are keyed by bucket name and the owning project is a field of the bucket. The second kind reads the project from `RequestContext`, which only REST requests set; from gRPC or background code use `forProject(...)`.
+GCP resource names follow `projects/{project}/...`. The project ID is the multi-tenancy boundary. A service isolates projects in one of two ways: a global store (`StorageFactory.createGlobal`) whose key names the project, which is what most services use, or a project-aware store (`StorageFactory.create`), where `ProjectAwareStorageBackend` prefixes every key with the request's project. In a global store the key is normally the full `projects/{project}/...` resource name; IAM composes its own (`sa:{project}:{email}`, `key:{project}:{email}:{keyId}`). A service can mix both kinds: BigQuery uses project-aware stores for datasets, tables and jobs, and a global store keyed by the full stream name for Storage Write API streams. Three stores keep the project out of the key: Cloud Storage, because bucket names are global in GCP, keys buckets and objects by bucket name and holds the owning project as a field of the bucket; GKE operations are keyed by operation ID and filtered by the project in their `selfLink`; credential tokens are keyed by token value and belong to no project. The project-aware kind reads the project from `RequestContext`, which only REST requests set; from gRPC or background code use `forProject(...)`.
 
 Resolution order in `ProjectContextFilter`:
 1. URL path segment `projects/{project}/...`
@@ -173,7 +173,8 @@ Rules:
 - Always use `StorageFactory`
 - Do not instantiate storage implementations directly inside services
 - Respect lifecycle hooks for load and flush behavior
-- Every stored key carries the GCP project (Cloud Storage buckets, whose names are global in GCP, are the exception): either the key is the full `projects/{project}/...` resource name in a global store (`createGlobal`), or the store is project-aware (`create`) and `ProjectAwareStorageBackend` adds the prefix. Never key a global store by a bare resource ID
+- A new store for project-scoped resources puts the GCP project in the key: either the key names the project in a global store (`createGlobal`), preferably as the full `projects/{project}/...` resource name, or the store is project-aware (`create`) and `ProjectAwareStorageBackend` adds the prefix. Do not key a new global store by a bare resource ID
+- Existing stores that differ are valid and keep their keys, so saved data stays readable: IAM (`sa:{project}:{email}`), Cloud Storage (bucket name, owner on the bucket), GKE operations (operation ID, project in `selfLink`) and credential tokens (token value, not project-scoped). Do not rekey them to fit the rule above
 
 Important nuance:
 

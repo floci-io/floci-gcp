@@ -529,6 +529,10 @@ class SqlDialectTranslatorTest {
         String aliasedUnnest = dml("MERGE ds.t USING UNNEST([STRUCT(1 AS src_id)]) AS u ON FALSE WHEN NOT MATCHED"
                 + " THEN INSERT (id) VALUES (src_id)");
         assertTrue(aliasedUnnest.contains("VALUES (src_id)"), aliasedUnnest);
+        String takenName = dml("MERGE ds.t AS _merge_source USING UNNEST([STRUCT(9 AS id)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (id)");
+        assertTrue(takenName.contains("max_depth := 2)) AS \"_merge_source_1\"")
+                && takenName.contains("VALUES (\"_merge_source_1\".id)"), takenName);
     }
 
     @Test

@@ -100,8 +100,9 @@ final class SqlDialectTranslator {
     private final Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
 
     private List<Token> tokens;
-    /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #MERGE_UNNEST_SOURCE} as its name. */
+    /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
     private Token mergeUnnestSource;
+    private String mergeUnnestName;
 
     private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
         this.projectId = projectId;
@@ -550,7 +551,8 @@ final class SqlDialectTranslator {
             }
             // Without an alias it renders as an unnamed subquery, so it gets a name to qualify with.
             mergeUnnestSource = tokens.get(source);
-            return MERGE_UNNEST_SOURCE;
+            mergeUnnestName = unusedName(MERGE_UNNEST_SOURCE);
+            return mergeUnnestName;
         } else {
             int last = source;
             int dot = nextSignificant(last + 1, tokens.size());
@@ -663,8 +665,25 @@ final class SqlDialectTranslator {
         }
     }
 
-    /** The name an unaliased {@code MERGE ... USING UNNEST(...)} source is rendered and qualified with. */
+    /** The base of the name an unaliased {@code MERGE ... USING UNNEST(...)} source is rendered and qualified with. */
     private static final String MERGE_UNNEST_SOURCE = "_merge_source";
+
+    /** {@code base}, or {@code base_1}, {@code base_2}, ... when the statement already uses that name. */
+    private String unusedName(String base) {
+        Set<String> used = new HashSet<>();
+        for (Token t : tokens) {
+            if (t.kind == Kind.IDENT || t.kind == Kind.QIDENT) {
+                for (String part : t.identifierText().split("\\.", -1)) {
+                    used.add(part.toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        String name = base;
+        for (int n = 1; used.contains(name); n++) {
+            name = base + "_" + n;
+        }
+        return name;
+    }
 
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
             "VALUES", "ROW", "UPDATE", "DELETE");
@@ -1654,7 +1673,7 @@ final class SqlDialectTranslator {
             // Unaliased: GoogleSQL expands STRUCT elements into one column per field.
             out.append("(SELECT UNNEST(").append(array).append(", max_depth := 2))");
             if (tokens.get(i) == mergeUnnestSource) {
-                out.append(" AS ").append(DuckTypes.quoteIdentifier(MERGE_UNNEST_SOURCE));
+                out.append(" AS ").append(DuckTypes.quoteIdentifier(mergeUnnestName));
             }
             return close + 1;
         }

@@ -520,6 +520,15 @@ class SqlDialectTranslatorTest {
                 + " VALUES (id, ST_GEOGFROMTEXT(w, make_valid => TRUE))");
         assertTrue(namedArgument.contains("\"S\".w") && namedArgument.contains("make_valid => TRUE"), namedArgument);
         assertFalse(namedArgument.contains("\"S\".make_valid"), namedArgument);
+
+        String unnest = dml("MERGE ds.t USING UNNEST([STRUCT(1 AS src_id)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (src_id)");
+        assertTrue(unnest.contains("max_depth := 2)) AS \"_merge_source\"")
+                && unnest.contains("VALUES (\"_merge_source\".src_id)"), unnest);
+        assertFalse(unnest.toUpperCase().contains("\"UNNEST\"."), unnest);
+        String aliasedUnnest = dml("MERGE ds.t USING UNNEST([STRUCT(1 AS src_id)]) AS u ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (src_id)");
+        assertTrue(aliasedUnnest.contains("VALUES (src_id)"), aliasedUnnest);
     }
 
     @Test

@@ -215,6 +215,15 @@ class BigQueryDuckDmlIntegrationTest {
         assertEquals(List.of(List.of("1", "2026-03-05"), List.of("2", "2026-03-10")),
                 rows("SELECT id, v FROM shop.merge_t ORDER BY id"));
 
+        query(target).then().statusCode(200);
+        query("MERGE shop.merge_t USING UNNEST([STRUCT(9 AS src_id)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (src_id)").then().statusCode(200);
+        assertEquals(List.of(List.of("9")), rows("SELECT id FROM shop.merge_t ORDER BY id"));
+        query(target).then().statusCode(200);
+        query("MERGE shop.merge_t T USING UNNEST([STRUCT(9 AS id, 'u' AS v)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id, v) VALUES (id, v)").then().statusCode(200);
+        assertEquals(List.of(List.of("9", "u")), rows("SELECT id, v FROM shop.merge_t ORDER BY id"));
+
         query("CREATE TABLE shop.days_s AS SELECT 1 AS id, DATE '2026-03-05' AS d, DATE '2026-03-01' AS day"
                 + " UNION ALL SELECT 2, DATE '2026-03-01', DATE '2026-03-05'").then().statusCode(200);
         query("CREATE TABLE shop.days_t (id INT64, d DATE, day DATE)").then().statusCode(200);

@@ -100,6 +100,8 @@ final class SqlDialectTranslator {
     private final Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
 
     private List<Token> tokens;
+    /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #MERGE_UNNEST_SOURCE} as its name. */
+    private Token mergeUnnestSource;
 
     private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
         this.projectId = projectId;
@@ -536,8 +538,19 @@ final class SqlDialectTranslator {
         }
         String name = null;
         int after;
+        int unnestOpen = tokens.get(source).isKeyword("UNNEST") ? nextSignificant(source + 1, tokens.size()) : -1;
         if (tokens.get(source).isPunct("(")) {
             after = nextSignificant(matchingParen(source) + 1, tokens.size());
+        } else if (unnestOpen >= 0 && tokens.get(unnestOpen).isPunct("(")) {
+            after = nextSignificant(matchingParen(unnestOpen) + 1, tokens.size());
+            if (after >= 0 && (tokens.get(after).isKeyword("AS") || tokens.get(after).kind == Kind.QIDENT
+                    || (tokens.get(after).kind == Kind.IDENT && !tokens.get(after).isKeyword("ON")))) {
+                // An aliased UNNEST renders as one STRUCT column, which the qualified names cannot reach.
+                return null;
+            }
+            // Without an alias it renders as an unnamed subquery, so it gets a name to qualify with.
+            mergeUnnestSource = tokens.get(source);
+            return MERGE_UNNEST_SOURCE;
         } else {
             int last = source;
             int dot = nextSignificant(last + 1, tokens.size());
@@ -649,6 +662,9 @@ final class SqlDialectTranslator {
             columns.add(i);
         }
     }
+
+    /** The name an unaliased {@code MERGE ... USING UNNEST(...)} source is rendered and qualified with. */
+    private static final String MERGE_UNNEST_SOURCE = "_merge_source";
 
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",
             "VALUES", "ROW", "UPDATE", "DELETE");
@@ -1637,6 +1653,9 @@ final class SqlDialectTranslator {
         if (nameIndex < 0) {
             // Unaliased: GoogleSQL expands STRUCT elements into one column per field.
             out.append("(SELECT UNNEST(").append(array).append(", max_depth := 2))");
+            if (tokens.get(i) == mergeUnnestSource) {
+                out.append(" AS ").append(DuckTypes.quoteIdentifier(MERGE_UNNEST_SOURCE));
+            }
             return close + 1;
         }
         out.append("UNNEST(").append(array).append(')');

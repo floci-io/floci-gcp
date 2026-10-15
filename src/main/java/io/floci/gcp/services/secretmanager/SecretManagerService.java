@@ -304,9 +304,9 @@ public class SecretManagerService {
             String secretName = versionedName.substring(0, versionedName.length() - "/versions/latest".length());
             String prefix = secretName + "/versions/";
             return versionStore.scan(k -> k.startsWith(prefix)).stream()
-                    .filter(v -> "ENABLED".equals(v.getState()))
                     .max(Comparator.comparingInt(StoredSecretVersion::getVersionNumber))
-                    .orElseThrow(() -> GcpException.notFound("No enabled version for: " + secretName));
+                    .orElseThrow(() -> GcpException.notFound(
+                            "Secret [" + secretName + "] not found or has no versions."));
         }
         return versionStore.get(versionedName)
                 .orElseThrow(() -> GcpException.notFound("Version not found: " + versionedName));

@@ -1,6 +1,7 @@
 package io.floci.gcp.services.secretmanager;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -130,6 +131,39 @@ class SecretManagerRestIntegrationTest {
                 .when().get("/v1/" + version + ":access")
                 .then().statusCode(200)
                 .body("payload.data", equalTo(""));
+    }
+
+    @Test
+    void latestAliasResolvesToNewestVersionEvenWhenItIsDisabled() {
+        String base = createPayloadSecret();
+        for (String data : new String[]{"djE=", "djI="}) {
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body("{\"payload\":{\"data\":\"" + data + "\"}}")
+                    .when().post(base + ":addVersion")
+                    .then().statusCode(200);
+        }
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/2:disable")
+                .then().statusCode(200);
+
+        Response direct = given().urlEncodingEnabled(false).when().get(base + "/versions/2:access");
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest:access")
+                .then().statusCode(direct.statusCode())
+                .body("error.status", equalTo(direct.path("error.status")))
+                .body("error.message", equalTo(direct.path("error.message")));
+    }
+
+    @Test
+    void latestAliasOnSecretWithoutVersionsIsNotFound() {
+        String base = createPayloadSecret();
+        String name = base.substring("/v1/".length());
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest:access")
+                .then().statusCode(404)
+                .body("error.code", equalTo(404))
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo("Secret [" + name + "] not found or has no versions."));
     }
 
     private static String createPayloadSecret() {

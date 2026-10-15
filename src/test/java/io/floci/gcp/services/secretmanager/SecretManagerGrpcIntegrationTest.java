@@ -4,6 +4,7 @@ import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
 import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.DisableSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.GetSecretRequest;
 import com.google.cloud.secretmanager.v1.ListSecretVersionsRequest;
 import com.google.cloud.secretmanager.v1.ListSecretsRequest;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -122,6 +124,41 @@ class SecretManagerGrpcIntegrationTest {
         assertEquals(1, stub.listSecrets(ListSecretsRequest.newBuilder()
                 .setParent("projects/" + project).build()).getSecretsCount());
         stub.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(secretName).build());
+    }
+
+    @Test
+    void latestAliasResolvesToNewestVersionEvenWhenItIsDisabled() {
+        String secretId = "latest-" + UUID.randomUUID();
+        String secretName = "projects/grpc-latest-project/secrets/" + secretId;
+        stub.createSecret(createRequest("projects/grpc-latest-project", secretId));
+        for (String value : new String[]{"v1", "v2"}) {
+            stub.addSecretVersion(AddSecretVersionRequest.newBuilder()
+                    .setParent(secretName)
+                    .setPayload(SecretPayload.newBuilder().setData(ByteString.copyFromUtf8(value)))
+                    .build());
+        }
+        stub.disableSecretVersion(DisableSecretVersionRequest.newBuilder().setName(secretName + "/versions/2").build());
+
+        StatusRuntimeException direct = assertThrows(StatusRuntimeException.class,
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(secretName + "/versions/2").build()));
+        StatusRuntimeException latest = assertThrows(StatusRuntimeException.class,
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(secretName + "/versions/latest").build()));
+        assertEquals(direct.getStatus().getCode(), latest.getStatus().getCode());
+        assertEquals(direct.getStatus().getDescription(), latest.getStatus().getDescription());
+    }
+
+    @Test
+    void latestAliasOnSecretWithoutVersionsIsNotFound() {
+        String secretId = "no-versions-" + UUID.randomUUID();
+        String secretName = "projects/grpc-latest-project/secrets/" + secretId;
+        stub.createSecret(createRequest("projects/grpc-latest-project", secretId));
+
+        StatusRuntimeException ex = assertStatus(Status.Code.NOT_FOUND,
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(secretName + "/versions/latest").build()));
+        assertEquals("Secret [" + secretName + "] not found or has no versions.", ex.getStatus().getDescription());
     }
 
     private static CreateSecretRequest createRequest(String parent, String secretId) {

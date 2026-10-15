@@ -20,6 +20,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Installed on the actual Vert.x gRPC bridge, including dynamically registered services. */
 @GlobalInterceptor
@@ -27,8 +28,6 @@ import java.util.Optional;
 public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
     static final Context.Key<String> AUTHORIZATION = Context.key("iam-authorization");
     static final Context.Key<Boolean> GRPC_REQUEST = Context.key("iam-grpc-request");
-    private static final Context.Key<StreamingPullDelivery> STREAMING_PULL_DELIVERY =
-            Context.key("iam-streaming-pull-delivery");
     private static final Metadata.Key<String> AUTHORIZATION_HEADER =
             Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
     private static final String IAM_POLICY_SERVICE = "google.iam.v1.IAMPolicy";
@@ -45,30 +44,31 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
         this.mapper = mapper;
     }
 
-    @FunctionalInterface
-    public interface StreamingPullDelivery {
-        void run(String subscription, Runnable delivery);
-    }
-
-    public static StreamingPullDelivery streamingPullDelivery() {
-        return STREAMING_PULL_DELIVERY.get();
-    }
-
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
             Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         String credential = headers.get(AUTHORIZATION_HEADER);
+        String serviceName = call.getMethodDescriptor().getServiceName();
+        String method = call.getMethodDescriptor().getBareMethodName();
+        Optional<IamAuthorizationAdapter> callAdapter = registry.grpc(serviceName);
+        Optional<IamAuthorizationAdapter.GrpcStreamAuthorization> streamAuthorization =
+                callAdapter.flatMap(adapter -> adapter.grpcStreamAuthorization(method));
+        AtomicReference<IamOperation> streamOperation = new AtomicReference<>();
         Context context = Context.current().withValue(AUTHORIZATION, credential).withValue(GRPC_REQUEST, true);
-        if (call.getMethodDescriptor().getFullMethodName().equals("google.pubsub.v1.Subscriber/StreamingPull")) {
-            IamAuthorizationAdapter adapter = registry.grpc("google.pubsub.v1.Subscriber").orElseThrow();
-            context = context.withValue(STREAMING_PULL_DELIVERY, (subscription, delivery) -> {
+        if (streamAuthorization.isPresent()) {
+            IamAuthorizationAdapter adapter = callAdapter.orElseThrow();
+            context = IamGrpcDeliveryAuthorization.withDelivery(context, (resource, delivery) -> {
                 IamAuthorizationService service = authorization.get();
                 if (!service.applies(credential, adapter)) {
                     delivery.run();
                     return;
                 }
-                service.withPolicyLocks(adapter.requireResource(subscription), () -> {
-                    service.authorize(credential, adapter, new IamOperation("streamingPull", subscription));
+                IamOperation operation = streamOperation.get();
+                if (operation == null || !operation.resource().equals(resource)) {
+                    throw GcpException.failedPrecondition("IAM streaming delivery has no matching resource mapping");
+                }
+                service.withPolicyLocks(adapter.requireResource(operation.resource()), () -> {
+                    service.authorize(credential, adapter, operation);
                     delivery.run();
                     return null;
                 });
@@ -78,7 +78,6 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
             ServerCall.Listener<ReqT> listener = next.startCall(contextCall, contextHeaders);
             return new SimpleForwardingServerCallListener<>(listener) {
                 private boolean rejected;
-                private String streamingSubscription;
 
                 @Override
                 public void onMessage(ReqT message) {
@@ -86,14 +85,12 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                         return;
                     }
                     try {
-                        String service = call.getMethodDescriptor().getServiceName();
-                        Optional<IamAuthorizationAdapter> adapter = registry.grpc(service);
-                        boolean mixin = IAM_POLICY_SERVICE.equals(service);
+                        Optional<IamAuthorizationAdapter> adapter = callAdapter;
+                        boolean mixin = IAM_POLICY_SERVICE.equals(serviceName);
                         if ((adapter.isPresent() || mixin) && authorization.get().enabled()) {
                             if (!(message instanceof Message proto)) {
-                                throw GcpException.failedPrecondition("IAM requires a protobuf resource mapping: " + service);
+                                throw GcpException.failedPrecondition("IAM requires a protobuf resource mapping: " + serviceName);
                             }
-                            String method = call.getMethodDescriptor().getBareMethodName();
                             IamOperation operation = null;
                             if (mixin) {
                                 String resource = switch (proto) {
@@ -114,27 +111,18 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     operation = new IamOperation(method, resource);
                                 }
                             } else {
-                                IamOperation mapped = adapter.orElseThrow().grpcOperation(method, proto, mapper);
-                                if (service.equals("google.pubsub.v1.Subscriber")
-                                        && method.equals("StreamingPull")) {
-                                    String requestedSubscription = mapped.resource();
-                                    if (streamingSubscription == null) {
-                                        if (requestedSubscription.isBlank()) {
-                                            throw GcpException.invalidArgument(
-                                                    "StreamingPull requires a subscription in its first request");
-                                        }
-                                        streamingSubscription = requestedSubscription;
-                                    } else if (!requestedSubscription.isBlank()) {
-                                        throw GcpException.invalidArgument(
-                                                "StreamingPull subscription must only be set in the first request");
-                                    }
-                                    operation = new IamOperation("streamingPull", streamingSubscription);
+                                if (streamAuthorization.isPresent()) {
+                                    operation = streamAuthorization.orElseThrow().requestOperation(
+                                            proto, streamOperation.get());
                                 } else {
-                                    operation = mapped;
+                                    operation = adapter.orElseThrow().grpcOperation(method, proto, mapper);
                                 }
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {
                                 authorization.get().authorize(credential, adapter.get(), operation);
+                            }
+                            if (streamAuthorization.isPresent()) {
+                                streamOperation.set(operation);
                             }
                         }
                         super.onMessage(message);

@@ -41,9 +41,10 @@ policy, so a condition on `resource.name` can scope creation. Subscription creat
 `pubsub.topics.get`; `DetachSubscription` requires
 `pubsub.topics.detachSubscription` on the subscription's topic. `StreamingPull`
 requires `pubsub.subscriptions.consume` on the subscription named in its first
-message. Later messages must omit the subscription name. Active streams check
-that permission again before delivering newly available messages and close if
-the grant has been revoked.
+message. Later messages must omit the subscription name. Floci checks active
+streams again before delivering newly available messages and closes a stream
+if its grant has been revoked. This stream-closing behavior is an emulator
+choice, not a verified behavior of Google Cloud Pub/Sub.
 
 Supported predefined roles are `roles/pubsub.admin`, `roles/pubsub.editor`,
 `roles/pubsub.viewer`, `roles/pubsub.publisher`, and `roles/pubsub.subscriber`.
@@ -66,7 +67,7 @@ Permission names and multi-resource checks follow Google's
 [Pub/Sub access-control reference](https://cloud.google.com/pubsub/docs/access-control).
 Role slices follow the [Pub/Sub predefined-role catalog](https://cloud.google.com/iam/docs/roles-permissions/pubsub).
 Request fields and StreamingPull's first-message rule follow the
-[Pub/Sub v1 proto](https://github.com/googleapis/googleapis/blob/master/google/pubsub/v1/pubsub.proto).
+[Pub/Sub v1 proto](https://github.com/googleapis/googleapis/blob/aa87617d67/google/pubsub/v1/pubsub.proto#L2248-L2250).
 
 ## REST / Terraform Endpoint
 

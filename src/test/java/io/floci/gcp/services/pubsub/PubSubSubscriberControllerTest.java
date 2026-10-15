@@ -8,8 +8,11 @@ import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Subscription;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamServices;
+import io.floci.gcp.services.iam.authorization.IamGrpcDeliveryAuthorization;
+import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -21,6 +24,8 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +33,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 class PubSubSubscriberControllerTest {
 
@@ -72,6 +82,74 @@ class PubSubSubscriberControllerTest {
                 response.getReceivedMessages(0).getMessage().getAttributesOrThrow("source"));
 
         requestObserver.onCompleted();
+    }
+
+    @Test
+    void streamingPullUsesDeliveryAuthorizationForRequestsAndPublishedMessages() throws Exception {
+        String topic = "projects/p1/topics/delivery-check";
+        String subscription = "projects/p1/subscriptions/delivery-check";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        AtomicInteger checks = new AtomicInteger();
+        Context context = IamGrpcDeliveryAuthorization.withDelivery(Context.current(), (resource, delivery) -> {
+            assertEquals(subscription, resource);
+            checks.incrementAndGet();
+            delivery.run();
+        });
+        Context previous = context.attach();
+        try {
+            RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+            StreamObserver<StreamingPullRequest> requests = controller.streamingPull(responses);
+            requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+            assertEquals(1, checks.get());
+
+            service.publish(topic, List.of(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("published")).build()));
+            assertTrue(responses.awaitValue());
+            assertEquals(2, checks.get());
+
+            requests.onNext(StreamingPullRequest.getDefaultInstance());
+            assertEquals(3, checks.get());
+            requests.onCompleted();
+        } finally {
+            context.detach(previous);
+        }
+    }
+
+    @Test
+    void streamingPullDoesNotAcknowledgeAfterDeliveryAuthorizationIsRevoked() throws Exception {
+        String topic = "projects/p1/topics/ack-revoked";
+        String subscription = "projects/p1/subscriptions/ack-revoked";
+        PubSubService observed = spy(service);
+        observed.createTopic(topic);
+        observed.createSubscription(subscription, topic, 10);
+        observed.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("delivered")).build()));
+        AtomicBoolean allowed = new AtomicBoolean(true);
+        Context context = IamGrpcDeliveryAuthorization.withDelivery(Context.current(), (resource, delivery) -> {
+            assertEquals(subscription, resource);
+            if (!allowed.get()) {
+                throw GcpException.permissionDenied("subscription revoked");
+            }
+            delivery.run();
+        });
+        Context previous = context.attach();
+        try {
+            RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+            StreamObserver<StreamingPullRequest> requests =
+                    new PubSubSubscriberController(observed).streamingPull(responses);
+            requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+            assertTrue(responses.awaitValue());
+            String ackId = responses.values.getFirst().getReceivedMessages(0).getAckId();
+
+            allowed.set(false);
+            requests.onNext(StreamingPullRequest.newBuilder().addAckIds(ackId).build());
+
+            assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(responses.error.get()).getCode());
+            verify(observed, never()).acknowledge(eq(subscription), anyList());
+        } finally {
+            context.detach(previous);
+        }
     }
 
     @Test

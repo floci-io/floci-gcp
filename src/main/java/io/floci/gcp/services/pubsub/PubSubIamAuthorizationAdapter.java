@@ -92,6 +92,27 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
     }
 
     @Override
+    public Optional<GrpcStreamAuthorization> grpcStreamAuthorization(String method) {
+        if (!method.equals("StreamingPull")) {
+            return Optional.empty();
+        }
+        return Optional.of((message, previous) -> {
+            StreamingPullRequest request = (StreamingPullRequest) message;
+            String subscription = request.getSubscription();
+            if (previous == null) {
+                if (subscription.isBlank()) {
+                    throw GcpException.invalidArgument("StreamingPull requires a subscription in its first request");
+                }
+                return new IamOperation("streamingPull", subscription);
+            }
+            if (!subscription.isBlank()) {
+                throw GcpException.invalidArgument("StreamingPull subscription must only be set in the first request");
+            }
+            return previous;
+        });
+    }
+
+    @Override
     public IamOperation restOperation(String method, Map<String, String> path, JsonNode body) {
         String project = "projects/" + required(path.get("project"), "project");
         String topic = path.containsKey("topic") ? project + "/topics/" + path.get("topic") : project;

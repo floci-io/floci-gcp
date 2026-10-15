@@ -4,8 +4,10 @@ import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
 import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.DestroySecretVersionRequest;
 import com.google.cloud.secretmanager.v1.DisableSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.GetSecretRequest;
+import com.google.cloud.secretmanager.v1.GetSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.ListSecretVersionsRequest;
 import com.google.cloud.secretmanager.v1.ListSecretsRequest;
 import com.google.cloud.secretmanager.v1.Replication;
@@ -25,6 +27,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -126,10 +130,12 @@ class SecretManagerGrpcIntegrationTest {
         stub.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(secretName).build());
     }
 
-    @Test
-    void latestAliasResolvesToNewestVersionEvenWhenItIsDisabled() {
+    @ParameterizedTest
+    @ValueSource(strings = {"DISABLED", "DESTROYED"})
+    void latestAliasResolvesToNewestVersionRegardlessOfState(String state) {
         String secretId = "latest-" + UUID.randomUUID();
         String secretName = "projects/grpc-latest-project/secrets/" + secretId;
+        String newest = secretName + "/versions/2";
         stub.createSecret(createRequest("projects/grpc-latest-project", secretId));
         for (String value : new String[]{"v1", "v2"}) {
             stub.addSecretVersion(AddSecretVersionRequest.newBuilder()
@@ -137,11 +143,19 @@ class SecretManagerGrpcIntegrationTest {
                     .setPayload(SecretPayload.newBuilder().setData(ByteString.copyFromUtf8(value)))
                     .build());
         }
-        stub.disableSecretVersion(DisableSecretVersionRequest.newBuilder().setName(secretName + "/versions/2").build());
+        if ("DISABLED".equals(state)) {
+            stub.disableSecretVersion(DisableSecretVersionRequest.newBuilder().setName(newest).build());
+        } else {
+            stub.destroySecretVersion(DestroySecretVersionRequest.newBuilder().setName(newest).build());
+        }
+
+        SecretVersion latestVersion = stub.getSecretVersion(GetSecretVersionRequest.newBuilder()
+                .setName(secretName + "/versions/latest").build());
+        assertEquals(newest, latestVersion.getName());
+        assertEquals(SecretVersion.State.valueOf(state), latestVersion.getState());
 
         StatusRuntimeException direct = assertThrows(StatusRuntimeException.class,
-                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
-                        .setName(secretName + "/versions/2").build()));
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder().setName(newest).build()));
         StatusRuntimeException latest = assertThrows(StatusRuntimeException.class,
                 () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
                         .setName(secretName + "/versions/latest").build()));

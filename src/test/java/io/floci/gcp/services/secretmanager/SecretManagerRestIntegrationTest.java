@@ -133,9 +133,11 @@ class SecretManagerRestIntegrationTest {
                 .body("payload.data", equalTo(""));
     }
 
-    @Test
-    void latestAliasResolvesToNewestVersionEvenWhenItIsDisabled() {
+    @ParameterizedTest
+    @ValueSource(strings = {"DISABLED", "DESTROYED"})
+    void latestAliasResolvesToNewestVersionRegardlessOfState(String state) {
         String base = createPayloadSecret();
+        String name = base.substring("/v1/".length());
         for (String data : new String[]{"djE=", "djI="}) {
             given().urlEncodingEnabled(false).contentType("application/json")
                     .body("{\"payload\":{\"data\":\"" + data + "\"}}")
@@ -143,8 +145,14 @@ class SecretManagerRestIntegrationTest {
                     .then().statusCode(200);
         }
         given().urlEncodingEnabled(false).contentType("application/json").body("{}")
-                .when().post(base + "/versions/2:disable")
+                .when().post(base + "/versions/2:" + ("DISABLED".equals(state) ? "disable" : "destroy"))
                 .then().statusCode(200);
+
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest")
+                .then().statusCode(200)
+                .body("name", equalTo(name + "/versions/2"))
+                .body("state", equalTo(state));
 
         Response direct = given().urlEncodingEnabled(false).when().get(base + "/versions/2:access");
         given().urlEncodingEnabled(false)

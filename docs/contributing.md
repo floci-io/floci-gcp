@@ -108,9 +108,9 @@ If the compatibility test suite is unavailable in your environment, state that e
 
 ## Releases
 
-Stable releases are cut manually from `main`. Merging does not cut a release; scheduled nightly builds normally publish the current tip as the `nightly` image.
+Stable releases ship on the **15th and the last day of each month**. Merging to `main` does not cut a release: the change rides the next train, and reaches the `nightly` image on the next nightly build.
 
-Maintainers cut releases from `main` with the Release Cut workflow, which runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
+Releases are cut from `main` by the Release Cut workflow, scheduled at 00:30 US Central time on those days (maintainers can also run it by hand). It runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
 
 ## Reporting Security Issues
 

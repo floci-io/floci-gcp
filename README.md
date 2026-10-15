@@ -665,7 +665,7 @@ image: floci/floci-gcp:nightly
 
 ### Release train
 
-Maintainers cut stable releases from `main` with the manual Release Cut workflow. Between releases, `floci/floci-gcp:nightly` tracks `main`; scheduled nightly builds normally publish the current tip, and dated `nightly-mmddyyyy` tags let you pin a specific build.
+Stable releases ship on the **15th and the last day of each month**, cut automatically from `main` at 00:30 US Central time by the Release Cut workflow. Between releases, `floci/floci-gcp:nightly` tracks `main`; scheduled nightly builds normally publish the current tip, and dated `nightly-mmddyyyy` tags let you pin a specific build.
 
 Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 

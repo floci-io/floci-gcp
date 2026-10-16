@@ -175,6 +175,9 @@ class SqlDialectTranslatorTest {
                 sql("SELECT 1 + 1, * FROM (SELECT 2 + 2)"));
         assertEquals("SELECT (SELECT 1 + 1 AS \"$col1\") AS v, 1 + 1 AS f0_", sql("SELECT (SELECT 1 + 1) AS v, 1 + 1"));
         assertEquals("SELECT 1 + 1 AS f0_ UNION ALL SELECT 2 + 2", sql("SELECT 1 + 1 UNION ALL SELECT 2 + 2"));
+        assertEquals("SELECT 1 + 1 AS f1_, 9 AS f0_", sql("SELECT 1 + 1, 9 AS f0_"));
+        assertEquals("SELECT * FROM (SELECT * EXCLUDE (x), 9 + 9 AS \"$col2\" FROM (SELECT 2 + 2 AS \"$col1\", 3 AS x))",
+                sql("SELECT * FROM (SELECT * EXCEPT (x), 9 + 9 FROM (SELECT 2 + 2, 3 AS x))"));
     }
 
     @Test

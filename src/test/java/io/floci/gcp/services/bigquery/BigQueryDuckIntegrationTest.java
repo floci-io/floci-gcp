@@ -221,6 +221,13 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT * FROM (SELECT 1 + 1 UNION ALL SELECT 2 + 2) ORDER BY 1", List.of("f0_"),
                 List.of("2"));
         assertResultColumns("SELECT (SELECT 1 + 1) AS v, 1 + 1", List.of("v", "f0_"), List.of("2", "2"));
+        assertResultColumns("SELECT *, 9 AS f0_ FROM (SELECT 1 + 1)", List.of("f1_", "f0_"), List.of("2", "9"));
+        assertResultColumns("SELECT 1 + 1, 9 AS f0_", List.of("f1_", "f0_"), List.of("2", "9"));
+        assertResultColumns("SELECT *, 9 AS f1_ FROM (SELECT 1 + 1, 2 + 2)", List.of("f0_", "f2_", "f1_"),
+                List.of("2", "4", "9"));
+        assertResultColumns("SELECT * FROM (SELECT 1 + 1, 9 AS f0_)", List.of("f1_", "f0_"), List.of("2", "9"));
+        assertResultColumns("SELECT * FROM (SELECT * EXCEPT (x), 9 + 9 FROM (SELECT 2 + 2, 3 AS x))",
+                List.of("f0_", "f1_"), List.of("4", "18"));
         for (String sql : List.of("SELECT 1 + 1, * FROM (SELECT 2 + 2)",
                 "SELECT * FROM (SELECT 1 + 1) a, (SELECT 2 + 2) b")) {
             query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")

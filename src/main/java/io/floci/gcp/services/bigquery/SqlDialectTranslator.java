@@ -1215,13 +1215,45 @@ final class SqlDialectTranslator {
                     anonymous.add(new int[] {last + 1, position + 1});
                 }
             }
+            // BigQuery numbers anonymous columns with the next f<n>_ that no other column of the result uses.
+            List<String> generated = new ArrayList<>();
+            if (!positional) {
+                Set<String> taken = new HashSet<>();
+                for (int[] item : items) {
+                    String name = needsGeneratedName(item[0], item[1]) ? null : outputName(item[0], item[1]);
+                    if (name != null) {
+                        taken.add(name);
+                    }
+                }
+                int next = 0;
+                for (int n = 0; n < anonymous.size(); n++) {
+                    while (taken.contains("f" + next + "_")) {
+                        next++;
+                    }
+                    generated.add("f" + next++ + "_");
+                }
+            }
             // Insert from the back so earlier indexes stay valid.
             for (int n = anonymous.size() - 1; n >= 0; n--) {
                 String alias = positional ? " AS " + DuckTypes.quoteIdentifier("$col" + anonymous.get(n)[1])
-                        : " AS f" + n + "_";
+                        : " AS " + generated.get(n);
                 tokens.add(anonymous.get(n)[0], Token.raw(alias));
             }
         }
+    }
+
+    /** The lower-cased name a named select item gives its column: its alias or the column it reads. */
+    private String outputName(int start, int end) {
+        List<Token> item = significant(start, end);
+        if (item.isEmpty()) {
+            return null;
+        }
+        Token last = item.getLast();
+        if (last.kind != Kind.IDENT && last.kind != Kind.QIDENT) {
+            return null;
+        }
+        String name = last.identifierText();
+        return name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     }
 
     /** True for a {@code *}, {@code t.*} or {@code * EXCEPT/REPLACE (...)} select item. */
@@ -1267,7 +1299,7 @@ final class SqlDialectTranslator {
                 items.add(new int[] {itemStart, end});
                 itemStart = end + 1;
             } else if (depth == 0 && t.kind == Kind.IDENT
-                    && (t.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(t.upper()))) {
+                    && (t.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(t.upper())) && !followsStar(end)) {
                 break;
             }
         }

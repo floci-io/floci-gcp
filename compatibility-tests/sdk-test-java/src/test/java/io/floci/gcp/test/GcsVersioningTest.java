@@ -14,8 +14,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -30,6 +34,9 @@ class GcsVersioningTest {
     private static Storage storage;
     private static Long v1Generation;
     private static Long v2Generation;
+    private static OffsetDateTime v1TimeCreated;
+    private static Instant overwriteStarted;
+    private static Instant overwriteCompleted;
 
     @BeforeAll
     static void setUp() {
@@ -58,10 +65,13 @@ class GcsVersioningTest {
     @Order(2)
     void uploadVersionOne() {
         BlobInfo info = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME))
+                .setMetadata(Map.of("client", "original"))
                 .setContentType("text/plain")
                 .build();
         Blob blob = storage.create(info, CONTENT_V1.getBytes(StandardCharsets.UTF_8));
         v1Generation = blob.getGeneration();
+        v1TimeCreated = blob.getCreateTimeOffsetDateTime();
+        assertThat(blob.getDeleteTimeOffsetDateTime()).isNull();
         assertThat(v1Generation).isNotNull();
         assertThat(blob.getName()).isEqualTo(OBJECT_NAME);
     }
@@ -72,7 +82,10 @@ class GcsVersioningTest {
         BlobInfo info = BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, OBJECT_NAME))
                 .setContentType("text/plain")
                 .build();
+        overwriteStarted = Instant.now().truncatedTo(ChronoUnit.MICROS);
         Blob blob = storage.create(info, CONTENT_V2.getBytes(StandardCharsets.UTF_8));
+        overwriteCompleted = Instant.now();
+        assertThat(blob.getDeleteTimeOffsetDateTime()).isNull();
         v2Generation = blob.getGeneration();
         assertThat(v2Generation).isNotNull();
         assertThat(v2Generation).isGreaterThan(v1Generation);
@@ -110,6 +123,13 @@ class GcsVersioningTest {
         assertThat(v1).isNotNull();
         String content = new String(v1.getContent(), StandardCharsets.UTF_8);
         assertThat(content).isEqualTo(CONTENT_V1);
+        assertThat(v1.getDeleteTimeOffsetDateTime()).isNotNull();
+        assertThat(v1.getDeleteTimeOffsetDateTime().toInstant())
+                .isBetween(overwriteStarted, overwriteCompleted);
+        assertThat(v1.getCreateTimeOffsetDateTime()).isEqualTo(v1TimeCreated);
+        assertThat(v1.getMetadata()).containsEntry("client", "original");
+        assertThat(v1.getContentType()).isEqualTo("text/plain");
+        assertThat(storage.get(BlobId.of(BUCKET_NAME, OBJECT_NAME)).getDeleteTimeOffsetDateTime()).isNull();
     }
 
     @Test
@@ -135,7 +155,7 @@ class GcsVersioningTest {
 
     @Test
     @Order(8)
-    void deleteCurrentObjectCreatesDeleteMarker() {
+    void deleteCurrentObjectLeavesNoncurrentGeneration() {
         storage.delete(BlobId.of(BUCKET_NAME, OBJECT_NAME));
 
         Blob gone = storage.get(BlobId.of(BUCKET_NAME, OBJECT_NAME));

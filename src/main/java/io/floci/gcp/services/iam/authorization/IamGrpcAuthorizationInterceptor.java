@@ -1,15 +1,11 @@
 package io.floci.gcp.services.iam.authorization;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.SetIamPolicyRequest;
 import com.google.iam.v1.TestIamPermissionsRequest;
 import com.google.protobuf.Message;
-import com.google.protobuf.util.JsonFormat;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpGrpcController;
-import io.floci.gcp.services.secretmanager.SecretManagerIamAuthorizationAdapter;
 import io.grpc.Context;
 import io.grpc.Contexts;
 import io.grpc.ForwardingServerCallListener.SimpleForwardingServerCallListener;
@@ -36,14 +32,12 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
 
     private final Instance<IamAuthorizationService> authorization;
     private final IamAuthorizationRegistry registry;
-    private final ObjectMapper mapper;
 
     @Inject
     public IamGrpcAuthorizationInterceptor(Instance<IamAuthorizationService> authorization,
-            IamAuthorizationRegistry registry, ObjectMapper mapper) {
+            IamAuthorizationRegistry registry) {
         this.authorization = authorization;
         this.registry = registry;
-        this.mapper = mapper;
     }
 
     @Override
@@ -91,12 +85,7 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                 }
                             } else {
                                 IamAuthorizationAdapter selected = adapter.orElseThrow();
-                                if (selected instanceof SecretManagerIamAuthorizationAdapter secretManager) {
-                                    operation = secretManager.grpcOperation(method, proto);
-                                } else {
-                                    JsonNode request = mapper.readTree(JsonFormat.printer().print(proto));
-                                    operation = selected.grpcOperation(method, request);
-                                }
+                                operation = selected.grpcOperation(method, proto);
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {
                                 authorization.get().authorize(credential, adapter.get(), operation);

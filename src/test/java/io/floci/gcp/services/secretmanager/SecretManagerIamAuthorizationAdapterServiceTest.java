@@ -4,10 +4,13 @@ import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
 import com.google.cloud.secretmanager.v1.CreateSecretRequest;
 import com.google.cloud.secretmanager.v1.Secret;
 import com.google.cloud.secretmanager.v1.UpdateSecretRequest;
+import com.google.iam.v1.Policy;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamResource;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -31,12 +34,16 @@ class SecretManagerIamAuthorizationAdapterServiceTest {
 
     @Test
     void grpcRequestsMapWithoutProtobufJsonReflection() {
-        assertEquals(new IamOperation("CreateSecret", PROJECT), adapter.grpcOperation("CreateSecret",
+        IamAuthorizationAdapter grpcAdapter = adapter;
+        assertEquals(new IamOperation("CreateSecret", PROJECT), grpcAdapter.grpcOperation("CreateSecret",
                 CreateSecretRequest.newBuilder().setParent(PROJECT).build()));
-        assertEquals(new IamOperation("UpdateSecret", SECRET), adapter.grpcOperation("UpdateSecret",
+        assertEquals(new IamOperation("UpdateSecret", SECRET), grpcAdapter.grpcOperation("UpdateSecret",
                 UpdateSecretRequest.newBuilder().setSecret(Secret.newBuilder().setName(SECRET)).build()));
-        assertEquals(new IamOperation("AccessSecretVersion", VERSION), adapter.grpcOperation("AccessSecretVersion",
+        assertEquals(new IamOperation("AccessSecretVersion", VERSION), grpcAdapter.grpcOperation("AccessSecretVersion",
                 AccessSecretVersionRequest.newBuilder().setName(VERSION).build()));
+        GcpException unmapped = assertThrows(GcpException.class,
+                () -> grpcAdapter.grpcOperation("UnknownMethod", Policy.getDefaultInstance()));
+        assertEquals(Status.Code.FAILED_PRECONDITION, unmapped.getGrpcCode());
     }
 
     @Test

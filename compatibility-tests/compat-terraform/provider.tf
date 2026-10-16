@@ -65,8 +65,10 @@ provider "google" {
   pubsub_custom_endpoint         = "${var.endpoint}/v1/"
   big_query_custom_endpoint      = "${var.endpoint}/bigquery/v2/"
 
-  # Service Usage + the Cloud Resource Manager v1 project lookup that
-  # google_project_service performs on every read.
+  # Service Usage, Cloud Resource Manager v1 (google_project and the lookup
+  # google_project_service performs on every read) and Cloud Billing, which
+  # google_project reads billing info from on every refresh.
   service_usage_custom_endpoint    = "${var.endpoint}/v1/"
   resource_manager_custom_endpoint = "${var.endpoint}/v1/"
+  cloud_billing_custom_endpoint    = "${var.endpoint}/v1/"
 }

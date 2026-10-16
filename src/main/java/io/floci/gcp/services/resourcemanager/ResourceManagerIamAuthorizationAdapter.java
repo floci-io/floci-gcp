@@ -10,6 +10,7 @@ import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,7 +25,8 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
 
     @Override
     public Set<Class<?>> restControllers() {
-        return Set.of(ResourceManagerController.class, ResourceManagerIamController.class);
+        return Set.of(ResourceManagerController.class, ResourceManagerProjectsController.class,
+                ResourceManagerIamController.class, ResourceManagerOperationsController.class);
     }
 
     @Override
@@ -34,8 +36,16 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
 
     @Override
     public IamOperation restOperation(String method, Map<String, String> path, JsonNode body) {
-        return new IamOperation(Character.toUpperCase(method.charAt(0)) + method.substring(1),
-                "projects/" + path.get("project"));
+        String name = Character.toUpperCase(method.charAt(0)) + method.substring(1);
+        if (path.containsKey("project")) {
+            return new IamOperation(name, "projects/" + path.get("project"));
+        }
+        if (path.containsKey("operation")) {
+            // Creation operations are named cp.{projectNumber}; polling one reads the project it created.
+            return new IamOperation(name, "projects/" + path.get("operation").substring("cp.".length()));
+        }
+        return new IamOperation(name, "CreateProject".equals(name)
+                ? "projects/" + body.path("projectId").asText("") : "projects");
     }
 
     @Override
@@ -47,6 +57,16 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
     public List<IamPermissionCheck> checks(IamOperation operation) {
         String permission = switch (operation.name()) {
             case "GetProject" -> "resourcemanager.projects.get";
+            case "UpdateProject" -> "resourcemanager.projects.update";
+            case "DeleteProject" -> "resourcemanager.projects.delete";
+            case "UndeleteProject" -> "resourcemanager.projects.undelete";
+            case "GetAncestry" -> "resourcemanager.projects.get";
+            // GCP checks create on the parent organization or folder, whose policies are not modelled,
+            // so no grant on the new project satisfies it and service accounts are denied.
+            case "CreateProject" -> "resourcemanager.projects.create";
+            case "GetOperation" -> "resourcemanager.projects.get";
+            // List returns only the projects the caller may get; ResourceManagerService filters them.
+            case "ListProjects" -> null;
             case "GetIamPolicy" -> "resourcemanager.projects.getIamPolicy";
             case "SetIamPolicy" -> "resourcemanager.projects.setIamPolicy";
             // Permission queries are evaluated separately; the GET variants return 405.
@@ -77,13 +97,27 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
     public Map<String, Set<String>> roles() {
         return Map.of("roles/browser", Set.of("resourcemanager.projects.get", "resourcemanager.projects.getIamPolicy"),
                 "roles/resourcemanager.projectIamAdmin", Set.of("resourcemanager.projects.get",
-                        "resourcemanager.projects.getIamPolicy", "resourcemanager.projects.setIamPolicy"));
+                        "resourcemanager.projects.getIamPolicy", "resourcemanager.projects.setIamPolicy"),
+                "roles/resourcemanager.projectDeleter", Set.of("resourcemanager.projects.delete"),
+                "roles/resourcemanager.projectMover", Set.of("resourcemanager.projects.get",
+                        "resourcemanager.projects.update"));
     }
     @Override
     public Map<String, Set<String>> basicRoles() {
         Map<String, Set<String>> predefined = roles();
-        return Map.of("roles/owner", predefined.get("roles/resourcemanager.projectIamAdmin"),
-                "roles/editor", predefined.get("roles/browser"), "roles/viewer", predefined.get("roles/browser"));
+        Set<String> editor = union(predefined.get("roles/browser"), Set.of("resourcemanager.projects.update"));
+        Set<String> owner = union(predefined.get("roles/resourcemanager.projectIamAdmin"), editor,
+                Set.of("resourcemanager.projects.delete", "resourcemanager.projects.undelete"));
+        return Map.of("roles/owner", owner, "roles/editor", editor, "roles/viewer", predefined.get("roles/browser"));
+    }
+
+    @SafeVarargs
+    private static Set<String> union(Set<String>... sets) {
+        Set<String> all = new HashSet<>();
+        for (Set<String> set : sets) {
+            all.addAll(set);
+        }
+        return Set.copyOf(all);
     }
 
 }

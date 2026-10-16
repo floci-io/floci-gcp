@@ -45,7 +45,7 @@ public class IamController {
     IamService service;
 
     @POST
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     public Response post(@PathParam("rest") String rest, Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM POST %s project=%s id=%s method=%s", rest, p.project(), p.identifier(), p.customMethod());
@@ -72,7 +72,7 @@ public class IamController {
     // UpdateServiceAccount: PUT /v1/projects/{project}/serviceAccounts/{email} with the
     // ServiceAccount as the body.
     @PUT
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     public Response put(@PathParam("rest") String rest, Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM PUT %s project=%s id=%s", rest, p.project(), p.identifier());
@@ -85,7 +85,7 @@ public class IamController {
     // PatchServiceAccount: PATCH /v1/projects/{project}/serviceAccounts/{email} with body
     // { "serviceAccount": {...}, "updateMask": "displayName,description" }.
     @PATCH
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     public Response patch(@PathParam("rest") String rest, Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM PATCH %s project=%s id=%s", rest, p.project(), p.identifier());
@@ -107,7 +107,7 @@ public class IamController {
     }
 
     @GET
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     public Response get(@PathParam("rest") String rest,
             @QueryParam("pageSize") @DefaultValue("0") int pageSize,
             @QueryParam("pageToken") String pageToken) {
@@ -148,7 +148,7 @@ public class IamController {
     }
 
     @DELETE
-    @Path("/{rest:.*}")
+    @Path("/{rest:.+}")
     public Response delete(@PathParam("rest") String rest) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM DELETE %s project=%s id=%s", rest, p.project(), p.identifier());

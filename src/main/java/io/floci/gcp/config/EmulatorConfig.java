@@ -40,6 +40,8 @@ public interface EmulatorConfig {
 
     StorageConfig storage();
 
+    ProjectsConfig projects();
+
     ServicesConfig services();
 
     DockerConfig docker();
@@ -205,6 +207,8 @@ public interface EmulatorConfig {
 
         ResourceManagerServiceConfig resourcemanager();
 
+        CloudBillingServiceConfig cloudbilling();
+
         FirebaseAuthServiceConfig firebaseauth();
 
         BigQueryServiceConfig bigquery();
@@ -275,6 +279,20 @@ public interface EmulatorConfig {
     interface ResourceManagerServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CloudBillingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ProjectsConfig {
+        /**
+         * When true, only the default project and projects created through Resource Manager
+         * exist; REST requests for any other project return 403 PERMISSION_DENIED.
+         */
+        @WithDefault("false")
+        boolean strict();
     }
 
     interface GkeServiceConfig {

@@ -34,6 +34,7 @@ import com.google.storage.v2.StorageGrpc;
 import com.google.storage.v2.WriteObjectRequest;
 import com.google.storage.v2.WriteObjectResponse;
 import com.google.storage.v2.WriteObjectSpec;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Metadata;
@@ -169,6 +170,57 @@ class ServiceUsageEnforcementIntegrationTest {
         given().when().get("/storage/v1/b?project=" + project)
                 .then().statusCode(403)
                 .body("error.details[0].metadata.service", equalTo("storage.googleapis.com"));
+    }
+
+    @Test
+    void projectNumberReadsTheStateSavedUnderTheProjectId() {
+        String project = "su-enforce-number";
+        String number = ProjectNumbers.of(project);
+        given().when().get("/storage/v1/b?project=" + project)
+                .then().statusCode(200);
+        given().when().get("/storage/v1/b?project=" + number)
+                .then().statusCode(200);
+
+        disable(project, "storage.googleapis.com");
+
+        given().when().get("/storage/v1/b?project=" + number)
+                .then().statusCode(403)
+                .body("error.details[0].reason", equalTo("SERVICE_DISABLED"))
+                .body("error.details[0].metadata.service", equalTo("storage.googleapis.com"));
+    }
+
+    @Test
+    void enablingByProjectNumberEnablesTheProjectId() {
+        String project = "su-enforce-number-enable";
+        String number = ProjectNumbers.of(project);
+        given().when().get("/v1/projects/" + project + "/services/secretmanager.googleapis.com")
+                .then().statusCode(200)
+                .body("state", equalTo("DISABLED"));
+
+        enable(number, "secretmanager.googleapis.com");
+
+        given().when().get("/v1/projects/" + project + "/secrets")
+                .then().statusCode(200);
+        given().when().get("/v1/projects/" + project + "/services/secretmanager.googleapis.com")
+                .then().statusCode(200)
+                .body("state", equalTo("ENABLED"));
+    }
+
+    @Test
+    void grpcRequestNamingTheProjectNumberIsCheckedAgainstTheProjectId() {
+        String project = "su-enforce-number-grpc";
+        String number = ProjectNumbers.of(project);
+        given().when().get("/v1/projects/" + project + "/services/pubsub.googleapis.com")
+                .then().statusCode(200);
+        PublisherGrpc.PublisherBlockingStub publisher = PublisherGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        Topic topic = Topic.newBuilder().setName("projects/" + number + "/topics/n1").build();
+
+        StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> publisher.createTopic(topic));
+        assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
+
+        enable(project, "pubsub.googleapis.com");
+        assertEquals(topic.getName(), publisher.createTopic(topic).getName());
     }
 
     @Test

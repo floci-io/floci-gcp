@@ -173,6 +173,46 @@ class DatastoreServiceTest {
     }
 
     @Test
+    void meaningAndExcludeFromIndexesReadBackOnEveryValue() {
+        Value value = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .putProperties("bio", Value.newBuilder()
+                                .setStringValue("long text").setMeaning(15).setExcludeFromIndexes(true).build())
+                        .putProperties("tags", Value.newBuilder()
+                                .setArrayValue(ArrayValue.newBuilder()
+                                        .addValues(Value.newBuilder().setStringValue("a").setExcludeFromIndexes(true))
+                                        .addValues(Value.newBuilder().setIntegerValue(1).setMeaning(9)))
+                                .build()))
+                .setExcludeFromIndexes(true)
+                .build();
+        upsertProperty("Person", "carol", "profile", value);
+
+        assertEquals(value, readBack("Person", "carol").getPropertiesOrThrow("profile"));
+    }
+
+    @Test
+    void meaningAndExcludeFromIndexesSurviveTheJsonRoundTripPersistentStorageUses() throws Exception {
+        Value value = Value.newBuilder()
+                .setStringValue("long text").setMeaning(15).setExcludeFromIndexes(true).build();
+        upsertProperty("Person", "dave", "bio", value);
+        StoredEntity stored = service.lookupEntity(PROJECT, namedKey("Person", "dave")).orElseThrow();
+
+        ObjectMapper mapper = new ObjectMapper();
+        StoredEntity reloaded = mapper.readValue(mapper.writeValueAsString(stored), StoredEntity.class);
+
+        assertEquals(value, service.toProto(reloaded).getPropertiesOrThrow("bio"));
+    }
+
+    @Test
+    void aPropertyStoredWithoutMeaningOrExcludeFromIndexesStillLoads() throws Exception {
+        // The JSON shape entities were persisted in before these two fields existed.
+        StoredProperty legacy = new ObjectMapper().readValue(
+                "{\"type\":\"string\",\"stringValue\":\"hello\"}", StoredProperty.class);
+
+        assertEquals(Value.newBuilder().setStringValue("hello").build(), legacy.toProto());
+    }
+
+    @Test
     void lookupMissingEntityReturnsEmpty() {
         Key key = namedKey("Person", "missing");
         Optional<StoredEntity> result = service.lookupEntity(PROJECT, key);

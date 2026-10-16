@@ -39,6 +39,10 @@ public class StoredProperty {
      * name with the same digits, so the key can be rebuilt on read.
      */
     private String keyValue;
+    /** {@code Value.meaning}, or null when unset (0). */
+    private Integer meaning;
+    /** {@code Value.exclude_from_indexes}, or null when false. */
+    private Boolean excludeFromIndexes;
 
     public StoredProperty() {}
 
@@ -95,6 +99,12 @@ public class StoredProperty {
                 }
             }
             default -> p.type = "null";
+        }
+        if (v.getMeaning() != 0) {
+            p.meaning = v.getMeaning();
+        }
+        if (v.getExcludeFromIndexes()) {
+            p.excludeFromIndexes = true;
         }
         return p;
     }
@@ -160,6 +170,12 @@ public class StoredProperty {
                 b.setEntityValue(eb.build());
             }
             default -> b.setNullValue(NullValue.NULL_VALUE);
+        }
+        if (meaning != null) {
+            b.setMeaning(meaning);
+        }
+        if (Boolean.TRUE.equals(excludeFromIndexes)) {
+            b.setExcludeFromIndexes(true);
         }
         return b.build();
     }
@@ -293,4 +309,8 @@ public class StoredProperty {
     public void setEntityProperties(Map<String, StoredProperty> entityProperties) { this.entityProperties = entityProperties; }
     public String getKeyValue() { return keyValue; }
     public void setKeyValue(String keyValue) { this.keyValue = keyValue; }
+    public Integer getMeaning() { return meaning; }
+    public void setMeaning(Integer meaning) { this.meaning = meaning; }
+    public Boolean getExcludeFromIndexes() { return excludeFromIndexes; }
+    public void setExcludeFromIndexes(Boolean excludeFromIndexes) { this.excludeFromIndexes = excludeFromIndexes; }
 }

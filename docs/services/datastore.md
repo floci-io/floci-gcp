@@ -170,8 +170,9 @@ Supported GQL syntax:
   back as `NULL` until the entity is written again, although equality filters still
   match it. An embedded entity written then reads back without its own key, since
   that key was not stored.
-- `Value.meaning` and `Value.exclude_from_indexes` are not stored, so they never
-  read back.
+- `Value.exclude_from_indexes` is stored and read back, but it does not change
+  queries: a filter or sort on an excluded property still matches the entity,
+  where real Datastore leaves it out of the result.
 
 ## Supported Operations
 

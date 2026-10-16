@@ -499,6 +499,20 @@ class BigQueryDuckIntegrationTest {
                     .body("error.errors[0].reason", equalTo("invalidQuery"))
                     .body(not(containsString("top-secret")));
         }
+        // DML is caller SQL too: INSERT ... SELECT must not copy another project's rows into the caller's table.
+        query("""
+                {"query": "CREATE TABLE shop.copied (v STRING)", "useLegacySql": false}
+                """)
+                .then().statusCode(200);
+        query("{\"query\": \"INSERT INTO shop.copied (v) SELECT v FROM '" + rows + "'\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body(not(containsString("top-secret")));
+        query("""
+                {"query": "SELECT COUNT(*) FROM shop.copied", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("0"));
         // The tables a query references are still staged over the same route.
         query("""
                 {"query": "SELECT COUNT(*) FROM shop.users", "useLegacySql": false}

@@ -1,9 +1,8 @@
 package io.floci.gcp.services.iam.authorization;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.Policy;
+import com.google.protobuf.Message;
 import io.floci.gcp.core.common.GcpException;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
@@ -30,9 +29,9 @@ class IamGrpcAuthorizationInterceptorServiceTest {
         when(adapter.restControllers()).thenReturn(Set.of());
         when(adapter.grpcServices()).thenReturn(Set.of("example.v1.Service"));
         IamOperation operation = new IamOperation("Read", "projects/p/examples/e");
-        when(adapter.grpcOperation(eq("Read"), any(JsonNode.class))).thenAnswer(invocation -> {
-            JsonNode request = invocation.getArgument(1);
-            return new IamOperation("Read", request.path("resource").asText());
+        when(adapter.grpcOperation(eq("Read"), any(Message.class))).thenAnswer(invocation -> {
+            GetIamPolicyRequest request = invocation.getArgument(1);
+            return new IamOperation("Read", request.getResource());
         });
         IamAuthorizationService authorization = mock(IamAuthorizationService.class);
         when(authorization.enabled()).thenReturn(true);
@@ -44,7 +43,7 @@ class IamGrpcAuthorizationInterceptorServiceTest {
         Instance<IamAuthorizationService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(authorization);
         IamGrpcAuthorizationInterceptor interceptor = new IamGrpcAuthorizationInterceptor(instance,
-                new IamAuthorizationRegistry(List.of(adapter)), new ObjectMapper());
+                new IamAuthorizationRegistry(List.of(adapter)));
         ServerCall<GetIamPolicyRequest, Policy> call = mock(ServerCall.class);
         when(call.getMethodDescriptor()).thenReturn(MethodDescriptor.<GetIamPolicyRequest, Policy>newBuilder()
                 .setType(MethodDescriptor.MethodType.UNARY).setFullMethodName("example.v1.Service/Read")
@@ -60,6 +59,7 @@ class IamGrpcAuthorizationInterceptorServiceTest {
         listener.onMessage(request);
         listener.onHalfClose();
         verify(authorization).authorize("Bearer example", adapter, operation);
+        verify(adapter).grpcOperation("Read", request);
         if (denied) {
             verify(call).close(argThat(status -> status.getCode() == Status.Code.PERMISSION_DENIED), any());
             verify(downstream, never()).onMessage(any());

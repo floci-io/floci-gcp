@@ -88,6 +88,7 @@ public class SecretManagerIamAuthorizationAdapter implements IamAuthorizationAda
         return new IamOperation(method, target);
     }
 
+    @Override
     public IamOperation grpcOperation(String method, Message request) {
         String target = switch (request) {
             case CreateSecretRequest value -> value.getParent();

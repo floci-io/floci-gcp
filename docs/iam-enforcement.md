@@ -24,6 +24,8 @@ Pub/Sub IAM enforcement is not supported.
 3. Translate each REST handler and protobuf request to an `IamOperation`. Both
    transports must use the same `checks` table. An unfamiliar operation must throw
    `unsupported(...)`. Explicit permission-free methods may return an empty list.
+   gRPC services override `grpcOperation(String, Message)` and read request fields
+   through typed protobuf getters. The default rejects unmapped gRPC operations.
 4. Return every required `IamPermissionCheck`, including checks on other resources.
    Create/list operations usually check the parent; verify the exact upstream
    contract. Do not guess permissions from method names. Each check is conjunctive.

@@ -384,6 +384,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      * caller's SQL must not: DuckDB's file and URL functions would let a query read another
      * project's rows from the internal route, or anything else the sidecar can reach. Once this
      * runs, the session can no longer touch files or URLs, and the setting cannot be changed back.
+     * It also stops DuckDB from loading extensions, autoloading included, so an extension a query
+     * needs has to be loaded in the trusted part, before this (the {@code SET TimeZone} that opens
+     * the setup is what loads ICU today).
      */
     static final String LOCK_EXTERNAL_ACCESS = "SET enable_external_access = false;\nSET lock_configuration = true;\n";
 

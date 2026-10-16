@@ -96,18 +96,18 @@ public class ResourceManagerService {
                     + "' is invalid. It must be 6 to 30 lowercase letters, digits, or hyphens. "
                     + "It must start with a letter. Trailing hyphens are prohibited.");
         }
-        ProjectRecord existing = projects.find(projectId).orElse(null);
-        if (existing != null && existing.isCreated()) {
-            throw GcpException.alreadyExists("Requested entity already exists");
-        }
         String name = validName(stringField(body, "name"));
         Map<String, String> labels = validLabels(body.get("labels"));
-        ProjectRecord project = existing != null ? existing : new ProjectRecord();
+        Parent parent = parseParent(body.get("parent"));
+        ProjectRecord project = new ProjectRecord();
         project.setProjectId(projectId);
         project.setName(name);
         project.setLabels(labels);
-        applyParent(project, body.get("parent"));
-        ProjectRecord created = existing != null ? adopt(project) : projects.create(project);
+        if (parent != null) {
+            project.setParentType(parent.type());
+            project.setParentId(parent.id());
+        }
+        ProjectRecord created = projects.createOrAdopt(project);
         LOG.infof("create project id=%s number=%s", created.getProjectId(), created.getProjectNumber());
         return operation(created);
     }
@@ -119,10 +119,14 @@ public class ResourceManagerService {
             throw GcpException.failedPrecondition("Project " + project.getProjectId() + " is not active.");
         }
         Map<String, Object> update = body != null ? body : Map.of();
-        project.setName(validName(stringField(update, "name")));
-        project.setLabels(validLabels(update.get("labels")));
-        if (update.get("parent") != null) {
-            applyParent(project, update.get("parent"));
+        String name = validName(stringField(update, "name"));
+        Map<String, String> labels = validLabels(update.get("labels"));
+        Parent parent = parseParent(update.get("parent"));
+        project.setName(name);
+        project.setLabels(labels);
+        if (parent != null) {
+            project.setParentType(parent.type());
+            project.setParentId(parent.id());
         }
         projects.save(project);
         return toJson(project);
@@ -194,13 +198,6 @@ public class ResourceManagerService {
                 .filter(p -> ProjectRegistry.isNumber(number) && p.isCreated())
                 .map(ResourceManagerService::operation)
                 .orElseThrow(() -> GcpException.notFound("Operation not found: " + name));
-    }
-
-    private ProjectRecord adopt(ProjectRecord project) {
-        project.setCreated(true);
-        project.setLifecycleState(ProjectRecord.ACTIVE);
-        projects.save(project);
-        return project;
     }
 
     private void requireProjectForPolicy(String resource) {
@@ -290,9 +287,9 @@ public class ResourceManagerService {
         return labels;
     }
 
-    private static void applyParent(ProjectRecord project, Object raw) {
+    private static Parent parseParent(Object raw) {
         if (raw == null) {
-            return;
+            return null;
         }
         if (!(raw instanceof Map<?, ?> parent)) {
             throw GcpException.invalidArgument("Project parent must be a ResourceId.");
@@ -304,7 +301,8 @@ public class ResourceManagerService {
             throw GcpException.invalidArgument(
                     "Project parent must have type \"organization\" or \"folder\" and a non-empty id.");
         }
-        project.setParentType(t);
-        project.setParentId(i);
+        return new Parent(t, i);
     }
+
+    private record Parent(String type, String id) {}
 }

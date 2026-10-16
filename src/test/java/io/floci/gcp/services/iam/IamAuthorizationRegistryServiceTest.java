@@ -86,6 +86,15 @@ class IamAuthorizationRegistryServiceTest {
         for (String role : List.of("roles/owner", "roles/resourcemanager.projectIamAdmin")) {
             assertTrue(catalog.grants(role, "resourcemanager.projects.setIamPolicy"));
         }
+        for (String permission : List.of("resourcemanager.projects.update", "resourcemanager.projects.delete",
+                "resourcemanager.projects.undelete")) {
+            assertTrue(catalog.grants("roles/owner", permission));
+            assertFalse(catalog.grants("roles/viewer", permission));
+        }
+        assertTrue(catalog.grants("roles/editor", "resourcemanager.projects.update"));
+        assertFalse(catalog.grants("roles/editor", "resourcemanager.projects.delete"));
+        assertTrue(catalog.grants("roles/resourcemanager.projectDeleter", "resourcemanager.projects.delete"));
+        assertTrue(catalog.grants("roles/resourcemanager.projectMover", "resourcemanager.projects.update"));
         assertEquals(List.of("projects/p"), new IamResourceHierarchy().policyResourcesFor(IamResource.project("projects/p")));
     }
 

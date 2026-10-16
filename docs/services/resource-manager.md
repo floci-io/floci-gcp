@@ -96,6 +96,11 @@ reads and policy reads/writes for Floci-issued service-account tokens.
 `testIamPermissions` evaluates the caller. Project policies also use the shared
 IAM gRPC mixin. Project metadata has no gRPC endpoint.
 
+Update, delete and undelete check `resourcemanager.projects.update`, `.delete` and
+`.undelete`. `roles/owner` holds all three, `roles/editor` and
+`roles/resourcemanager.projectMover` hold update, and `roles/resourcemanager.projectDeleter`
+holds delete.
+
 Service adapters can use the shared framework to inherit project policies.
 Pub/Sub does not support IAM enforcement. Secret Manager secrets and versions
 inherit applicable project bindings.

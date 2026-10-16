@@ -13,6 +13,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.InMemoryStorage;
@@ -210,6 +211,30 @@ class ServiceUsageServiceTest {
                         .map(Service::getName).toList());
 
         assertTrue(withRegistry.isServiceEnabled("999999999999", "storage.googleapis.com"));
+    }
+
+    @Test
+    void stateSavedUnderTheProjectNumberBeforeTheRegistryIsStillRead() {
+        LongRunningOperationsService operations = mock(LongRunningOperationsService.class);
+        when(operations.done(anyString(), any(Message.class), any(Message.class)))
+                .thenReturn(Operation.newBuilder().setDone(true).build());
+        ProjectRegistry projects = mock(ProjectRegistry.class);
+        when(projects.find(anyString())).thenReturn(Optional.empty());
+        InMemoryStorage<String, String> store = new InMemoryStorage<>();
+        String number = ProjectNumbers.of("p1");
+        store.put("projects/" + number + "/services/pubsub.googleapis.com", "ENABLED");
+        store.put("projects/" + number + "/services/storage.googleapis.com", "DISABLED");
+        ServiceUsageService upgraded = new ServiceUsageService(store, operations,
+                mock(EmulatorConfig.class), Set.of("storage.googleapis.com"), projects);
+
+        assertTrue(upgraded.isServiceEnabled("p1", "pubsub.googleapis.com"));
+        assertFalse(upgraded.isServiceEnabled("p1", "storage.googleapis.com"));
+        assertEquals(List.of("projects/p1/services/pubsub.googleapis.com"),
+                upgraded.list("p1", 0, null, "state:ENABLED").getServicesList().stream()
+                        .map(Service::getName).toList());
+
+        upgraded.disable("p1", "pubsub.googleapis.com");
+        assertFalse(upgraded.isServiceEnabled("p1", "pubsub.googleapis.com"));
     }
 
     @Test

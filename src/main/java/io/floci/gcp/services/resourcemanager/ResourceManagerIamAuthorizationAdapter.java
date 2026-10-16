@@ -10,6 +10,7 @@ import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -96,13 +97,27 @@ public class ResourceManagerIamAuthorizationAdapter implements IamAuthorizationA
     public Map<String, Set<String>> roles() {
         return Map.of("roles/browser", Set.of("resourcemanager.projects.get", "resourcemanager.projects.getIamPolicy"),
                 "roles/resourcemanager.projectIamAdmin", Set.of("resourcemanager.projects.get",
-                        "resourcemanager.projects.getIamPolicy", "resourcemanager.projects.setIamPolicy"));
+                        "resourcemanager.projects.getIamPolicy", "resourcemanager.projects.setIamPolicy"),
+                "roles/resourcemanager.projectDeleter", Set.of("resourcemanager.projects.delete"),
+                "roles/resourcemanager.projectMover", Set.of("resourcemanager.projects.get",
+                        "resourcemanager.projects.update"));
     }
     @Override
     public Map<String, Set<String>> basicRoles() {
         Map<String, Set<String>> predefined = roles();
-        return Map.of("roles/owner", predefined.get("roles/resourcemanager.projectIamAdmin"),
-                "roles/editor", predefined.get("roles/browser"), "roles/viewer", predefined.get("roles/browser"));
+        Set<String> editor = union(predefined.get("roles/browser"), Set.of("resourcemanager.projects.update"));
+        Set<String> owner = union(predefined.get("roles/resourcemanager.projectIamAdmin"), editor,
+                Set.of("resourcemanager.projects.delete", "resourcemanager.projects.undelete"));
+        return Map.of("roles/owner", owner, "roles/editor", editor, "roles/viewer", predefined.get("roles/browser"));
+    }
+
+    @SafeVarargs
+    private static Set<String> union(Set<String>... sets) {
+        Set<String> all = new HashSet<>();
+        for (Set<String> set : sets) {
+            all.addAll(set);
+        }
+        return Set.copyOf(all);
     }
 
 }

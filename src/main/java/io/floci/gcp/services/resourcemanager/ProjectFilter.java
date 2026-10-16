@@ -26,7 +26,7 @@ final class ProjectFilter {
         if (filter == null || filter.isBlank()) {
             return new ProjectFilter(terms);
         }
-        for (String token : filter.trim().split("\\s+")) {
+        for (String token : tokens(filter)) {
             if (token.equalsIgnoreCase("OR") || token.equalsIgnoreCase("AND")) {
                 continue;
             }
@@ -82,6 +82,38 @@ final class ProjectFilter {
                     case "name", "id", "projectid", "parent.type", "parent.id", "lifecyclestate" -> true;
                     default -> false;
                 };
+    }
+
+    /** Splits on whitespace outside quotes, so {@code name:"My Project"} stays one term. */
+    private static List<String> tokens(String filter) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        char quote = 0;
+        for (char c : filter.trim().toCharArray()) {
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+                current.append(c);
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+                current.append(c);
+            } else if (Character.isWhitespace(c)) {
+                if (!current.isEmpty()) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (quote != 0) {
+            throw GcpException.invalidArgument("Invalid filter: unterminated quote.");
+        }
+        if (!current.isEmpty()) {
+            tokens.add(current.toString());
+        }
+        return tokens;
     }
 
     private static int separatorIndex(String token) {

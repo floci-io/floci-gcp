@@ -113,16 +113,33 @@ public class ProjectRegistry {
         return idOrNumber;
     }
 
-    public synchronized ProjectRecord create(ProjectRecord project) {
-        if (find(project.getProjectId()).isPresent()) {
+    /**
+     * Creates a project, or adopts one that was only registered implicitly. The lookup and the write
+     * run under the lock implicit registration uses, so concurrent creates and first-use requests
+     * cannot interleave.
+     */
+    public synchronized ProjectRecord createOrAdopt(ProjectRecord project) {
+        Optional<ProjectRecord> found = find(project.getProjectId());
+        if (found.isPresent() && found.get().isCreated()) {
             throw GcpException.alreadyExists("Requested entity already exists");
         }
-        project.setProjectNumber(ProjectNumbers.of(project.getProjectId()));
-        project.setLifecycleState(ProjectRecord.ACTIVE);
-        project.setCreateTime(Instant.now().toString());
-        project.setCreated(true);
-        store.put(project.getProjectId(), project);
-        return project;
+        ProjectRecord record = found.orElse(null);
+        if (record == null) {
+            record = project;
+            record.setProjectNumber(ProjectNumbers.of(project.getProjectId()));
+            record.setCreateTime(Instant.now().toString());
+        } else {
+            record.setName(project.getName());
+            record.setLabels(project.getLabels());
+            if (project.hasParent()) {
+                record.setParentType(project.getParentType());
+                record.setParentId(project.getParentId());
+            }
+        }
+        record.setLifecycleState(ProjectRecord.ACTIVE);
+        record.setCreated(true);
+        store.put(record.getProjectId(), record);
+        return record;
     }
 
     public void save(ProjectRecord project) {

@@ -15,6 +15,7 @@ import com.google.longrunning.Operation;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ProtoJson;
@@ -135,9 +136,10 @@ public class ServiceUsageService implements ServiceStateProvider {
             throw GcpException.invalidArgument("Requested page size cannot exceed " + MAX_PAGE_SIZE + ".");
         }
         int effectivePageSize = pageSize <= 0 ? DEFAULT_PAGE_SIZE : pageSize;
-        String prefix = stateKey(project, "");
+        List<String> prefixes = stateKeys(project, "");
         List<Service> services = Stream.concat(
-                        stateStore.keys().stream().filter(k -> k.startsWith(prefix)).map(k -> k.substring(prefix.length())),
+                        stateStore.keys().stream().flatMap(k -> prefixes.stream()
+                                .filter(k::startsWith).map(prefix -> k.substring(prefix.length()))),
                         defaultEnabled.stream())
                 .distinct()
                 .map(serviceId -> buildService(project, serviceId, readState(project, serviceId)))
@@ -204,23 +206,34 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     private Service writeState(String project, String serviceId, State state) {
-        stateStore.put(stateKey(project, serviceId), state.name());
+        stateStore.put(stateKeys(project, serviceId).getFirst(), state.name());
         return buildService(project, serviceId, state);
     }
 
     private State readState(String project, String serviceId) {
-        return stateStore.get(stateKey(project, serviceId))
+        return stateKeys(project, serviceId).stream()
+                .flatMap(key -> stateStore.get(key).stream())
+                .findFirst()
                 .map(State::valueOf)
                 .orElseGet(() -> defaultEnabled.contains(serviceId) ? State.ENABLED : State.DISABLED);
     }
 
-    /** State is kept under the project ID, so a registered project's number reads and writes the same record. */
-    private String stateKey(String project, String serviceId) {
-        String projectId = project;
-        if (projectRegistry != null && ProjectRegistry.isNumber(project)) {
-            projectId = projectRegistry.find(project).map(ProjectRecord::getProjectId).orElse(project);
+    /**
+     * Where a project's state lives, newest first. State is written under the project ID, so a
+     * registered project's number reads and writes the same record; the number key is still read
+     * because releases before the project registry stored state under the project as given.
+     */
+    private List<String> stateKeys(String project, String serviceId) {
+        if (projectRegistry == null) {
+            return List.of(serviceName(project, serviceId));
         }
-        return serviceName(projectId, serviceId);
+        String projectId = ProjectRegistry.isNumber(project)
+                ? projectRegistry.find(project).map(ProjectRecord::getProjectId).orElse(project)
+                : project;
+        if (ProjectRegistry.isNumber(projectId)) {
+            return List.of(serviceName(projectId, serviceId));
+        }
+        return List.of(serviceName(projectId, serviceId), serviceName(ProjectNumbers.of(projectId), serviceId));
     }
 
     private Service buildService(String project, String serviceId, State state) {

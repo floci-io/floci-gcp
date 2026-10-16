@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs;
 
+import io.floci.gcp.core.common.RequestContext;
 import io.floci.gcp.services.gcs.model.GcsHmacKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -31,16 +32,17 @@ import java.util.Map;
 public class GcsHmacKeyController {
 
     private final GcsHmacKeyService service;
+    private final RequestContext requestContext;
 
     @Inject
-    public GcsHmacKeyController(GcsHmacKeyService service) {
+    public GcsHmacKeyController(GcsHmacKeyService service, RequestContext requestContext) {
         this.service = service;
+        this.requestContext = requestContext;
     }
 
     @POST
-    public Response create(@PathParam("project") String project,
-            @QueryParam("serviceAccountEmail") String serviceAccountEmail) {
-        GcsHmacKeyService.CreatedKey created = service.create(project, serviceAccountEmail);
+    public Response create(@QueryParam("serviceAccountEmail") String serviceAccountEmail) {
+        GcsHmacKeyService.CreatedKey created = service.create(project(), serviceAccountEmail);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#hmacKey");
         response.put("metadata", created.metadata());
@@ -49,10 +51,9 @@ public class GcsHmacKeyController {
     }
 
     @GET
-    public Response list(@PathParam("project") String project,
-            @QueryParam("serviceAccountEmail") String serviceAccountEmail,
+    public Response list(@QueryParam("serviceAccountEmail") String serviceAccountEmail,
             @QueryParam("showDeletedKeys") @DefaultValue("false") boolean showDeletedKeys) {
-        List<GcsHmacKey> items = service.list(project, serviceAccountEmail, showDeletedKeys);
+        List<GcsHmacKey> items = service.list(project(), serviceAccountEmail, showDeletedKeys);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("kind", "storage#hmacKeysMetadata");
         response.put("items", items);
@@ -61,23 +62,31 @@ public class GcsHmacKeyController {
 
     @GET
     @Path("/{accessId}")
-    public Response get(@PathParam("project") String project, @PathParam("accessId") String accessId) {
-        return Response.ok(service.get(project, accessId)).build();
+    public Response get(@PathParam("accessId") String accessId) {
+        return Response.ok(service.get(project(), accessId)).build();
     }
 
     @PUT
     @Path("/{accessId}")
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response update(@PathParam("project") String project, @PathParam("accessId") String accessId,
+    public Response update(@PathParam("accessId") String accessId,
             Map<String, Object> body) {
         Object state = body != null ? body.get("state") : null;
-        return Response.ok(service.updateState(project, accessId, state)).build();
+        return Response.ok(service.updateState(project(), accessId, state)).build();
     }
 
     @DELETE
     @Path("/{accessId}")
-    public Response delete(@PathParam("project") String project, @PathParam("accessId") String accessId) {
-        service.delete(project, accessId);
+    public Response delete(@PathParam("accessId") String accessId) {
+        service.delete(project(), accessId);
         return Response.noContent().build();
+    }
+
+    /**
+     * The project the request resolved to: a registered project's number becomes its ID, so keys
+     * created by number and by ID are the same keys. The path segment is only routing.
+     */
+    private String project() {
+        return requestContext.getProjectId();
     }
 }

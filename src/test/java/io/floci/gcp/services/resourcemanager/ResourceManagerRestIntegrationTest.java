@@ -206,6 +206,58 @@ class ResourceManagerRestIntegrationTest {
     }
 
     @Test
+    void rejectedUpdateOrAdoptionChangesNothing() {
+        String id = uniqueId("crm-reject");
+        create(id, "Original");
+
+        given().contentType("application/json")
+                .body("{\"name\":\"Changed Name\",\"labels\":{\"Bad Key\":\"x\"}}")
+                .when().put("/v1/projects/" + id)
+                .then().statusCode(400);
+        given().contentType("application/json")
+                .body("{\"name\":\"Changed Name\",\"parent\":{\"type\":\"planet\",\"id\":\"1\"}}")
+                .when().put("/v1/projects/" + id)
+                .then().statusCode(400);
+        given().when().get("/v1/projects/" + id)
+                .then().statusCode(200)
+                .body("name", equalTo("Original"))
+                .body("labels", nullValue());
+
+        String implicit = uniqueId("crm-reject-adopt");
+        given().when().get("/v1/projects/" + implicit).then().statusCode(200);
+        given().contentType("application/json")
+                .body("{\"projectId\":\"" + implicit + "\",\"name\":\"Adopted\",\"parent\":{\"type\":\"planet\",\"id\":\"1\"}}")
+                .when().post("/v1/projects")
+                .then().statusCode(400);
+        given().when().get("/v1/projects/" + implicit)
+                .then().statusCode(200)
+                .body("name", equalTo(implicit));
+        given().contentType("application/json").body("{\"projectId\":\"" + implicit + "\",\"name\":\"Adopted\"}")
+                .when().post("/v1/projects")
+                .then().statusCode(200)
+                .body("response.name", equalTo("Adopted"));
+    }
+
+    @Test
+    void quotedFilterValuesMayContainSpaces() {
+        String tag = UUID.randomUUID().toString().substring(0, 6);
+        String id = "crm-quoted-" + tag;
+        create(id, "My Project " + tag);
+
+        given().queryParam("filter", "name:\"My Project " + tag + "\"")
+                .when().get("/v1/projects")
+                .then().statusCode(200)
+                .body("projects.projectId", contains(id));
+        given().queryParam("filter", "name:'my project " + tag + "'")
+                .when().get("/v1/projects")
+                .then().statusCode(200)
+                .body("projects.projectId", contains(id));
+        given().queryParam("filter", "name:\"My Project")
+                .when().get("/v1/projects")
+                .then().statusCode(400);
+    }
+
+    @Test
     void getAncestryListsProjectThenParent() {
         String id = uniqueId("crm-anc");
         given().contentType("application/json")

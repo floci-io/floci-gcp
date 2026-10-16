@@ -12,7 +12,15 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -76,17 +84,67 @@ class ProjectRegistryTest {
         assertEquals(ProjectRegistry.PERMISSION_DENIED_MESSAGE, denied.getMessage());
         assertEquals("default-proj", registry.observe("default-proj"));
 
-        registry.create(newProject("made-proj"));
+        registry.createOrAdopt(newProject("made-proj"));
         assertEquals("made-proj", registry.require("made-proj").getProjectId());
     }
 
     @Test
     void createRejectsDuplicates() {
         ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
-        registry.create(newProject("dup-proj"));
+        registry.createOrAdopt(newProject("dup-proj"));
 
-        GcpException conflict = assertThrows(GcpException.class, () -> registry.create(newProject("dup-proj")));
+        GcpException conflict = assertThrows(GcpException.class, () -> registry.createOrAdopt(newProject("dup-proj")));
         assertEquals("ALREADY_EXISTS", conflict.getGcpStatus());
+    }
+
+    @Test
+    void createAdoptsAnImplicitProjectKeepingItsNumberAndCreateTime() {
+        ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
+        registry.observe("seen-proj");
+        ProjectRecord implicit = registry.require("seen-proj");
+        String createTime = implicit.getCreateTime();
+
+        ProjectRecord adopted = registry.createOrAdopt(newProject("seen-proj"));
+
+        assertTrue(adopted.isCreated());
+        assertEquals(ProjectNumbers.of("seen-proj"), adopted.getProjectNumber());
+        assertEquals(createTime, adopted.getCreateTime());
+        assertThrows(GcpException.class, () -> registry.createOrAdopt(newProject("seen-proj")));
+    }
+
+    @Test
+    void concurrentCreatesOfOneProjectLetExactlyOneWin() throws Exception {
+        ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
+        registry.observe("race-proj");
+        int threads = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        AtomicInteger created = new AtomicInteger();
+        AtomicInteger conflicts = new AtomicInteger();
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        registry.createOrAdopt(newProject("race-proj"));
+                        created.incrementAndGet();
+                    } catch (GcpException e) {
+                        conflicts.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> f : futures) {
+                f.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(1, created.get());
+        assertEquals(threads - 1, conflicts.get());
     }
 
     @Test
@@ -111,7 +169,7 @@ class ProjectRegistryTest {
         created.setLabels(Map.of("env", "dev"));
         created.setParentType("folder");
         created.setParentId("123");
-        registry.create(created);
+        registry.createOrAdopt(created);
         ProjectRecord linked = registry.require("persist-proj");
         linked.setBillingAccountName("billingAccounts/000000-AAAAAA-BBBBBB");
         linked.setLifecycleState(ProjectRecord.DELETE_REQUESTED);

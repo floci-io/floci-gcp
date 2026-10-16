@@ -298,11 +298,9 @@ public class SecretManagerService {
             return authorized("AccessSecretVersion", versionedName, () -> {
                 requireSecretExists(secretName);
                 StoredSecretVersion version = resolveVersion(versionedName);
-                if ("DESTROYED".equals(version.getState())) {
-                    throw GcpException.notFound("Secret version is destroyed: " + version.getName());
-                }
-                if ("DISABLED".equals(version.getState())) {
-                    throw GcpException.invalidArgument("Secret version is disabled: " + version.getName());
+                if ("DESTROYED".equals(version.getState()) || "DISABLED".equals(version.getState())) {
+                    throw GcpException.failedPrecondition(
+                            "Secret Version [" + version.getName() + "] is in " + version.getState() + " state.");
                 }
                 return version;
             });

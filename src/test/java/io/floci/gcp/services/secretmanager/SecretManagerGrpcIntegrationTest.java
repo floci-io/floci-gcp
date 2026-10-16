@@ -175,6 +175,33 @@ class SecretManagerGrpcIntegrationTest {
         assertEquals("Secret [" + secretName + "] not found or has no versions.", ex.getStatus().getDescription());
     }
 
+    @Test
+    void accessingDisabledOrDestroyedVersionIsFailedPrecondition() {
+        String secretId = "state-" + UUID.randomUUID();
+        String secretName = "projects/grpc-version-state-project/secrets/" + secretId;
+        stub.createSecret(createRequest("projects/grpc-version-state-project", secretId));
+        for (String value : new String[]{"v1", "v2"}) {
+            stub.addSecretVersion(AddSecretVersionRequest.newBuilder()
+                    .setParent(secretName)
+                    .setPayload(SecretPayload.newBuilder().setData(ByteString.copyFromUtf8(value)))
+                    .build());
+        }
+        stub.disableSecretVersion(DisableSecretVersionRequest.newBuilder().setName(secretName + "/versions/1").build());
+        stub.destroySecretVersion(DestroySecretVersionRequest.newBuilder().setName(secretName + "/versions/2").build());
+
+        StatusRuntimeException disabled = assertStatus(Status.Code.FAILED_PRECONDITION,
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(secretName + "/versions/1").build()));
+        assertEquals("Secret Version [" + secretName + "/versions/1] is in DISABLED state.",
+                disabled.getStatus().getDescription());
+
+        StatusRuntimeException destroyed = assertStatus(Status.Code.FAILED_PRECONDITION,
+                () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(secretName + "/versions/2").build()));
+        assertEquals("Secret Version [" + secretName + "/versions/2] is in DESTROYED state.",
+                destroyed.getStatus().getDescription());
+    }
+
     private static CreateSecretRequest createRequest(String parent, String secretId) {
         return CreateSecretRequest.newBuilder()
                 .setParent(parent)

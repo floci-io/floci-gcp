@@ -317,7 +317,20 @@ class SecretManagerServiceTest {
 
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.accessSecretVersion("projects/p1/secrets/s1/versions/1"));
-        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("FAILED_PRECONDITION", ex.getGcpStatus());
+        assertEquals("Secret Version [projects/p1/secrets/s1/versions/1] is in DISABLED state.", ex.getMessage());
+    }
+
+    @Test
+    void accessDestroyedVersionThrowsFailedPrecondition() {
+        service.createSecret("p1", "s1", "automatic");
+        service.addSecretVersion("projects/p1/secrets/s1", new byte[]{1}, null);
+        service.destroySecretVersion("projects/p1/secrets/s1/versions/1");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.accessSecretVersion("projects/p1/secrets/s1/versions/1"));
+        assertEquals("FAILED_PRECONDITION", ex.getGcpStatus());
+        assertEquals("Secret Version [projects/p1/secrets/s1/versions/1] is in DESTROYED state.", ex.getMessage());
     }
 
     @Test

@@ -403,7 +403,7 @@ public class SecretManagerHttpController {
             case 5 -> 404;
             case 6 -> 409;
             case 7 -> 403;
-            case 3 -> 400;
+            case 3, 9 -> 400;
             default -> 500;
         };
     }

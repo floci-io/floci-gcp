@@ -174,6 +174,37 @@ class SecretManagerRestIntegrationTest {
                 .body("error.message", equalTo("Secret [" + name + "] not found or has no versions."));
     }
 
+    @Test
+    void accessingDisabledOrDestroyedVersionIsFailedPrecondition() {
+        String base = createPayloadSecret();
+        for (String data : new String[]{"djE=", "djI="}) {
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body("{\"payload\":{\"data\":\"" + data + "\"}}")
+                    .when().post(base + ":addVersion")
+                    .then().statusCode(200);
+        }
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/1:disable")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/2:destroy")
+                .then().statusCode(200);
+
+        String name = base.substring("/v1/".length());
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/1:access")
+                .then().statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Secret Version [" + name + "/versions/1] is in DISABLED state."));
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/2:access")
+                .then().statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Secret Version [" + name + "/versions/2] is in DESTROYED state."));
+    }
+
     private static String createPayloadSecret() {
         String project = "secret-payload-rest-it";
         String secretId = "base64-" + UUID.randomUUID();

@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Rewrites a GoogleSQL {@code SELECT} into DuckDB SQL. Works on a token stream, never on raw
@@ -103,6 +104,14 @@ final class SqlDialectTranslator {
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
     private Token mergeUnnestSource;
     private String mergeUnnestName;
+    /** A table's lower-cased column names, or null when they are unknown. */
+    private Function<TableRef, Set<String>> columnsOf = ref -> null;
+    /** The MERGE source table, when the source is a table rather than a subquery. */
+    private TableRef mergeSource;
+    private MergeScope mergeScope;
+
+    /** Names that refer to the MERGE target or source, and the columns of both when they are known. */
+    private record MergeScope(Set<String> names, Set<String> columns) {}
 
     private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
         this.projectId = projectId;
@@ -152,7 +161,18 @@ final class SqlDialectTranslator {
      */
     static Translation translateDml(String sql, String projectId, String defaultDatasetId,
                                     QueryParameters parameters) {
+        return translateDml(sql, projectId, defaultDatasetId, parameters, ref -> null);
+    }
+
+    /**
+     * As {@link #translateDml(String, String, String, QueryParameters)}, with {@code columnsOf} giving a
+     * table's lower-cased column names (or null when unknown), which {@code MERGE} uses to tell source
+     * columns from other names.
+     */
+    static Translation translateDml(String sql, String projectId, String defaultDatasetId,
+                                    QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters);
+        translator.columnsOf = columnsOf;
         return translator.runDml(sql);
     }
 
@@ -430,6 +450,7 @@ final class SqlDialectTranslator {
             default -> "UPDATE ";
         };
         StringBuilder out = new StringBuilder(head).append(targetSql);
+        String targetAlias = target.tableId();
         int rest = path.end();
         int next = nextSignificant(rest, tokens.size());
         // UPDATE/DELETE/MERGE target alias: "t", "AS t"
@@ -444,11 +465,12 @@ final class SqlDialectTranslator {
             }
             if (aliasIndex >= 0) {
                 out.append(" AS ").append(DuckTypes.quoteIdentifier(tokens.get(aliasIndex).identifierText()));
+                targetAlias = tokens.get(aliasIndex).identifierText();
                 rest = aliasIndex + 1;
             }
         }
         if (first.equals("MERGE")) {
-            qualifyNotMatchedSourceColumns(rest);
+            qualifyNotMatchedSourceColumns(rest, target, targetAlias);
         }
         out.append(render(rest, tokens.size()));
         if (first.equals("MERGE")) {
@@ -461,13 +483,25 @@ final class SqlDialectTranslator {
      * A {@code WHEN NOT MATCHED [BY TARGET]} clause has no target row, so GoogleSQL resolves a bare column
      * in its search condition or {@code INSERT ... VALUES} to the source; dbt-bigquery's incremental
      * MERGE relies on it ({@code INSERT (`a`) VALUES (`a`)}). DuckDB resolves those names against both
-     * tables and rejects them as ambiguous, so they are qualified with the source alias here.
+     * tables and rejects them as ambiguous, so they are qualified with the source alias here. When the
+     * target's columns are known, only names that are also target columns are qualified: no other name
+     * can be ambiguous.
      */
-    private void qualifyNotMatchedSourceColumns(int from) {
+    private void qualifyNotMatchedSourceColumns(int from, TableRef target, String targetAlias) {
         String source = mergeSourceAlias(from);
         if (source == null) {
             return;
         }
+        Set<String> targetColumns = columnsOf.apply(target);
+        Set<String> sourceColumns = mergeSource == null ? null : columnsOf.apply(mergeSource);
+        Set<String> outerColumns = null;
+        if (targetColumns != null || sourceColumns != null) {
+            outerColumns = new HashSet<>();
+            outerColumns.addAll(targetColumns != null ? targetColumns : Set.of());
+            outerColumns.addAll(sourceColumns != null ? sourceColumns : Set.of());
+        }
+        mergeScope = new MergeScope(new HashSet<>(List.of(source.toLowerCase(Locale.ROOT),
+                targetAlias.toLowerCase(Locale.ROOT), target.tableId().toLowerCase(Locale.ROOT))), outerColumns);
         List<Integer> columns = new ArrayList<>();
         int depth = 0;
         int caseDepth = 0;
@@ -494,8 +528,13 @@ final class SqlDialectTranslator {
                 clauseStart = notMatchedByTargetBody(i);
             }
         }
+        mergeScope = null;
         for (int k = columns.size() - 1; k >= 0; k--) {
             int at = columns.get(k);
+            if (targetColumns != null
+                    && !targetColumns.contains(tokens.get(at).identifierText().toLowerCase(Locale.ROOT))) {
+                continue;
+            }
             tokens.add(at, new Token(Kind.PUNCT, ".", "."));
             tokens.add(at, new Token(Kind.QIDENT, "`" + source + "`", source));
         }
@@ -555,11 +594,14 @@ final class SqlDialectTranslator {
             return mergeUnnestName;
         } else {
             int last = source;
+            List<String> segments = new ArrayList<>(pathSegments(tokens.get(last)));
             int dot = nextSignificant(last + 1, tokens.size());
             while (dot >= 0 && tokens.get(dot).isPunct(".")) {
                 last = nextSignificant(dot + 1, tokens.size());
+                segments.addAll(pathSegments(tokens.get(last)));
                 dot = nextSignificant(last + 1, tokens.size());
             }
+            mergeSource = tableRefOrNull(segments);
             String path = tokens.get(last).identifierText();
             name = path.substring(path.lastIndexOf('.') + 1);
             after = dot;
@@ -589,9 +631,11 @@ final class SqlDialectTranslator {
     private void collectBareColumns(int from, int to, List<Integer> columns) {
         Deque<String> calls = new ArrayDeque<>();
         Deque<int[]> argumentIndexes = new ArrayDeque<>();
+        boolean inInsert = false;
         for (int i = from; i < to; i++) {
             Token t = tokens.get(i);
             if (t.isKeyword("INSERT")) {
+                inInsert = true;
                 int open = nextSignificant(i + 1, to);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
                     i = matchingParen(open);
@@ -601,7 +645,9 @@ final class SqlDialectTranslator {
             if (t.isPunct("(")) {
                 int first = nextSignificant(i + 1, to);
                 if (first >= 0 && (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH"))) {
-                    i = matchingParen(i);
+                    int close = matchingParen(i);
+                    rejectCorrelatedSubquery(i, close, inInsert ? "INSERT" : "WHEN");
+                    i = close;
                     continue;
                 }
                 int callee = previousSignificantIndex(i);
@@ -683,6 +729,117 @@ final class SqlDialectTranslator {
             name = base + "_" + n;
         }
         return name;
+    }
+
+    /**
+     * GoogleSQL rejects a subquery in a {@code WHEN NOT MATCHED} clause that reads the target or the
+     * source ("Correlated Subquery is unsupported in INSERT clause."), where DuckDB would run it or fail on
+     * an ambiguous name. A reference is a name qualified with the target or the source, or, when the
+     * table schemas are known, a bare name that is a column of the MERGE tables but not of the
+     * subquery's own tables.
+     */
+    private void rejectCorrelatedSubquery(int open, int close, String clause) {
+        MergeScope scope = mergeScope;
+        if (scope == null) {
+            return;
+        }
+        Set<String> innerNames = new HashSet<>();
+        Set<String> innerColumns = new HashSet<>();
+        Set<Integer> fromItems = new HashSet<>();
+        boolean innerKnown = true;
+        for (int k = open + 1; k < close; k++) {
+            if (!tokens.get(k).isKeyword("FROM") && !tokens.get(k).isKeyword("JOIN")) {
+                continue;
+            }
+            int item = nextSignificant(k + 1, close);
+            if (item < 0 || (tokens.get(item).kind != Kind.IDENT && tokens.get(item).kind != Kind.QIDENT)) {
+                innerKnown = false;
+                continue;
+            }
+            List<String> segments = new ArrayList<>(pathSegments(tokens.get(item)));
+            int last = item;
+            fromItems.add(item);
+            int dot = nextSignificant(last + 1, close);
+            while (dot >= 0 && tokens.get(dot).isPunct(".")) {
+                last = nextSignificant(dot + 1, close);
+                if (last < 0) {
+                    break;
+                }
+                fromItems.add(last);
+                segments.addAll(pathSegments(tokens.get(last)));
+                dot = nextSignificant(last + 1, close);
+            }
+            innerNames.add(segments.getLast().toLowerCase(Locale.ROOT));
+            int alias = dot;
+            if (alias >= 0 && tokens.get(alias).isKeyword("AS")) {
+                alias = nextSignificant(alias + 1, close);
+            }
+            if (alias >= 0 && (tokens.get(alias).kind == Kind.QIDENT || (tokens.get(alias).kind == Kind.IDENT
+                    && !GOOGLESQL_RESERVED.contains(tokens.get(alias).upper())
+                    && !NON_ALIAS_KEYWORDS.contains(tokens.get(alias).upper())))) {
+                fromItems.add(alias);
+                innerNames.add(tokens.get(alias).identifierText().toLowerCase(Locale.ROOT));
+            }
+            TableRef ref = tableRefOrNull(segments);
+            Set<String> columns = ref == null ? null : columnsOf.apply(ref);
+            if (columns == null) {
+                innerKnown = false;
+            } else {
+                innerColumns.addAll(columns);
+            }
+        }
+        for (int k = open + 1; k < close; k++) {
+            Token t = tokens.get(k);
+            if (fromItems.contains(k) || (t.kind != Kind.IDENT && t.kind != Kind.QIDENT)) {
+                continue;
+            }
+            int previous = previousSignificantIndex(k);
+            if (previous >= 0 && tokens.get(previous).isPunct(".")) {
+                continue;
+            }
+            String qualifier = null;
+            if (t.kind == Kind.QIDENT && t.value.contains(".")) {
+                qualifier = t.value.substring(0, t.value.indexOf('.'));
+            } else {
+                int next = nextSignificant(k + 1, close);
+                if (next >= 0 && tokens.get(next).isPunct(".")) {
+                    qualifier = t.identifierText();
+                }
+            }
+            if (qualifier != null && scope.names().contains(qualifier.toLowerCase(Locale.ROOT))
+                    && !innerNames.contains(qualifier.toLowerCase(Locale.ROOT))) {
+                throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
+            }
+        }
+        if (!innerKnown || scope.columns() == null) {
+            return;
+        }
+        List<Integer> bare = new ArrayList<>();
+        mergeScope = null;
+        try {
+            collectBareColumns(open + 1, close, bare);
+        } finally {
+            mergeScope = scope;
+        }
+        for (int k : bare) {
+            String name = tokens.get(k).identifierText().toLowerCase(Locale.ROOT);
+            if (!fromItems.contains(k) && scope.columns().contains(name) && !innerColumns.contains(name)) {
+                throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
+            }
+        }
+    }
+
+    private static List<String> pathSegments(Token t) {
+        return t.kind == Kind.QIDENT ? List.of(t.value.split("\\.", -1)) : List.of(t.text);
+    }
+
+    /** The table a path names, or null when it names none this pass can look up. */
+    private TableRef tableRefOrNull(List<String> segments) {
+        try {
+            return resolveTable(segments);
+        } catch (GcpException e) {
+            return null;
+        }
     }
 
     private static final Set<String> MERGE_CLAUSE_WORDS = Set.of("MATCHED", "TARGET", "SOURCE", "INSERT",

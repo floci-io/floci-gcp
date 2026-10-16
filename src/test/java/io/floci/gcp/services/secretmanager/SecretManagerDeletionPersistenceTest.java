@@ -6,6 +6,7 @@ import com.google.iam.v1.Policy;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
+import io.floci.gcp.core.storage.PersistentStorageFaults;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.WalStorage;
 import io.floci.gcp.services.iam.IamServices;
@@ -20,6 +21,7 @@ import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -70,6 +72,27 @@ class SecretManagerDeletionPersistenceTest {
         assertTrue(verifiedService.listSecretVersions(resource).isEmpty());
         assertTrue(verifiedService.getIamPolicy(resource).getBindingsList().isEmpty());
         verified.close();
+    }
+
+    @org.junit.jupiter.api.Test
+    void persistentFailureDuringStartupRecoveryLeavesDeletionIntentForRetry() {
+        String resource = "projects/p1/secrets/recovery-failure";
+        Path secretsPath = tempDir.resolve("failure/secrets.json");
+        var secretFaults = new PersistentStorageFaults<String, StoredSecret>(secretsPath,
+                new TypeReference<Map<String, StoredSecret>>() {});
+        var versions = new io.floci.gcp.core.storage.InMemoryStorage<String, StoredSecretVersion>();
+        var deletions = new io.floci.gcp.core.storage.InMemoryStorage<String, String>();
+        var service = new SecretManagerService(secretFaults.storage, versions, deletions, IamServices.inMemory());
+        service.createSecret("p1", "recovery-failure", "automatic");
+        deletions.put(resource, resource);
+        secretFaults.failBeforeWrite(bytes -> true);
+
+        assertDoesNotThrow(service::resumePendingDeletions);
+        assertTrue(deletions.get(resource).isPresent());
+
+        secretFaults.failBeforeWrite(bytes -> false);
+        secretFaults.storage.load();
+        assertTrue(secretFaults.storage.get(resource).isPresent());
     }
 
     private Stores openStores(StorageMode mode) {

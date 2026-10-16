@@ -13,6 +13,7 @@ import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -175,6 +176,34 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(5)
+    void arraysWithNullElementsFailTheQueryOnlyInTheResult() {
+        assertNullElementError("SELECT ARRAY_AGG(x) AS a FROM UNNEST([1, NULL, 3]) x", "a");
+        assertNullElementError("SELECT [1, NULL, 3] AS a", "a");
+        assertNullElementError("SELECT 1 AS x, [CAST(NULL AS INT64)] AS b", "b");
+        assertNullElementError("SELECT [STRUCT(1 AS v), NULL] AS a", "a");
+        assertNullElementError("SELECT STRUCT(1 AS id, [1, NULL] AS arr) AS s", "s.arr; error in writing field s");
+        assertNullElementError("SELECT [STRUCT([1, NULL] AS inner_arr)] AS a",
+                "a.inner_arr; error in writing field a");
+        query("""
+                {"query": "SELECT ARRAY_LENGTH(a) AS n FROM (SELECT ARRAY_AGG(x) AS a FROM UNNEST([1, NULL, 3]) x)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("3")));
+        query("""
+                {"query": "SELECT ARRAY_AGG(STRUCT(x AS v) ORDER BY x) AS a FROM UNNEST([1, NULL]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("1"), Arrays.asList((String) null))));
+    }
+
+    private static void assertNullElementError(String sql, String field) {
+        query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Array cannot have a null element; error in writing field " + field));
     }
 
     @Test

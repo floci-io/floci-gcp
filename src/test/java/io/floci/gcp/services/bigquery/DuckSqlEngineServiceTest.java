@@ -2,6 +2,7 @@ package io.floci.gcp.services.bigquery;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerDetector;
 import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.services.bigquery.model.Table;
@@ -10,11 +11,15 @@ import io.floci.gcp.services.bigquery.model.TableSchema;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -94,18 +99,7 @@ class DuckSqlEngineServiceTest {
     void dryRunUsesEmptySetupWithoutReadJson() {
         DuckClient client = mock(DuckClient.class);
         when(client.query(anyString(), anyString(), anyString(), isNull())).thenReturn(new DuckClient.DuckResult(List.of(), List.of(), null));
-
-        EmulatorConfig.BigQueryDuckConfig duck = mock(EmulatorConfig.BigQueryDuckConfig.class);
-        when(duck.callbackUrl()).thenReturn(Optional.of("http://localhost"));
-        EmulatorConfig.BigQueryServiceConfig bigquery = mock(EmulatorConfig.BigQueryServiceConfig.class);
-        when(bigquery.duck()).thenReturn(duck);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        when(services.bigquery()).thenReturn(bigquery);
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.services()).thenReturn(services);
-
-        DockerHostResolver resolver = new DockerHostResolver(mock(ContainerDetector.class));
-        DuckSqlEngine engine = new DuckSqlEngine(client, resolver, config, new ObjectMapper());
+        DuckSqlEngine engine = engine(client);
 
         BigQuerySqlEngine.Request request = new BigQuerySqlEngine.Request("proj", "SELECT * FROM ds.t", "ds", List.of(), "NAMED", true);
         BigQuerySqlEngine.Tables tables = mock(BigQuerySqlEngine.Tables.class);
@@ -126,5 +120,42 @@ class DuckSqlEngineServiceTest {
         String setup = setupCaptor.getValue();
         assertTrue(setup.contains("CREATE TABLE"), "Should create staging table");
         assertFalse(setup.contains("read_json"), "Dry run should not fetch table data using read_json");
+    }
+
+    @Test
+    void aResultArrayWithANullElementFailsTheQuery() {
+        assertEquals("Array cannot have a null element; error in writing field a",
+                nullElementError("INTEGER[]", Arrays.asList(1, null, 3)));
+        assertEquals("Array cannot have a null element; error in writing field a",
+                nullElementError("STRUCT(v INTEGER)[]", Arrays.asList(Map.of("v", 1), null)));
+        assertEquals("Array cannot have a null element; error in writing field a.arr; error in writing field a",
+                nullElementError("STRUCT(id INTEGER, arr INTEGER[])", Map.of("id", 1, "arr", Arrays.asList(1, null))));
+        assertEquals("Array cannot have a null element; error in writing field a.nested.arr; error in writing field a.nested;"
+                + " error in writing field a", nullElementError("STRUCT(nested STRUCT(arr INTEGER[]))[]",
+                List.of(Map.of("nested", Map.of("arr", Arrays.asList(null, 2))))));
+    }
+
+    @Test
+    void aNullFieldInsideAStructElementIsNotANullElement() {
+        Map<String, Object> element = new HashMap<>();
+        element.put("v", null);
+        BigQuerySqlEngine.Result result = run("STRUCT(v INTEGER)[]", List.of(Map.of("v", 1), element));
+        assertEquals(1, result.rows().size());
+    }
+
+    private static String nullElementError(String duckType, Object value) {
+        GcpException e = assertThrows(GcpException.class, () -> run(duckType, value));
+        assertEquals("invalidQuery", e.getReason());
+        return e.getMessage();
+    }
+
+    private static BigQuerySqlEngine.Result run(String duckType, Object value) {
+        DuckClient client = mock(DuckClient.class);
+        Map<String, Object> row = new HashMap<>();
+        row.put("a", value);
+        when(client.query(anyString(), anyString(), anyString(), isNull())).thenReturn(new DuckClient.DuckResult(
+                List.of(new DuckClient.DuckColumn("a", duckType)), List.of(row), null));
+        BigQuerySqlEngine.Request request = new BigQuerySqlEngine.Request("proj", "SELECT 1 AS a", null, List.of(), "NAMED", false);
+        return engine(client).execute(request, mock(BigQuerySqlEngine.Tables.class));
     }
 }

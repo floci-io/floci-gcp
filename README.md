@@ -224,7 +224,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 
 | Service | Protocol | Notable features |
 |---|---|---|
-| **[Compute Engine](docs/services/compute.md)** | REST JSON | Scoped operations, synthetic catalogs, VPC/subnets/firewalls/addresses, VM and disk lifecycle, images/snapshots, NEGs and global HTTP load-balancer configuration; no guest execution or traffic forwarding |
+| **[Compute Engine](docs/services/compute.md)** | REST JSON | Scoped operations, synthetic catalogs, VPC/subnets/firewalls/addresses, VM and disk lifecycle, resource policies (instance and snapshot schedules), images/snapshots, NEGs and global HTTP load-balancer configuration; no guest execution or traffic forwarding |
 | **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, compose, rewrite, move, soft delete and restore, ACLs, bucket IAM with opt-in allow-policy enforcement, HMAC keys, conditional requests, versioning, lifecycle, CORS, decompressive transcoding, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
 | **Firestore** | gRPC | Documents, collections, structured queries with filters, ordering, and cursors, field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |

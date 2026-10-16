@@ -60,6 +60,24 @@ supported Hyperdisk types accept provisioned IOPS/throughput; unsupported knobs
 fail. Performance limits are basic API checks, not complete machine/disk quota
 or size-ratio emulation. Multi-writer disks and regional disks are unsupported.
 
+## Resource policies
+
+Regional `resourcePolicies` support insert/get/list/aggregatedList/delete with
+`instanceSchedulePolicy` (`vmStartSchedule`, `vmStopSchedule`, `timeZone`, `startTime`,
+`expirationTime`) and `snapshotSchedulePolicy` (hourly, daily or weekly `schedule`,
+`retentionPolicy`, `snapshotProperties`). Exactly one policy type is required; other
+types (group placement, workload) fail explicitly. Policies are stored and returned as
+sent and report `status` READY. Schedules are validated but never executed: no VM is
+started or stopped and no snapshot is taken. Resource policies have no update method
+and IAM methods are not implemented.
+
+Instances accept instance schedule policies and disks accept snapshot schedule policies,
+either in `resourcePolicies` on insert (including disk `initializeParams`) or through
+`addResourcePolicies` / `removeResourcePolicies`. The policy must exist in the same
+region as the instance or disk, and at most one policy can be attached to a resource.
+`resourcePolicies` is returned as self links on get and list. Deleting a policy that is
+still attached fails with `resourceInUseByAnotherResource`.
+
 ## Images and snapshots
 
 Global images support sources from disks, images and snapshots, family lookup,

@@ -9,6 +9,8 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -274,8 +276,9 @@ class IamObjectAuthorizationRestIntegrationTest {
         assertFalse(gcsService.objectExists(bucket, "moved.txt"));
     }
 
-    @Test
-    void objectAdminAllowsImplementedObjectMutationRoutes() {
+    @ParameterizedTest
+    @ValueSource(strings = {"roles/storage.objectAdmin", "roles/storage.objectUser"})
+    void objectWriteRolesAllowImplementedObjectMutationRoutes(String role) {
         String bucket = createBucket();
         gcsService.putObject(bucket, "source.txt", "text/plain", "source".getBytes(),
                 GcsCustomerEncryption.none(), "http://localhost:4588");
@@ -283,7 +286,7 @@ class IamObjectAuthorizationRestIntegrationTest {
                 GcsCustomerEncryption.none(), "http://localhost:4588");
         gcsService.putObject(bucket, "move-source.txt", "text/plain", "move".getBytes(),
                 GcsCustomerEncryption.none(), "http://localhost:4588");
-        setRole(bucket, "roles/storage.objectAdmin");
+        setRole(bucket, role);
 
         given().contentType("application/json").body(Map.of("contentType", "text/csv"))
                 .when().patch("/storage/v1/b/{bucket}/o/{object}", bucket, "source.txt")

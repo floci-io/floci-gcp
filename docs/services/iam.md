@@ -110,7 +110,7 @@ and when evaluating previously stored project policies. Disabled mode retains
 permissive policy storage.
 
 The finite catalog also contains `roles/storage.objectViewer`,
-`roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
+`roles/storage.objectCreator`, `roles/storage.objectUser`, `roles/storage.objectAdmin`, and
 `roles/storage.admin` for the explicitly enforced bucket and object permissions.
 Uncatalogued roles grant no permissions and do not block known
 bindings, including when they apply to the caller. Missing resource/operation

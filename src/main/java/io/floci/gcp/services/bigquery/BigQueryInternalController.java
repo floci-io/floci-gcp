@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -131,11 +132,19 @@ public class BigQueryInternalController {
                          @PathParam("datasetId") String datasetId,
                          @PathParam("tableId") String tableId) {
         Table table = service.getTable(projectId, datasetId, tableId);
+        List<Map<String, Object>> rows = service.stagingRows(projectId, datasetId, tableId);
         TableSchema schema = table.getSchema();
-        List<Map<String, Object>> rows = service.storedRows(projectId, datasetId, tableId);
         StreamingOutput body = out -> {
             for (Map<String, Object> row : rows) {
-                out.write(mapper.writeValueAsBytes(RowCodec.stagingRow(schema, row)));
+                Map<String, Object> formatted = RowCodec.formatForDuck(table.getSchema(), row);
+                Map<String, Object> staged = new LinkedHashMap<>(RowCodec.stagingRow(schema, formatted));
+                if (row.containsKey(BigQueryService.PARTITION_DATE)) {
+                    staged.put(BigQueryService.PARTITION_DATE, row.get(BigQueryService.PARTITION_DATE));
+                }
+                if (row.containsKey(BigQueryService.PARTITION_TIME)) {
+                    staged.put(BigQueryService.PARTITION_TIME, row.get(BigQueryService.PARTITION_TIME));
+                }
+                out.write(mapper.writeValueAsBytes(staged));
                 out.write('\n');
             }
         };

@@ -56,7 +56,7 @@ services:
       - "4588:4588"
     volumes:
       - ./data:/app/data
-      # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE)
+      # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE, BigQuery)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
@@ -175,7 +175,7 @@ flowchart LR
         Router["HTTP/2 Router\nALPN negotiation"]
 
         subgraph GRPC ["gRPC services"]
-            A["Pub/Sub\nFirestore\nDatastore\nCloud Storage v2\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring\nIAM policy mixins"]
+            A["Pub/Sub\nFirestore\nDatastore\nCloud Storage v2\nBigQuery Storage\nSecret Manager\nCloud Logging\nCloud KMS\nCloud Tasks\nCloud Scheduler\nCloud Monitoring\nIAM policy mixins"]
         end
 
         subgraph REST ["HTTP API services"]
@@ -193,7 +193,7 @@ flowchart LR
     end
 
     DockerEngine["Docker Engine"]
-    Sidecars["Redpanda\nPostgreSQL\nCloud Run containers\nk3s"]
+    Sidecars["Redpanda\nPostgreSQL\nCloud Run containers\nk3s\nDuckDB"]
     Client -->|"HTTP/2 :4588\nGCP wire protocols"| Router
     DockerControl -->|"Docker API"| DockerEngine
     DockerEngine --> Sidecars
@@ -248,7 +248,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Resource Manager** | REST JSON | Cloud Resource Manager v1 projects: create (done LRO), get by ID or number, filtered list, update, delete/undelete, `getAncestry`, project IAM policy mixins; projects are registered on first use, or only when created with `FLOCI_GCP_PROJECTS_STRICT=true` |
 | **Cloud Billing** | REST JSON | Project billing info get/update and billing-account `testIamPermissions` stub for Terraform `google_project` |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
-| **BigQuery** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) running GoogleSQL (joins, aggregation, window functions, CTEs, `UNNEST`, parameters, dry runs) on a DuckDB sidecar |
+| **BigQuery** | REST JSON + gRPC | Datasets and tables CRUD, load and query jobs, partition decorators, scripts with temporary objects, GoogleSQL translation on a DuckDB sidecar, and Storage Read and Write APIs |
 
 </details>
 
@@ -719,7 +719,7 @@ services:
     environment:
       FLOCI_GCP_HOSTNAME: floci-gcp
       FLOCI_GCP_BASE_URL: http://floci-gcp:4588
-      # Attach spawned sidecars (Cloud Run, Cloud SQL, Kafka, GKE) to this network
+      # Attach spawned sidecars (Cloud Run, Cloud SQL, Kafka, GKE, BigQuery) to this network
       FLOCI_GCP_SERVICES_DOCKER_NETWORK: my_project_default
     networks:
       my_project_default:

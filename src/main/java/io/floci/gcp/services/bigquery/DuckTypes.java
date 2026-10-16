@@ -4,9 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -14,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Type bridge between BigQuery table schemas and DuckDB, used by {@link DuckSqlEngine}:
@@ -112,6 +117,132 @@ final class DuckTypes {
             case "BYTES" -> "from_base64(" + column + ")";
             default -> "CAST(" + column + " AS " + scalarDuckType(field.getType()) + ")";
         };
+    }
+
+    /**
+     * Converts BYTES leaves within a JSON-staged nested value.  BigQuery's REST representation
+     * stores every BYTES value as base64 text, while DuckDB's {@code read_json} turns that text
+     * directly into a BLOB when it reads a RECORD or REPEATED column.  Rebuild nested values so
+     * those text BLOBs are decoded exactly once.
+     */
+    static String convertNestedStagedBytes(TableFieldSchema field, String value) {
+        if (!containsBytes(field)) {
+            return value;
+        }
+        if ("REPEATED".equals(field.getMode())) {
+            return "list_transform(" + value + ", _floci_value -> "
+                    + convertNestedStagedBytes(copyWithMode(field, "NULLABLE"), "_floci_value") + ")";
+        }
+        if ("RECORD".equals(field.getType())) {
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            StringBuilder rebuilt = new StringBuilder("struct_pack(");
+            for (int i = 0; i < children.size(); i++) {
+                if (i > 0) {
+                    rebuilt.append(", ");
+                }
+                TableFieldSchema child = children.get(i);
+                rebuilt.append(quoteIdentifier(child.getName())).append(" := ")
+                        .append(convertNestedStagedBytes(child,
+                                value + "." + quoteIdentifier(child.getName())));
+            }
+            return "CASE WHEN " + value + " IS NULL THEN NULL ELSE " + rebuilt.append(") END");
+        }
+        // read_json materializes nested BYTES leaves as BLOBs containing their base64 text.
+        // DuckDB's from_base64 accepts VARCHAR only, so cast that intermediate BLOB back to its
+        // textual representation before decoding it into the actual byte value.
+        return "BYTES".equals(field.getType()) ? "from_base64(CAST(" + value + " AS VARCHAR))" : value;
+    }
+
+    /** GoogleSQL literal for a value in the emulator's stored row representation. */
+    @SuppressWarnings("unchecked")
+    static String storedLiteral(TableFieldSchema field, Object value) {
+        if (value == null) {
+            return "CAST(NULL AS " + googleSqlType(field) + ")";
+        }
+        if ("REPEATED".equals(field.getMode())) {
+            if (!(value instanceof List<?> values)) {
+                return "CAST(NULL AS " + googleSqlType(field) + ")";
+            }
+            if (values.isEmpty()) {
+                return googleSqlType(field) + "[]";
+            }
+            TableFieldSchema element = copyWithMode(field, "NULLABLE");
+            return "[" + values.stream().map(item -> storedLiteral(element, item))
+                    .collect(Collectors.joining(", ")) + "]";
+        }
+        if ("RECORD".equals(field.getType())) {
+            if (!(value instanceof Map<?, ?> raw)) {
+                return "CAST(NULL AS " + googleSqlType(field) + ")";
+            }
+            Map<String, Object> record = (Map<String, Object>) raw;
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            return "STRUCT(" + children.stream()
+                    .map(child -> storedLiteral(child, record.get(child.getName())) + " AS "
+                            + googleIdentifier(child.getName()))
+                    .collect(Collectors.joining(", ")) + ")";
+        }
+        String text = String.valueOf(value);
+        return switch (field.getType() == null ? "STRING" : field.getType()) {
+            case "INTEGER" -> "CAST(" + text + " AS INT64)";
+            case "FLOAT" -> "CAST(" + googleSqlLiteral(text) + " AS FLOAT64)";
+            case "BOOLEAN" -> Boolean.parseBoolean(text) ? "TRUE" : "FALSE";
+            case "NUMERIC", "BIGNUMERIC" -> "CAST(" + googleSqlLiteral(text) + " AS " + field.getType() + ")";
+            case "BYTES" -> "FROM_BASE64(" + googleSqlLiteral(text) + ")";
+            case "DATE" -> "DATE " + googleSqlLiteral(text);
+            case "TIME" -> "TIME " + googleSqlLiteral(text);
+            case "DATETIME" -> "DATETIME " + googleSqlLiteral(text);
+            case "TIMESTAMP" -> timestampLiteral(text);
+            case "JSON" -> "JSON " + googleSqlLiteral(text);
+            default -> googleSqlLiteral(text);
+        };
+    }
+
+    private static String timestampLiteral(String value) {
+        try {
+            String micros = new BigDecimal(value).movePointRight(6).setScale(0, RoundingMode.HALF_UP)
+                    .toPlainString();
+            return "TIMESTAMP_MICROS(" + micros + ")";
+        } catch (NumberFormatException ignored) {
+            return "TIMESTAMP " + googleSqlLiteral(value);
+        }
+    }
+
+    /** Literal that will be parsed as GoogleSQL before it is rendered for DuckDB. */
+    private static String googleSqlLiteral(String value) {
+        return '\'' + value.replace("\\", "\\\\").replace("'", "\\'") + '\'';
+    }
+
+    private static String googleSqlType(TableFieldSchema field) {
+        TableFieldSchema element = "REPEATED".equals(field.getMode()) ? copyWithMode(field, "NULLABLE") : field;
+        String base;
+        if ("RECORD".equals(element.getType())) {
+            List<TableFieldSchema> children = element.getFields() != null ? element.getFields() : List.of();
+            base = "STRUCT<" + children.stream()
+                    .map(child -> googleIdentifier(child.getName()) + " " + googleSqlType(child))
+                    .collect(Collectors.joining(", ")) + ">";
+        } else {
+            base = switch (element.getType() == null ? "STRING" : element.getType()) {
+                case "INTEGER" -> "INT64";
+                case "FLOAT" -> "FLOAT64";
+                case "BOOLEAN" -> "BOOL";
+                default -> element.getType() == null ? "STRING" : element.getType();
+            };
+        }
+        return "REPEATED".equals(field.getMode()) ? "ARRAY<" + base + ">" : base;
+    }
+
+    private static String googleIdentifier(String value) {
+        return '`' + value.replace("`", "\\`") + '`';
+    }
+
+    private static boolean containsBytes(TableFieldSchema field) {
+        if ("BYTES".equals(field.getType())) {
+            return true;
+        }
+        if (!"RECORD".equals(field.getType()) || field.getFields() == null) {
+            return false;
+        }
+        return field.getFields().stream().anyMatch(DuckTypes::containsBytes);
     }
 
     // ── DuckDB type strings ──────────────────────────────────────────────────
@@ -489,6 +620,29 @@ final class DuckTypes {
     /** Epoch microseconds → BigQuery's float-seconds text, e.g. {@code 1704164645.123456}. */
     static String microsToSeconds(long micros) {
         return BigDecimal.valueOf(micros, 6).stripTrailingZeros().toPlainString();
+    }
+
+    /** Parses stored BigQuery date, datetime, timestamp text, including epoch-second timestamps. */
+    static LocalDateTime storedDateTime(Object value) {
+        String text = String.valueOf(value).trim();
+        try {
+            BigDecimal epoch = new BigDecimal(text);
+            long seconds = epoch.setScale(0, RoundingMode.FLOOR).longValueExact();
+            int nanos = epoch.subtract(BigDecimal.valueOf(seconds)).movePointRight(9).intValueExact();
+            return LocalDateTime.ofInstant(Instant.ofEpochSecond(seconds, nanos), ZoneOffset.UTC);
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // Continue with the calendar forms accepted by BigQuery row encodings.
+        }
+        try {
+            return OffsetDateTime.parse(text.replace(' ', 'T')).withOffsetSameInstant(ZoneOffset.UTC)
+                    .toLocalDateTime();
+        } catch (DateTimeParseException ignored) {
+            try {
+                return LocalDateTime.parse(text.replace(' ', 'T'));
+            } catch (DateTimeParseException alsoIgnored) {
+                return LocalDate.parse(text).atStartOfDay();
+            }
+        }
     }
 
     static String quoteIdentifier(String name) {

@@ -21,6 +21,16 @@ public class StoredTableData {
     private List<Map<String, Object>> rows = new ArrayList<>();
 
     /**
+     * Rows written through a partition decorator, keyed by its canonical suffix (for example,
+     * {@code YYYYMMDDHH}, {@code YYYYMMDD}, {@code YYYYMM}, {@code YYYY}, or an integer range
+     * boundary).
+     * {@link #rows} remains the rows written through an undecorated table reference, so legacy
+     * persisted data stays readable and an undecorated read can combine both collections.
+     */
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<String, List<Map<String, Object>>> partitionRows = new LinkedHashMap<>();
+
+    /**
      * Storage Write streams: how many of each stream's rows are in {@code rows}, keyed by the full
      * stream name. Written in the same put as the rows, so after a crash a reloaded stream can tell
      * what already landed and a retry does not apply it twice.
@@ -30,6 +40,11 @@ public class StoredTableData {
 
     public List<Map<String, Object>> getRows() { return rows; }
     public void setRows(List<Map<String, Object>> rows) { this.rows = rows; }
+
+    public Map<String, List<Map<String, Object>>> getPartitionRows() { return partitionRows; }
+    public void setPartitionRows(Map<String, List<Map<String, Object>>> partitionRows) {
+        this.partitionRows = partitionRows;
+    }
 
     public Map<String, Long> getStreamRows() { return streamRows; }
     public void setStreamRows(Map<String, Long> streamRows) { this.streamRows = streamRows; }

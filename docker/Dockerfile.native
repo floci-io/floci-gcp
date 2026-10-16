@@ -13,6 +13,12 @@ COPY src ./src
 
 RUN mvn clean package -Dnative -DskipTests -B
 
+# The native executable is dynamically linked against zlib, while ubi9-micro
+# intentionally does not include it. Stage the runtime library explicitly so
+# the minimal image can start the executable without adding a package manager.
+RUN mkdir -p /tmp/runtime-lib \
+    && cp -a /usr/lib64/libz.so.1* /tmp/runtime-lib/
+
 # Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
 FROM registry.access.redhat.com/ubi9-micro:9.7
 
@@ -35,6 +41,7 @@ ENV FLOCI_GCP_STORAGE_PERSISTENT_PATH=/app/data
 # runner needs libz.so.1, which ubi9-micro does not ship. Take it from the builder image.
 COPY --from=build /usr/lib64/libz.so.1 /usr/lib64/libz.so.1
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
+COPY --from=build /tmp/runtime-lib/ /usr/lib64/
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 

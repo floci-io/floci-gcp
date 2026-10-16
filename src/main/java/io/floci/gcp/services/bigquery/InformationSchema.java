@@ -1,10 +1,16 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.bigquery.model.Dataset;
+import io.floci.gcp.services.bigquery.model.StoredTableData;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
+import java.io.IOException;
+import java.math.BigInteger;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -14,8 +20,8 @@ import java.util.stream.Collectors;
 
 /**
  * The {@code INFORMATION_SCHEMA} views floci serves, generated from dataset and table metadata:
- * SCHEMATA, TABLES, COLUMNS, COLUMN_FIELD_PATHS, TABLE_OPTIONS and VIEWS, with the columns and
- * value formats of the BigQuery documentation.
+ * SCHEMATA, TABLES, COLUMNS, COLUMN_FIELD_PATHS, TABLE_OPTIONS, VIEWS and PARTITIONS, with the
+ * columns and value formats of the BigQuery documentation.
  */
 final class InformationSchema {
 
@@ -32,6 +38,7 @@ final class InformationSchema {
     static final String SCHEMA = "_floci_information_schema";
 
     private static final Map<String, List<TableFieldSchema>> VIEWS = new LinkedHashMap<>();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     static {
         VIEWS.put("SCHEMATA", fields("catalog_name STRING", "schema_name STRING", "schema_owner STRING",
@@ -60,6 +67,9 @@ final class InformationSchema {
                 "option_name STRING", "option_type STRING", "option_value STRING"));
         VIEWS.put("VIEWS", fields("table_catalog STRING", "table_schema STRING", "table_name STRING",
                 "view_definition STRING", "check_option STRING", "use_standard_sql STRING"));
+        VIEWS.put("PARTITIONS", fields("table_catalog STRING", "table_schema STRING", "table_name STRING",
+                "partition_id STRING", "total_rows INTEGER", "total_logical_bytes INTEGER",
+                "total_billable_bytes INTEGER", "last_modified_time TIMESTAMP", "storage_tier STRING"));
     }
 
     private InformationSchema() {}
@@ -94,7 +104,8 @@ final class InformationSchema {
 
     /** Rows of one view over the given datasets, in the stored row representation. */
     static List<Map<String, Object>> rows(String view, String projectId, List<Dataset> datasets,
-                                          Map<String, List<Table>> tablesByDataset) {
+                                          Map<String, List<Table>> tablesByDataset,
+                                          Map<String, StoredTableData> tableDataByKey) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Dataset dataset : datasets) {
             String datasetId = dataset.getDatasetReference().getDatasetId();
@@ -113,11 +124,123 @@ final class InformationSchema {
                             rows.add(viewsRow(projectId, datasetId, table));
                         }
                     }
+                    case "PARTITIONS" -> rows.addAll(partitionRows(projectId, datasetId, table,
+                            tableDataByKey.get(tableKey(datasetId, table.getTableReference().getTableId()))));
                     default -> throw new IllegalArgumentException(view);
                 }
             }
         }
         return rows;
+    }
+
+    /**
+     * BigQuery storage byte metrics have no local equivalent, so both byte fields use the UTF-8
+     * JSON representation kept by the emulator. Per-partition mutation timestamps are likewise
+     * unavailable, so the table's last modified time is reported for every partition.
+     */
+    private static List<Map<String, Object>> partitionRows(String projectId, String datasetId, Table table,
+                                                           StoredTableData data) {
+        Object rawTimePartitioning = table.getExtra().get("timePartitioning");
+        Object rawRangePartitioning = table.getExtra().get("rangePartitioning");
+        Map<?, ?> timePartitioning = rawTimePartitioning instanceof Map<?, ?> map ? map : null;
+        Map<?, ?> rangePartitioning = rawRangePartitioning instanceof Map<?, ?> map ? map : null;
+        if ((timePartitioning == null && rangePartitioning == null) || data == null) {
+            return List.of();
+        }
+        Map<String, List<Map<String, Object>>> partitions = new LinkedHashMap<>();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        synchronized (data) {
+            data.getPartitionRows().forEach((id, values) ->
+                    partitions.computeIfAbsent(id, ignored -> new ArrayList<>()).addAll(values));
+            if (timePartitioning != null && timePartitioning.get("field") instanceof String field) {
+                Object rawType = timePartitioning.get("type");
+                String type = rawType != null ? String.valueOf(rawType) : "DAY";
+                String actualField = BigQueryMetadata.actualFieldName(table, field);
+                synchronized (data.getRows()) {
+                    data.getRows().forEach(value -> partitions
+                            .computeIfAbsent(partitionId(value.get(actualField), type), ignored -> new ArrayList<>())
+                            .add(value));
+                }
+            } else if (rangePartitioning != null && rangePartitioning.get("field") instanceof String field) {
+                String actualField = BigQueryMetadata.actualFieldName(table, field);
+                synchronized (data.getRows()) {
+                    data.getRows().forEach(value -> partitions
+                            .computeIfAbsent(rangePartitionId(value.get(actualField), rangePartitioning),
+                                    ignored -> new ArrayList<>())
+                            .add(value));
+                }
+            }
+            partitions.forEach((partitionId, partition) -> rows.add(
+                    partitionRow(projectId, datasetId, table, partitionId, partition)));
+        }
+        return rows;
+    }
+
+    private static Map<String, Object> partitionRow(String projectId, String datasetId, Table table,
+                                                     String partitionId, List<Map<String, Object>> partition) {
+        Map<String, Object> row = base(projectId, datasetId, table.getTableReference().getTableId());
+        row.put("partition_id", partitionId);
+        row.put("total_rows", (long) partition.size());
+        long bytes = serializedBytes(partition);
+        row.put("total_logical_bytes", bytes);
+        row.put("total_billable_bytes", bytes);
+        row.put("last_modified_time", seconds(table.getLastModifiedTime()));
+        row.put("storage_tier", "ACTIVE");
+        return row;
+    }
+
+    private static String partitionId(Object value, String type) {
+        if (value == null) {
+            return "__NULL__";
+        }
+        LocalDateTime dateTime = partitionDateTime(String.valueOf(value));
+        return switch (type.toUpperCase(Locale.ROOT)) {
+            case "HOUR" -> dateTime.format(DateTimeFormatter.ofPattern("yyyyMMddHH"));
+            case "MONTH" -> dateTime.format(DateTimeFormatter.ofPattern("yyyyMM"));
+            case "YEAR" -> dateTime.format(DateTimeFormatter.ofPattern("yyyy"));
+            default -> dateTime.format(DateTimeFormatter.BASIC_ISO_DATE);
+        };
+    }
+
+    private static String rangePartitionId(Object value, Map<?, ?> partitioning) {
+        if (value == null) {
+            return "__NULL__";
+        }
+        if (!(partitioning.get("range") instanceof Map<?, ?> range)) {
+            return "__UNPARTITIONED__";
+        }
+        try {
+            BigInteger number = new BigInteger(String.valueOf(value));
+            BigInteger start = new BigInteger(String.valueOf(range.get("start")));
+            BigInteger end = new BigInteger(String.valueOf(range.get("end")));
+            BigInteger interval = new BigInteger(String.valueOf(range.get("interval")));
+            if (number.compareTo(start) < 0 || number.compareTo(end) >= 0) {
+                return "__UNPARTITIONED__";
+            }
+            return start.add(number.subtract(start).divide(interval).multiply(interval)).toString();
+        } catch (RuntimeException invalidRange) {
+            return "__UNPARTITIONED__";
+        }
+    }
+
+    private static LocalDateTime partitionDateTime(String value) {
+        return DuckTypes.storedDateTime(value);
+    }
+
+    private static long serializedBytes(List<Map<String, Object>> rows) {
+        long bytes = 0;
+        for (Map<String, Object> row : rows) {
+            try {
+                bytes += JSON.writeValueAsBytes(row).length;
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not size partition row data", e);
+            }
+        }
+        return bytes;
+    }
+
+    private static String tableKey(String datasetId, String tableId) {
+        return datasetId + "/" + tableId;
     }
 
     private static Map<String, Object> schemataRow(String projectId, Dataset dataset) {

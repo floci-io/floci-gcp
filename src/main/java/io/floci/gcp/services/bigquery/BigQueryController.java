@@ -297,10 +297,14 @@ public class BigQueryController {
         if (loadConfig != null) {
             return Response.ok(buildJob(service.load(projectId, location, jobId, loadConfig, null))).build();
         }
+        Map<String, Object> copyConfig = configuration != null ? asMap(configuration.get("copy")) : null;
+        if (copyConfig != null) {
+            return Response.ok(buildJob(service.copy(projectId, location, jobId, copyConfig))).build();
+        }
         Map<String, Object> queryConfig = configuration != null ? asMap(configuration.get("query")) : null;
         if (queryConfig == null || queryConfig.get("query") == null) {
             throw GcpException.invalidArgument(
-                    "Only QUERY and LOAD jobs are supported by the floci BigQuery emulator");
+                    "Only QUERY, LOAD, and COPY jobs are supported by the floci BigQuery emulator");
         }
         boolean dryRun = Boolean.TRUE.equals(configuration.get("dryRun"));
         BigQueryService.QueryOptions options = queryOptions(queryConfig, dryRun);
@@ -370,7 +374,21 @@ public class BigQueryController {
                 string(config.get("parameterMode"), "parameterMode"), dryRun, useLegacySql, destinationTable,
                 disposition(config.get("writeDisposition"), "writeDisposition", WRITE_DISPOSITIONS),
                 disposition(config.get("createDisposition"), "createDisposition", CREATE_DISPOSITIONS),
-                schemaUpdateOptions(config.get("schemaUpdateOptions")));
+                schemaUpdateOptions(config.get("schemaUpdateOptions")),
+                copyMap(config.get("timePartitioning"), "timePartitioning"),
+                copyMap(config.get("rangePartitioning"), "rangePartitioning"));
+    }
+
+    private static Map<String, Object> copyMap(Object raw, String field) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> map)) {
+            throw QueryEngine.invalidQuery(field + " must be an object");
+        }
+        Map<String, Object> copy = new LinkedHashMap<>();
+        map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+        return copy;
     }
 
     /**
@@ -481,6 +499,9 @@ public class BigQueryController {
         if ("LOAD".equals(sj.getJobType())) {
             return buildLoadJob(sj, job);
         }
+        if ("COPY".equals(sj.getJobType())) {
+            return buildCopyJob(sj, job);
+        }
 
         Map<String, Object> queryConfig = new LinkedHashMap<>();
         queryConfig.put("query", sj.getQuery());
@@ -563,6 +584,20 @@ public class BigQueryController {
         return job;
     }
 
+    private static Job buildCopyJob(StoredJob sj, Job job) {
+        Map<String, Object> configuration = new LinkedHashMap<>();
+        configuration.put("jobType", "COPY");
+        configuration.put("copy", sj.getCopyConfiguration());
+        job.setConfiguration(configuration);
+        job.setStatus(status(sj, null));
+        Map<String, Object> statistics = new LinkedHashMap<>();
+        statistics.put("creationTime", sj.getCreationTime());
+        statistics.put("startTime", sj.getCreationTime());
+        statistics.put("endTime", sj.getCreationTime());
+        job.setStatistics(statistics);
+        return job;
+    }
+
     private static JobStatus status(StoredJob sj, String location) {
         JobStatus status = new JobStatus();
         status.setState(sj.getState());
@@ -585,17 +620,19 @@ public class BigQueryController {
         if (maxResults != null && maxResults == 0) {
             return new PageToken.Page<>(List.of(), null);
         }
+        PageToken.Cursor cursor = PageToken.decodeCursor(pageToken);
         int offset = pageToken != null && !pageToken.isBlank()
-                ? PageToken.decode(pageToken)
+                ? cursor.offset()
                 : startIndex != null ? (int) Math.min(startIndex, Integer.MAX_VALUE) : 0;
         if (offset < 0 || offset >= all.size()) {
             return new PageToken.Page<>(List.of(), null);
         }
         int size = maxResults != null && maxResults > 0
-                ? (int) Math.min(maxResults, Integer.MAX_VALUE) : all.size();
+                ? (int) Math.min(maxResults, Integer.MAX_VALUE)
+                : cursor.pageSize() != null && cursor.pageSize() > 0 ? cursor.pageSize() : all.size();
         int end = Math.min(offset + size, all.size());
         List<TableRow> items = List.copyOf(all.subList(offset, end));
-        String next = end < all.size() ? PageToken.encode(end) : null;
+        String next = end < all.size() ? PageToken.encode(end, size) : null;
         return new PageToken.Page<>(items, next);
     }
 

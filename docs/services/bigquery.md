@@ -2,7 +2,7 @@
 
 floci-gcp emulates the BigQuery v2 REST API (the surface the `google-cloud-bigquery` SDKs and
 the Discovery document define): datasets, tables with schemas, `tabledata.insertAll`,
-`tabledata.list`, and query jobs that run **GoogleSQL on an embedded DuckDB engine**, plus the
+`tabledata.list`, and query jobs that run **GoogleSQL on a DuckDB sidecar**, plus the
 **Storage Read and Write APIs** over gRPC on the same port.
 
 ## Configuration
@@ -64,13 +64,32 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `{v}`, `RECORD` as nested `{f:[...]}`), `maxResults`/`pageToken`/`startIndex` paging.
   `maxResults=0` returns zero rows (the SDK's `Job.waitFor()` contract); a `pageToken` wins over
   `startIndex` (the SDK sends both when auto-paging).
-- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY and LOAD), `jobs.get`, `jobs.list`,
+- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY, LOAD and COPY), `jobs.get`, `jobs.list`,
   `jobs.cancel`, `jobs.delete`, `getQueryResults`. Query results are materialized into a hidden
   anonymous table (`_floci_anon.anon_<jobId>`) referenced as the job's
   `configuration.query.destinationTable`, which is how the SDK's `Job.getQueryResults()` reads
   rows.
+- **Copy jobs**: `configuration.copy` accepts either `sourceTable` or non-empty `sourceTables`,
+  plus `destinationTable`. It supports `CREATE_IF_NEEDED`/`CREATE_NEVER` and
+  `WRITE_EMPTY`/`WRITE_TRUNCATE`/`WRITE_APPEND`, validates that multiple sources have identical
+  schemas, partitioning and clustering, and copies table metadata when creating a destination.
+  Partition-decorated source and destination references copy only the named partition. Supported
+  decorators follow the table definition: `$YYYYMMDDHH` (hour), `$YYYYMMDD` (day), `$YYYYMM`
+  (month), `$YYYY` (year), and `$range_start` for integer-range partitions. Copying a decorated
+  source to an undecorated partitioned destination retains the source partition. Column- and
+  range-partitioned decorated copies require identical partition specifications and IDs;
+  ingestion-time copies may target the same granularity or a containing coarser partition.
+  Copy references are currently limited to the project that owns the job.
 - **Query parameters**: `parameterMode` `NAMED` (`@name`) and `POSITIONAL` (`?`), with scalar,
   `ARRAY` and `STRUCT` parameter types.
+- **Scripts and temporary objects**: request-scoped `CREATE TEMP FUNCTION` and `CREATE TEMP TABLE`
+  declarations can be interleaved with queries in source order. Functions become temporary
+  DuckDB macros; typed scalar, array and nested `STRUCT` parameters are accepted, and CTEs in a
+  function body remain local to that body. Preceding query results are discarded and the final
+  query or DML statement supplies the result. Procedural `IF`/`ELSEIF`/`ELSE` blocks are evaluated
+  with the same temporary objects and execute only their selected branch. Variables, loops,
+  JavaScript UDFs, persistent mutations before the final statement of a non-procedural script, and
+  positional parameters in multi-statement scripts are not supported.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is
@@ -80,7 +99,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
   (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
   reported in the job status (`duplicate`, `notFound`); any other disposition value is an
-  HTTP 400 (`invalid`).
+  HTTP 400 (`invalid`). A partition-decorated destination writes that named partition of an existing
+  partitioned table; `WRITE_TRUNCATE`, `WRITE_APPEND` and `WRITE_EMPTY` apply to that partition.
+  Queries over an ingestion-time-partitioned base table materialize `_PARTITIONTIME` for stored
+  rows and `_PARTITIONDATE` for daily partitions, so they can filter or explicitly project a
+  selected partition. As in BigQuery, these pseudocolumns are not expanded by `SELECT *`; an
+  undecorated read sees all stored rows. Ordinary writes go to the current ingestion-time
+  partition, while a decorator selects an explicit partition.
 - **Views**: logical and materialized views, created with `tables.insert` (`view.query`) or
   DDL. The view query is validated and its schema derived on creation; views are expanded at
   query time, including views over views. A materialized view is evaluated on read, like a
@@ -118,23 +143,32 @@ Server-side behavior driven by these fields:
   schema, and not both time and range partitioning. Violations return 400 with reason `invalid`,
   and a rejected update leaves the stored resource unchanged.
 
-Partitioning and clustering are metadata only: queries do not prune partitions and
-`requirePartitionFilter` is not enforced.
+Partitioning and clustering are metadata only apart from partition routing for writes,
+partition-decorated query/load/copy reads and writes, their `_PARTITIONDATE`/`_PARTITIONTIME`
+query pseudocolumns, and partition rows reported by `INFORMATION_SCHEMA.PARTITIONS`. Decorated
+`tabledata.insertAll` is limited, like BigQuery's legacy streaming API, to daily ingestion-time
+partitions from 31 days in the past through 16 days in the future. Queries do not physically prune
+partitions, partition expiration is not applied, and `requirePartitionFilter` is not enforced.
 
 ## GoogleSQL support
 
 Queries are translated to DuckDB SQL and executed on the sidecar, so most of GoogleSQL's
 `SELECT` surface works:
 
-- `JOIN` (all kinds), `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
+- `JOIN` (all kinds, including correlated `LEFT JOIN UNNEST(array) alias`), `GROUP BY`, `HAVING`,
+  `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
   `UNION`/`INTERSECT`/`EXCEPT` (`ALL` and `DISTINCT`), subqueries, `WITH` (CTEs), window
   functions, `QUALIFY`, `UNNEST` (including `FROM t, t.array_column AS x` and `x IN UNNEST(...)`),
   `SELECT * EXCEPT (...)` and `SELECT * REPLACE (...)`.
+- Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
+  and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes
-  literals, `TIMESTAMP`/`DATETIME`/`DATE`/`TIME`/`NUMERIC`/`JSON` typed literals.
+  literals, `TIMESTAMP`/`DATETIME`/`DATE`/`TIME`/`NUMERIC`/`JSON` typed literals, and typed
+  array literals including `ARRAY<STRUCT<...>>[...]`.
 - `CAST`/`SAFE_CAST` with GoogleSQL type names, including `ARRAY<...>` and `STRUCT<...>`.
 - Functions rewritten to their DuckDB equivalents: `SAFE_DIVIDE`, `IEEE_DIVIDE`, `DIV`, `IF`,
   `COUNTIF`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `GENERATE_ARRAY`,
+  `GENERATE_UUID`, `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`,
   `SPLIT`, `FORMAT`, `TO_JSON_STRING`, `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
   `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
@@ -143,6 +177,41 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `DATE(...)`/`DATETIME(...)`/`TIMESTAMP(...)`, `EXTRACT` (including `DAYOFWEEK`, 1 = Sunday) and
   `STRUCT(... AS name)`. Functions with the same name and meaning in both dialects (`COALESCE`,
   `IFNULL`, `CONCAT`, `LOWER`, `STRING_AGG`, `ARRAY_AGG`, `ROUND`, and many more) pass through.
+- `ARRAY_CONCAT_AGG` concatenates array inputs. `HLL_COUNT.INIT`, `HLL_COUNT.EXTRACT`,
+  `HLL_COUNT.MERGE` and `HLL_COUNT.MERGE_PARTIAL` compose through `BYTES` sketch values,
+  including merges over sketches from grouped CTEs and `UNNEST`ed arrays. The sidecar uses
+  BigQuery-compatible HLL++ ZetaSketch bytes for `INT64`, `STRING`, and `BYTES` inputs, including
+  BigQuery's precision range and NULL behavior. `NUMERIC` and `BIGNUMERIC` sketch initialization
+  are not currently supported.
+- `CONTAINS_SUBSTR` supports scalar `STRING` inputs with case-insensitive NFC-normalized substring
+  matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
+  emulated.
+- `LENGTH` counts Unicode characters for `STRING` and bytes for `BYTES`. `BYTE_LENGTH` returns the
+  UTF-8 byte length of `STRING` and the byte length of `BYTES`. `RAND` returns a uniformly
+  distributed value in the half-open interval `[0, 1)`.
+- `FARM_FINGERPRINT` accepts `STRING` (UTF-8) and `BYTES` inputs and returns the BigQuery-compatible
+  signed `INT64` FarmHash Fingerprint64 value. `NULL` input returns `NULL`.
+- `TO_JSON_STRING` preserves typed temporal values recursively: `DATE` uses `YYYY-MM-DD`, `TIME`
+  uses `HH:MM:SS` with BigQuery's canonical 0, 3, or 6 fractional digits, `DATETIME` uses ISO-8601
+  civil time, and `TIMESTAMP` uses UTC ISO-8601 with `Z`. UUID and `HUGEINT` values serialize as
+  canonical and lossless decimal strings. Ordinary `STRING` values are not interpreted or
+  rewritten based on their contents.
+- `ARRAY_AGG(value IGNORE NULLS ORDER BY ... LIMIT n)` preserves BigQuery's null filtering,
+  aggregate ordering, and inline result limit, including when followed by a window `OVER` clause.
+- Array subscripts using `OFFSET(index)` preserve GoogleSQL's zero-based indexing.
+- `NET.IP_FROM_STRING` returns canonical IPv4 or IPv6 address `BYTES` and fails for malformed input.
+  `NET.SAFE_IP_FROM_STRING` returns `NULL` instead. `NET.IP_TRUNC(address, bits)` supports
+  byte-address prefix truncation, and `NET.IP_TO_STRING` formats address bytes canonically.
+- `HAVING` can dereference a field of an explicit `STRUCT` select alias, including an aggregate
+  field such as `latest.pt` where `latest` contains `MAX(...)`.
+- `TIMESTAMP_ADD` and `TIMESTAMP_SUB` coerce GoogleSQL string timestamp literals before interval
+  arithmetic.
+- `SAFE.PARSE_DATE` and `SAFE.PARSE_TIMESTAMP` return `NULL` rather than failing when their input
+  does not match the supplied format string.
+- `DATE_TRUNC` accepts BigQuery-coerced date string literals as well as typed `DATE` values.
+- `UNPIVOT` supports the single-value `value FOR name IN (column, ...)` form used by analytical
+  queries. It retains BigQuery's default `EXCLUDE NULLS` behavior. Multi-column sets and aliases
+  are not emulated.
 - Unaliased expressions in the select list are named `f0_`, `f1_`, ... like BigQuery names them.
 - Result schemas carry real types: `INTEGER`, `FLOAT`, `NUMERIC`, `BOOLEAN`, `STRING`, `BYTES`,
   `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `JSON`, `RECORD` (with nested fields) and `REPEATED`
@@ -156,7 +225,7 @@ columns BigQuery documents:
 | View | Qualifiers |
 |---|---|
 | `SCHEMATA` | `[project.]INFORMATION_SCHEMA.SCHEMATA` (US region), ``[project.]`region-x`.INFORMATION_SCHEMA.SCHEMATA`` |
-| `TABLES`, `COLUMNS`, `COLUMN_FIELD_PATHS`, `TABLE_OPTIONS`, `VIEWS` | `[project.]dataset.INFORMATION_SCHEMA.VIEW` or ``[project.]`region-x`.INFORMATION_SCHEMA.VIEW`` |
+| `TABLES`, `COLUMNS`, `COLUMN_FIELD_PATHS`, `TABLE_OPTIONS`, `VIEWS`, `PARTITIONS` | `[project.]dataset.INFORMATION_SCHEMA.VIEW` or ``[project.]`region-x`.INFORMATION_SCHEMA.VIEW`` |
 
 - A region qualifier covers every dataset whose location matches (`region-us` matches `US`); a
   dataset qualifier for a missing dataset is a 404. Without a qualifier, the request's
@@ -166,10 +235,14 @@ columns BigQuery documents:
 - `ddl` is a `CREATE TABLE` / `CREATE VIEW` / `CREATE SCHEMA` statement in BigQuery's format.
 - `TABLE_OPTIONS` reports `description`, `friendly_name` and `labels` as GoogleSQL literals
   (`"text"`, `[STRUCT("key", "value")]`).
+- `PARTITIONS` reports decorator-written ingestion-time partitions and derives partitions from
+  rows in field-partitioned tables, including `__NULL__`. `total_logical_bytes` and
+  `total_billable_bytes` are the size of the emulator's stored JSON rows, and
+  `last_modified_time` is the table-level modification time.
 - Columns describing features the emulator does not model (clones, snapshots, replicas, identity
   and generated columns, policy tags) are present and `NULL`, `NO` or empty. `COLUMNS` omits
   `async_generation_status` and `data_policies`; `COLUMN_FIELD_PATHS` omits `data_policies`.
-- Other views (`JOBS`, `PARTITIONS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
+- Other views (`JOBS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
 
 ## Storage Read API
 
@@ -308,6 +381,8 @@ BigQuery's 10 MB `AppendRows` limit.
   a header gets generic names such as `string_field_0`. `skipLeadingRows` follows BigQuery's
   auto-detection rules (unset: detect a header; `0`: no header; `N`: skip `N-1` rows and detect a
   header in row `N`).
+- **Partition decorators**: a destination such as `table$YYYYMMDD` reuses the pre-created
+  partitioned base table's schema and writes only the selected partition.
 - **CSV options**: `skipLeadingRows`, `fieldDelimiter` (including `\t`), `quote`,
   `allowJaggedRows`, `nullMarker`, `encoding` (`UTF-8`, `ISO-8859-1`) and `maxBadRecords`. Without
   a `nullMarker`, an empty `STRING` value stays an empty string and empty values of other types
@@ -334,8 +409,9 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `DELETE [FROM] t WHERE ...` | `WHERE` is required |
 | `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); `PARTITION BY`, `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; supported time `PARTITION BY` expressions populate table metadata |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source` | Copies schema, metadata, ordinary rows, and decorated partitions |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
 | `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE \| RESTRICT]` | Datasets; a non-empty dataset needs `CASCADE`. `CASCADE`/`RESTRICT` are rejected on `DROP TABLE`/`VIEW` |
@@ -403,7 +479,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 |---|---|---|
 | `STRING` | string, number, boolean | as-is |
 | `INTEGER` (`INT64`) | integral number, decimal string | decimal string |
-| `FLOAT` (`FLOAT64`) | number, decimal string | decimal string |
+| `FLOAT` (`FLOAT64`) | number, decimal string | JSON number |
 | `BOOLEAN` (`BOOL`) | boolean, `"true"`/`"false"` | `"true"`/`"false"` |
 | `RECORD` (`STRUCT`) | object (validated against nested fields) | `{f:[...]}` |
 | any + `REPEATED` mode | array of the base type | array of `{v}` |
@@ -411,19 +487,22 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
-- Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW`, `CREATE FUNCTION` /
-  `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported yet; they fail with `invalidQuery`.
+- Scripts support temporary SQL functions and tables plus `IF`/`ELSEIF`/`ELSE`. Variables,
+  loops, JavaScript UDFs, persistent `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA`, `LOAD DATA`,
+  `ALTER TABLE`, and `ALTER VIEW` are not supported; they fail with `invalidQuery`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
-- Table-level `PARTITION BY`, `CLUSTER BY` and `OPTIONS` in DDL are not stored.
+- `CLUSTER BY` and table `OPTIONS` in DDL are not stored. Time-based `PARTITION BY` metadata is
+  stored for the supported expressions documented above.
 - Legacy SQL (`useLegacySql: true`) is rejected. A request that omits `useLegacySql` runs as
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
 - `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias
   (`UNNEST(array) AS x`) the element is one column `x`.
-- `UNNEST ... WITH OFFSET`, INFORMATION_SCHEMA views other than the six above, wildcard tables, `FOR SYSTEM_TIME AS OF`,
-  `GEOGRAPHY` functions, BigQuery ML and remote functions are not emulated.
-- `ARRAY_AGG(... IGNORE NULLS)`, `SAFE.`-prefixed functions and GoogleSQL `WEEK` boundaries
-  (Sunday-based) follow DuckDB's behavior.
+- `UNNEST ... WITH OFFSET`, INFORMATION_SCHEMA views other than the seven above, non-terminal
+  wildcard table patterns, `FOR SYSTEM_TIME AS OF`, `GEOGRAPHY` functions, BigQuery ML and remote
+  functions are not emulated.
+- Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.PARSE_DATE`,
+  `SAFE.PARSE_TIMESTAMP`, and `NET.SAFE_IP_FROM_STRING` are supported explicitly.
 - `NUMERIC` and `BIGNUMERIC` are computed as `DECIMAL(38, 9)`.
 - `TIMESTAMP` values nested inside `RECORD` or `REPEATED` columns must be stored as ISO-8601
   strings to be queryable; top-level `TIMESTAMP` columns accept epoch seconds too.

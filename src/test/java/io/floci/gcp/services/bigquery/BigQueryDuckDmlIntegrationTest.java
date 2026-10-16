@@ -106,6 +106,15 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(BASE + "/jobs/" + insertJob).then().statusCode(200)
                 .body("statistics.query.statementType", equalTo("INSERT"))
                 .body("statistics.query.numDmlAffectedRows", equalTo("3"));
+
+        query("INSERT INTO shop.items (id, name, price, tags)"
+                + " VALUES (4, 'typed', 2, ARRAY<STRING>['array', 'literal'])")
+                .then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
+        query("SELECT tags FROM shop.items WHERE id = 4").then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("array", "literal")));
+        query("DELETE shop.items WHERE id = 4").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
         given().when().get(BASE + "/queries/" + insertJob).then().statusCode(200)
                 .body("totalRows", equalTo("0"))
                 .body("numDmlAffectedRows", equalTo("3"));
@@ -400,7 +409,245 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(100)
+    void destinationPartitionDecoratorsWriteOnePartition() {
+        query("CREATE SCHEMA partitions").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference":{"tableId":"events"},
+                 "schema":{"fields":[{"name":"id","type":"INT64"}]},
+                 "timePartitioning":{"type":"DAY"}}
+                """).when().post(BASE + "/datasets/partitions/tables").then().statusCode(200);
+
+        Map<String, Object> first = Map.of("datasetId", "partitions", "tableId", "events$20261006");
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable", first,
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("configuration.query.destinationTable.tableId", equalTo("events$20261006"));
+        insertJob(Map.of("query", "SELECT 2 AS id", "useLegacySql", false, "destinationTable", first,
+                "writeDisposition", "WRITE_APPEND")).then().statusCode(200);
+        insertJob(Map.of("query", "SELECT 3 AS id", "useLegacySql", false, "destinationTable",
+                Map.of("datasetId", "partitions", "tableId", "events$20261007"),
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200);
+        String partitionJob = insertJob(Map.of("query", "SELECT 4 AS id", "useLegacySql", false,
+                "destinationTable", first, "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .extract().jsonPath().getString("jobReference.jobId");
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("3"), List.of("4")),
+                rows("SELECT id FROM partitions.events ORDER BY id"));
+        query("SELECT * FROM partitions.events ORDER BY id").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id")))
+                .body("rows.f.v", equalTo(List.of(List.of("3"), List.of("4"))));
+        query("SELECT * REPLACE (id + 100 AS id) FROM partitions.events"
+                + " WHERE _PARTITIONDATE = DATE '2026-10-06'").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id")))
+                .body("rows.f.v", equalTo(List.of(List.of("104"))));
+        given().when().get(BASE + "/queries/" + partitionJob).then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("4"))));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("4")),
+                rows("SELECT id FROM partitions.events WHERE _PARTITIONDATE = DATE '2026-10-06'"));
+        query("SELECT id FROM `partitions.events$20261006`").then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.events"
+                        + " WHERE _PARTITIONTIME = TIMESTAMP '2026-10-07 00:00:00+00'"));
+        insertJob(Map.of("query", "SELECT 5 AS id", "useLegacySql", false, "destinationTable", first))
+                .then().statusCode(200).body("status.errorResult.reason", equalTo("duplicate"));
+
+        query("UPDATE partitions.events SET id = id + 10"
+                + " WHERE _PARTITIONDATE = DATE '2026-10-06'").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("3"), List.of("14")),
+                rows("SELECT id FROM partitions.events ORDER BY id"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("14")),
+                rows("SELECT id FROM partitions.events WHERE _PARTITIONDATE = DATE '2026-10-06'"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("20261006"), List.of("20261007")),
+                rows("SELECT partition_id FROM partitions.INFORMATION_SCHEMA.PARTITIONS"
+                        + " WHERE table_name = 'events' ORDER BY partition_id"));
+
+        query("CREATE TABLE partitions.events_copy COPY partitions.events").then().statusCode(200);
+        given().when().get(BASE + "/datasets/partitions/tables/events_copy").then().statusCode(200)
+                .body("timePartitioning.type", equalTo("DAY"))
+                .body("schema.fields.name", equalTo(List.of("id")));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("14")),
+                rows("SELECT id FROM partitions.events_copy"
+                        + " WHERE _PARTITIONDATE = DATE '2026-10-06'"));
+    }
+
+    @Test
+    @Order(101)
+    void insertPartitionTimeDerivesPartitionDate() {
+        query("CREATE TABLE partitions.metrics (id INT64) PARTITION BY DATE(_PARTITIONTIME)")
+                .then().statusCode(200);
+        given().when().get(BASE + "/datasets/partitions/tables/metrics").then().statusCode(200)
+                .body("timePartitioning.type", equalTo("DAY"));
+        query("INSERT INTO partitions.metrics (id, _PARTITIONTIME) "
+                + "SELECT 1, TIMESTAMP '2026-10-08 00:00:00+00'")
+                .then().statusCode(200).body("errors", nullValue());
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT id FROM partitions.metrics WHERE _PARTITIONDATE = DATE '2026-10-08'"));
+
+        query("INSERT INTO partitions.metrics VALUES (2)")
+                .then().statusCode(200).body("errors", nullValue());
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.metrics WHERE id = 2"));
+    }
+
+    @Test
+    @Order(1011)
+    void hourlyPartitionTimeSurvivesInternalStaging() {
+        given().contentType("application/json").body("""
+                {"tableReference":{"tableId":"hourly_events"},
+                 "schema":{"fields":[{"name":"id","type":"INT64"}]},
+                 "timePartitioning":{"type":"HOUR"}}
+                """).when().post(BASE + "/datasets/partitions/tables").then().statusCode(200);
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable",
+                Map.of("datasetId", "partitions", "tableId", "hourly_events$2026100812"),
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.hourly_events"
+                        + " WHERE _PARTITIONTIME = TIMESTAMP '2026-10-08 12:00:00+00'"));
+    }
+
+    @Test
+    @Order(1012)
+    void queryTimestampValuesRouteToPartitions() {
+        query("CREATE TABLE partitions.by_timestamp PARTITION BY DATE(ts) AS "
+                + "SELECT TIMESTAMP '2026-10-01 00:00:00+00' AS ts").then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/partitions/tables/by_timestamp$20261001/data")
+                .then().statusCode(200).body("totalRows", equalTo("1"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("20261001")),
+                rows("SELECT partition_id FROM partitions.INFORMATION_SCHEMA.PARTITIONS"
+                        + " WHERE table_name = 'by_timestamp'"));
+    }
+
+    @Test
+    @Order(1013)
+    void updatingPartitionTimeMovesAnIngestionTimeRow() {
+        query("CREATE TABLE partitions.movable_events (id INT64) PARTITION BY DATE(_PARTITIONTIME)")
+                .then().statusCode(200);
+        query("INSERT INTO partitions.movable_events (id, _PARTITIONTIME) "
+                + "SELECT 1, TIMESTAMP '2026-10-08 00:00:00+00'").then().statusCode(200);
+
+        query("UPDATE partitions.movable_events "
+                + "SET _PARTITIONTIME = TIMESTAMP '2026-10-09 00:00:00+00' WHERE id = 1")
+                .then().statusCode(200).body("numDmlAffectedRows", equalTo("1"));
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("0")),
+                rows("SELECT COUNT(*) FROM partitions.movable_events "
+                        + "WHERE _PARTITIONDATE = DATE '2026-10-08'"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.movable_events "
+                        + "WHERE _PARTITIONDATE = DATE '2026-10-09'"));
+    }
+
+    @Test
+    @Order(1014)
+    void truncatedPartitionTimeCreatesAnIngestionTimePartitionedTable() {
+        query("CREATE TABLE partitions.hourly_ingestion (id INT64) "
+                + "PARTITION BY TIMESTAMP_TRUNC(_PARTITIONTIME, HOUR)").then().statusCode(200);
+        given().when().get(BASE + "/datasets/partitions/tables/hourly_ingestion")
+                .then().statusCode(200)
+                .body("timePartitioning.type", equalTo("HOUR"))
+                .body("timePartitioning.field", nullValue());
+
+        query("INSERT INTO partitions.hourly_ingestion (id) VALUES (1)")
+                .then().statusCode(200).body("numDmlAffectedRows", equalTo("1"));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.hourly_ingestion WHERE _PARTITIONTIME IS NOT NULL"));
+    }
+
+    @Test
+    @Order(102)
+    void scriptsSupportTemporaryFunctionsAndPrecedingSelects() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("42")), rows("""
+                SELECT 1 AS ignored;
+                CREATE TEMP FUNCTION add_one(value ANY TYPE) AS (value + 1);
+                SELECT add_one(41) AS answer;
+                """));
+    }
+
+    @Test
+    @Order(103)
+    void temporaryFunctionCanUnnestTypedStructArrays() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("email-a;phone-b")), rows("""
+                CREATE TEMP FUNCTION join_keys_to_str(join_keys ARRAY<STRUCT<id_type STRING, id_value STRING>>)
+                RETURNS STRING AS ((
+                  SELECT ARRAY_TO_STRING(ARRAY_AGG(CONCAT(LOWER(id_type), "-", id_value) ORDER BY LOWER(id_type)), ";")
+                  FROM UNNEST(join_keys)
+                ));
+                SELECT join_keys_to_str([
+                  STRUCT('phone' AS id_type, 'b' AS id_value),
+                  STRUCT('email' AS id_type, 'a' AS id_value)
+                ]) AS keys;
+                """));
+    }
+
+    @Test
+    @Order(104)
+    void temporaryFunctionsCanReadEarlierTemporaryTables() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("2")), rows("""
+                CREATE TEMP TABLE input_rows AS SELECT 1 AS id UNION ALL SELECT 2;
+                CREATE TEMP FUNCTION max_id() AS ((SELECT MAX(id) FROM input_rows));
+                SELECT max_id() AS value;
+                """));
+    }
+
+    @Test
+    @Order(1041)
+    void invalidFinalTemporaryFunctionFailsExecutionAndDryRun() {
+        for (boolean dryRun : List.of(false, true)) {
+            given().contentType("application/json")
+                    .body(Map.of("query", "SELECT 1; CREATE TEMP FUNCTION f;",
+                            "useLegacySql", false, "dryRun", dryRun))
+                    .when().post(BASE + "/queries")
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"));
+        }
+    }
+
+    @Test
+    @Order(105)
+    void finalTemporaryTableDmlReportsAffectedRows() {
+        query("""
+                CREATE TEMP TABLE working_rows AS SELECT 1 AS id;
+                INSERT INTO working_rows VALUES (2), (3);
+                """).then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("2"))
+                .body("dmlStats.insertedRowCount", equalTo("2"));
+    }
+
+    @Test
+    @Order(106)
+    void intermediateTemporaryTableDmlDoesNotLeakStatistics() {
+        query("""
+                CREATE TEMP TABLE working_rows AS SELECT 1 AS id;
+                INSERT INTO working_rows VALUES (2);
+                SELECT COUNT(*) AS total FROM working_rows;
+                """).then().statusCode(200)
+                .body("numDmlAffectedRows", nullValue())
+                .body("dmlStats", nullValue())
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(107)
+    void createTableCopyRejectsViewsWithoutReplacingTheDestination() {
+        query("CREATE VIEW procedural.copy_source_view AS SELECT 1 AS id").then().statusCode(200);
+        query("CREATE TABLE procedural.copy_destination AS SELECT 9 AS id").then().statusCode(200);
+
+        query("CREATE OR REPLACE TABLE procedural.copy_destination COPY procedural.copy_source_view")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("9")),
+                rows("SELECT id FROM procedural.copy_destination"));
+    }
+
+    @Test
+    @Order(8)
     void truncateAndDrop() {
         query("TRUNCATE TABLE shop.items").then().statusCode(200)
                 .body("dmlStats.deletedRowCount", equalTo("3"));
@@ -504,5 +751,153 @@ class BigQueryDuckDmlIntegrationTest {
         insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false,
                 "destinationTable", Map.of("tableId", "orphan"))).then().statusCode(200)
                 .body("status.errorResult.reason", equalTo("invalid"));
+    }
+
+    @Test
+    @Order(13)
+    void proceduralIfExecutesTheSelectedGenericCopyBranch() {
+        query("CREATE SCHEMA procedural").then().statusCode(200);
+        query("CREATE TABLE procedural.new_rows AS SELECT 1 AS id").then().statusCode(200);
+        query("CREATE TABLE procedural.refreshed_rows AS SELECT 2 AS id").then().statusCode(200);
+
+        String copy = """
+                IF EXISTS (SELECT * FROM procedural.new_rows) THEN
+                  CREATE OR REPLACE TABLE procedural.output_rows COPY procedural.new_rows;
+                ELSE
+                  CREATE OR REPLACE TABLE procedural.output_rows COPY procedural.refreshed_rows;
+                END IF;
+                """;
+        query(copy).then().statusCode(200);
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")),
+                rows("SELECT id FROM procedural.output_rows"));
+
+        query("TRUNCATE TABLE procedural.new_rows").then().statusCode(200);
+        query(copy).then().statusCode(200);
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("2")),
+                rows("SELECT id FROM procedural.output_rows"));
+    }
+
+    @Test
+    @Order(14)
+    void proceduralIfSharesTemporaryObjectsWithConditionsAndSelectedStatements() {
+        query("CREATE TABLE procedural.temp_output (id INT64)").then().statusCode(200);
+
+        query("""
+                CREATE TEMP TABLE candidates AS SELECT 7 AS id;
+                IF EXISTS (SELECT 1 FROM candidates WHERE id = 7) THEN
+                  INSERT INTO procedural.temp_output SELECT id FROM candidates;
+                ELSE
+                  INSERT INTO procedural.temp_output VALUES (0);
+                END IF;
+                """).then().statusCode(200);
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("7")),
+                rows("SELECT id FROM procedural.temp_output"));
+    }
+
+    @Test
+    @Order(14)
+    void temporaryTruncateDoesNotTouchTheDefaultDatasetTable() {
+        query("CREATE OR REPLACE TABLE procedural.truncate_target AS SELECT 99 AS id").then().statusCode(200);
+
+        given().contentType("application/json")
+                .body(Map.of("query", """
+                        CREATE TEMP TABLE truncate_target AS SELECT 1 AS id;
+                        TRUNCATE TABLE truncate_target;
+                        SELECT * FROM truncate_target;
+                        """, "defaultDataset", Map.of("projectId", PROJECT, "datasetId", "procedural"),
+                        "useLegacySql", false))
+                .when().post(BASE + "/queries").then().statusCode(200)
+                .body("rows", nullValue())
+                .body("totalRows", equalTo("0"));
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("99")),
+                rows("SELECT id FROM procedural.truncate_target"));
+    }
+
+    @Test
+    @Order(15)
+    void proceduralIfReturnsTheSelectedQueryResult() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("selected")), rows("""
+                IF TRUE THEN
+                  SELECT 'selected' AS result;
+                ELSE
+                  SELECT 'skipped' AS result;
+                END IF;
+                """));
+    }
+
+    @Test
+    @Order(16)
+    void proceduralTemporaryTablesRemainSnapshotsAcrossPersistentDml() {
+        query("CREATE TABLE procedural.snapshot_source AS SELECT 1 AS id").then().statusCode(200);
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1")), rows("""
+                CREATE TEMP TABLE snapshot AS SELECT * FROM procedural.snapshot_source;
+                IF TRUE THEN
+                  DELETE FROM procedural.snapshot_source WHERE TRUE;
+                  SELECT id FROM snapshot;
+                END IF;
+                """));
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("0")),
+                rows("SELECT COUNT(*) FROM procedural.snapshot_source"));
+    }
+
+    @Test
+    @Order(17)
+    void proceduralCreateTableAsSelectCanReadTemporaryTables() {
+        query("""
+                CREATE TEMP TABLE candidates AS SELECT 9 AS id;
+                IF TRUE THEN
+                  CREATE TABLE procedural.from_temp AS SELECT * FROM candidates;
+                END IF;
+                """).then().statusCode(200).body("errors", nullValue());
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("9")),
+                rows("SELECT id FROM procedural.from_temp"));
+    }
+
+    @Test
+    @Order(18)
+    void straightLineScriptCreateTableCanReadTemporaryTables() {
+        query("""
+                CREATE TEMP TABLE staged_values AS SELECT 11 AS id;
+                CREATE TABLE procedural.straight_from_temp AS SELECT * FROM staged_values;
+                """).then().statusCode(200).body("errors", nullValue());
+
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("11")),
+                rows("SELECT id FROM procedural.straight_from_temp"));
+    }
+
+    @Test
+    @Order(19)
+    void temporaryTableSnapshotsPreserveBackslashes() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("C:\\new")), rows("""
+                CREATE TEMP TABLE snapshot AS SELECT r'C:\\new' AS path;
+                SELECT path FROM snapshot;
+                """));
+    }
+
+    @Test
+    @Order(20)
+    void temporaryTablesAcceptIntermediateDml() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("2"), List.of("11")), rows("""
+                CREATE TEMP TABLE working_rows AS SELECT 1 AS id;
+                INSERT INTO working_rows VALUES (2);
+                UPDATE working_rows SET id = id + 10 WHERE id = 1;
+                SELECT id FROM working_rows ORDER BY id;
+                """));
+    }
+
+    @Test
+    @Order(21)
+    void proceduralIfAcceptsCaseExpressions() {
+        org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("selected")), rows("""
+                IF CASE WHEN TRUE THEN TRUE ELSE FALSE END THEN
+                  SELECT 'selected' AS result;
+                ELSE
+                  SELECT 'skipped' AS result;
+                END IF;
+                """));
     }
 }

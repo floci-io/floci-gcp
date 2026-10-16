@@ -188,6 +188,17 @@ final class BigQueryMetadata {
         }
     }
 
+    static String actualFieldName(Table table, String configuredName) {
+        if (table.getSchema() == null || table.getSchema().getFields() == null) {
+            return configuredName;
+        }
+        return table.getSchema().getFields().stream()
+                .map(TableFieldSchema::getName)
+                .filter(name -> name.equalsIgnoreCase(configuredName))
+                .findFirst()
+                .orElse(configuredName);
+    }
+
     // ── Server-side behavior ─────────────────────────────────────────────────
 
     /**

@@ -23,9 +23,9 @@ import java.util.Map;
 
 /**
  * Schema-aware conversion between {@code insertAll} JSON rows, the normalized stored
- * representation, and BigQuery's {@code {f:[{v:...}]}} wire encoding. Scalar cell values
- * are always strings on the wire; REPEATED cells are arrays of {@code {v:...}} and RECORD
- * cells nest {@code {f:[...]}} (the exact contract of the SDK's {@code FieldValue.fromPb}).
+ * representation, and BigQuery's {@code {f:[{v:...}]}} wire encoding. INTEGER cells are
+ * strings, including FLOAT cells; REPEATED cells are arrays of {@code {v:...}} and
+ * RECORD cells nest {@code {f:[...]}}.
  */
 final class RowCodec {
 
@@ -387,6 +387,48 @@ final class RowCodec {
         return new TableRow(cells);
     }
 
+    public static Map<String, Object> formatForDuck(TableSchema schema, Map<String, Object> row) {
+        if (schema == null || schema.getFields() == null || row == null) {
+            return row;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (TableFieldSchema field : schema.getFields()) {
+            if (row.containsKey(field.getName())) {
+                out.put(field.getName(), formatValueForDuck(field, row.get(field.getName())));
+            }
+        }
+        return out;
+    }
+
+    private static Object formatValueForDuck(TableFieldSchema field, Object value) {
+        if (value == null) {
+            return null;
+        }
+        if ("REPEATED".equals(field.getMode()) && value instanceof List<?> list) {
+            List<Object> out = new ArrayList<>(list.size());
+            for (Object element : list) {
+                out.add(formatScalarForDuck(field, element));
+            }
+            return out;
+        }
+        return formatScalarForDuck(field, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object formatScalarForDuck(TableFieldSchema field, Object value) {
+        if (value == null) {
+            return null;
+        }
+        if ("RECORD".equals(field.getType()) && value instanceof Map<?, ?> map) {
+            TableSchema subSchema = new TableSchema(field.getFields() != null ? field.getFields() : List.of());
+            return formatForDuck(subSchema, (Map<String, Object>) map);
+        }
+        if ("TIMESTAMP".equals(field.getType())) {
+            return encodeTimestamp(String.valueOf(value), TimestampFormat.ISO8601_STRING);
+        }
+        return value;
+    }
+
 
     private static Object encodeValue(TableFieldSchema field, Object value, TimestampFormat format) {
         if (value == null) {
@@ -419,6 +461,9 @@ final class RowCodec {
         }
         if ("TIMESTAMP".equals(field.getType())) {
             return encodeTimestamp(String.valueOf(value), format);
+        }
+        if ("FLOAT".equals(field.getType())) {
+            return String.valueOf(value);
         }
         return String.valueOf(value);
     }

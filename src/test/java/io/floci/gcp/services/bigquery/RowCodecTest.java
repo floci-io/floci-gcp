@@ -75,6 +75,18 @@ class RowCodecTest {
     }
 
     @Test
+    void floatCellsEncodeAsJsonStrings() {
+        TableFieldSchema score = new TableFieldSchema();
+        score.setName("score");
+        score.setType("FLOAT");
+
+        TableCell cell = RowCodec.encodeRow(new TableSchema(List.of(score)), Map.of("score", 1.25),
+                RowCodec.TimestampFormat.FLOAT64).getF().getFirst();
+
+        assertEquals("1.25", cell.getV());
+    }
+
+    @Test
     void insertAllJsonStringsStayJsonText() {
         assertEquals("{\"a\": 1}", storedJson("{\"a\": 1}", false));
     }

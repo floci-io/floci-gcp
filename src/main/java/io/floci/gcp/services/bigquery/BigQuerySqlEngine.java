@@ -25,6 +25,9 @@ interface BigQuerySqlEngine {
     interface Tables {
         Table table(String datasetId, String tableId);
 
+        /** Tables in a dataset, used to expand BigQuery wildcard table references. */
+        List<Table> listTables(String datasetId);
+
         List<Map<String, Object>> rows(String datasetId, String tableId);
 
         /** Rows of an INFORMATION_SCHEMA view; a missing dataset qualifier throws 404. */
@@ -37,6 +40,9 @@ interface BigQuerySqlEngine {
      */
     record DmlResult(long affectedRows, long insertedRows, long updatedRows, long deletedRows,
                      List<Map<String, Object>> tableRows, long totalBytesProcessed) {}
+
+    /** DML applied to a request-local temporary table, including its resulting schema. */
+    record TemporaryDmlResult(TableSchema schema, DmlResult dmlResult) {}
 
     /**
      * Source files of a load job, already staged in {@link BigQueryLoadFiles}. {@code schema} is
@@ -55,4 +61,6 @@ interface BigQuerySqlEngine {
     Result readFiles(LoadSource source);
 
     DmlResult executeDml(Request request, Tables tables);
+
+    TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable);
 }

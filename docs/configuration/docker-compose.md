@@ -12,7 +12,9 @@ docker run --rm -p 4588:4588 \
 
 All emulated GCP APIs are immediately available at `http://localhost:4588`. Docker-backed Kafka, PostgreSQL, and Kubernetes data planes expose their own generated endpoints.
 
-The Docker socket mount lets floci-gcp spawn sidecar containers for the Docker-backed services (Cloud Run execution, Cloud SQL, Managed Kafka, GKE). Omit it if you only need the in-process services, or set the per-service `*_MOCK` flags to `true`.
+The Docker socket mount lets floci-gcp spawn sidecar containers for the Docker-backed services
+(Cloud Run execution, Cloud SQL, Managed Kafka, GKE, and BigQuery). Omit it if you only need the
+in-process services, or set the per-service `*_MOCK` flags to `true`.
 
 ## Docker Compose
 
@@ -92,7 +94,9 @@ networks:
 ```
 
 1. Must match the Compose service name so other containers can resolve it by DNS.
-2. Attaches spawned sidecar containers (Cloud Run, Cloud SQL, Kafka, GKE) to the Compose network so both floci-gcp and your app can reach them by name. The `localhost.floci.io` aliases let other containers resolve virtual-hosted URLs served by floci-gcp's embedded DNS.
+2. Attaches spawned sidecar containers (Cloud Run, Cloud SQL, Kafka, GKE, and BigQuery) to the
+   Compose network so both floci-gcp and your app can reach them by name. The `localhost.floci.io`
+   aliases let other containers resolve virtual-hosted URLs served by floci-gcp's embedded DNS.
 
 !!! tip "CI pipelines"
     In GitHub Actions or GitLab CI where both your app and floci-gcp run as `services`, set `FLOCI_GCP_HOSTNAME` to the service name (e.g. `floci-gcp`) and point your GCP SDKs at `floci-gcp:4588`.

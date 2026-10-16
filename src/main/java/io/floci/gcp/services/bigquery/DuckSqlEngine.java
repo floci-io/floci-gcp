@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Runs GoogleSQL on the floci-duck sidecar. Each query:
@@ -57,7 +59,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public Result execute(Request request, Tables tables) {
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
 
@@ -65,16 +67,18 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(), tables,
                 flociEndpoint);
         String sql = translation.sql();
+        String setup = staging.setup() + translation.setupSql();
+        String emptySetup = staging.emptySetup() + translation.setupSql();
         if (request.dryRun()) {
-            List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
+            List<Column> columns = describe(sql, emptySetup, flociEndpoint);
             return new Result(schemaOf(columns), List.of(), "SELECT", staging.bytesProcessed());
         }
 
-        DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
+        DuckClient.DuckResult result = run(sql, setup, flociEndpoint, null);
         if (result.columns() == null) {
-            List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
+            List<Column> columns = describe(sql, emptySetup, flociEndpoint);
             return new Result(schemaOf(columns),
-                    rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
+                    rejectNullArrayElements(columns, fetch(sql, setup, flociEndpoint, columns)), "SELECT",
                     staging.bytesProcessed());
         }
         List<Column> columns = columns(result.columns().stream()
@@ -142,7 +146,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
         String flociEndpoint = flociEndpoint();
@@ -150,7 +154,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 flociEndpoint);
         DuckClient.ArrowIpc arrow;
         try {
-            arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
+            arrow = client.query(translation.sql(), staging.setup() + translation.setupSql(),
+                    flociEndpoint, null, true).arrow();
         } catch (DuckClient.DuckSqlException e) {
             throw SqlDialectTranslator.invalidQuery(e.getMessage());
         }
@@ -163,36 +168,78 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public DmlResult executeDml(Request request, Tables tables) {
-        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(request.sql(),
-                request.projectId(), request.defaultDatasetId());
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
+                request.projectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
+                ref -> columnNames(tables, ref));
+        SqlDialectTranslator.Statement statement = script.finalStatement();
+        if (!statement.isDml()) {
+            throw SqlDialectTranslator.invalidQuery("A DML script must end with INSERT, UPDATE, DELETE or MERGE.");
+        }
         SqlDialectTranslator.TableRef target = statement.target();
         Table targetTable = tables.table(target.datasetId(), target.tableId());
         if (targetTable.viewQuery() != null) {
             throw SqlDialectTranslator.invalidQuery("Cannot run " + statement.statementType() + " on view "
                     + request.projectId() + ":" + target.datasetId() + "." + target.tableId());
         }
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
-                request.projectId(), request.defaultDatasetId(),
-                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref));
-
+        String statementSql = insertDeclaredColumns(script.sql(), statement, target, targetTable);
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
+        Staging staging = stage(request.projectId(), script.tables(), script.informationSchema(),
                 tables, flociEndpoint);
         if (request.dryRun()) {
             // EXPLAIN binds the statement against the staged tables without running it, so a missing
             // column or a malformed clause fails the dry run just as it would fail the real one.
-            run("EXPLAIN " + translation.sql(), staging.emptySetup(), flociEndpoint, null);
+            run("EXPLAIN " + statementSql, staging.emptySetup() + script.setupSql(), flociEndpoint, null);
             return new DmlResult(0, 0, 0, 0, List.of(), staging.bytesProcessed());
         }
-        String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(target.datasetId()) + "."
+        String stagedTarget = DuckTypes.quoteIdentifier(target.datasetId()) + "."
                 + DuckTypes.quoteIdentifier(target.tableId());
-        DuckClient.DuckResult result = run(translation.sql(), staging.setup(), flociEndpoint, followup);
+        String followup;
+        if (targetTable.getExtra().containsKey("timePartitioning")) {
+            // BigQuery exposes _PARTITIONDATE as the UTC date represented by _PARTITIONTIME.
+            // DuckDB stores the two staged pseudocolumns independently, so an INSERT that names
+            // only _PARTITIONTIME would otherwise leave _PARTITIONDATE null on subsequent reads.
+            followup = "SELECT * REPLACE (COALESCE(CAST(\"_PARTITIONTIME\" AS DATE), \"_PARTITIONDATE\")"
+                    + " AS \"_PARTITIONDATE\") FROM " + stagedTarget;
+        } else {
+            followup = "SELECT * FROM " + stagedTarget;
+        }
+        DuckClient.DuckResult result = run(statementSql, staging.setup() + script.setupSql(), flociEndpoint, followup);
         if (result.followup() == null || result.followup().columns() == null) {
             throw GcpException.failedPrecondition("DML needs a floci-duck image that supports follow-up"
                     + " statements; update " + config.services().bigquery().duck().defaultImage());
         }
 
+        List<TableFieldSchema> targetFields = targetTable.getSchema() != null
+                && targetTable.getSchema().getFields() != null ? targetTable.getSchema().getFields() : List.of();
+        return decodeDmlResult(statement, result, targetFields, staging.bytesProcessed()).dmlResult();
+    }
+
+    @Override
+    public TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable) {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
+                request.projectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
+        SqlDialectTranslator.Statement statement = script.finalStatement();
+        if (!statement.isDml()) {
+            throw SqlDialectTranslator.invalidQuery("A temporary table mutation must end with DML.");
+        }
+        String flociEndpoint = flociEndpoint();
+        Staging staging = stage(request.projectId(), script.tables(), script.informationSchema(), tables,
+                flociEndpoint);
+        String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(temporaryTable);
+        DuckClient.DuckResult result = run(script.sql(), staging.setup() + script.setupSql(), flociEndpoint, followup);
+        if (result.followup() == null || result.followup().columns() == null) {
+            throw GcpException.failedPrecondition("Temporary DML needs a floci-duck image that supports follow-up"
+                    + " statements; update " + config.services().bigquery().duck().defaultImage());
+        }
+        return decodeDmlResult(statement, result, List.of(), staging.bytesProcessed());
+    }
+
+    private static TemporaryDmlResult decodeDmlResult(SqlDialectTranslator.Statement statement,
+                                                        DuckClient.DuckResult result,
+                                                        List<TableFieldSchema> targetFields,
+                                                        long totalBytesProcessed) {
         long inserted = 0;
         long updated = 0;
         long deleted = 0;
@@ -218,8 +265,6 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
         }
 
-        List<TableFieldSchema> targetFields = targetTable.getSchema() != null
-                && targetTable.getSchema().getFields() != null ? targetTable.getSchema().getFields() : List.of();
         List<Column> columns = new ArrayList<>();
         for (DuckClient.DuckColumn duckColumn : result.followup().columns()) {
             DuckTypes.DuckType type = DuckTypes.parse(duckColumn.type());
@@ -240,7 +285,33 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
             tableRows.add(row);
         }
-        return new DmlResult(affected, inserted, updated, deleted, tableRows, staging.bytesProcessed());
+        DmlResult dmlResult = new DmlResult(affected, inserted, updated, deleted, tableRows, totalBytesProcessed);
+        return new TemporaryDmlResult(schemaOf(columns), dmlResult);
+    }
+
+    /** Partition pseudocolumns are staged physically but are absent from BigQuery's implicit INSERT column list. */
+    private static String insertDeclaredColumns(String sql, SqlDialectTranslator.Statement statement,
+                                                SqlDialectTranslator.TableRef target, Table table) {
+        if (statement.kind() != SqlDialectTranslator.StatementKind.INSERT
+                || !table.getExtra().containsKey("timePartitioning") || table.getSchema() == null
+                || table.getSchema().getFields() == null || table.getSchema().getFields().isEmpty()) {
+            return sql;
+        }
+        String prefix = "INSERT INTO " + DuckTypes.quoteIdentifier(target.datasetId()) + "."
+                + DuckTypes.quoteIdentifier(target.tableId());
+        if (!sql.startsWith(prefix)) {
+            return sql;
+        }
+        int rest = prefix.length();
+        while (rest < sql.length() && Character.isWhitespace(sql.charAt(rest))) {
+            rest++;
+        }
+        if (rest < sql.length() && sql.charAt(rest) == '(') {
+            return sql;
+        }
+        String columns = table.getSchema().getFields().stream().map(TableFieldSchema::getName)
+                .map(DuckTypes::quoteIdentifier).collect(Collectors.joining(", "));
+        return prefix + " (" + columns + ")" + sql.substring(prefix.length());
     }
 
     // ── Load jobs ─────────────────────────────────────────────────────────────
@@ -507,6 +578,11 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             throw SqlDialectTranslator.invalidQuery("View " + projectId + ":" + ref.datasetId() + "." + ref.tableId()
                     + " references itself");
         }
+        if (ref.tableId().endsWith("*")) {
+            stageWildcard(projectId, ref, tables, flociEndpoint, setup, emptySetup, views, schemas, staged, expanding,
+                    bytes);
+            return;
+        }
         Table table = tables.table(ref.datasetId(), ref.tableId());
         String viewQuery = table.viewQuery();
         if (schemas.add(ref.datasetId())) {
@@ -533,6 +609,162 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         staged.add(ref);
         expanding.remove(ref);
+    }
+
+    /** Expands a BigQuery terminal-prefix wildcard into a temporary DuckDB view. */
+    private void stageWildcard(String projectId, SqlDialectTranslator.TableRef wildcard, Tables tables,
+                               String flociEndpoint, StringBuilder setup, StringBuilder emptySetup,
+                               StringBuilder views, Set<String> schemas, Set<SqlDialectTranslator.TableRef> staged,
+                               Set<SqlDialectTranslator.TableRef> expanding, long[] bytes) {
+        String prefix = wildcard.tableId().substring(0, wildcard.tableId().length() - 1);
+        List<Table> candidates = tables.listTables(wildcard.datasetId()).stream()
+                .filter(table -> table.getTableReference() != null
+                        && table.getTableReference().getTableId() != null
+                        && table.getTableReference().getTableId().startsWith(prefix))
+                .sorted(Comparator.comparing(table -> table.getTableReference().getTableId()))
+                .toList();
+        if (candidates.stream().anyMatch(table -> "VIEW".equalsIgnoreCase(table.getType())
+                || "MATERIALIZED_VIEW".equalsIgnoreCase(table.getType()))) {
+            throw SqlDialectTranslator.invalidQuery("Wildcard table " + wildcard.datasetId() + "."
+                    + wildcard.tableId() + " matched a view");
+        }
+        List<Table> matches = candidates.stream()
+                .filter(table -> table.getType() == null || "TABLE".equalsIgnoreCase(table.getType()))
+                .toList();
+        if (matches.isEmpty()) {
+            throw GcpException.notFound("Not found: Table " + projectId + ":" + wildcard.datasetId() + "."
+                    + wildcard.tableId() + ".");
+        }
+
+        for (Table match : matches) {
+            String tableId = match.getTableReference().getTableId();
+            stageOne(projectId, new SqlDialectTranslator.TableRef(wildcard.datasetId(), tableId), tables,
+                    flociEndpoint, setup, emptySetup, views, schemas, staged, expanding, bytes);
+        }
+        String ddl = wildcardView(wildcard, matches);
+        setup.append(ddl).append('\n');
+        emptySetup.append(ddl).append('\n');
+        staged.add(wildcard);
+        expanding.remove(wildcard);
+    }
+
+    private static String wildcardView(SqlDialectTranslator.TableRef wildcard, List<Table> matches) {
+        String dataset = DuckTypes.quoteIdentifier(wildcard.datasetId());
+        StringBuilder ddl = new StringBuilder("CREATE VIEW ").append(dataset).append('.')
+                .append(DuckTypes.quoteIdentifier(wildcard.tableId())).append(" AS ");
+        String prefix = wildcard.tableId().substring(0, wildcard.tableId().length() - 1);
+        Table schemaTable = matches.stream().max(Comparator
+                        .comparingLong(DuckSqlEngine::creationTime)
+                        .thenComparing(table -> table.getTableReference().getTableId()))
+                .orElseThrow();
+        List<TableFieldSchema> columns = stagingFields(schemaTable);
+        int[] generatedAliases = {0};
+        for (int i = 0; i < matches.size(); i++) {
+            if (i > 0) {
+                ddl.append(" UNION ALL ");
+            }
+            Table match = matches.get(i);
+            String tableId = match.getTableReference().getTableId();
+            String suffix = tableId.substring(prefix.length());
+            Map<String, TableFieldSchema> sourceFields = new LinkedHashMap<>();
+            stagingFields(match).forEach(field -> sourceFields.put(field.getName().toLowerCase(Locale.ROOT), field));
+            ddl.append("SELECT ");
+            for (int column = 0; column < columns.size(); column++) {
+                if (column > 0) {
+                    ddl.append(", ");
+                }
+                TableFieldSchema expected = columns.get(column);
+                TableFieldSchema source = sourceFields.get(expected.getName().toLowerCase(Locale.ROOT));
+                if (source == null) {
+                    if (!"NULLABLE".equals(fieldMode(expected))) {
+                        throw SqlDialectTranslator.invalidQuery("Wildcard table schema mismatch: field "
+                                + expected.getName() + " is missing from " + tableId);
+                    }
+                    ddl.append("CAST(NULL AS ").append(DuckTypes.duckType(expected)).append(")");
+                } else {
+                    if (!wildcardFieldsCompatible(expected, source)) {
+                        throw SqlDialectTranslator.invalidQuery("Wildcard table schema mismatch for field "
+                                + expected.getName() + " in " + tableId);
+                    }
+                    ddl.append(wildcardFieldProjection(expected, source,
+                            DuckTypes.quoteIdentifier(source.getName()), generatedAliases));
+                }
+                ddl.append(" AS ").append(DuckTypes.quoteIdentifier(expected.getName()));
+            }
+            ddl.append(", ").append(DuckTypes.quoteLiteral(suffix))
+                    .append(" AS ").append(DuckTypes.quoteIdentifier("_TABLE_SUFFIX"))
+                    .append(" FROM ").append(dataset).append('.')
+                    .append(DuckTypes.quoteIdentifier(tableId));
+        }
+        return ddl.append(';').toString();
+    }
+
+    private static String wildcardFieldProjection(TableFieldSchema expected, TableFieldSchema source,
+                                                  String expression, int[] generatedAliases) {
+        if (!"RECORD".equalsIgnoreCase(expected.getType())) {
+            return expression;
+        }
+        if ("REPEATED".equals(fieldMode(expected))) {
+            String item = "_floci_wildcard_item_" + generatedAliases[0]++;
+            return "list_transform(" + expression + ", " + item + " -> "
+                    + wildcardStructProjection(expected, source, item, generatedAliases) + ")";
+        }
+        return "CASE WHEN " + expression + " IS NULL THEN NULL ELSE "
+                + wildcardStructProjection(expected, source, expression, generatedAliases) + " END";
+    }
+
+    private static String wildcardStructProjection(TableFieldSchema expected, TableFieldSchema source,
+                                                    String expression, int[] generatedAliases) {
+        List<TableFieldSchema> expectedChildren = expected.getFields() != null ? expected.getFields() : List.of();
+        List<TableFieldSchema> sourceChildren = source.getFields() != null ? source.getFields() : List.of();
+        Map<String, TableFieldSchema> sourceByName = new LinkedHashMap<>();
+        sourceChildren.forEach(field -> sourceByName.put(field.getName().toLowerCase(Locale.ROOT), field));
+        List<String> fields = new ArrayList<>(expectedChildren.size());
+        for (TableFieldSchema expectedChild : expectedChildren) {
+            TableFieldSchema sourceChild = sourceByName.get(expectedChild.getName().toLowerCase(Locale.ROOT));
+            String value;
+            if (sourceChild == null) {
+                value = "CAST(NULL AS " + DuckTypes.duckType(expectedChild) + ")";
+            } else {
+                String child = expression + "." + DuckTypes.quoteIdentifier(sourceChild.getName());
+                value = wildcardFieldProjection(expectedChild, sourceChild, child, generatedAliases);
+            }
+            fields.add(DuckTypes.quoteIdentifier(expectedChild.getName()) + " := " + value);
+        }
+        return "struct_pack(" + String.join(", ", fields) + ")";
+    }
+
+    private static long creationTime(Table table) {
+        try {
+            return Long.parseLong(table.getCreationTime());
+        } catch (NumberFormatException | NullPointerException ignored) {
+            return Long.MIN_VALUE;
+        }
+    }
+
+    private static boolean wildcardFieldsCompatible(TableFieldSchema expected, TableFieldSchema actual) {
+        if (!String.valueOf(expected.getType()).equalsIgnoreCase(String.valueOf(actual.getType()))
+                || !fieldMode(expected).equals(fieldMode(actual))) {
+            return false;
+        }
+        List<TableFieldSchema> expectedChildren = expected.getFields() != null ? expected.getFields() : List.of();
+        List<TableFieldSchema> actualChildren = actual.getFields() != null ? actual.getFields() : List.of();
+        Map<String, TableFieldSchema> actualByName = new LinkedHashMap<>();
+        actualChildren.forEach(field -> actualByName.put(field.getName().toLowerCase(Locale.ROOT), field));
+        for (TableFieldSchema expectedChild : expectedChildren) {
+            TableFieldSchema actualChild = actualByName.get(expectedChild.getName().toLowerCase(Locale.ROOT));
+            if (actualChild == null && !"NULLABLE".equals(fieldMode(expectedChild))) {
+                return false;
+            }
+            if (actualChild != null && !wildcardFieldsCompatible(expectedChild, actualChild)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String fieldMode(TableFieldSchema field) {
+        return field.getMode() == null ? "NULLABLE" : field.getMode().toUpperCase(Locale.ROOT);
     }
 
     /** Lower-cased column names of a table, or null when it does not exist or has no schema. */
@@ -677,8 +909,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      */
     String stageTable(String projectId, SqlDialectTranslator.TableRef ref, Table table, boolean empty,
                       String flociEndpoint) {
-        List<TableFieldSchema> fields = table.getSchema() != null && table.getSchema().getFields() != null
-                ? table.getSchema().getFields() : List.of();
+        List<TableFieldSchema> fields = stagingFields(table);
         String target = DuckTypes.quoteIdentifier(ref.datasetId()) + "." + DuckTypes.quoteIdentifier(ref.tableId());
         if (fields.isEmpty()) {
             throw SqlDialectTranslator.invalidQuery("Table " + projectId + ":" + ref.datasetId() + "."
@@ -687,6 +918,23 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         String url = flociEndpoint + "/_floci-gcp/bigquery/projects/" + encode(projectId)
                 + "/datasets/" + encode(ref.datasetId()) + "/tables/" + encode(ref.tableId()) + "/rows.ndjson";
         return stageRows(target, fields, empty, url);
+    }
+
+    private static List<TableFieldSchema> stagingFields(Table table) {
+        List<TableFieldSchema> fields = new ArrayList<>(table.getSchema() != null && table.getSchema().getFields() != null
+                ? table.getSchema().getFields() : List.of());
+        if (table.getExtra().containsKey("timePartitioning")) {
+            fields.add(field(BigQueryService.PARTITION_DATE, "DATE"));
+            fields.add(field(BigQueryService.PARTITION_TIME, "TIMESTAMP"));
+        }
+        return fields;
+    }
+
+    private static TableFieldSchema field(String name, String type) {
+        TableFieldSchema field = new TableFieldSchema();
+        field.setName(name);
+        field.setType(type);
+        return field;
     }
 
     /** {@code CREATE TABLE target} from NDJSON rows at {@code url}, or empty with the given columns. */
@@ -713,7 +961,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 projection.append(", ");
                 columns.append(", ");
             }
-            projection.append(text ? DuckTypes.convertStagedText(field, column) + " AS " + column : column);
+            String staged = text ? DuckTypes.convertStagedText(field, column)
+                    : DuckTypes.convertNestedStagedBytes(field, column);
+            projection.append(staged).append(" AS ").append(column);
             columns.append(DuckTypes.quoteLiteral(field.getName())).append(": ")
                     .append(DuckTypes.quoteLiteral(text ? "VARCHAR" : DuckTypes.duckType(field)));
         }

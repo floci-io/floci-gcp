@@ -14,7 +14,7 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
           - "4588:4588"
         volumes:
           - ./data:/app/data
-          # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE)
+          # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE, BigQuery)
           - /var/run/docker.sock:/var/run/docker.sock
         environment:
           FLOCI_GCP_HOSTNAME: floci-gcp
@@ -36,7 +36,8 @@ This guide gets floci-gcp running and verifies that GCP SDK and gcloud CLI comma
       floci/floci-gcp:latest
     ```
 
-    The Docker socket mount enables the Docker-backed services (Cloud Run execution, Cloud SQL, Managed Kafka, GKE); omit it if you only need the in-process services.
+    The Docker socket mount enables the Docker-backed services (Cloud Run execution, Cloud SQL,
+    Managed Kafka, GKE, and BigQuery); omit it if you only need the in-process services.
 
 === "Build from source"
 

@@ -377,6 +377,35 @@ class BigQueryRestIntegrationTest {
 
     @Test
     @Order(6)
+    void copyJobRoundTripsConfigurationAndCopiesRows() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"jobReference": {"jobId": "copy-rest", "location": "US"},
+                         "configuration": {"copy": {
+                           "sourceTable": {"projectId": "bq-rest-it", "datasetId": "ds1", "tableId": "t1"},
+                           "destinationTable": {"projectId": "bq-rest-it", "datasetId": "ds1", "tableId": "t1_copy"},
+                           "createDisposition": "CREATE_IF_NEEDED",
+                           "writeDisposition": "WRITE_EMPTY"}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then()
+                .statusCode(200)
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult", nullValue())
+                .body("configuration.jobType", equalTo("COPY"))
+                .body("configuration.copy.sourceTable.tableId", equalTo("t1"))
+                .body("configuration.copy.destinationTable.tableId", equalTo("t1_copy"));
+
+        given().when().get(BASE + "/jobs/copy-rest").then().statusCode(200)
+                .body("jobReference.location", equalTo("US"))
+                .body("configuration.copy.writeDisposition", equalTo("WRITE_EMPTY"));
+        given().when().get(BASE + "/datasets/ds1/tables/t1_copy/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(7)
     void invalidSqlPathsDiffer() {
         // jobs.query → HTTP 400 invalidQuery
         given()
@@ -420,7 +449,7 @@ class BigQueryRestIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void jobLifecycleCancelAndDelete() {
         String jobId = given()
                 .contentType("application/json")
@@ -622,7 +651,92 @@ class BigQueryRestIntegrationTest {
     }
 
     @Test
+    @Order(12)
+    void schemaLessResumableJsonUploadUsesThePrecreatedTableSchema() {
+        String dataset = "load_schema";
+        String table = "precreated";
+        given().contentType("application/json")
+                .body("{\"datasetReference\": {\"datasetId\": \"" + dataset + "\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "precreated"}, "schema": {"fields": [
+                  {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+                  {"name": "count", "type": "INT64"}
+                ]}}
+                """).when().post(BASE + "/datasets/" + dataset + "/tables").then().statusCode(200);
+
+        String job = """
+                {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+                  "destinationTable": {"datasetId": "%s", "tableId": "%s"}}}}
+                """.formatted(dataset, table);
+        String location = given().contentType("application/json").body(job)
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200).extract().header("Location");
+        String path = location.substring(location.indexOf("/upload/"));
+        byte[] data = "{\"name\": \"ana\", \"count\": \"2\"}\n".getBytes();
+
+        given().header("Content-Range", "bytes 0-" + (data.length - 1) + "/" + data.length)
+                .contentType("application/octet-stream").body(data).when().put(path)
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("1"));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name", "count")))
+                .body("schema.fields.type", equalTo(List.of("STRING", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REQUIRED"));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table + "/data")
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("ana", "2")));
+    }
+
+    @Test
     @Order(13)
+    void schemaLessResumableJsonUploadUsesThePartitionedBaseTableSchema() {
+        String dataset = "load_partition_schema";
+        String table = "precreated";
+        String partition = "20261006";
+        given().contentType("application/json")
+                .body("{\"datasetReference\": {\"datasetId\": \"" + dataset + "\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "precreated"}, "schema": {"fields": [
+                  {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+                  {"name": "count", "type": "INT64"}
+                ]}, "timePartitioning": {"type": "DAY"}}
+                """).when().post(BASE + "/datasets/" + dataset + "/tables").then().statusCode(200);
+
+        String job = """
+                {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+                  "destinationTable": {"datasetId": "%s", "tableId": "%s$%s"}}}}
+                """.formatted(dataset, table, partition);
+        String location = given().contentType("application/json").body(job)
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200).extract().header("Location");
+        String path = location.substring(location.indexOf("/upload/"));
+        byte[] data = "{\"name\": \"ana\", \"count\": \"2\"}\n".getBytes();
+
+        given().header("Content-Range", "bytes 0-" + (data.length - 1) + "/" + data.length)
+                .contentType("application/octet-stream").body(data).when().put(path)
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("1"));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name", "count")))
+                .body("schema.fields.type", equalTo(List.of("STRING", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REQUIRED"));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table + "$" + partition + "/data")
+                .then().statusCode(200)
+                .body("totalRows", equalTo("1"))
+                .body("rows[0].f.v", equalTo(List.of("ana", "2")));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table + "$20261007/data")
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"));
+    }
+
+    @Test
+    @Order(14)
     void resumableUploadAnswers308UntilTheLastChunk() {
         String location = given().contentType("application/json").body(LOAD_JOB.formatted("resumable"))
                 .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")

@@ -82,8 +82,15 @@ public class BigQueryDuckManager implements ContainerTeardown {
         ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels("bigquery", null, null, null))
-                .withDockerNetwork(config.services().dockerNetwork())
-                .withHostDockerInternalOnLinux()
+                .withDockerNetwork(config.services().dockerNetwork());
+        // When floci-gcp runs in a container, the sidecar is attached to the same
+        // network and reaches floci-gcp through its container IP. Podman does not
+        // support Docker's special `host-gateway` value, so only add that mapping
+        // for host-native Linux deployments where it is actually needed.
+        if (!containerDetector.isRunningInContainer()) {
+            builder.withHostDockerInternalOnLinux();
+        }
+        builder
                 .withLogRotation();
         if (containerDetector.isRunningInContainer()) {
             builder.withExposedPort(DUCK_PORT);

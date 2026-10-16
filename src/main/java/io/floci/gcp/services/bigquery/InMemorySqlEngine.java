@@ -51,4 +51,10 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
         throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
                 + "set floci-gcp.services.bigquery.mock to false.");
     }
+
+    @Override
+    public TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable) {
+        throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
+                + "set floci-gcp.services.bigquery.mock to false.");
+    }
 }

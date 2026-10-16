@@ -67,5 +67,12 @@ java -jar target/quarkus-app/quarkus-run.jar
 ./target/floci-gcp-*-runner
 ```
 
+The repository also provides `docker/Dockerfile.native`, which compiles and packages the native
+executable in a multi-stage container build:
+
+```bash
+docker build -f docker/Dockerfile.native -t floci-gcp:native-local .
+```
+
 !!! note
     Native compilation requires GraalVM or Mandrel with the `native-image` tool on your PATH. Build time is typically 2–5 minutes.

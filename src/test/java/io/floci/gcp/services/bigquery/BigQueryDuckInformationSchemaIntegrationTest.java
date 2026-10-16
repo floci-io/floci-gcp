@@ -78,12 +78,29 @@ class BigQueryDuckInformationSchemaIntegrationTest {
         query("CREATE VIEW shop.order_ids AS SELECT id FROM shop.orders").then().statusCode(200);
         query("CREATE TABLE archive.old (x INT64)").then().statusCode(200);
         query("CREATE TABLE eu_data.eu_only (x INT64)").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "events"},
+                 "schema": {"fields": [{"name": "id", "type": "INT64"}]},
+                 "timePartitioning": {"type": "DAY"}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        String job = """
+                {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+                  "destinationTable": {"datasetId": "shop", "tableId": "events$20261006"}}}}
+                """;
+        String location = given().contentType("application/json").body(job)
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200).extract().header("Location");
+        String path = location.substring(location.indexOf("/upload/"));
+        byte[] data = "{\"id\": 1}\n{\"id\": 2}\n".getBytes();
+        given().header("Content-Range", "bytes 0-%d/%d".formatted(data.length - 1, data.length)).body(data)
+                .when().put(path).then().statusCode(200);
     }
 
     @Test
     @Order(2)
     void tablesForOneDataset() {
-        assertEquals(List.of(List.of("order_ids", "VIEW", "NO"), List.of("orders", "BASE TABLE", "YES")),
+        assertEquals(List.of(List.of("events", "BASE TABLE", "YES"),
+                        List.of("order_ids", "VIEW", "NO"), List.of("orders", "BASE TABLE", "YES")),
                 rows("SELECT table_name, table_type, is_insertable_into FROM shop.INFORMATION_SCHEMA.TABLES"
                         + " ORDER BY table_name"));
         query("SELECT ddl FROM shop.INFORMATION_SCHEMA.TABLES WHERE table_name = 'orders'").then()
@@ -96,7 +113,8 @@ class BigQueryDuckInformationSchemaIntegrationTest {
     @Test
     @Order(3)
     void regionScopeSpansDatasetsInThatLocation() {
-        assertEquals(List.of(List.of("archive", "old"), List.of("shop", "order_ids"), List.of("shop", "orders")),
+        assertEquals(List.of(List.of("archive", "old"), List.of("shop", "events"),
+                        List.of("shop", "order_ids"), List.of("shop", "orders")),
                 rows("SELECT table_schema, table_name FROM `region-us`.INFORMATION_SCHEMA.TABLES"
                         + " ORDER BY table_schema, table_name"));
         assertEquals(List.of(List.of("eu_only")),
@@ -155,7 +173,7 @@ class BigQueryDuckInformationSchemaIntegrationTest {
     @Order(7)
     void joinsWithRegularTablesAndErrors() {
         query("INSERT INTO shop.orders (id, tags) VALUES (1, ['a'])").then().statusCode(200);
-        assertEquals(List.of(List.of("orders", "1")),
+        assertEquals(List.of(List.of("events", "1"), List.of("orders", "1")),
                 rows("SELECT t.table_name, (SELECT COUNT(*) FROM shop.orders) AS n"
                         + " FROM shop.INFORMATION_SCHEMA.TABLES t WHERE t.table_type = 'BASE TABLE'"));
         query("SELECT * FROM missing.INFORMATION_SCHEMA.TABLES").then().statusCode(404)
@@ -187,5 +205,23 @@ class BigQueryDuckInformationSchemaIntegrationTest {
                 .body("error.message", equalTo("Not found: Dataset " + PROJECT + ":eu_data was not found in location US"));
         query("SELECT table_name FROM `region-eu`.INFORMATION_SCHEMA.TABLES").then().statusCode(200)
                 .body("jobReference.location", equalTo("EU"));
+        query("SELECT 1; SELECT table_name FROM eu_data.INFORMATION_SCHEMA.TABLES").then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"));
+        given().contentType("application/json")
+                .body(Map.of("query", "SELECT 1; SELECT table_name FROM eu_data.INFORMATION_SCHEMA.TABLES",
+                        "useLegacySql", false, "location", "US"))
+                .when().post(BASE + "/queries")
+                .then().statusCode(404)
+                .body("error.message", equalTo("Not found: Dataset " + PROJECT + ":eu_data was not found in location US"));
+    }
+
+    @Test
+    @Order(10)
+    void partitionsSupportsDatasetQualifiedFilters() {
+        assertEquals(List.of(List.of("20261006", "2", "ACTIVE")),
+                rows("SELECT partition_id, total_rows, storage_tier"
+                        + " FROM `bq-is-it.shop.INFORMATION_SCHEMA.PARTITIONS`"
+                        + " WHERE table_name = 'events' AND partition_id != '__NULL__'"
+                        + " ORDER BY partition_id"));
     }
 }

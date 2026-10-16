@@ -474,6 +474,35 @@ class BigQueryTest {
 
     @Test
     @Order(20)
+    void schemaLessResumableUploadUsesPrecreatedTableSchema() throws Exception {
+        if (bigquery.getDataset(DATASET) == null) {
+            bigquery.create(DatasetInfo.newBuilder(DATASET).setLocation("US").build());
+        }
+        TableId target = TableId.of(DATASET, "uploaded_precreated");
+        bigquery.create(TableInfo.newBuilder(target, StandardTableDefinition.of(Schema.of(
+                Field.of("name", StandardSQLTypeName.STRING),
+                Field.of("score", StandardSQLTypeName.FLOAT64)))).build());
+
+        WriteChannelConfiguration config = WriteChannelConfiguration
+                .newBuilder(target)
+                .setFormatOptions(FormatOptions.json())
+                .build();
+        TableDataWriteChannel writer = bigquery.writer(config);
+        try (OutputStream out = Channels.newOutputStream(writer)) {
+            out.write("{\"name\": \"ana\", \"score\": 9.5}\n"
+                    .getBytes(StandardCharsets.UTF_8));
+        }
+
+        Job job = writer.getJob().waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        assertThat(((JobStatistics.LoadStatistics) job.getStatistics()).getOutputRows()).isEqualTo(1L);
+        Schema schema = bigquery.getTable(target).getDefinition().getSchema();
+        assertThat(schema.getFields().get("name").getType().getStandardType()).isEqualTo(StandardSQLTypeName.STRING);
+        assertThat(schema.getFields().get("score").getType().getStandardType()).isEqualTo(StandardSQLTypeName.FLOAT64);
+    }
+
+    @Test
+    @Order(21)
     void informationSchemaDescribesTheDataset() throws InterruptedException {
         TableResult columns = bigquery.query(QueryJobConfiguration.newBuilder(
                 "SELECT column_name, data_type FROM `" + PROJECT_ID + "." + DATASET

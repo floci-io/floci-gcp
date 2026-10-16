@@ -9,10 +9,20 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlDialectTranslatorTest {
+
+    @Test
+    void indexedStructWildcardExpandsAsColumns() {
+        String translated = sql("SELECT ARRAY_AGG(STRUCT(1 AS a, 2 AS b) LIMIT 1)[OFFSET(0)].*");
+
+        assertTrue(translated.contains("unnest([list_extract(list_transform([struct_pack("), translated);
+        assertEquals(translated.indexOf("ARRAY_AGG"), translated.lastIndexOf("ARRAY_AGG"), translated);
+        assertTrue(translated.contains("error('Array index out of bounds')"), translated);
+    }
 
     private static SqlDialectTranslator.Translation translate(String sql) {
         return SqlDialectTranslator.translate(sql, "test-project", null,
@@ -51,7 +61,7 @@ class SqlDialectTranslatorTest {
     void bareTableUsesDefaultDataset() {
         SqlDialectTranslator.Translation t = SqlDialectTranslator.translate("SELECT * FROM users",
                 "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
-        assertEquals("SELECT * FROM \"ds\".\"users\"", t.sql());
+        assertEquals("SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$' FROM \"ds\".\"users\"", t.sql());
     }
 
     @Test
@@ -61,11 +71,448 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void terminalWildcardTableIsPreservedForStaging() {
+        SqlDialectTranslator.Translation t = translate(
+                "SELECT _TABLE_SUFFIX FROM `test-project.ds.events_*` WHERE _TABLE_SUFFIX LIKE '2026%'");
+        assertEquals("SELECT _TABLE_SUFFIX FROM \"ds\".\"events_*\""
+                        + " WHERE _TABLE_SUFFIX LIKE '2026%'", t.sql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "events_*")), t.tables());
+    }
+
+    @Test
+    void derivedPseudocolumnsRemainOrdinaryOutputColumns() {
+        assertEquals("SELECT * FROM (SELECT _TABLE_SUFFIX FROM \"ds\".\"events_*\")"
+                        + " AS \"_floci_derived_0\"",
+                sql("SELECT * FROM (SELECT _TABLE_SUFFIX FROM `test-project.ds.events_*`)"));
+        assertEquals("SELECT * REPLACE (UPPER(_TABLE_SUFFIX) AS _TABLE_SUFFIX)"
+                        + " FROM (SELECT _TABLE_SUFFIX FROM \"ds\".\"events_*\") AS \"_floci_derived_0\"",
+                sql("SELECT * REPLACE (UPPER(_TABLE_SUFFIX) AS _TABLE_SUFFIX)"
+                        + " FROM (SELECT _TABLE_SUFFIX FROM `test-project.ds.events_*`)"));
+    }
+
+    @Test
+    void nonTerminalWildcardIsRejected() {
+        GcpException e = invalid("SELECT * FROM `test-project.ds.events_*_archive`");
+        assertTrue(e.getMessage().contains("terminal '*'"));
+    }
+
+    @Test
+    void scriptCreatesTemporaryMacroBeforeFinalSelect() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                SELECT 1 AS ignored;
+                CREATE TEMP FUNCTION add_one(value ANY TYPE) AS (value + 1);
+                SELECT add_one(41) AS answer;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals("SELECT add_one(41) AS answer", script.sql());
+        assertTrue(script.setupSql().contains("SELECT 1 AS ignored;"));
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"add_one\"(\"_floci_udf_arg_0\")"
+                + " AS (\"_floci_udf_arg_0\" + 1);"));
+    }
+
+    @Test
+    void scriptCreatesTemporaryTablesBeforeTerminalInsert() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE first_round AS (
+                  SELECT id FROM source_rows
+                );
+                CREATE TEMP TABLE second_round AS (
+                  SELECT id + 1 AS id FROM first_round
+                );
+                INSERT target_rows SELECT id FROM second_round;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals(SqlDialectTranslator.StatementKind.INSERT, script.finalStatement().kind());
+        assertEquals("INSERT INTO \"ds\".\"target_rows\" SELECT id FROM \"second_round\"", script.sql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"first_round\" AS (SELECT id FROM \"ds\".\"source_rows\");"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"second_round\" AS (SELECT id + 1 AS id FROM \"first_round\");"),
+                script.setupSql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "source_rows"),
+                new SqlDialectTranslator.TableRef("ds", "target_rows")), script.tables());
+    }
+
+    @Test
+    void proceduralIfKeepsGenericConditionsAndCopyStatementsAsStructure() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                IF EXISTS (SELECT * FROM `test-project.ds.new_rows`) THEN
+                  CREATE OR REPLACE TABLE `test-project.ds.output_rows` COPY `test-project.ds.new_rows`;
+                ELSE
+                  CREATE OR REPLACE TABLE `test-project.ds.output_rows` COPY `test-project.ds.refreshed_rows`;
+                END IF;
+                """);
+
+        assertEquals("EXISTS (SELECT * FROM `test-project.ds.new_rows`)",
+                ((SqlDialectTranslator.IfBlock) script.items().getFirst()).condition());
+        SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) script.items().getFirst();
+        assertEquals(1, conditional.whenTrue().size());
+        assertEquals(1, conditional.whenFalse().size());
+
+        SqlDialectTranslator.Statement copy = SqlDialectTranslator.parseStatement(
+                ((SqlDialectTranslator.SqlItem) conditional.whenTrue().getFirst()).sql(), "test-project", null);
+        assertEquals("CREATE_TABLE_COPY", copy.statementType());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "output_rows"), copy.target());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "new_rows"), copy.copySource());
+    }
+
+    @Test
+    void proceduralElseIfIsRepresentedAsANestedConditional() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                IF first_condition THEN
+                  SELECT 1;
+                ELSEIF second_condition THEN
+                  SELECT 2;
+                ELSE
+                  SELECT 3;
+                END IF;
+                """);
+
+        SqlDialectTranslator.IfBlock first = (SqlDialectTranslator.IfBlock) script.items().getFirst();
+        SqlDialectTranslator.IfBlock second = (SqlDialectTranslator.IfBlock) first.whenFalse().getFirst();
+        assertEquals("first_condition", first.condition());
+        assertEquals("second_condition", second.condition());
+        assertEquals("SELECT 3", ((SqlDialectTranslator.SqlItem) second.whenFalse().getFirst()).sql());
+    }
+
+    @Test
+    void proceduralIfKeepsCaseExpressionsInsideTheCondition() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                IF CASE WHEN TRUE THEN TRUE ELSE FALSE END THEN
+                  SELECT 1;
+                END IF;
+                """);
+
+        SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) script.items().getFirst();
+        assertEquals("CASE WHEN TRUE THEN TRUE ELSE FALSE END", conditional.condition());
+    }
+
+    @Test
+    void scriptsKeepRequestLocalStatementsInSourceOrder() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE first_round AS SELECT id FROM source_rows;
+                SELECT COUNT(*) FROM first_round;
+                CREATE OR REPLACE TEMP TABLE first_round AS SELECT id + 1 AS id FROM first_round;
+                CREATE TEMP FUNCTION add_one(value ANY TYPE) AS (value + 1);
+                CREATE TEMP TABLE second_round AS SELECT add_one(id) AS id FROM first_round;
+                DROP TABLE second_round;
+                SELECT id FROM first_round;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals("SELECT id FROM \"first_round\"", script.sql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"first_round\" AS (SELECT id FROM \"ds\".\"source_rows\");"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE OR REPLACE TEMP TABLE \"first_round\" AS "
+                + "(SELECT id + 1 AS id FROM \"first_round\");"), script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"add_one\"(\"_floci_udf_arg_0\")"
+                        + " AS (\"_floci_udf_arg_0\" + 1);"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"second_round\" AS "
+                + "(SELECT add_one(id) AS id FROM \"first_round\");\nDROP TABLE \"second_round\";"), script.setupSql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "source_rows")), script.tables());
+    }
+
+    @Test
+    void temporaryTablesRemainBoundWithoutADefaultDataset() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE first_round AS (SELECT 1 AS id);
+                CREATE TEMP TABLE second_round AS (SELECT id + 1 AS id FROM first_round);
+                INSERT `ds.output_rows` SELECT id FROM second_round;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals("INSERT INTO \"ds\".\"output_rows\" SELECT id FROM \"second_round\"", script.sql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"second_round\" AS "
+                + "(SELECT id + 1 AS id FROM \"first_round\");"), script.setupSql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "output_rows")), script.tables());
+    }
+
+    @Test
+    void qualifiedPhysicalTablesAndStringLiteralsDoNotResolveToTemporaryTables() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE t AS SELECT 1 AS id;
+                SELECT '"ds"."t"' AS label, id FROM ds.t;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.sql().contains("FROM \"ds\".\"t\""), script.sql());
+        assertTrue(script.sql().contains("'\"ds\".\"t\"'"), script.sql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), script.tables());
+    }
+
+    @Test
+    void truncateResolvesOnlyUnqualifiedOrSessionQualifiedTemporaryTables() {
+        Set<String> temporaryTables = Set.of("t");
+
+        assertEquals("t", SqlDialectTranslator.temporaryTruncateTarget("TRUNCATE TABLE t", temporaryTables));
+        assertEquals("t", SqlDialectTranslator.temporaryTruncateTarget(
+                "TRUNCATE TABLE _SESSION.t", temporaryTables));
+        assertNull(SqlDialectTranslator.temporaryTruncateTarget(
+                "TRUNCATE TABLE ds.t", temporaryTables));
+    }
+
+    @Test
+    void preservesGeneralBigQueryByteOperatorsForSidecarOverloads() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION CHECK_BIT_SET(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx )) != 0
+                );
+                SELECT CHECK_BIT_SET(b'\\x10', 4) AS bit;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CAST(\"_floci_udf_arg_0\" AS BLOB) &"), script.setupSql());
+        assertTrue(script.setupSql().contains("from_hex('01')"), script.setupSql());
+        assertTrue(script.setupSql().contains("<< CAST(\"_floci_udf_arg_1\" AS BIGINT)"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                        "CASE (floci_byte_length(CAST(\"_floci_udf_arg_0\" AS BLOB)) > 0) WHEN FALSE THEN FALSE"),
+                script.setupSql());
+        assertFalse(script.setupSql().contains("CAST(CASE WHEN"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionLogicalOperatorsPreservePrecedenceAndThreeValuedLogic() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION predicate(a BOOL, b BOOL, c BOOL) AS (a OR b AND c);
+                SELECT predicate(TRUE, FALSE, FALSE);
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "CASE (CAST(\"_floci_udf_arg_0\" AS BOOLEAN)) WHEN TRUE THEN TRUE"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "CASE (CAST(\"_floci_udf_arg_1\" AS BOOLEAN)) WHEN FALSE THEN FALSE"), script.setupSql());
+    }
+
+    @Test
+    void translatesTypedEmptyArrayLiteralAndGenerateUuid() {
+        assertEquals("SELECT CAST([] AS STRUCT(\"key\" VARCHAR, \"value\" VARCHAR)[]) AS metadata, uuid() AS id",
+                sql("SELECT ARRAY<STRUCT<key STRING, value STRING>>[] AS metadata, GENERATE_UUID() AS id"));
+    }
+
+    @Test
+    void translatesNonEmptyTypedStructArrayLiteral() {
+        String translated = sql("""
+                SELECT ARRAY<STRUCT<name STRING, value STRING>>[
+                  STRUCT('source' AS name, 'origin' AS value)
+                ] AS metadata""");
+
+        assertFalse(translated.contains("ARRAY<"), translated);
+        assertTrue(translated.contains("'source'"), translated);
+    }
+
+    @Test
+    void translatesIndexedTypedArrayLiteralAsOneCastExpression() {
+        String translated = sql("SELECT ARRAY<INT64>[1, 2][OFFSET(0)] AS value");
+
+        assertFalse(translated.contains("ARRAY<"), translated);
+        assertFalse(translated.contains("OFFSET("), translated);
+        assertTrue(translated.contains("CAST([1, 2] AS BIGINT[])"), translated);
+    }
+
+    @Test
+    void arrayStructElementsInheritFieldNamesFromFirstElement() {
+        assertEquals("SELECT [{'metric_name': 'first', 'metric_value': 1}, "
+                        + "{'metric_name': 'second', 'metric_value': 2}] AS metrics",
+                sql("SELECT [STRUCT('first' AS metric_name, 1 AS metric_value), "
+                        + "STRUCT('second', 2)] AS metrics"));
+    }
+
+    @Test
+    void nestedArrayStructsKeepTheirOwnFieldNames() {
+        assertEquals("SELECT [{'child': {'x': 1}}, {'child': {'x': 2}}] AS records",
+                sql("SELECT [STRUCT(STRUCT(1 AS x) AS child), "
+                        + "STRUCT(STRUCT(2 AS x) AS child)] AS records"));
+    }
+
+    @Test
+    void retainsDeclaredNamesForPositionalTypedStructArrayElements() {
+        assertEquals("SELECT CAST([(item_category, owner_id)] AS STRUCT(\"category\" VARCHAR, \"owner_id\" BIGINT)[]) AS records",
+                sql("SELECT ARRAY<STRUCT<category STRING, owner_id INT64>>[(item_category, owner_id)] AS records"));
+    }
+
+    @Test
+    void translatesSelectAsStruct() {
+        assertEquals("SELECT {'id': id, 'name': name} FROM \"ds\".\"users\"",
+                sql("SELECT AS STRUCT id, name FROM ds.users"));
+        assertEquals("SELECT {'id': id, 'display_name': name} FROM \"ds\".\"users\"",
+                sql("SELECT AS STRUCT id, name AS display_name FROM ds.users"));
+        assertEquals("SELECT struct_pack(COLUMNS(input.* NOT SIMILAR TO"
+                        + " '(?i)^(_PARTITIONDATE|_PARTITIONTIME|_TABLE_SUFFIX|id)$'))"
+                        + " FROM \"ds\".\"users\" AS \"input\"",
+                sql("SELECT AS STRUCT input.* EXCEPT(id) FROM ds.users AS input"));
+        assertEquals("SELECT {'_field_1': index * 25} AS value",
+                sql("SELECT STRUCT(index * 25) AS value"));
+    }
+
+    @Test
+    void translatesStructsInsideTemporaryFunctionBodies() {
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript("""
+                CREATE TEMPORARY FUNCTION distinctRecords(
+                  records ARRAY<STRUCT<category STRING, owner_id INT64>>
+                ) AS (
+                  ARRAY(
+                    SELECT STRUCT(category AS category, owner_id AS owner_id)
+                    FROM UNNEST(records)
+                    GROUP BY category, owner_id
+                  )
+                );
+                SELECT distinctRecords(records) FROM dataset.table
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertFalse(translation.setupSql().contains("SELECT STRUCT("), translation.setupSql());
+        assertTrue(translation.setupSql().contains("{'category': category, 'owner_id': owner_id}"),
+                translation.setupSql());
+    }
+
+    @Test
+    void selectAsStructTreatsComparisonOperatorsAsExpressions() {
+        assertEquals("SELECT {'small': id < 10} FROM \"ds\".\"events\"",
+                sql("SELECT AS STRUCT id < 10 AS small FROM ds.events"));
+        assertEquals("SELECT {'small': id < 10, 'large': id > 20} FROM \"ds\".\"events\"",
+                sql("SELECT AS STRUCT id < 10 AS small, id > 20 AS large FROM ds.events"));
+    }
+
+    @Test
+    void translatesSelectAsStructInsideTemporaryFunction() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION pick(id STRING, name STRING) AS (
+                  SELECT AS STRUCT id, name || '_display' display_name
+                );
+                SELECT pick('id1', 'name1') AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                        "SELECT {'id': CAST(\"_floci_udf_arg_0\" AS VARCHAR), "
+                                + "'display_name': CAST(\"_floci_udf_arg_1\" AS VARCHAR) || '_display'}"),
+                script.setupSql());
+    }
+
+    @Test
+    void translatesTypedEmptyArrayInTemporaryFunction() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION empty_metadata() AS (ARRAY<STRUCT<key STRING, value STRING>>[]);
+                SELECT empty_metadata() AS metadata;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "CREATE TEMP MACRO \"empty_metadata\"() AS (CAST([] AS STRUCT(\"key\" VARCHAR, \"value\" VARCHAR)[]));"));
+    }
+
+    @Test
+    void temporaryFunctionKeepsStructTypeCommasWithinOneParameter() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION join_keys_to_str(join_keys ARRAY<STRUCT<id_type STRING, id_value STRING>>)
+                RETURNS STRING AS ('');
+                SELECT join_keys_to_str([]) AS keys;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"join_keys_to_str\"(\"_floci_udf_arg_0\")"),
+                script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionSplitsParameterAfterNestedStructType() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION extract_additional(addtl ARRAY<STRUCT<name STRING, value STRING>>, key STRING)
+                RETURNS STRING AS (key);
+                SELECT extract_additional([], 'email_source') AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "CREATE TEMP MACRO \"extract_additional\"(\"_floci_udf_arg_0\", \"_floci_udf_arg_1\")"),
+                script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionAppliesDeclaredParameterAndReturnTypes() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION as_float(value INT64) RETURNS FLOAT64 AS (value + 1);
+                SELECT as_float(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"as_float\"(\"_floci_udf_arg_0\")"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "CAST((CAST(\"_floci_udf_arg_0\" AS BIGINT) + 1) AS DOUBLE)"), script.setupSql());
+        assertFalse(script.setupSql().contains("FROM (SELECT"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionCtesRemainInScope() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION normalize(items ARRAY<STRING>) AS ((
+                  WITH unnested AS (SELECT value FROM UNNEST(items) value)
+                  SELECT ARRAY_AGG(value) FROM unnested
+                ));
+                SELECT normalize(['value']) AS result;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("FROM \"unnested\""), script.setupSql());
+    }
+
+    @Test
     void cteNamesAreNotTreatedAsTables() {
         SqlDialectTranslator.Translation t = translate(
                 "WITH recent AS (SELECT * FROM ds.orders) SELECT COUNT(*) AS n FROM recent");
         assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "orders")), t.tables());
         assertTrue(t.sql().endsWith("FROM \"recent\""), t.sql());
+    }
+
+    @Test
+    void unpivotSyntaxIsPreserved() {
+        assertEquals("SELECT id, metric, value FROM \"ds\".\"metrics\""
+                        + " UNPIVOT INCLUDE NULLS (value FOR metric IN (a, b))",
+                sql("SELECT id, metric, value FROM ds.metrics UNPIVOT INCLUDE NULLS (value FOR metric IN (a, b))"));
+    }
+
+    @Test
+    void nestedCtesInResultWrapperAreNotTreatedAsTables() {
+        SqlDialectTranslator.Translation t = translate("""
+                WITH INPUT AS (
+                  WITH new_aggregated AS (SELECT 1 AS id),
+                       nested_results AS (SELECT * FROM new_aggregated)
+                  SELECT * FROM nested_results
+                )
+                SELECT TO_JSON_STRING(row) FROM INPUT AS row
+                """);
+
+        assertEquals(Set.of(), t.tables());
+        assertTrue(t.sql().contains("FROM \"new_aggregated\""), t.sql());
+        assertTrue(t.sql().contains("FROM \"nested_results\""), t.sql());
+        assertTrue(t.sql().contains("FROM \"INPUT\" AS \"row\""), t.sql());
+    }
+
+    @Test
+    void nestedCteAfterOuterCteCommaIsVisibleWithinItsContainingCte() {
+        SqlDialectTranslator.Translation t = translate("""
+                WITH INPUT AS (
+                  WITH prev AS (SELECT 1 AS id),
+                       `new` AS (
+                         WITH new_aggregated AS (
+                           SELECT (SELECT id FROM UNNEST(aliases) WHERE type IN ('idfa') LIMIT 1) id_value
+                           FROM `test-project.ds.batch_id_events`
+                         )
+                         SELECT id_value FROM new_aggregated
+                       ),
+                       unified AS (SELECT * FROM prev UNION ALL SELECT * FROM `new`)
+                  SELECT * FROM unified
+                )
+                SELECT TO_JSON_STRING(row) FROM INPUT AS row
+                """);
+
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "batch_id_events")), t.tables());
+        assertTrue(t.sql().contains("FROM \"new_aggregated\""), t.sql());
+    }
+
+    @Test
+    void nestedCtesDoNotHidePhysicalTablesOutsideTheirScope() {
+        SqlDialectTranslator.Translation t = SqlDialectTranslator.translate("""
+                WITH INPUT AS (
+                  WITH users AS (SELECT 1 AS id)
+                  SELECT * FROM users
+                )
+                SELECT * FROM users
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "users")), t.tables());
+        assertTrue(t.sql().endsWith("FROM \"ds\".\"users\""), t.sql());
     }
 
     @Test
@@ -89,11 +536,42 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void unaliasedParenthesizedQueryInFromGetsADuckDbAlias() {
+        assertEquals("SELECT *"
+                        + " FROM ((SELECT 1 AS \"value\") UNION ALL (SELECT 2 AS \"value\")) AS \"_floci_derived_0\"",
+                sql("SELECT * FROM ((SELECT 1 value) UNION ALL (SELECT 2 value))"));
+    }
+
+    @Test
+    void parenthesizedJoinGroupsDoNotHideTheirRangeVariables() {
+        String translated = sql("""
+                WITH previous_batch AS (SELECT 1 AS group_id, [1] AS items),
+                     current_batch AS (SELECT 1 AS group_id, [1] AS items)
+                SELECT previous_rows.group_id
+                FROM ((previous_batch previous_rows CROSS JOIN UNNEST(previous_rows.items) AS previous_item)
+                      FULL JOIN (current_batch current_rows CROSS JOIN UNNEST(current_rows.items) AS current_item)
+                      ON previous_rows.group_id = current_rows.group_id)
+                """);
+
+        assertTrue(translated.contains("ON previous_rows.group_id = current_rows.group_id"), translated);
+        assertFalse(translated.contains("_floci_derived_"), translated);
+    }
+
+    @Test
+    void bareJoinUnnestBecomesCrossJoin() {
+        assertEquals("SELECT a.* NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$'"
+                        + " FROM \"ds\".\"filtered\" CROSS JOIN UNNEST(aliases) AS \"_unnest_a\"(\"a\")",
+                sql("SELECT a.* FROM ds.filtered JOIN UNNEST(aliases) a"));
+    }
+
+    @Test
     void ctesOfParenthesizedQueriesAndSubqueriesAreNotTreatedAsTables() {
         SqlDialectTranslator.Translation t = translate("(WITH s AS (SELECT * FROM ds.t) SELECT x + 1 FROM s)");
         assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), t.tables());
-        assertEquals("(WITH s AS (SELECT * FROM \"ds\".\"t\") SELECT x + 1 AS f0_ FROM \"s\")", t.sql());
-        assertEquals("SELECT * FROM (WITH s AS (SELECT 1 AS x) SELECT x FROM \"s\")",
+        assertEquals("(WITH s AS (SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$'"
+                + " FROM \"ds\".\"t\") SELECT x + 1 AS f0_ FROM \"s\")", t.sql());
+        assertEquals("SELECT *"
+                        + " FROM (WITH s AS (SELECT 1 AS x) SELECT x FROM \"s\") AS \"_floci_derived_0\"",
                 sql("SELECT * FROM (WITH s AS (SELECT 1 AS x) SELECT x FROM s)"));
         assertEquals("SELECT (WITH s AS (SELECT 1 AS x) SELECT x FROM \"s\") AS \"y\"",
                 sql("SELECT (WITH s AS (SELECT 1 AS x) SELECT x FROM s) y"));
@@ -106,8 +584,16 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void correlatedLeftJoinUnnestBecomesLateralJoinWithNullPreservingCondition() {
+        assertEquals("""
+                SELECT g.id, member FROM "ds"."groups" AS "g" LEFT JOIN LATERAL UNNEST(g.members) AS "_unnest_member"("member") ON TRUE WHERE g.id = 1""",
+                sql("SELECT g.id, member FROM ds.groups g LEFT JOIN UNNEST(g.members) member WHERE g.id = 1"));
+    }
+
+    @Test
     void unaliasedUnnestExpandsStructFields() {
-        assertEquals("SELECT * FROM (SELECT UNNEST([1, 2], max_depth := 2))", sql("SELECT * FROM UNNEST([1, 2])"));
+        assertEquals("SELECT * FROM (SELECT UNNEST([1, 2], max_depth := 2)) AS \"_floci_unnest_0\"",
+                sql("SELECT * FROM UNNEST([1, 2])"));
     }
 
     @Test
@@ -126,6 +612,16 @@ class SqlDialectTranslatorTest {
     @Test
     void escapesAreDecodedButRawStringsKeepBackslashes() {
         assertEquals("SELECT 'a\nb' AS a, 'a\\d' AS b", sql("SELECT 'a\\nb' AS a, r'a\\d' AS b"));
+    }
+
+    @Test
+    void byteLiteralsDecodeHexAndOctalEscapesWithoutUtf8Reencoding() {
+        assertEquals("SELECT from_hex('0010ff41') AS value",
+                sql("SELECT b'\\x00\\020\\xffA' AS value"));
+        assertEquals("SELECT 'A😀' AS value", sql("SELECT '\\u0041\\U0001F600' AS value"));
+        assertThrows(GcpException.class, () -> sql("SELECT b'\\u0041'"));
+        assertThrows(GcpException.class, () -> sql("SELECT b'\\x0'"));
+        assertThrows(GcpException.class, () -> sql("SELECT b'\\400'"));
     }
 
     @Test
@@ -167,23 +663,42 @@ class SqlDialectTranslatorTest {
 
     @Test
     void anonymousColumnsBelowTheResultKeepTheirPosition() {
-        assertEquals("SELECT * FROM (SELECT 1 + 1 AS \"$col1\", 2 AS x, 3 + 3 AS \"$col3\")",
+        assertEquals("SELECT *"
+                        + " FROM (SELECT 1 + 1 AS \"$col1\", 2 AS x, 3 + 3 AS \"$col3\") AS \"_floci_derived_0\"",
                 sql("SELECT * FROM (SELECT 1 + 1, 2 AS x, 3 + 3)"));
         assertEquals("WITH s AS (SELECT 1 + 1 AS \"$col1\") SELECT * FROM \"s\"",
                 sql("WITH s AS (SELECT 1 + 1) SELECT * FROM s"));
-        assertEquals("SELECT 1 + 1 AS \"$col1\", * FROM (SELECT 2 + 2 AS \"$col1\")",
+        assertEquals("SELECT 1 + 1 AS \"$col1\", *"
+                        + " FROM (SELECT 2 + 2 AS \"$col1\") AS \"_floci_derived_0\"",
                 sql("SELECT 1 + 1, * FROM (SELECT 2 + 2)"));
         assertEquals("SELECT (SELECT 1 + 1 AS \"$col1\") AS v, 1 + 1 AS f0_", sql("SELECT (SELECT 1 + 1) AS v, 1 + 1"));
         assertEquals("SELECT 1 + 1 AS f0_ UNION ALL SELECT 2 + 2", sql("SELECT 1 + 1 UNION ALL SELECT 2 + 2"));
         assertEquals("SELECT 1 + 1 AS f1_, 9 AS f0_", sql("SELECT 1 + 1, 9 AS f0_"));
-        assertEquals("SELECT * FROM (SELECT * EXCLUDE (x), 9 + 9 AS \"$col2\" FROM (SELECT 2 + 2 AS \"$col1\", 3 AS x))",
+        assertEquals("SELECT *"
+                        + " FROM (SELECT * NOT SIMILAR TO '(?i)^(x)$', 9 + 9 AS \"$col2\""
+                        + " FROM (SELECT 2 + 2 AS \"$col1\", 3 AS x) AS \"_floci_derived_0\")"
+                        + " AS \"_floci_derived_1\"",
                 sql("SELECT * FROM (SELECT * EXCEPT (x), 9 + 9 FROM (SELECT 2 + 2, 3 AS x))"));
     }
 
     @Test
     void starAndImplicitAliasesKeepTheirNames() {
-        assertEquals("SELECT * EXCLUDE (secret), UPPER(name) AS \"upper_name\" FROM \"ds\".\"t\"",
+        assertEquals("SELECT * NOT SIMILAR TO '(?i)^(_PARTITIONDATE|_PARTITIONTIME|_TABLE_SUFFIX|secret)$',"
+                        + " UPPER(name) AS \"upper_name\" FROM \"ds\".\"t\"",
                 sql("SELECT * EXCEPT (secret), UPPER(name) upper_name FROM ds.t"));
+        assertEquals("SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$' FROM ("
+                        + "SELECT * REPLACE (UPPER(name) AS name) FROM \"ds\".\"t\""
+                        + ") AS \"_floci_star_replace\"",
+                sql("SELECT * REPLACE (UPPER(name) AS name) FROM ds.t"));
+    }
+
+    @Test
+    void parenthesizedPathKeepsItsImplicitColumnName() {
+        assertEquals("WITH categories AS (SELECT DISTINCT(category) FROM \"ds\".\"t\")"
+                        + " SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$'"
+                        + " FROM \"ds\".\"t\" JOIN \"categories\" USING (category)",
+                sql("WITH categories AS (SELECT DISTINCT(category) FROM ds.t)"
+                        + " SELECT * FROM ds.t JOIN categories USING (category)"));
     }
 
     // ── Functions ────────────────────────────────────────────────────────────
@@ -230,16 +745,157 @@ class SqlDialectTranslatorTest {
     @Test
     void functionShimsRewriteToDuckDb() {
         assertEquals("SELECT (CASE WHEN (b) = 0 THEN NULL ELSE (a) / (b) END) AS r", sql("SELECT SAFE_DIVIDE(a, b) AS r"));
-        assertEquals("SELECT count_if(x > 1) AS c", sql("SELECT COUNTIF(x > 1) AS c"));
+        assertEquals("SELECT count(CASE WHEN x > 1 THEN 1 END) AS c", sql("SELECT COUNTIF(x > 1) AS c"));
+        assertEquals("SELECT count(CASE WHEN x > 1 THEN 1 END) OVER (PARTITION BY bucket) AS c",
+                sql("SELECT COUNTIF(x > 1) OVER (PARTITION BY bucket) AS c"));
+        assertEquals("SELECT list_extract(list_transform([struct_pack(\"_floci_concat_0_0\" := a,"
+                        + " \"_floci_concat_0_1\" := b)], _floci_concat_value_0 -> CASE WHEN"
+                        + " _floci_concat_value_0.\"_floci_concat_0_0\" IS NULL OR"
+                        + " _floci_concat_value_0.\"_floci_concat_0_1\" IS NULL THEN NULL ELSE concat("
+                        + "_floci_concat_value_0.\"_floci_concat_0_0\","
+                        + " _floci_concat_value_0.\"_floci_concat_0_1\") END), 1) AS c",
+                sql("SELECT CONCAT(a, b) AS c"));
+        String singleConcat = sql("SELECT CONCAT(7) AS c");
+        assertTrue(singleConcat.contains("concat(_floci_concat_value_0.\"_floci_concat_0_0\")"),
+                singleConcat);
+        assertTrue(singleConcat.contains("IS NULL THEN NULL"), singleConcat);
+        assertTrue(sql("SELECT CONCAT(7, '_', label) AS c").contains(
+                "struct_pack(\"_floci_concat_0_0\" := 7, \"_floci_concat_0_1\" := '_',"
+                        + " \"_floci_concat_0_2\" := label)"));
+        String volatileConcat = sql("SELECT CONCAT(IF(RAND() < 0.5, NULL, 'x'), 'y') AS c");
+        assertEquals(1, volatileConcat.split("random\\(\\)", -1).length - 1, volatileConcat);
+        String aggregateConcat = sql("SELECT CONCAT(COUNT(*), ' rows') FROM ds.t");
+        assertEquals(1, aggregateConcat.split("COUNT\\(\\*\\)", -1).length - 1, aggregateConcat);
+        assertFalse(aggregateConcat.contains("FROM (SELECT COUNT"), aggregateConcat);
+        assertEquals("SELECT floci_length(value) AS n", sql("SELECT LENGTH(value) AS n"));
+        assertEquals("SELECT floci_byte_length(value) AS n", sql("SELECT BYTE_LENGTH(value) AS n"));
+        assertEquals("SELECT coalesce(floci_to_json_string(value, TRUE),"
+                        + " CASE WHEN TRUE IS NULL THEN NULL ELSE 'null' END) AS json",
+                sql("SELECT TO_JSON_STRING(value, TRUE) AS json"));
         assertEquals("SELECT (CASE WHEN x THEN 1 ELSE 2 END) AS c", sql("SELECT IF(x, 1, 2) AS c"));
         assertEquals("SELECT date_diff('day', b, a) AS d", sql("SELECT DATE_DIFF(a, b, DAY) AS d"));
-        assertEquals("SELECT CAST(date_trunc('month', d) AS DATE) AS m", sql("SELECT DATE_TRUNC(d, MONTH) AS m"));
+        assertEquals("SELECT date_diff('week', (b - INTERVAL 1 DAY), (a - INTERVAL 1 DAY)) AS d",
+                sql("SELECT DATE_DIFF(a, b, WEEK(TUESDAY)) AS d"));
+        assertEquals("SELECT cast_to_type(date_trunc('month', d), d) AS m", sql("SELECT DATE_TRUNC(d, MONTH) AS m"));
+        assertEquals("SELECT cast_to_type((date_trunc('week', d - INTERVAL 1 DAY) + INTERVAL 1 DAY), d) AS t",
+                sql("SELECT DATE_TRUNC(d, WEEK(TUESDAY)) AS t"));
+        assertEquals("SELECT cast_to_type(date_trunc('month', CAST('2024-05-17' AS DATE)), CAST('2024-05-17' AS DATE)) AS m",
+                sql("SELECT DATE_TRUNC('2024-05-17', MONTH) AS m"));
         assertEquals("SELECT strftime(ts, '%Y') AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
         assertEquals("SELECT (dayofweek(d) + 1) AS w", sql("SELECT EXTRACT(DAYOFWEEK FROM d) AS w"));
         assertEquals("SELECT regexp_extract(s, 'a(b)', 1) AS x", sql("SELECT REGEXP_EXTRACT(s, r'a(b)') AS x"));
         assertEquals("SELECT regexp_replace(s, 'a', 'b', 'g') AS x", sql("SELECT REGEXP_REPLACE(s, 'a', 'b') AS x"));
         assertEquals("SELECT {'a': 1, 'b': 'x'} AS s", sql("SELECT STRUCT(1 AS a, 'x' AS b) AS s"));
         assertEquals("SELECT len(arr) AS n", sql("SELECT ARRAY_LENGTH(arr) AS n"));
+        assertEquals("SELECT ARRAY_AGG(value ORDER BY ordinal) FILTER (WHERE (value) IS NOT NULL) AS \"values\"",
+                sql("SELECT ARRAY_AGG(value IGNORE NULLS ORDER BY ordinal) AS values"));
+        assertEquals("SELECT quantile_disc(counts, list_transform(generate_series(0, CAST(4 AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(4 AS DOUBLE))) AS \"values\"",
+                sql("SELECT APPROX_QUANTILES(counts, 4) AS values"));
+        assertEquals("SELECT quantile_disc(counts, list_transform(generate_series(0, CAST(4 AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(4 AS DOUBLE))) AS \"values\"",
+                sql("SELECT APPROX_QUANTILES(counts, 4 IGNORE NULLS) AS values"));
+        assertEquals("SELECT COUNT(DISTINCT value) AS count", sql("SELECT APPROX_COUNT_DISTINCT(value) AS count"));
+        assertEquals("SELECT CAST(try_strptime(value, '%Y%m%d') AS DATE) AS parsed",
+                sql("SELECT SAFE.PARSE_DATE('%Y%m%d', value) AS parsed"));
+        assertEquals("SELECT lower(hex(value)) AS encoded", sql("SELECT TO_HEX(value) AS encoded"));
+        assertEquals("SELECT from_hex(md5(value)) AS md5, from_hex(sha1(value)) AS sha1,"
+                        + " from_hex(sha256(value)) AS sha256",
+                sql("SELECT MD5(value) AS md5, SHA1(value) AS sha1, SHA256(value) AS sha256"));
+        assertEquals("SELECT lower(hex(from_hex(md5(UPPER(id))))) AS md5,"
+                        + " lower(hex(from_hex(sha1(UPPER(id))))) AS sha1",
+                sql("SELECT TO_HEX(MD5(UPPER(id))) AS md5, TO_HEX(SHA1(UPPER(id))) AS sha1"));
+    }
+
+    @Test
+    void indexedArraySubqueriesCanReferenceVisibleCtes() {
+        SqlDialectTranslator.Translation translated = translate(
+                "WITH x AS (SELECT 1 AS id) SELECT ARRAY(SELECT id FROM x)[OFFSET(0)] AS value");
+
+        assertTrue(translated.tables().isEmpty(), translated.tables().toString());
+        assertTrue(translated.sql().contains("SELECT id FROM \"x\""), translated.sql());
+    }
+
+    @Test
+    void weekWeekdayWorksInEverySupportedDatePartPosition() {
+        String extracted = sql("SELECT EXTRACT(WEEK(TUESDAY) FROM d) AS week FROM ds.t");
+        assertTrue(extracted.contains("CASE WHEN CAST(d AS DATE) <"), extracted);
+        assertTrue(extracted.contains("date_diff('day'"), extracted);
+        assertTrue(extracted.contains("// 7) + 1 END"), extracted);
+    }
+
+    @Test
+    void translatesBigQueryPivotSyntaxToDuckDb() {
+        assertEquals("SELECT *"
+                        + " FROM (PIVOT \"ds\".\"metrics\" ON metric IN ('one', 'two') USING ANY_VALUE(value))",
+                sql("SELECT * FROM ds.metrics PIVOT (ANY_VALUE(value) FOR metric IN ('one', 'two'))"));
+    }
+
+    @Test
+    void aggregateArrayConcatAndHllSketchFunctionsTranslateToDuckDb() {
+        assertEquals("SELECT flatten(list(tags)) AS tags FROM \"ds\".\"t\"",
+                sql("SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(list_filter(list(id), value -> value IS NOT NULL), CAST(20 AS INTEGER)) AS sketch"
+                        + " FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id, 20) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_merge(list_filter(list(CAST(sketch AS BLOB)), sketch -> sketch IS NOT NULL))"
+                        + " AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.MERGE(sketch) AS cardinality FROM ds.t"));
+        assertEquals("SELECT floci_hll_extract(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.EXTRACT(sketch) AS cardinality FROM ds.t"));
+    }
+
+    @Test
+    void containsSubstrNormalizesAndComparesScalarStringsCaseInsensitively() {
+        assertEquals("SELECT contains(lower(nfc_normalize(CAST(name AS VARCHAR))),"
+                        + " lower(nfc_normalize(CAST(',' AS VARCHAR)))) AS has_comma FROM \"ds\".\"t\"",
+                sql("SELECT CONTAINS_SUBSTR(name, ',') AS has_comma FROM ds.t"));
+    }
+
+    @Test
+    void toJsonStringUsesTheTypeAwareSidecarSerializer() {
+        assertEquals("SELECT coalesce(floci_to_json_string(\"row\"), 'null') AS json",
+                sql("SELECT TO_JSON_STRING(row) AS json"));
+    }
+
+    @Test
+    void farmFingerprintUsesTheCompatibleSidecarScalar() {
+        assertEquals("SELECT farm_fingerprint(CAST('1footrue' AS BLOB)) AS fingerprint FROM \"ds\".\"t\"",
+                sql("SELECT FARM_FINGERPRINT(CAST('1footrue' AS BYTES)) AS fingerprint FROM ds.t"));
+    }
+
+    @Test
+    void standardSingleValueUnpivotPreservesItsDefaultNullExclusion() {
+        SqlDialectTranslator.Translation t = translate(
+                "SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS INT64) AS absent)\n"
+                        + "    UNPIVOT (metric_value FOR metric IN (present, absent))");
+
+        assertEquals(Set.of(), t.tables());
+        assertEquals("SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS BIGINT) AS absent) AS \"_floci_derived_0\""
+                + "\n    UNPIVOT (metric_value FOR metric IN (present, absent))", t.sql());
+        assertEquals(SqlDialectTranslator.StatementKind.QUERY, statement(
+                "SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS INT64) AS absent)\n"
+                        + "    UNPIVOT (metric_value FOR metric IN (present, absent))").kind());
+        assertEquals(t.sql(), SqlDialectTranslator.translateScript(
+                "SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS INT64) AS absent)\n"
+                        + "    UNPIVOT (metric_value FOR metric IN (present, absent))",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none()).sql());
+        assertEquals("SELECT id, metric, value FROM \"ds\".\"metrics\""
+                        + " UNPIVOT INCLUDE NULLS (value FOR metric IN (a, b))",
+                sql("SELECT id, metric, value FROM ds.metrics UNPIVOT INCLUDE NULLS (value FOR metric IN (a, b))"));
+    }
+
+    @Test
+    void hllSketchFunctionsValidateTheirSignatures() {
+        invalid("SELECT HLL_COUNT.MERGE()");
+        assertTrue(invalid("SELECT HLL_COUNT.EXTRACT(a, b)").getMessage().contains("HLL_COUNT.EXTRACT"));
+        assertTrue(invalid("SELECT HLL_COUNT.INIT(a, 10, 20)").getMessage().contains("HLL_COUNT.INIT"));
+    }
+
+    @Test
+    void lengthAndJsonFunctionsValidateTheirSignatures() {
+        assertTrue(invalid("SELECT LENGTH(a, b)").getMessage().contains("LENGTH"));
+        assertTrue(invalid("SELECT BYTE_LENGTH(a, b)").getMessage().contains("BYTE_LENGTH"));
+        assertTrue(invalid("SELECT TO_JSON_STRING()").getMessage().contains("TO_JSON_STRING"));
+        assertTrue(invalid("SELECT TO_JSON_STRING(a, TRUE, FALSE)").getMessage().contains("TO_JSON_STRING"));
     }
 
     @Test
@@ -256,7 +912,7 @@ class SqlDialectTranslatorTest {
     void implicitSelectAliasesBecomeQuotedAsAliases() {
         assertEquals("SELECT 1 AS \"sample\", x AS \"name\", COUNT(*) AS \"value\" FROM \"ds\".\"t\"",
                 sql("SELECT 1 sample, x name, COUNT(*) value FROM ds.t"));
-        assertEquals("SELECT name FROM (SELECT 'a' AS \"name\", (CASE WHEN x THEN 1 ELSE 2 END) AS \"type\" FROM \"ds\".\"t\")",
+        assertEquals("SELECT name FROM (SELECT 'a' AS \"name\", (CASE WHEN x THEN 1 ELSE 2 END) AS \"type\" FROM \"ds\".\"t\") AS \"_floci_derived_0\"",
                 sql("SELECT name FROM (SELECT 'a' name, IF(x, 1, 2) type FROM ds.t)"));
         assertEquals("SELECT CASE WHEN x THEN 1 END AS \"year\" FROM \"ds\".\"t\"",
                 sql("SELECT CASE WHEN x THEN 1 END year FROM ds.t"));
@@ -280,16 +936,133 @@ class SqlDialectTranslatorTest {
     @Test
     void cteNamedOffsetIsQuoted() {
         assertEquals("WITH \"offset\" AS (SELECT 1 AS x) SELECT x FROM \"offset\"", sql("WITH offset AS (SELECT 1 AS x) SELECT x FROM offset"));
-        assertEquals("invalidQuery", assertThrows(GcpException.class,
-                () -> sql("SELECT v FROM UNNEST([1]) v WITH OFFSET AS o")).getReason());
+        assertEquals("SELECT v, o FROM LATERAL (SELECT \"_value\" AS \"v\", \"_ordinality\" - 1 AS \"o\""
+                        + " FROM UNNEST([1]) WITH ORDINALITY AS \"_floci_offset\"(\"_value\", \"_ordinality\"))"
+                        + " AS \"_unnest_v\"",
+                sql("SELECT v, o FROM UNNEST([1]) v WITH OFFSET AS o"));
     }
 
     @Test
     void offsetKeywordsStayKeywords() {
         assertEquals("SELECT x, 5 \"offset\" FROM \"ds\".\"t\" ORDER BY x LIMIT 1 OFFSET 1", sql("SELECT x, 5 offset FROM ds.t ORDER BY x LIMIT 1 OFFSET 1"));
-        assertEquals("SELECT a[OFFSET(1)] AS f0_ FROM \"ds\".\"t\"", sql("SELECT a[OFFSET(1)] FROM ds.t"));
+        String ordinary = sql("SELECT a[OFFSET(1)] FROM ds.t");
+        assertTrue(ordinary.contains("IS NULL THEN NULL"), ordinary);
+        assertTrue(ordinary.contains("error('Array index out of bounds')"), ordinary);
+        String safe = sql("SELECT a[SAFE_OFFSET(-2)] FROM ds.t");
+        assertTrue(safe.contains(">= 0 THEN"), safe);
+        assertTrue(safe.contains("ELSE NULL END"), safe);
+        String literal = sql("SELECT ['zero', 'one'][OFFSET(0)]");
+        assertEquals(literal.indexOf("['zero', 'one']"), literal.lastIndexOf("['zero', 'one']"), literal);
+        assertTrue(literal.contains("error('Array index out of bounds')"), literal);
         assertEquals("invalidQuery", assertThrows(GcpException.class,
                 () -> sql("SELECT x FROM UNNEST([1]) x WITH OFFSET")).getReason());
+    }
+
+    @Test
+    void parenthesizedArrayOffsetRetainsOuterSelect() {
+        String translated = sql("SELECT ([1, 2])[OFFSET(0)] AS value");
+
+        assertTrue(translated.startsWith("SELECT "), translated);
+        assertTrue(translated.endsWith(" AS value"), translated);
+        assertFalse(translated.contains("[OFFSET("), translated);
+    }
+
+    @Test
+    void unreservedFunctionNameCanBeIndexed() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION last(x ARRAY<INT64>) AS (x);
+                SELECT last([1, 2])[OFFSET(0)] AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().startsWith("CREATE TEMP MACRO \"last\"("), script.setupSql());
+        assertTrue(script.sql().contains(":= last([1, 2])"), script.sql());
+        assertFalse(script.sql().contains("[OFFSET("), script.sql());
+    }
+
+    @Test
+    void selectAsStructAppliesOffsetBoundsBeforeRenderingItsFields() {
+        String safe = sql("SELECT AS STRUCT ['zero'][SAFE_OFFSET(-1)] AS value");
+        assertTrue(safe.contains(">= 0 THEN"), safe);
+        assertTrue(safe.contains("ELSE NULL END"), safe);
+
+        String ordinary = sql("SELECT AS STRUCT ['zero'][OFFSET(1)] AS value");
+        assertTrue(ordinary.contains("ELSE error('Array index out of bounds') END"), ordinary);
+    }
+
+    @Test
+    void indexedNestedStructQueriesAreTranslatedBeforeOffsetRewriting() {
+        String translated = sql("SELECT ARRAY(SELECT AS STRUCT 1 AS id)[OFFSET(0)].id");
+
+        assertTrue(translated.contains("SELECT {'id': 1}"), translated);
+        assertFalse(translated.contains("SELECT AS STRUCT"), translated);
+        assertTrue(translated.contains("error('Array index out of bounds')"), translated);
+    }
+
+    @Test
+    void temporaryFunctionParametersDoNotReplaceExtractDateParts() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(day INT64, ts TIMESTAMP)
+                AS (EXTRACT(DAY FROM ts) + day);
+                SELECT f(1, TIMESTAMP '2026-10-01 00:00:00+00');
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "EXTRACT(DAY FROM CAST(\"_floci_udf_arg_1\" AS TIMESTAMPTZ))"), script.setupSql());
+        assertTrue(script.setupSql().contains("+ CAST(\"_floci_udf_arg_0\" AS BIGINT)"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionSubqueryAliasesShadowParameters() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM UNNEST([2]) AS x));
+                SELECT f(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("SELECT x FROM UNNEST([2]) AS"), script.setupSql());
+        assertFalse(script.setupSql().contains("SELECT CAST(\"_floci_udf_arg_0\" AS BIGINT) FROM"),
+                script.setupSql());
+
+        SqlDialectTranslator.ScriptTranslation implicit = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM UNNEST([2]) x));
+                SELECT f(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+        assertTrue(implicit.setupSql().contains("SELECT x FROM UNNEST([2]) AS"), implicit.setupSql());
+        assertFalse(implicit.setupSql().contains("SELECT CAST(\"_floci_udf_arg_0\" AS BIGINT) FROM"),
+                implicit.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionParametersDoNotReplaceFunctionDateParts() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(day INT64, ts TIMESTAMP)
+                AS (EXTRACT(DAY FROM TIMESTAMP_TRUNC(ts, DAY)) + day);
+                SELECT f(1, TIMESTAMP '2026-10-01 00:00:00+00');
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "date_trunc('day', CAST(\"_floci_udf_arg_1\" AS TIMESTAMPTZ))"), script.setupSql());
+        assertTrue(script.setupSql().contains("+ CAST(\"_floci_udf_arg_0\" AS BIGINT)"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionParametersDoNotReplaceIntervalDateParts() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(day INT64, d DATE)
+                AS (UNIX_DATE(DATE_ADD(d, INTERVAL 1 DAY)) + day);
+                SELECT f(1, DATE '2026-10-01');
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("INTERVAL 1 DAY"), script.setupSql());
+        assertTrue(script.setupSql().contains("+ CAST(\"_floci_udf_arg_0\" AS BIGINT)"), script.setupSql());
+    }
+
+    @Test
+    void chainedSafeOffsetsKeepTheIndexedStructAsTheFieldReceiver() {
+        String translated = sql("SELECT groups[SAFE_OFFSET(0)].items[SAFE_OFFSET(0)].value FROM ds.t");
+
+        assertTrue(translated.contains("struct_pack(\"_floci_offset_array_0\" := groups"), translated);
+        assertTrue(translated.contains(")), 1).items, \"_floci_offset_index_1\" := 0"), translated);
+        assertFalse(translated.contains(".list_extract(items"), translated);
     }
 
     @Test
@@ -318,6 +1091,92 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT d + INTERVAL 5 DAY AS f0_, d + INTERVAL '-5' DAY AS f1_, d + INTERVAL (-5) DAY AS f2_"
                 + " FROM \"ds\".\"t\"", sql("SELECT d + INTERVAL 5 DAY, d + INTERVAL '-5' DAY, d + INTERVAL (-5) DAY FROM ds.t"));
         assertEquals("SELECT INTERVAL '1:2' HOUR TO MINUTE AS f0_ FROM \"ds\".\"t\"", sql("SELECT INTERVAL '1:2' HOUR TO MINUTE FROM ds.t"));
+    }
+
+    @Test
+    void netIpFunctionsUseSidecarByteScalars() {
+        assertEquals("""
+                SELECT safe_ip_from_string(ip) AS ipv4, ip_trunc(safe_ip_from_string(ipv6), 64) AS ipv6 FROM "ds"."t\"""",
+                sql("SELECT NET.SAFE_IP_FROM_STRING(ip) AS ipv4, "
+                        + "NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(ipv6), 64) AS ipv6 FROM ds.t"));
+    }
+
+    @Test
+    void netIpToStringUsesTheSidecarScalar() {
+        assertEquals("SELECT ip_to_string(ip) AS ip_string FROM \"ds\".\"t\"",
+                sql("SELECT NET.IP_TO_STRING(ip) AS ip_string FROM ds.t"));
+    }
+
+    @Test
+    void havingCanDereferenceAnAggregateStructAlias() {
+        assertEquals("""
+                WITH selected AS (
+                  SELECT {'group_id': group_id, 'latest_at': MAX(_PARTITIONTIME)} AS latest_per_group
+                  FROM "ds"."t" GROUP BY group_id HAVING (MAX(_PARTITIONTIME)) <= '2021-01-30'
+                )
+                SELECT * FROM "selected\"""",
+                sql("""
+                        WITH selected AS (
+                          SELECT {'group_id': group_id, 'latest_at': MAX(_PARTITIONTIME)} AS latest_per_group
+                          FROM ds.t GROUP BY group_id HAVING latest_per_group.latest_at <= '2021-01-30'
+                        )
+                        SELECT * FROM selected"""));
+    }
+
+    @Test
+    void havingCanDereferenceGoogleSqlStructAliasFields() {
+        assertEquals("""
+                SELECT {'group_id': group_id, 'latest_at': MAX(_PARTITIONTIME)} AS latest_per_group
+                FROM "ds"."t" GROUP BY group_id HAVING (MAX(_PARTITIONTIME)) <= '2021-01-30'""",
+                sql("""
+                        SELECT STRUCT(group_id, MAX(_PARTITIONTIME) AS latest_at) AS latest_per_group
+                        FROM ds.t GROUP BY group_id HAVING latest_per_group.latest_at <= '2021-01-30'"""));
+    }
+
+    @Test
+    void havingStructAliasWorksWithAnInlineSourceQuery() {
+        String translated = sql("""
+                WITH grouped AS (
+                  SELECT {'group_id': group_id, 'latest_at': MAX(event_time)} AS latest_per_group
+                  FROM (
+                    SELECT 'first' AS group_id, TIMESTAMP '2021-01-29 00:00:00+00' AS event_time
+                    UNION ALL SELECT 'first', TIMESTAMP '2021-01-30 00:00:00+00'
+                  )
+                  GROUP BY group_id
+                  HAVING latest_per_group.latest_at <= TIMESTAMP '2021-01-30 00:00:00+00'
+                )
+                SELECT latest_per_group.group_id FROM grouped""");
+
+        assertTrue(translated.contains(
+                "HAVING (MAX(event_time)) <= CAST('2021-01-30 00:00:00+00' AS TIMESTAMPTZ)"), translated);
+    }
+
+    @Test
+    void timestampSubCoercesStringLiterals() {
+        assertEquals("SELECT (CAST('2021-01-30' AS TIMESTAMPTZ) - INTERVAL 3 DAY) AS f0_",
+                sql("SELECT TIMESTAMP_SUB('2021-01-30', INTERVAL 3 DAY)"));
+    }
+
+    @Test
+    void dateTruncPreservesItsOverloadedInputType() {
+        String translated = sql("""
+                SELECT DATE_TRUNC(DATE '2021-09-21', WEEK(TUESDAY)) AS date_value,
+                       DATE_TRUNC(DATETIME '2021-09-21 12:34:56', WEEK(TUESDAY)) AS datetime_value,
+                       DATE_TRUNC(TIMESTAMP '2021-09-21 12:34:56+00', WEEK(TUESDAY)) AS timestamp_value
+                """);
+
+        assertTrue(translated.contains("cast_to_type((date_trunc('week', CAST('2021-09-21' AS DATE) - INTERVAL 1 DAY) + INTERVAL 1 DAY), CAST('2021-09-21' AS DATE))"), translated);
+        assertTrue(translated.contains("cast_to_type((date_trunc('week', CAST('2021-09-21 12:34:56' AS TIMESTAMP) - INTERVAL 1 DAY) + INTERVAL 1 DAY), CAST('2021-09-21 12:34:56' AS TIMESTAMP))"), translated);
+        assertTrue(translated.contains("cast_to_type((date_trunc('week', CAST('2021-09-21 12:34:56+00' AS TIMESTAMPTZ) - INTERVAL 1 DAY) + INTERVAL 1 DAY), CAST('2021-09-21 12:34:56+00' AS TIMESTAMPTZ))"), translated);
+
+        String timestampArithmetic = sql("""
+                SELECT TIMESTAMP_ADD(
+                  DATE_TRUNC(TIMESTAMP '2021-09-21 12:34:56+00', WEEK(TUESDAY)),
+                  INTERVAL 7 DAY)
+                """);
+        assertTrue(timestampArithmetic.contains("cast_to_type((date_trunc('week', "
+                + "CAST('2021-09-21 12:34:56+00' AS TIMESTAMPTZ) - INTERVAL 1 DAY) + INTERVAL 1 DAY), "
+                + "CAST('2021-09-21 12:34:56+00' AS TIMESTAMPTZ)) + INTERVAL 7 DAY"), timestampArithmetic);
     }
 
     @Test
@@ -356,7 +1215,8 @@ class SqlDialectTranslatorTest {
         String out = SqlDialectTranslator.translate(
                 "SELECT * FROM ds.t WHERE name = @name AND age >= @min_age AND ts > @since",
                 "test-project", null, new SqlDialectTranslator.QueryParameters(params, "NAMED")).sql();
-        assertEquals("SELECT * FROM \"ds\".\"t\" WHERE name = CAST('O''Brien' AS VARCHAR)"
+        assertEquals("SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$' FROM \"ds\".\"t\""
+                + " WHERE name = CAST('O''Brien' AS VARCHAR)"
                 + " AND age >= CAST(21 AS BIGINT) AND ts > CAST('2024-01-02 03:04:05+00:00' AS TIMESTAMPTZ)", out);
     }
 
@@ -367,7 +1227,8 @@ class SqlDialectTranslatorTest {
                 "parameterValue", Map.of("arrayValues", List.of(Map.of("value", "1"), Map.of("value", "2")))));
         String out = SqlDialectTranslator.translate("SELECT * FROM ds.t WHERE id IN UNNEST(?)",
                 "test-project", null, new SqlDialectTranslator.QueryParameters(params, "POSITIONAL")).sql();
-        assertEquals("SELECT * FROM \"ds\".\"t\" WHERE id IN (SELECT UNNEST([CAST(1 AS BIGINT), CAST(2 AS BIGINT)]))", out);
+        assertEquals("SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$' FROM \"ds\".\"t\""
+                + " WHERE id IN (SELECT UNNEST([CAST(1 AS BIGINT), CAST(2 AS BIGINT)]))", out);
     }
 
     @Test
@@ -375,7 +1236,8 @@ class SqlDialectTranslatorTest {
         String out = SqlDialectTranslator.translate("SELECT * FROM ds.t WHERE active = @flag",
                 "test-project", null, new SqlDialectTranslator.QueryParameters(
                         List.of(param("flag", "BOOL", "TRUE")), "NAMED")).sql();
-        assertEquals("SELECT * FROM \"ds\".\"t\" WHERE active = TRUE", out);
+        assertEquals("SELECT * NOT SIMILAR TO '^(_PARTITION(DATE|TIME)|_TABLE_SUFFIX)$'"
+                + " FROM \"ds\".\"t\" WHERE active = TRUE", out);
 
         // "yes" is not a BOOL literal. Coercing it to FALSE would silently invert the predicate,
         // so it fails the query the way a malformed INT64 already does.
@@ -468,6 +1330,17 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void typedArraysAndStructSubqueriesAreTranslatedInDml() {
+        String typedArray = dml("INSERT ds.t (items) VALUES (ARRAY<INT64>[1, 2])");
+        assertTrue(typedArray.contains("CAST([1, 2] AS BIGINT[])"), typedArray);
+        assertFalse(typedArray.contains("ARRAY<"), typedArray);
+
+        String struct = dml("INSERT ds.t (item) SELECT AS STRUCT 1 AS id, 'one' AS name");
+        assertFalse(struct.contains("SELECT AS STRUCT"), struct);
+        assertTrue(struct.contains("{'id': 1, 'name': 'one'}"), struct);
+    }
+
+    @Test
     void notMatchedClausesReadBareColumnsFromTheSource() {
         assertEquals("MERGE INTO \"ds\".\"t\" AS \"T\" USING \"ds\".\"s\" AS \"S\" ON S.id = T.id"
                         + " WHEN MATCHED THEN UPDATE SET \"v\" = S.\"v\""
@@ -548,6 +1421,28 @@ class SqlDialectTranslatorTest {
                 + " THEN INSERT (id) VALUES (id)");
         assertTrue(takenName.contains("max_depth := 2)) AS \"_merge_source_1\"")
                 && takenName.contains("VALUES (\"_merge_source_1\".id)"), takenName);
+    }
+
+    @Test
+    void fullyQualifiedProjectTableWithHyphenIsResolvedForDml() {
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(
+                "INSERT INTO `floci-local.ds.t` (a) VALUES (1)", "floci-local", null);
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "t"), statement.target());
+        assertEquals("INSERT INTO \"ds\".\"t\" (a) VALUES (1)",
+                SqlDialectTranslator.translateDml("INSERT INTO `floci-local.ds.t` (a) VALUES (1)",
+                        "floci-local", null, SqlDialectTranslator.QueryParameters.none()).sql());
+    }
+
+    @Test
+    void dmlCtesRemainInScope() {
+        assertEquals("""
+                INSERT INTO "ds"."target"
+                WITH grouped_rows AS (SELECT group_id FROM "ds"."details")
+                SELECT group_id FROM "grouped_rows\"""",
+                dml("""
+                        INSERT ds.target
+                        WITH grouped_rows AS (SELECT group_id FROM ds.details)
+                        SELECT group_id FROM grouped_rows"""));
     }
 
     @Test
@@ -698,6 +1593,18 @@ class SqlDialectTranslatorTest {
         assertEquals("RECORD", cols.get(3).getType());
         assertEquals("RECORD", cols.get(3).getFields().get(1).getType());
         assertEquals("FLOAT", cols.get(3).getFields().get(1).getFields().get(0).getType());
+        assertEquals(Map.of("type", "DAY"), create.timePartitioning());
+
+        SqlDialectTranslator.Statement fieldPartitioned = statement(
+                "CREATE TABLE ds.events (event_time TIMESTAMP) PARTITION BY TIMESTAMP_TRUNC(event_time, HOUR)");
+        assertEquals(Map.of("type", "HOUR", "field", "event_time"), fieldPartitioned.timePartitioning());
+
+        for (String type : List.of("HOUR", "DAY", "MONTH", "YEAR")) {
+            SqlDialectTranslator.Statement ingestionTime = statement(
+                    "CREATE TABLE ds.ingestion (id INT64) PARTITION BY TIMESTAMP_TRUNC(_PARTITIONTIME, "
+                            + type + ")");
+            assertEquals(Map.of("type", type), ingestionTime.timePartitioning());
+        }
     }
 
     @Test
@@ -706,6 +1613,11 @@ class SqlDialectTranslatorTest {
         assertEquals("CREATE_TABLE_AS_SELECT", ctas.statementType());
         assertTrue(ctas.orReplace());
         assertEquals("SELECT a FROM ds.src", ctas.querySql().trim());
+
+        SqlDialectTranslator.Statement partitionedCtas = statement(
+                "CREATE TABLE ds.daily PARTITION BY DATE(event_time) AS SELECT event_time FROM ds.src");
+        assertEquals(Map.of("type", "DAY", "field", "event_time"), partitionedCtas.timePartitioning());
+        assertEquals("SELECT event_time FROM ds.src", partitionedCtas.querySql().trim());
 
         SqlDialectTranslator.Statement view = statement("CREATE VIEW ds.v OPTIONS(description='x') AS SELECT 1 AS a");
         assertEquals("CREATE_VIEW", view.statementType());
@@ -760,6 +1672,12 @@ class SqlDialectTranslatorTest {
                 translate("SELECT * FROM INFORMATION_SCHEMA.SCHEMATA").informationSchema());
         assertEquals(Set.of(new InformationSchema.Ref("SCHEMATA", null, "us")),
                 translate("SELECT * FROM `test-project`.INFORMATION_SCHEMA.SCHEMATA").informationSchema());
+
+        SqlDialectTranslator.Translation partitions = translate(
+                "SELECT partition_id, total_rows FROM `test-project.ds.INFORMATION_SCHEMA.PARTITIONS`"
+                        + " WHERE table_name = 'events' AND partition_id != '__NULL__' ORDER BY partition_id");
+        assertEquals(Set.of(new InformationSchema.Ref("PARTITIONS", "ds", null)), partitions.informationSchema());
+        assertTrue(partitions.sql().contains("WHERE table_name = 'events' AND partition_id != '__NULL__'"));
     }
 
     @Test

@@ -1,5 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -13,9 +15,11 @@ import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -68,6 +72,10 @@ class BigQueryDuckIntegrationTest {
 
     @Inject
     DuckSqlEngine engine;
+
+    private static Response query(Map<String, Object> body) {
+        return given().contentType("application/json").body(body).when().post(BASE + "/queries");
+    }
 
     @Test
     @Order(1)
@@ -229,9 +237,29 @@ class BigQueryDuckIntegrationTest {
         query("""
                 {"query": "SELECT *, (WITH s AS (SELECT 1 x) SELECT x FROM s) y FROM (WITH s AS (SELECT 1 x) SELECT x FROM s)", "useLegacySql": false}
                 """)
+        .then().statusCode(200)
+        .body("schema.fields.name", equalTo(List.of("x", "y")))
+        .body("rows[0].f.v", equalTo(List.of("1", "1")));
+    }
+
+    @Test
+    @Order(5)
+    void resultWrapperResolvesNestedCtes() {
+        given().contentType("application/json").body(Map.of(
+                "query", """
+                        WITH INPUT AS (
+                          WITH new_aggregated AS (SELECT name FROM shop.users),
+                               nested_results AS (SELECT name FROM new_aggregated)
+                          SELECT name FROM nested_results
+                        )
+                        SELECT TO_JSON_STRING(row) FROM INPUT AS row ORDER BY name
+                        """,
+                "useLegacySql", false))
+                .when().post(BASE + "/queries")
                 .then().statusCode(200)
-                .body("schema.fields.name", equalTo(List.of("x", "y")))
-                .body("rows[0].f.v", equalTo(List.of("1", "1")));
+                .body("schema.fields.name", equalTo(List.of("f0_")))
+                .body("schema.fields.type", equalTo(List.of("STRING")))
+                .body("rows", hasSize(3));
     }
 
     @Test
@@ -282,6 +310,625 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(java.util.Arrays.asList("object", "array", "string", "number",
                         "number", "number", "number", "boolean", "null", null)));
+    }
+
+    @Test
+    @Order(5)
+    void arrayConcatAggAndHllSketchesCompose() {
+        query("""
+                {"query": "SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM shop.users", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("a", "b")));
+
+        query(Map.of("query", """
+                WITH sketches AS (SELECT HLL_COUNT.INIT(name, 20) AS sketch FROM shop.users)
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value) FROM UNNEST([sketch, sketch]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(List.of("3", "3")));
+
+        query(Map.of("query", """
+                SELECT HLL_COUNT.INIT(CAST(NULL AS STRING)) IS NULL AS init_all_null,
+                  HLL_COUNT.MERGE(CAST(NULL AS BYTES)) = 0 AS merge_all_null,
+                  HLL_COUNT.MERGE_PARTIAL(CAST(NULL AS BYTES)) IS NULL AS merge_partial_all_null
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("BOOLEAN", "BOOLEAN", "BOOLEAN")))
+                .body("rows[0].f.v", equalTo(List.of("true", "true", "true")));
+    }
+
+    @Test
+    @Order(5)
+    void hllOperationsReadBigQueryCompatibleSketchBytes() {
+        query(Map.of("query", """
+                WITH sketches AS (
+                  SELECT FROM_BASE64('CHAQARgCIAuCBwsQARgPIBQyA9bwNQ==') AS sketch
+                )
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value)
+                   FROM UNNEST([sketch, FROM_BASE64('CHAQAhgCIAuCBw4QAhgPIBQyBr/IHISsGQ==')]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(List.of("1", "3")));
+    }
+
+    @Test
+    @Order(5)
+    void containsSubstrExecutesWithBigQueryScalarSemantics() {
+        query("""
+                {"query": "SELECT CONTAINS_SUBSTR('A, B', ',') AS contains_comma", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("BOOLEAN"))
+                .body("rows[0].f[0].v", equalTo("true"));
+    }
+
+    @Test
+    @Order(5)
+    void byteLengthRandAndStrictIpFromStringTranslateToDuckDb() {
+        query(Map.of("query", """
+                SELECT BYTE_LENGTH('hé') AS string_bytes,
+                  RAND() >= 0 AND RAND() < 1 AS rand_in_range,
+                  LENGTH(NET.IP_FROM_STRING('127.0.0.1')) AS ip_bytes
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "BOOLEAN", "INTEGER")))
+                .body("rows[0].f[0].v", equalTo("3"))
+                .body("rows[0].f[1].v", equalTo("true"))
+                .body("rows[0].f[2].v", equalTo("4"));
+    }
+
+    @Test
+    @Order(5)
+    void farmFingerprintMatchesBigQuerySignedInt64Vectors() {
+        query(Map.of("query", """
+                SELECT FARM_FINGERPRINT('1footrue') AS string_hash,
+                  FARM_FINGERPRINT('2applefalse') AS positive_hash,
+                  FARM_FINGERPRINT(CAST('1footrue' AS BYTES)) AS bytes_hash,
+                  FARM_FINGERPRINT(CAST(NULL AS STRING)) AS null_hash
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER", "INTEGER", "INTEGER")))
+                .body("rows[0].f[0].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[1].v", equalTo("2794438866806483259"))
+                .body("rows[0].f[2].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[3].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void correlatedLeftJoinUnnestPreservesRowsForEmptyArrays() {
+        query(Map.of("query", """
+                WITH users AS (
+                  SELECT 1 AS id, ['a', 'b'] AS tags
+                  UNION ALL SELECT 2 AS id, CAST([] AS ARRAY<STRING>) AS tags
+                )
+                SELECT u.id, tag
+                FROM users u LEFT JOIN UNNEST(u.tags) tag
+                ORDER BY u.id, tag
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "tag")))
+                .body("rows", hasSize(3))
+                .body("rows[0].f.v", equalTo(List.of("1", "a")))
+                .body("rows[1].f.v", equalTo(List.of("1", "b")))
+                .body("rows[2].f[0].v", equalTo("2"))
+                .body("rows[2].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void arrayAggIgnoreNullsOrdersValuesBeforeAggregation() {
+        query(Map.of("query", """
+                WITH source AS (
+                  SELECT 2 AS ordinal, 'second' AS value
+                  UNION ALL SELECT 1, 'first'
+                  UNION ALL SELECT 3, CAST(NULL AS STRING)
+                )
+                SELECT ARRAY_AGG(value IGNORE NULLS ORDER BY ordinal) AS values FROM source
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("first", "second")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayAggSupportsInlineLimit() {
+        query(Map.of("query", """
+                SELECT ARRAY_AGG(value IGNORE NULLS ORDER BY ordinal LIMIT 2) AS values
+                FROM (SELECT 3 AS ordinal, 'third' AS value
+                      UNION ALL SELECT 1, 'first'
+                      UNION ALL SELECT 2, 'second'
+                      UNION ALL SELECT 4, CAST(NULL AS STRING))
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("first", "second")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayOffsetUsesGoogleSqlZeroBasedIndexes() {
+        query(Map.of("query", """
+                SELECT ['zero', 'one'][OFFSET(0)] AS first_value,
+                  ['zero', 'one'][OFFSET(1)] AS second_value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("zero", "one")));
+        query(Map.of("query", "SELECT ['zero'][SAFE_OFFSET(-1)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT ['zero'][OFFSET(1)] AS value", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+        query(Map.of("query", "SELECT CAST(NULL AS ARRAY<INT64>)[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT ['zero'][OFFSET(CAST(NULL AS INT64))] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT [10, 20][OFFSET([0, 1][OFFSET(0)])] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("10"));
+        query(Map.of("query", "SELECT ARRAY<INT64>[1, 2][OFFSET(0)] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "SELECT ([1, 2])[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION last(x ARRAY<INT64>) AS (x);
+                SELECT last([1, 2])[OFFSET(0)] AS value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void indexedNestedStructQueriesExecuteAfterTranslation() {
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT 1 AS id)[OFFSET(0)].id AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void chainedSafeOffsetsRetainTheirStructReceiver() {
+        query(Map.of("query", """
+                SELECT groups[SAFE_OFFSET(0)].items[SAFE_OFFSET(0)].value AS value
+                FROM (SELECT [STRUCT([STRUCT(7 AS value)] AS items)] AS groups)
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
+    }
+
+    @Test
+    @Order(5)
+    void nestedArrayStructsRetainInnerFieldNames() {
+        query(Map.of("query", """
+                SELECT records[OFFSET(1)].child.x AS value
+                FROM (SELECT [STRUCT(STRUCT(1 AS x) AS child),
+                  STRUCT(STRUCT(2 AS x) AS child)] AS records)
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void netIpFunctionsProduceBigQueryCompatibleAddressBytes() {
+        query(Map.of("query", """
+                SELECT NET.SAFE_IP_FROM_STRING('123.123.123.123') AS ipv4,
+                  NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING('1111:1111:1111:1111::'), 64) AS ipv6,
+                  NET.SAFE_IP_FROM_STRING('not-an-ip') AS malformed
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("BYTES", "BYTES", "BYTES")))
+                .body("rows[0].f[0].v", equalTo("e3t7ew=="))
+                .body("rows[0].f[1].v", equalTo("EREREREREREAAAAAAAAAAA=="))
+                .body("rows[0].f[2].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void netIpToStringFormatsCanonicalAddresses() {
+        query(Map.of("query", """
+                SELECT NET.IP_TO_STRING(NET.SAFE_IP_FROM_STRING('123.123.123.123')) AS ipv4,
+                  NET.IP_TO_STRING(NET.SAFE_IP_FROM_STRING('1111:1111:1111:1111::')) AS ipv6
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("STRING", "STRING")))
+                .body("rows[0].f[0].v", equalTo("123.123.123.123"))
+                .body("rows[0].f[1].v", equalTo("1111:1111:1111:1111::"));
+    }
+
+    @Test
+    @Order(5)
+    void havingCanDereferenceAnAggregateStructAlias() {
+        query(Map.of("query", """
+                WITH grouped AS (
+                  SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
+                  FROM (
+                    SELECT 'first' AS group_id, TIMESTAMP '2021-01-29 00:00:00+00' AS event_time
+                    UNION ALL SELECT 'first', TIMESTAMP '2021-01-30 00:00:00+00'
+                  )
+                  GROUP BY group_id
+                  HAVING latest_per_group.latest_at <= TIMESTAMP '2021-01-30 00:00:00+00'
+                )
+                SELECT latest_per_group.group_id FROM grouped
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("first"));
+    }
+
+    @Test
+    @Order(5)
+    void timestampSubCoercesStringLiteralsBeforeIntervalArithmetic() {
+        query(Map.of("query", """
+                SELECT TIMESTAMP_SUB('2021-01-30', INTERVAL 3 DAY) AS previous
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("TIMESTAMP")))
+                .body("rows[0].f[0].v", equalTo("1611705600"));
+    }
+
+    @Test
+    @Order(5)
+    void safeParseDateReturnsNullForMalformedInput() {
+        query(Map.of("query", """
+                SELECT SAFE.PARSE_DATE('%Y%m%d', '20230801') AS parsed,
+                  SAFE.PARSE_DATE('%Y%m%d', 'invalid') AS malformed
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("DATE", "DATE")))
+                .body("rows[0].f[0].v", equalTo("2023-08-01"))
+                .body("rows[0].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void dateTruncCoercesStringLiteralsLikeBigQuery() {
+        query(Map.of("query", """
+                SELECT DATE_TRUNC('2024-05-17', MONTH) AS month_start
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("month_start")))
+                .body("schema.fields.type", equalTo(List.of("DATE")))
+                .body("rows[0].f[0].v", equalTo("2024-05-01"));
+    }
+
+    @Test
+    @Order(5)
+    void extractWeekUsesBigQueryWeekdayBoundaries() {
+        query(Map.of("query", """
+                SELECT
+                  EXTRACT(WEEK(TUESDAY) FROM DATE '2024-01-01') AS before_tuesday,
+                  EXTRACT(WEEK(TUESDAY) FROM DATE '2024-01-02') AS first_tuesday,
+                  EXTRACT(WEEK FROM DATE '2024-01-06') AS before_sunday,
+                  EXTRACT(WEEK FROM DATE '2024-01-07') AS first_sunday
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("0", "1", "0", "1")));
+    }
+
+    @Test
+    @Order(5)
+    void toJsonStringFormatsTemporalValuesWithoutChangingStrings() throws Exception {
+        Response response = query(Map.of("query", """
+                WITH INPUT AS (
+                  SELECT TIMESTAMP '2021-07-09 00:00:00+00' AS occurred_at,
+                    DATE '2021-07-10' AS event_date,
+                    TIME '03:04:05.123400' AS event_time,
+                    DATETIME '2021-07-11 06:07:08.123400' AS event_datetime,
+                    '2021-07-09 00:00:00+00' AS timestamp_shaped_text
+                )
+                SELECT TO_JSON_STRING(row) AS json FROM INPUT AS row
+                """, "useLegacySql", false));
+        response.then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("rows[0].f[0].v", equalTo(
+                        "{\"occurred_at\":\"2021-07-09T00:00:00Z\","
+                                        + "\"event_date\":\"2021-07-10\","
+                                        + "\"event_time\":\"03:04:05.123400\","
+                                        + "\"event_datetime\":\"2021-07-11T06:07:08.123400\","
+                                        + "\"timestamp_shaped_text\":\"2021-07-09 00:00:00+00\"}"));
+
+        JsonNode json = new ObjectMapper().readTree(response.jsonPath().getString("rows[0].f[0].v"));
+        assertEquals(Instant.parse("2021-07-09T00:00:00Z"), Instant.parse(json.path("occurred_at").asText()));
+        assertEquals("2021-07-10", json.path("event_date").asText());
+        assertEquals("03:04:05.123400", json.path("event_time").asText());
+        assertEquals("2021-07-11T06:07:08.123400", json.path("event_datetime").asText());
+        assertEquals("2021-07-09 00:00:00+00", json.path("timestamp_shaped_text").asText());
+
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST(NULL AS STRING)) AS null_value,
+                  TO_JSON_STRING(STRUCT(1 AS id, [10, 20] AS coordinates), TRUE) AS pretty,
+                  TO_JSON_STRING(STRUCT(1 AS id), NULL) AS null_pretty
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("null"))
+                .body("rows[0].f[1].v", equalTo(
+                        "{\n  \"id\": 1,\n  \"coordinates\": [\n    10,\n    20\n  ]\n}"))
+                .body("rows[0].f[2].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void toJsonStringSerializesGeneratedUuidsAsStrings() throws Exception {
+        Response response = query(Map.of("query", """
+                WITH input AS (SELECT GENERATE_UUID() AS unique_key)
+                SELECT TO_JSON_STRING(row) AS json FROM input AS row
+                """, "useLegacySql", false));
+        response.then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("STRING")));
+
+        JsonNode json = new ObjectMapper().readTree(response.jsonPath().getString("rows[0].f[0].v"));
+        assertEquals(UUID.fromString(json.path("unique_key").asText()).toString(), json.path("unique_key").asText());
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionsCanComposeBytesBitwiseOperators() {
+        query(Map.of("query", "SELECT CONCAT(7, '_', 'value') AS combined", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7_value"));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                SELECT check_bit_set(b'\\x10', 4) AS set_bit,
+                       check_bit_set(b'\\x10', 3) AS clear_bit,
+                       check_bit_set(b'', 4) AS empty_bytes
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "false", "false")));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                WITH inputs AS (
+                  SELECT 'row1' AS row_id, b'\\x10' AS value
+                  UNION ALL SELECT 'row2', b''
+                  UNION ALL SELECT 'row3', CAST(NULL AS BYTES)
+                )
+                SELECT row_id,
+                  ARRAY_AGG(STRUCT(COALESCE(check_bit_set(value, 4), false) AS bit_set)) AS flags
+                FROM inputs
+                GROUP BY row_id
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(3));
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionReturnTypeIsApplied() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION as_float() RETURNS FLOAT64 AS (1);
+                SELECT as_float() AS value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("1.0"));
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionParametersDoNotReplaceExtractDateParts() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION f(day INT64, ts TIMESTAMP)
+                AS (EXTRACT(DAY FROM ts) + day);
+                SELECT f(1, TIMESTAMP '2026-10-01 00:00:00+00') AS value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION f(day INT64, ts TIMESTAMP)
+                AS (EXTRACT(DAY FROM TIMESTAMP_TRUNC(ts, DAY)) + day);
+                SELECT f(1, TIMESTAMP '2026-10-01 00:00:00+00') AS value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION add_days(day INT64, d DATE)
+                AS (UNIX_DATE(DATE_ADD(d, INTERVAL 1 DAY)) + day);
+                SELECT add_days(1, DATE '1970-01-01') AS value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void typedTemporaryFunctionCanReadAGroupedStructField() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION normalize_category(category STRING) AS (
+                  CASE WHEN category IS NULL THEN CAST(0 AS STRING) ELSE category END
+                );
+                SELECT normalize_category(item.category) AS category, COUNT(1) AS total
+                FROM UNNEST([STRUCT(CAST(1 AS STRING) AS category)]) item
+                GROUP BY item.category
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionSubqueryAliasShadowsItsParameter() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM UNNEST([2]) AS x));
+                SELECT f(1) AS value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void starExceptMatchesColumnNamesCaseInsensitively() {
+        query(Map.of("query", "SELECT * EXCEPT(ID) FROM UNNEST([STRUCT(1 AS id, 2 AS value)])",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("value")))
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void concatKeepsAggregatesInTheirQueryScope() {
+        query(Map.of("query", "SELECT CONCAT(COUNT(*), ' rows') AS summary FROM shop.users",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("3 rows"));
+
+        query(Map.of("query", "SELECT CONCAT(7) AS text, CONCAT(CAST(NULL AS INT64)) AS absent",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("STRING", "STRING")))
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void wildcardStarOmitsTheSuffixPseudocolumn() {
+        query(Map.of("query", "CREATE TABLE shop.events_2025 AS SELECT 1 AS id", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.events_2026 AS SELECT 2 AS id", "useLegacySql", false))
+                .then().statusCode(200);
+
+        query(Map.of("query", "SELECT * FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query(Map.of("query", "SELECT id, _TABLE_SUFFIX FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1", "2025"), List.of("2", "2026"))));
+        query(Map.of("query", "SELECT * FROM (SELECT _TABLE_SUFFIX FROM `shop.events_*`)"
+                        + " ORDER BY _TABLE_SUFFIX", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("_TABLE_SUFFIX")))
+                .body("rows.f.v", equalTo(List.of(List.of("2025"), List.of("2026"))));
+
+        query(Map.of("query", "CREATE TABLE shop.people_a AS"
+                        + " SELECT 'Ada' AS first_name, 'Lovelace' AS last_name", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.people_b AS"
+                        + " SELECT 'Hopper' AS last_name, 'Grace' AS first_name", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT first_name, last_name FROM `shop.people_*` ORDER BY first_name",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("Ada", "Lovelace"), List.of("Grace", "Hopper"))));
+
+        query(Map.of("query", "CREATE TABLE shop.people_c AS"
+                        + " SELECT 'Katherine' AS first_name, 'Kay' AS nickname", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT first_name, nickname FROM `shop.people_*` ORDER BY first_name",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("first_name", "nickname")))
+                .body("rows[0].f[0].v", equalTo("Ada"))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[1].f[0].v", equalTo("Grace"))
+                .body("rows[1].f[1].v", nullValue())
+                .body("rows[2].f.v", equalTo(List.of("Katherine", "Kay")));
+
+        query(Map.of("query", "CREATE TABLE shop.people_d AS SELECT 4 AS first_name",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT first_name FROM `shop.people_*`", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        query(Map.of("query", "CREATE TABLE shop.records_a AS SELECT"
+                        + " STRUCT('Ada' AS first_name, 'Lovelace' AS last_name) AS person",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.records_b AS SELECT"
+                        + " STRUCT('Hopper' AS last_name, 'Grace' AS first_name, 'Amazing Grace' AS nickname) AS person",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT person.first_name, person.last_name, person.nickname"
+                        + " FROM `shop.records_*` ORDER BY person.first_name", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("Ada"))
+                .body("rows[0].f[1].v", equalTo("Lovelace"))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[1].f.v", equalTo(List.of("Grace", "Hopper", "Amazing Grace")));
+
+        query(Map.of("query", "CREATE VIEW shop.records_view AS SELECT person FROM shop.records_a",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT person FROM `shop.records_*`", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(5)
+    void indexedArraySubqueryUsesItsCte() {
+        query(Map.of("query", "WITH x AS (SELECT 7 AS id)"
+                        + " SELECT ARRAY(SELECT id FROM x)[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
+
+        query(Map.of("query", "CREATE TEMP FUNCTION first_id() AS ((WITH x AS (SELECT 8 AS id)"
+                        + " SELECT ARRAY(SELECT id FROM x)[OFFSET(0)])); SELECT first_id() AS value;",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("8"));
+    }
+
+    @Test
+    @Order(5)
+    void bytesRepeatStillRejectsNegativeCountsWhenEvaluationIsRequired() {
+        query(Map.of("query", "SELECT REPEAT(b'x', -1)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("BYTES repeat count must not be negative"));
+    }
+
+    @Test
+    @Order(5)
+    void toJsonStringSerializesHugeintsWithoutPrecisionLoss() {
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST('9223372036854775808' AS HUGEINT)) AS value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("\"9223372036854775808\""));
+    }
+
+    @Test
+    @Order(5)
+    void singleValueUnpivotExcludesNullsByDefault() {
+        String sql = """
+                SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS INT64) AS absent)
+                UNPIVOT (metric_value FOR metric IN (present, absent))
+                """;
+
+        query(Map.of("query", sql, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("present", "1")));
     }
 
     @Test
@@ -532,6 +1179,14 @@ class BigQueryDuckIntegrationTest {
                 .body("rows", nullValue())
                 .body("jobReference.jobId", nullValue());
 
+        query("""
+                {"query": "SELECT 1; SELECT 2 AS value", "dryRun": true, "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("value")))
+                .body("rows", nullValue())
+                .body("jobReference.jobId", nullValue());
+
         Response job = given().contentType("application/json").body("""
                 {"jobReference": {"jobId": "dry-run-job"},
                  "configuration": {"dryRun": true, "query": {"query": "SELECT name FROM shop.users", "useLegacySql": false}}}
@@ -546,6 +1201,18 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(7)
+    void nonEmptyTypedStructArrayLiteralExecutes() {
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(ARRAY<STRUCT<name STRING, value STRING>>[
+                  STRUCT('source' AS name, 'origin' AS value)
+                ]) AS metadata
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("[{\"name\":\"source\",\"value\":\"origin\"}]"));
+    }
+
+    @Test
+    @Order(8)
     void sqlErrorsSurfaceAsInvalidQuery() {
         query("""
                 {"query": "SELECT nope FROM shop.users", "useLegacySql": false}

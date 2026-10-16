@@ -12,6 +12,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -140,6 +141,18 @@ public class ProjectRegistry {
         record.setCreated(true);
         store.put(record.getProjectId(), record);
         return record;
+    }
+
+    /**
+     * Changes a registered project: the state check and the change in {@code change} run under the
+     * lock creation, adoption and implicit registration use, so two updates, or an update and a
+     * delete, cannot interleave and leave a mix of both. A {@code change} that throws saves nothing.
+     */
+    public synchronized ProjectRecord update(String idOrNumber, Consumer<ProjectRecord> change) {
+        ProjectRecord project = require(idOrNumber);
+        change.accept(project);
+        store.put(project.getProjectId(), project);
+        return project;
     }
 
     public void save(ProjectRecord project) {

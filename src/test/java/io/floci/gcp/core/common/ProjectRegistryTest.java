@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -110,6 +111,43 @@ class ProjectRegistryTest {
         assertEquals(ProjectNumbers.of("seen-proj"), adopted.getProjectNumber());
         assertEquals(createTime, adopted.getCreateTime());
         assertThrows(GcpException.class, () -> registry.createOrAdopt(newProject("seen-proj")));
+    }
+
+    @Test
+    void anUpdateWaitsForAnotherInProgressSoFieldsNeverMix() throws Exception {
+        ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
+        registry.createOrAdopt(newProject("mix-proj"));
+        CountDownLatch firstInside = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = pool.submit(() -> registry.update("mix-proj", p -> {
+                p.setName("first");
+                firstInside.countDown();
+                try {
+                    releaseFirst.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                p.setLabels(Map.of("writer", "first"));
+            }));
+            assertTrue(firstInside.await(5, TimeUnit.SECONDS));
+            Future<?> second = pool.submit(() -> registry.update("mix-proj", p -> {
+                p.setName("second");
+                p.setLabels(Map.of("writer", "second"));
+            }));
+            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
+
+            releaseFirst.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        ProjectRecord project = registry.require("mix-proj");
+        assertEquals("second", project.getName());
+        assertEquals(Map.of("writer", "second"), project.getLabels());
     }
 
     @Test

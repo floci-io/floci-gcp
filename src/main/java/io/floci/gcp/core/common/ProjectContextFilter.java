@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  * Extracts the GCP project ID from the request and populates {@link RequestContext}.
  * Resolution order:
  * <ol>
- *   <li>URL path segment {@code /projects/{project}/...}</li>
+ *   <li>URL path segment {@code /projects/{project}/...} right after the API prefix</li>
  *   <li>{@code project} query parameter</li>
  *   <li>{@code x-goog-request-params} header ({@code project=...})</li>
  *   <li>Falls back to {@code EmulatorConfig.defaultProjectId()}</li>
@@ -28,7 +28,14 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ProjectContextFilter implements ContainerRequestFilter {
 
-    private static final Pattern PATH_PROJECT = Pattern.compile("/projects/([^/]+)");
+    /**
+     * A project in the path sits right after the API prefix: {@code /projects/p}, or up to two
+     * segments and a version ({@code /v1/projects/p}, {@code /storage/v1/projects/p},
+     * {@code /upload/bigquery/v2/projects/p}). Anchoring it keeps a {@code projects/} inside a GCS
+     * object name ({@code /bucket/dir/projects/x/file}) from being read as the request's project.
+     */
+    private static final Pattern PATH_PROJECT =
+            Pattern.compile("^(?:(?:/[^/]+){0,2}/v\\d+[a-z0-9]*)?/projects/([^/]+)");
     private static final Pattern PARAM_PROJECT = Pattern.compile("(?:^|&)project=([^&]+)");
 
     private final RequestContext requestContext;

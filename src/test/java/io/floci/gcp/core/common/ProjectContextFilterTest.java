@@ -32,4 +32,22 @@ class ProjectContextFilterTest {
         assertEquals("example.com:my-proj",
                 ProjectContextFilter.explicitProject("/v1/projects/example.com%3Amy-proj/secrets", null, null));
     }
+
+    @Test
+    void aProjectIsReadOnlyRightAfterTheApiPrefix() {
+        assertEquals("p-one", ProjectContextFilter.explicitProject("/projects/p-one/logs", null, null));
+        assertEquals("p-one", ProjectContextFilter.explicitProject("/v1beta4/projects/p-one", null, null));
+        assertEquals("p-one", ProjectContextFilter.explicitProject("/storage/v1/projects/p-one/hmacKeys", null, null));
+        assertEquals("p-one", ProjectContextFilter.explicitProject("/upload/bigquery/v2/projects/p-one/jobs", null, null));
+        assertEquals("p-one", ProjectContextFilter.explicitProject("/compute/v1/projects/p-one/zones", null, null));
+    }
+
+    @Test
+    void projectsInsideAnObjectNameAreNotAProject() {
+        assertNull(ProjectContextFilter.explicitProject("/bucket/dir/projects/not-a-project/file", null, null));
+        assertNull(ProjectContextFilter.explicitProject("/storage/v1/b/bucket/o/dir/projects/x/file", null, null));
+        assertNull(ProjectContextFilter.explicitProject("/download/storage/v1/b/bucket/o/projects/x", null, null));
+        assertEquals("from-query", ProjectContextFilter.explicitProject(
+                "/bucket/dir/projects/not-a-project/file", "from-query", null));
+    }
 }

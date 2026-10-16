@@ -60,15 +60,14 @@ public class CloudBillingService {
     }
 
     public Map<String, Object> updateBillingInfo(String project, Map<String, Object> body) {
-        ProjectRecord record = projects.require(project);
         Object raw = body != null ? body.get("billingAccountName") : null;
         String billingAccountName = raw instanceof String s ? s : "";
         if (!billingAccountName.isEmpty() && !BILLING_ACCOUNT_NAME.matcher(billingAccountName).matches()) {
             throw GcpException.invalidArgument("Billing account name '" + billingAccountName
                     + "' is invalid. It must have the form billingAccounts/{billing_account_id}.");
         }
-        record.setBillingAccountName(billingAccountName);
-        projects.save(record);
+        ProjectRecord record = projects.update(project,
+                existing -> existing.setBillingAccountName(billingAccountName));
         LOG.infof("update billing info project=%s billingAccount=%s", record.getProjectId(), billingAccountName);
         return billingInfo(record);
     }

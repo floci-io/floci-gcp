@@ -114,43 +114,43 @@ public class ResourceManagerService {
 
     public Map<String, Object> updateProject(String idOrNumber, Map<String, Object> body) {
         requireProjectId(idOrNumber);
-        ProjectRecord project = projects.require(idOrNumber);
-        if (!project.isActive()) {
-            throw GcpException.failedPrecondition("Project " + project.getProjectId() + " is not active.");
-        }
         Map<String, Object> update = body != null ? body : Map.of();
         String name = validName(stringField(update, "name"));
         Map<String, String> labels = validLabels(update.get("labels"));
         Parent parent = parseParent(update.get("parent"));
-        project.setName(name);
-        project.setLabels(labels);
-        if (parent != null) {
-            project.setParentType(parent.type());
-            project.setParentId(parent.id());
-        }
-        projects.save(project);
-        return toJson(project);
+        ProjectRecord updated = projects.update(idOrNumber, project -> {
+            if (!project.isActive()) {
+                throw GcpException.failedPrecondition("Project " + project.getProjectId() + " is not active.");
+            }
+            project.setName(name);
+            project.setLabels(labels);
+            if (parent != null) {
+                project.setParentType(parent.type());
+                project.setParentId(parent.id());
+            }
+        });
+        return toJson(updated);
     }
 
     public void deleteProject(String idOrNumber) {
         requireProjectId(idOrNumber);
-        ProjectRecord project = projects.require(idOrNumber);
-        if (project.isActive()) {
-            project.setLifecycleState(ProjectRecord.DELETE_REQUESTED);
-            projects.save(project);
-            LOG.infof("delete requested project id=%s", project.getProjectId());
-        }
+        projects.update(idOrNumber, project -> {
+            if (project.isActive()) {
+                project.setLifecycleState(ProjectRecord.DELETE_REQUESTED);
+                LOG.infof("delete requested project id=%s", project.getProjectId());
+            }
+        });
     }
 
     public void undeleteProject(String idOrNumber) {
         requireProjectId(idOrNumber);
-        ProjectRecord project = projects.require(idOrNumber);
-        if (!ProjectRecord.DELETE_REQUESTED.equals(project.getLifecycleState())) {
-            throw GcpException.failedPrecondition("Project " + project.getProjectId()
-                    + " is not in state DELETE_REQUESTED.");
-        }
-        project.setLifecycleState(ProjectRecord.ACTIVE);
-        projects.save(project);
+        projects.update(idOrNumber, project -> {
+            if (!ProjectRecord.DELETE_REQUESTED.equals(project.getLifecycleState())) {
+                throw GcpException.failedPrecondition("Project " + project.getProjectId()
+                        + " is not in state DELETE_REQUESTED.");
+            }
+            project.setLifecycleState(ProjectRecord.ACTIVE);
+        });
     }
 
     public Map<String, Object> getAncestry(String idOrNumber) {

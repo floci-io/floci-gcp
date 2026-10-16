@@ -188,6 +188,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     // ── Load jobs ─────────────────────────────────────────────────────────────
 
     private static final Pattern GENERIC_CSV_COLUMN = Pattern.compile("column\\d+");
+    /** A column the translator left anonymous in a nested select list (see {@code nameAnonymousColumns}). */
+    private static final Pattern ANONYMOUS_COLUMN = Pattern.compile("\\$col\\d+");
 
     @Override
     public Result readFiles(LoadSource source) {
@@ -369,7 +371,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         for (Map<String, Object> typedRow : typedRows) {
             Map<String, Object> row = new LinkedHashMap<>();
             for (Column column : columns) {
-                row.put(column.name(), DuckTypes.decodeTyped(typedRow.get(column.name()), column.type(),
+                row.put(column.field().getName(), DuckTypes.decodeTyped(typedRow.get(column.name()), column.type(),
                         column.field()));
             }
             rows.add(row);
@@ -480,18 +482,38 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return columns(run("DESCRIBE " + sql, setup, flociEndpoint, null).rows());
     }
 
-    /** Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names. */
+    /**
+     * Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names.
+     * Anonymous columns a {@code *} brought up from a nested select list are named {@code f0_},
+     * {@code f1_}, ... in output order, as BigQuery names them, skipping names other columns of the
+     * result already have.
+     */
     private static List<Column> columns(List<Map<String, Object>> described) {
         List<Column> columns = new ArrayList<>(described.size());
         Set<String> seen = new LinkedHashSet<>();
         Set<String> duplicates = new LinkedHashSet<>();
+        Set<String> named = new HashSet<>();
+        for (Map<String, Object> row : described) {
+            String name = String.valueOf(row.get("column_name"));
+            if (!ANONYMOUS_COLUMN.matcher(name).matches()) {
+                named.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        int anonymous = 0;
         for (Map<String, Object> row : described) {
             String name = String.valueOf(row.get("column_name"));
             if (!seen.add(name.toLowerCase(Locale.ROOT))) {
                 duplicates.add(name);
             }
             DuckTypes.DuckType type = DuckTypes.parse(String.valueOf(row.get("column_type")));
-            columns.add(new Column(name, type, DuckTypes.toField(name, type), DuckTypes.projection(type)));
+            String output = name;
+            if (ANONYMOUS_COLUMN.matcher(name).matches()) {
+                while (named.contains("f" + anonymous + "_")) {
+                    anonymous++;
+                }
+                output = "f" + anonymous++ + "_";
+            }
+            columns.add(new Column(name, type, DuckTypes.toField(output, type), DuckTypes.projection(type)));
         }
         if (!duplicates.isEmpty()) {
             throw SqlDialectTranslator.invalidQuery("Duplicate column names in the result are not supported."
@@ -523,7 +545,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             Map<String, Object> row = new LinkedHashMap<>();
             for (int i = 0; i < columns.size(); i++) {
                 Column column = columns.get(i);
-                row.put(column.name(), DuckTypes.decode(rawRow.get("c" + i), column.projection(), column.type(),
+                row.put(column.field().getName(), DuckTypes.decode(rawRow.get("c" + i), column.projection(), column.type(),
                         column.field()));
             }
             rows.add(row);

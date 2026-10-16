@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.Policy;
+import com.google.protobuf.Message;
 import io.floci.gcp.core.common.GcpException;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
@@ -25,7 +26,7 @@ class IamGrpcAuthorizationInterceptorServiceTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     @SuppressWarnings("unchecked")
-    void extensionServiceIsAuthorizedBeforeItsRequestReachesTheHandler(boolean denied) {
+    void extensionServiceIsAuthorizedBeforeItsRequestReachesTheHandler(boolean denied) throws Exception {
         IamAuthorizationAdapter adapter = mock(IamAuthorizationAdapter.class);
         when(adapter.restControllers()).thenReturn(Set.of());
         when(adapter.grpcServices()).thenReturn(Set.of("example.v1.Service"));
@@ -34,6 +35,8 @@ class IamGrpcAuthorizationInterceptorServiceTest {
             JsonNode request = invocation.getArgument(1);
             return new IamOperation("Read", request.path("resource").asText());
         });
+        when(adapter.grpcOperation(eq("Read"), any(Message.class), any(ObjectMapper.class)))
+                .thenCallRealMethod();
         IamAuthorizationService authorization = mock(IamAuthorizationService.class);
         when(authorization.enabled()).thenReturn(true);
         when(authorization.applies("Bearer example", adapter)).thenReturn(true);

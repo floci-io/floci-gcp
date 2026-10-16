@@ -1,10 +1,14 @@
 package io.floci.gcp.services.iam.authorization;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.Message;
+import com.google.protobuf.util.JsonFormat;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamPolicy;
 import io.floci.gcp.services.iam.IamResource;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +30,20 @@ public interface IamAuthorizationAdapter {
     IamOperation restOperation(String method, Map<String, String> path, JsonNode body);
 
     IamOperation grpcOperation(String method, JsonNode request);
+
+    default IamOperation grpcOperation(String method, Message request, ObjectMapper mapper) throws IOException {
+        return grpcOperation(method, mapper.readTree(JsonFormat.printer().print(request)));
+    }
+
+    /** A service-owned mapping for requests that share a resource across a gRPC stream. */
+    default Optional<GrpcStreamAuthorization> grpcStreamAuthorization(String method) {
+        return Optional.empty();
+    }
+
+    @FunctionalInterface
+    interface GrpcStreamAuthorization {
+        IamOperation requestOperation(Message request, IamOperation previous);
+    }
 
     List<IamPermissionCheck> checks(IamOperation operation);
 

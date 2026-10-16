@@ -2,12 +2,14 @@ package io.floci.gcp.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.iam.v1.GetIamPolicyRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.resourcemanager.ResourceManagerIamAuthorizationAdapter;
+import io.grpc.Status;
 import jakarta.ws.rs.HttpMethod;
 import org.junit.jupiter.api.Test;
 
@@ -52,6 +54,18 @@ class IamAuthorizationRegistryServiceTest {
                     () -> adapter.requireResource("projects/p/unimplemented/x"));
             assertTrue(resource.getMessage().contains("projects/p/unimplemented/x"));
         }
+    }
+
+    @Test
+    void grpcAdapterWithoutTypedMappingRejectsProtobufRequests() {
+        IamAuthorizationAdapter adapter = new ExampleAdapter();
+        GetIamPolicyRequest request = GetIamPolicyRequest.newBuilder()
+                .setResource("projects/p/examples/e").build();
+
+        GcpException exception = assertThrows(GcpException.class,
+                () -> adapter.grpcOperation("Read", request));
+        assertEquals(Status.Code.FAILED_PRECONDITION, exception.getGrpcCode());
+        assertTrue(exception.getMessage().contains("example gRPC operation Read"));
     }
 
     @Test

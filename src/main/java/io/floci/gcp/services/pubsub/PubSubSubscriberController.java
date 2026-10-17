@@ -29,6 +29,7 @@ import com.google.pubsub.v1.SubscriberGrpc;
 import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.UpdateSnapshotRequest;
 import com.google.pubsub.v1.UpdateSubscriptionRequest;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpGrpcController;
 import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
@@ -38,6 +39,8 @@ import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -179,8 +182,15 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     public void modifyAckDeadline(ModifyAckDeadlineRequest request, StreamObserver<Empty> responseObserver) {
         LOG.debugf("modifyAckDeadline subscription=%s ackIds=%d deadline=%d",
                 request.getSubscription(), request.getAckIdsCount(), request.getAckDeadlineSeconds());
-        responseObserver.onNext(Empty.getDefaultInstance());
-        responseObserver.onCompleted();
+        try {
+            service.modifyAckDeadline(request.getSubscription(), request.getAckIdsList(),
+                    request.getAckDeadlineSeconds());
+            responseObserver.onNext(Empty.getDefaultInstance());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("modifyAckDeadline failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
     }
 
     @Override
@@ -216,6 +226,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                         LOG.debugf("streamingPull ack subscription=%s ackIds=%d", sub, request.getAckIdsCount());
                         service.acknowledge(sub, request.getAckIdsList());
                     }
+                    if (request.getModifyDeadlineAckIdsCount() > 0 || request.getModifyDeadlineSecondsCount() > 0) {
+                        modifyStreamingAckDeadlines(sub, request);
+                    }
                     deliverStreamingMessages(sub, responseObserver, closed, deliveryLock);
                 } catch (Exception e) {
                     LOG.warnf("streamingPull error: %s", e.getMessage());
@@ -235,6 +248,24 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                 completeStreamingPull(responseObserver, unregisterRef, closed, deliveryLock);
             }
         };
+    }
+
+    private void modifyStreamingAckDeadlines(String sub, StreamingPullRequest request) {
+        if (request.getModifyDeadlineAckIdsCount() != request.getModifyDeadlineSecondsCount()) {
+            throw GcpException.invalidArgument("modify_deadline_ack_ids has " + request.getModifyDeadlineAckIdsCount()
+                    + " entries but modify_deadline_seconds has " + request.getModifyDeadlineSecondsCount()
+                    + "; the two lists must have the same size.");
+        }
+        LOG.debugf("streamingPull modifyAckDeadline subscription=%s ackIds=%d",
+                sub, request.getModifyDeadlineAckIdsCount());
+        Map<Integer, List<String>> ackIdsByDeadline = new LinkedHashMap<>();
+        for (int i = 0; i < request.getModifyDeadlineAckIdsCount(); i++) {
+            ackIdsByDeadline.computeIfAbsent(request.getModifyDeadlineSeconds(i), k -> new ArrayList<>())
+                    .add(request.getModifyDeadlineAckIds(i));
+        }
+        for (Map.Entry<Integer, List<String>> entry : ackIdsByDeadline.entrySet()) {
+            service.modifyAckDeadline(sub, entry.getValue(), entry.getKey());
+        }
     }
 
     private void deliverStreamingMessages(String sub,

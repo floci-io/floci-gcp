@@ -27,6 +27,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -230,6 +231,16 @@ public class PubSubRestController {
                                 @PathParam("subscription") String subscriptionId,
                                 Map<String, Object> body) {
         service.acknowledge(subscriptionName(project, subscriptionId), stringList(body, "ackIds"));
+        return Response.ok(Map.of()).build();
+    }
+
+    @POST
+    @Path("/subscriptions/{subscription}:modifyAckDeadline")
+    public Response modifyAckDeadline(@PathParam("project") String project,
+                                      @PathParam("subscription") String subscriptionId,
+                                      Map<String, Object> body) {
+        service.modifyAckDeadline(subscriptionName(project, subscriptionId),
+                stringList(body, "ackIds"), int32Value(body, "ackDeadlineSeconds", "ack_deadline_seconds"));
         return Response.ok(Map.of()).build();
     }
 
@@ -518,6 +529,24 @@ public class PubSubRestController {
             return Integer.parseInt(string);
         }
         return 0;
+    }
+
+    // proto3 JSON: a missing or null int32 is 0, a numeric string or an integral float is accepted,
+    // anything else is rejected the way GCP does ("Invalid value at 'field' (TYPE_INT32), literal").
+    private static int int32Value(Map<String, Object> body, String key, String protoField) {
+        Object value = value(body, key);
+        if (value == null) {
+            return 0;
+        }
+        try {
+            if (!(value instanceof Number) && !(value instanceof String)) {
+                throw new NumberFormatException();
+            }
+            return new BigDecimal(value.toString()).intValueExact();
+        } catch (NumberFormatException | ArithmeticException e) {
+            String literal = value instanceof String ? "\"" + value + "\"" : String.valueOf(value);
+            throw GcpException.invalidArgument("Invalid value at '" + protoField + "' (TYPE_INT32), " + literal);
+        }
     }
 
     private static boolean booleanValue(Map<String, Object> body, String key) {

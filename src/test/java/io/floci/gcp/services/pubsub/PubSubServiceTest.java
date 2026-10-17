@@ -481,6 +481,125 @@ class PubSubServiceTest {
         assertTrue(second.isEmpty());
     }
 
+    // ── ModifyAckDeadline ──────────────────────────────────────────────────────
+
+    @Test
+    void modifyAckDeadlineWithZeroRequeuesTheMessageForTheNextPull() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, first.size());
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(first.get(0).getAckId()), 0);
+
+        List<ReceivedMessage> redelivered = service.pull("projects/p1/subscriptions/s1", 10);
+        assertEquals(1, redelivered.size());
+        assertEquals(first.get(0).getMessage().getMessageId(), redelivered.get(0).getMessage().getMessageId());
+        assertNotEquals(first.get(0).getAckId(), redelivered.get(0).getAckId());
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void modifyAckDeadlineWithPositiveDeadlineKeepsTheMessageOutstanding() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+        String ackId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(ackId), 600);
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(ackId), 0);
+        assertEquals(1, service.pull("projects/p1/subscriptions/s1", 10).size());
+    }
+
+    @Test
+    void modifyAckDeadlineRequeuesNackedMessagesInPublishOrderAheadOfTheBacklog() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1", List.of(
+                PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m1")).build(),
+                PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m2")).build(),
+                PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m3")).build()));
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 2);
+        assertEquals(List.of("m1", "m2"), first.stream()
+                .map(m -> m.getMessage().getData().toStringUtf8()).toList());
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                List.of(first.get(1).getAckId(), first.get(0).getAckId()), 0);
+
+        assertEquals(List.of("m1", "m2", "m3"), service.pull("projects/p1/subscriptions/s1", 10).stream()
+                .map(m -> m.getMessage().getData().toStringUtf8()).toList());
+    }
+
+    @Test
+    void modifyAckDeadlineIgnoresAcknowledgedAndUnknownAckIds() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+        String ackId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+        service.acknowledge("projects/p1/subscriptions/s1", List.of(ackId));
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(ackId, "never-issued"), 0);
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void modifyAckDeadlineAfterDetachDoesNotResurrectTheMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+        String ackId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+        service.detachSubscription("projects/p1/subscriptions/s1");
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(ackId), 0);
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void modifyAckDeadlineRejectsADeadlineOutsideZeroToSixHundredSeconds() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        GcpException tooLong = assertThrows(GcpException.class,
+                () -> service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of("ack"), 601));
+        assertEquals("INVALID_ARGUMENT", tooLong.getGcpStatus());
+        assertEquals("Invalid ack deadline given (ack_deadline=601). "
+                + "The ack deadline must be between 0 and 600 seconds.", tooLong.getMessage());
+
+        GcpException negative = assertThrows(GcpException.class,
+                () -> service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of("ack"), -1));
+        assertEquals("INVALID_ARGUMENT", negative.getGcpStatus());
+        assertEquals("Invalid ack deadline given (ack_deadline=-1). "
+                + "The ack deadline must be between 0 and 600 seconds.", negative.getMessage());
+    }
+
+    @Test
+    void modifyAckDeadlineRejectsAnEmptyAckIdList() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(), 10));
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("You have not specified an ack ID in the request.", ex.getMessage());
+    }
+
+    @Test
+    void modifyAckDeadlineOnMissingSubscriptionThrowsNotFound() {
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.modifyAckDeadline("projects/p1/subscriptions/missing", List.of("ack"), 0));
+        assertEquals("NOT_FOUND", ex.getGcpStatus());
+    }
+
     // ── IAM policies ───────────────────────────────────────────────────────────
 
     @Test

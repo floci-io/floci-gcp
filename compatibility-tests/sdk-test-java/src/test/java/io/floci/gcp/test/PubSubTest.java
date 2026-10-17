@@ -6,7 +6,9 @@ import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.InvalidArgumentException;
 import com.google.api.gax.rpc.NotFoundException;
 import com.google.api.gax.rpc.TransportChannelProvider;
+import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Publisher;
+import com.google.cloud.pubsub.v1.Subscriber;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.TopicAdminClient;
@@ -23,6 +25,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.FieldMask;
 import com.google.pubsub.v1.AcknowledgeRequest;
 import com.google.pubsub.v1.DetachSubscriptionRequest;
+import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.ProjectTopicName;
 import com.google.pubsub.v1.PubsubMessage;
@@ -46,7 +49,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -657,6 +662,132 @@ class PubSubTest {
         } finally {
             try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
             try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(20)
+    void modifyAckDeadlineWithZeroRedeliversTheMessage() throws Exception {
+        String topicId = TestFixtures.uniqueName("nack-topic");
+        String subId = TestFixtures.uniqueName("nack-sub");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, subId);
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(
+                subName, topicName, PushConfig.getDefaultInstance(), 60);
+        try {
+            publishOne(topicName, "nack-me");
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullRequest pullRequest = PullRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setMaxMessages(1)
+                        .build();
+                PullResponse first = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(first.getReceivedMessagesList()).hasSize(1);
+                ReceivedMessage received = first.getReceivedMessages(0);
+
+                subscriberStub.modifyAckDeadlineCallable().call(ModifyAckDeadlineRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .addAckIds(received.getAckId())
+                        .setAckDeadlineSeconds(600)
+                        .build());
+                assertThat(subscriberStub.pullCallable().call(pullRequest).getReceivedMessagesList()).isEmpty();
+
+                subscriberStub.modifyAckDeadlineCallable().call(ModifyAckDeadlineRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .addAckIds(received.getAckId())
+                        .setAckDeadlineSeconds(0)
+                        .build());
+                PullResponse redelivered = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(redelivered.getReceivedMessagesList()).hasSize(1);
+                assertThat(redelivered.getReceivedMessages(0).getMessage().getMessageId())
+                        .isEqualTo(received.getMessage().getMessageId());
+                assertThat(redelivered.getReceivedMessages(0).getAckId()).isNotEqualTo(received.getAckId());
+
+                assertThatThrownBy(() -> subscriberStub.modifyAckDeadlineCallable().call(
+                        ModifyAckDeadlineRequest.newBuilder()
+                                .setSubscription(subName.toString())
+                                .addAckIds(received.getAckId())
+                                .setAckDeadlineSeconds(601)
+                                .build()))
+                        .isInstanceOf(InvalidArgumentException.class)
+                        .hasMessageContaining("The ack deadline must be between 0 and 600 seconds.");
+            }
+        } finally {
+            deleteQuietly(subName, topicName);
+        }
+    }
+
+    @Test
+    @Order(21)
+    void streamingSubscriberNackRedeliversTheMessage() throws Exception {
+        String topicId = TestFixtures.uniqueName("nack-stream-topic");
+        String subId = TestFixtures.uniqueName("nack-stream-sub");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, subId);
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(
+                subName, topicName, PushConfig.getDefaultInstance(), 60);
+
+        AtomicInteger deliveries = new AtomicInteger();
+        CompletableFuture<PubsubMessage> redelivered = new CompletableFuture<>();
+        MessageReceiver receiver = (message, consumer) -> {
+            if (deliveries.incrementAndGet() == 1) {
+                consumer.nack();
+            } else {
+                consumer.ack();
+                redelivered.complete(message);
+            }
+        };
+        Subscriber subscriber = Subscriber.newBuilder(subName.toString(), receiver)
+                .setChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+        subscriber.startAsync().awaitRunning();
+        try {
+            publishOne(topicName, "nack-stream");
+
+            PubsubMessage message = redelivered.get(30, TimeUnit.SECONDS);
+            assertThat(message.getData().toStringUtf8()).isEqualTo("nack-stream");
+            assertThat(deliveries.get()).isEqualTo(2);
+        } finally {
+            subscriber.stopAsync().awaitTerminated(10, TimeUnit.SECONDS);
+            deleteQuietly(subName, topicName);
+        }
+    }
+
+    private static void deleteQuietly(ProjectSubscriptionName subName, ProjectTopicName topicName) {
+        try {
+            subscriptionAdminClient.deleteSubscription(subName);
+        } catch (Exception ignored) {
+            // Cleanup after the assertions; the names are unique per run, so a leftover cannot affect another test.
+        }
+        try {
+            topicAdminClient.deleteTopic(topicName);
+        } catch (Exception ignored) {
+            // Same as above.
+        }
+    }
+
+    private static void publishOne(ProjectTopicName topicName, String data) throws Exception {
+        Publisher publisher = Publisher.newBuilder(topicName)
+                .setChannelProvider(channelProvider)
+                .setCredentialsProvider(credentialsProvider)
+                .build();
+        try {
+            publisher.publish(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8(data))
+                    .build()).get(10, TimeUnit.SECONDS);
+        } finally {
+            publisher.shutdown();
+            publisher.awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 }

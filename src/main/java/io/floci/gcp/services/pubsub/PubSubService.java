@@ -61,6 +61,8 @@ public class PubSubService {
 
     private static final Predicate<Map<String, String>> NEVER_MATCHES = attributes -> false;
 
+    private static final int MAX_ACK_DEADLINE_SECONDS = 600;
+
     private final StorageBackend<String, StoredTopic> topicStore;
     private final StorageBackend<String, StoredSubscription> subStore;
     private final StorageBackend<String, StoredSnapshot> snapshotStore;
@@ -653,6 +655,51 @@ public class PubSubService {
         }
     }
 
+    // ── ModifyAckDeadline ──────────────────────────────────────────────────────
+
+    public void modifyAckDeadline(String subName, List<String> ackIds, int ackDeadlineSeconds) {
+        LOG.debugf("modifyAckDeadline subscription=%s ackIds=%d deadline=%d",
+                subName, ackIds.size(), ackDeadlineSeconds);
+        if (ackDeadlineSeconds < 0 || ackDeadlineSeconds > MAX_ACK_DEADLINE_SECONDS) {
+            throw GcpException.invalidArgument("Invalid ack deadline given (ack_deadline=" + ackDeadlineSeconds
+                    + "). The ack deadline must be between 0 and " + MAX_ACK_DEADLINE_SECONDS + " seconds.");
+        }
+        if (ackIds.isEmpty()) {
+            throw GcpException.invalidArgument("You have not specified an ack ID in the request.");
+        }
+        if (subStore.get(subName).isEmpty()) {
+            LOG.warnf("modifyAckDeadline failed: subscription not found name=%s", subName);
+            throw GcpException.notFound("Subscription not found: " + subName);
+        }
+        if (ackDeadlineSeconds > 0) {
+            // Leases never expire yet (#327), so extending one changes nothing.
+            return;
+        }
+        nack(subName, ackIds);
+    }
+
+    private void nack(String subName, List<String> ackIds) {
+        ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subName);
+        ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
+        if (deliveredMap == null || queue == null) {
+            // Deleted or detached in the meantime: there is no live queue to return the messages to.
+            return;
+        }
+        List<StoredMessage> requeued = new ArrayList<>();
+        for (String ackId : ackIds) {
+            StoredMessage msg = deliveredMap.remove(ackId);
+            if (msg != null) {
+                requeued.add(msg);
+            }
+        }
+        if (requeued.isEmpty()) {
+            return;
+        }
+        LOG.debugf("nack subscription=%s requeued=%d", subName, requeued.size());
+        requeueAtFront(queue, requeued);
+        notifyListeners(subName);
+    }
+
     Runnable registerMessageListener(String subName, MessageListener listener) {
         getSubscription(subName);
         CopyOnWriteArrayList<MessageListener> subscriptionListeners =
@@ -767,14 +814,18 @@ public class PubSubService {
                     requeued.add(msg);
                 }
             }
-            // deliveredMap iterates in ack id hash order; put redelivered messages back in publish order.
-            requeued.sort(PUBLISH_ORDER);
-            for (int i = requeued.size() - 1; i >= 0; i--) {
-                queue.addFirst(requeued.get(i));
-            }
+            requeueAtFront(queue, requeued);
         }
         if (!queue.isEmpty()) {
             notifyListeners(subscriptionName);
+        }
+    }
+
+    // deliveredMap iterates in ack id hash order; put redelivered messages back in publish order.
+    private static void requeueAtFront(ConcurrentLinkedDeque<StoredMessage> queue, List<StoredMessage> messages) {
+        messages.sort(PUBLISH_ORDER);
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            queue.addFirst(messages.get(i));
         }
     }
 

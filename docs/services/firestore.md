@@ -178,7 +178,7 @@ registration.remove();
 - `Commit`
 - `Rollback`
 - `RunQuery`
-- `RunAggregationQuery`
+- `RunAggregationQuery` (COUNT with `up_to`, SUM, AVG)
 - `PartitionQuery`
 - `Write` (streaming)
 - `Listen` (real-time change streams)
@@ -192,6 +192,9 @@ registration.remove();
   abort the transaction.
 - `RunAggregationQuery` ignores `transaction` and `newTransaction`; aggregations
   read outside the transaction and are not part of its read set.
+- `RunAggregationQuery` does not reject duplicate aliases, or a request with no
+  aggregations or more than five, although the proto requires unique aliases and
+  one to five aggregations.
 - Transactions expire after 15 minutes instead of Firestore's shorter
   server-side deadlines.
 - Transaction state is held in memory; transactions do not survive an emulator

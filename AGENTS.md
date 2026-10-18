@@ -128,7 +128,7 @@ Source of truth: `src/main/resources/application.yml`. Update this section when 
 ### Auth bypass
 
 GCP SDKs skip credential checks when `*_EMULATOR_HOST` environment variables are set. With the default `iam.authorization-mode=disabled`, floci-gcp does not cryptographically validate credentials: requests with no credential, external credentials, and emulator-issued OAuth or impersonated tokens are accepted. Floci-issued downscoped GCS tokens are always constrained by their Credential Access Boundary (CAB).
-Opt-in `floci-gcp.services.iam.authorization-mode=enforce` also evaluates stored allow policies for Resource Manager v1 project metadata/policies, project policies through the shared IAM gRPC mixin, supported GCS REST bucket and object operations, Cloud Run v2 services, and Pub/Sub REST and gRPC methods. GCS applies CAB before IAM and retains the source principal for valid downscoped credentials. Anonymous/external credentials bypass Resource Manager and Pub/Sub enforcement; GCS evaluates them as anonymous so `allUsers` bindings work. Secret Manager, GCS ACLs, GCS gRPC, and other services remain unenforced. See [IAM enforcement](docs/services/iam.md#opt-in-enforcement) and the [service extension contract](docs/iam-enforcement.md).
+Opt-in `floci-gcp.services.iam.authorization-mode=enforce` also evaluates stored allow policies for Resource Manager v1 project metadata/policies, project policies through the shared IAM gRPC mixin, Cloud Run v2 service and revision REST operations, Cloud Run service-policy methods over REST and the shared IAM gRPC API, Secret Manager REST and gRPC secret and version operations, Pub/Sub REST and gRPC methods, and supported GCS REST bucket and object operations. GCS applies CAB before IAM and retains the source principal for valid downscoped credentials. Anonymous/external credentials bypass Resource Manager, Cloud Run, Secret Manager, and Pub/Sub enforcement; GCS evaluates them as anonymous so `allUsers` bindings work. Cloud Run jobs, worker pools, instances, invocation and operations, GCS ACLs, GCS gRPC, and other services remain unenforced. See [IAM enforcement](docs/services/iam.md#opt-in-enforcement) and the [service extension contract](docs/iam-enforcement.md).
 
 ### Project ID as multi-tenancy key
 
@@ -266,7 +266,7 @@ Sources of truth: the `compatibility-tests/` subdirectories and `matrix.test` in
 Every suite receives the same endpoint variables: `FLOCI_GCP_ENDPOINT`, `FLOCI_ENDPOINT`, `FLOCI_HOST` and `FLOCI_PROJECT`. The SDK suites and `sdk-test-gcloud` read `FLOCI_GCP_ENDPOINT`; only `compat-terraform` and `compat-opentofu` read the other three.
 
 The Java job additionally starts an isolated native emulator with IAM enforcement on and runs
-`IamEnforcementTest`, `CloudRunIamEnforcementTest`, and `PubSubIamEnforcementTest` with `FLOCI_GCP_IAM_TEST_ENFORCEMENT=true`. Their JUnit XML is stored
+`IamEnforcementTest` with `FLOCI_GCP_IAM_TEST_ENFORCEMENT=true`. Its JUnit XML is stored
 under `/results` in a separate `test-results/iam` host directory. The ordinary Java suite
 still runs with enforcement disabled.
 

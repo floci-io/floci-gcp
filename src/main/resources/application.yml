@@ -61,6 +61,10 @@ floci-gcp:
   default-project-id: floci-local
   locations:
     strict: false  # FLOCI_GCP_LOCATIONS_STRICT, reject unknown locations on regional create/list calls and locations that do not belong together (e.g. a Cloud SQL zone outside the instance region) with INVALID_ARGUMENT
+  projects:
+    # When true, only the default project and projects created via Resource Manager exist;
+    # REST requests for other projects return 403 PERMISSION_DENIED.
+    strict: false
   storage:
     mode: memory
     persistent-path: ./data
@@ -159,7 +163,38 @@ floci-gcp:
       docker-network:
     serviceusage:
       enabled: true
+      # Reject calls to APIs that are not ENABLED in Service Usage for the caller's project
+      # (403 PERMISSION_DENIED, reason SERVICE_DISABLED), like real GCP.
+      enforcement-enabled: false
+      # APIs treated as ENABLED in every project until explicitly disabled (GCP's default set
+      # for new projects). Only consulted when enforcement-enabled is true.
+      default-enabled:
+        - analyticshub.googleapis.com
+        - apptopology.googleapis.com
+        - bigquery.googleapis.com
+        - bigqueryconnection.googleapis.com
+        - bigquerydatapolicy.googleapis.com
+        - bigquerydatatransfer.googleapis.com
+        - bigquerymigration.googleapis.com
+        - bigqueryreservation.googleapis.com
+        - bigquerystorage.googleapis.com
+        - cloudapis.googleapis.com
+        - cloudtrace.googleapis.com
+        - dataform.googleapis.com
+        - dataplex.googleapis.com
+        - datastore.googleapis.com
+        - logging.googleapis.com
+        - monitoring.googleapis.com
+        - servicemanagement.googleapis.com
+        - serviceusage.googleapis.com
+        - sql-component.googleapis.com
+        - storage-api.googleapis.com
+        - storage-component.googleapis.com
+        - storage.googleapis.com
+        - telemetry.googleapis.com
     resourcemanager:
+      enabled: true
+    cloudbilling:
       enabled: true
     firebaseauth:
       enabled: true

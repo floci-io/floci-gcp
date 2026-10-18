@@ -1,6 +1,5 @@
 package io.floci.gcp.services.iam.authorization;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.SetIamPolicyRequest;
 import com.google.iam.v1.TestIamPermissionsRequest;
@@ -34,14 +33,12 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
 
     private final Instance<IamAuthorizationService> authorization;
     private final IamAuthorizationRegistry registry;
-    private final ObjectMapper mapper;
 
     @Inject
     public IamGrpcAuthorizationInterceptor(Instance<IamAuthorizationService> authorization,
-            IamAuthorizationRegistry registry, ObjectMapper mapper) {
+            IamAuthorizationRegistry registry) {
         this.authorization = authorization;
         this.registry = registry;
-        this.mapper = mapper;
     }
 
     @Override
@@ -94,11 +91,11 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                             IamOperation operation = null;
                             if (mixin) {
                                 String resource = switch (proto) {
-                                    case GetIamPolicyRequest get -> get.getResource();
-                                    case SetIamPolicyRequest set -> set.getResource();
-                                    case TestIamPermissionsRequest test -> test.getResource();
+                                    case GetIamPolicyRequest request -> request.getResource();
+                                    case SetIamPolicyRequest request -> request.getResource();
+                                    case TestIamPermissionsRequest request -> request.getResource();
                                     default -> throw GcpException.failedPrecondition(
-                                            "IAM requires a resource mapping: " + method);
+                                            "IAM requires a resource mapping: " + serviceName);
                                 };
                                 adapter = registry.resource(resource);
                                 if (adapter.isEmpty()) {
@@ -115,7 +112,7 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                     operation = streamAuthorization.orElseThrow().requestOperation(
                                             proto, streamOperation.get());
                                 } else {
-                                    operation = adapter.orElseThrow().grpcOperation(method, proto, mapper);
+                                    operation = adapter.orElseThrow().grpcOperation(method, proto);
                                 }
                             }
                             if (adapter.isPresent() && authorization.get().applies(credential, adapter.get())) {

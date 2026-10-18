@@ -39,9 +39,21 @@ For REST requests floci-gcp resolves the project in this order:
 3. `x-goog-request-params` header: `project=...`
 4. `FLOCI_GCP_DEFAULT_PROJECT_ID` fallback (default: `floci-local`)
 
+On REST requests, a project number in any of these positions resolves to the ID of the
+project it belongs to. Projects named in a request are registered on first use and then
+show up in the [Resource Manager](../services/resource-manager.md) API.
+
 gRPC requests carry the project in the resource names of the request message
 (`projects/{project}/topics/{topic}`) or in a `project_id` field, and each service reads it from
 there.
+
+## Strict Mode
+
+By default any project ID works. Set `FLOCI_GCP_PROJECTS_STRICT=true` to make only the
+default project and projects created with `POST /v1/projects` exist. REST requests for any
+other project then return `403 PERMISSION_DENIED`, as GCP does for a project you cannot
+see. gRPC requests are not checked. See
+[Resource Manager: strict mode](../services/resource-manager.md#strict-mode).
 
 ## Working with Multiple Projects
 
@@ -153,7 +165,9 @@ evaluated. These settings make it stricter. All are off by default.
 ## Known Gaps
 
 - No organizations or folders: every project stands alone, and there are no organization policies.
-- Outside Cloud Storage bucket listing, a project number in a resource name is not mapped to
-  its project ID, so `projects/{number}/...` and `projects/{id}/...` address different data.
+- Services that store by resource name keep the project as the request names it, so
+  `projects/{number}/...` and `projects/{id}/...` address different data there. A number
+  maps to the ID only for the request project on REST (the services that store by request
+  project, Cloud Storage bucket listing) and for Service Usage enablement.
 - Project numbers are derived from the ID. They are stable, but they are not the numbers real
   GCP would assign.

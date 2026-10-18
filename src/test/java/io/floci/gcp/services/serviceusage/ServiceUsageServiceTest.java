@@ -13,15 +13,21 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.core.common.ProjectRecord;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -157,5 +163,84 @@ class ServiceUsageServiceTest {
         assertThrows(GcpException.class, () -> service.batchGet("p1",
                 List.of("projects/other/services/run.googleapis.com")));
         assertThrows(GcpException.class, () -> service.batchGet("p1", List.of()));
+    }
+
+    @Test
+    void defaultEnabledServicesAreEnabledUntilDisabled() {
+        LongRunningOperationsService operations = mock(LongRunningOperationsService.class);
+        when(operations.done(anyString(), any(Message.class), any(Message.class)))
+                .thenReturn(Operation.newBuilder().setDone(true).build());
+        ServiceUsageService withDefaults = new ServiceUsageService(new InMemoryStorage<>(), operations,
+                mock(EmulatorConfig.class), Set.of("storage.googleapis.com"), null);
+
+        assertTrue(withDefaults.isServiceEnabled("p1", "storage.googleapis.com"));
+        assertFalse(withDefaults.isServiceEnabled("p1", "pubsub.googleapis.com"));
+        assertEquals(State.ENABLED, withDefaults.get("p1", "storage.googleapis.com").getState());
+        assertEquals(List.of("projects/p1/services/storage.googleapis.com"),
+                withDefaults.list("p1", 0, null, "state:ENABLED").getServicesList().stream()
+                        .map(Service::getName).toList());
+
+        withDefaults.disable("p1", "storage.googleapis.com");
+
+        assertFalse(withDefaults.isServiceEnabled("p1", "storage.googleapis.com"));
+        assertTrue(withDefaults.isServiceEnabled("p2", "storage.googleapis.com"));
+        assertEquals(0, withDefaults.list("p1", 0, null, "state:ENABLED").getServicesCount());
+    }
+
+    @Test
+    void registeredProjectNumberSharesTheStateOfItsProjectId() {
+        LongRunningOperationsService operations = mock(LongRunningOperationsService.class);
+        when(operations.done(anyString(), any(Message.class), any(Message.class)))
+                .thenReturn(Operation.newBuilder().setDone(true).build());
+        ProjectRecord project = new ProjectRecord();
+        project.setProjectId("p1");
+        project.setProjectNumber("123456789012");
+        ProjectRegistry projects = mock(ProjectRegistry.class);
+        when(projects.find(anyString())).thenReturn(Optional.empty());
+        when(projects.find("123456789012")).thenReturn(Optional.of(project));
+        ServiceUsageService withRegistry = new ServiceUsageService(new InMemoryStorage<>(), operations,
+                mock(EmulatorConfig.class), Set.of("storage.googleapis.com"), projects);
+
+        withRegistry.disable("p1", "storage.googleapis.com");
+        assertFalse(withRegistry.isServiceEnabled("123456789012", "storage.googleapis.com"));
+
+        withRegistry.enable("123456789012", "pubsub.googleapis.com");
+        assertTrue(withRegistry.isServiceEnabled("p1", "pubsub.googleapis.com"));
+        assertEquals(List.of("projects/123456789012/services/pubsub.googleapis.com"),
+                withRegistry.list("123456789012", 0, null, "state:ENABLED").getServicesList().stream()
+                        .map(Service::getName).toList());
+
+        assertTrue(withRegistry.isServiceEnabled("999999999999", "storage.googleapis.com"));
+    }
+
+    @Test
+    void stateSavedUnderTheProjectNumberBeforeTheRegistryIsStillRead() {
+        LongRunningOperationsService operations = mock(LongRunningOperationsService.class);
+        when(operations.done(anyString(), any(Message.class), any(Message.class)))
+                .thenReturn(Operation.newBuilder().setDone(true).build());
+        ProjectRegistry projects = mock(ProjectRegistry.class);
+        when(projects.find(anyString())).thenReturn(Optional.empty());
+        InMemoryStorage<String, String> store = new InMemoryStorage<>();
+        String number = ProjectNumbers.of("p1");
+        store.put("projects/" + number + "/services/pubsub.googleapis.com", "ENABLED");
+        store.put("projects/" + number + "/services/storage.googleapis.com", "DISABLED");
+        ServiceUsageService upgraded = new ServiceUsageService(store, operations,
+                mock(EmulatorConfig.class), Set.of("storage.googleapis.com"), projects);
+
+        assertTrue(upgraded.isServiceEnabled("p1", "pubsub.googleapis.com"));
+        assertFalse(upgraded.isServiceEnabled("p1", "storage.googleapis.com"));
+        assertEquals(List.of("projects/p1/services/pubsub.googleapis.com"),
+                upgraded.list("p1", 0, null, "state:ENABLED").getServicesList().stream()
+                        .map(Service::getName).toList());
+
+        upgraded.disable("p1", "pubsub.googleapis.com");
+        assertFalse(upgraded.isServiceEnabled("p1", "pubsub.googleapis.com"));
+    }
+
+    @Test
+    void withoutDefaultsNothingIsEnabledImplicitly() {
+        assertFalse(service.isServiceEnabled("p1", "storage.googleapis.com"));
+        service.enable("p1", "storage.googleapis.com");
+        assertTrue(service.isServiceEnabled("p1", "storage.googleapis.com"));
     }
 }

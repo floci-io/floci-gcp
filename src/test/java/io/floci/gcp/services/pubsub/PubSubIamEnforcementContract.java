@@ -139,13 +139,16 @@ abstract class PubSubIamEnforcementContract {
         given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
                 .body(Map.of("maxMessages", 1)).post("/v1/" + first + ":pull")
                 .then().statusCode(200);
-
         if (enforced()) {
             StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
                     () -> subscriber.pull(PullRequest.newBuilder().setSubscription(second).setMaxMessages(1).build()));
             assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
             given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
                     .body(Map.of("maxMessages", 1)).post("/v1/" + second + ":pull")
+                    .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+            given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
+                    .body(Map.of("ackIds", List.of("unknown"), "ackDeadlineSeconds", 10))
+                    .post("/v1/" + second + ":modifyAckDeadline")
                     .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
         } else {
             subscriber.pull(PullRequest.newBuilder().setSubscription(second).setMaxMessages(1).build());
@@ -335,14 +338,21 @@ abstract class PubSubIamEnforcementContract {
         grant(subscription, "roles/pubsub.subscriber", null);
         SubscriberGrpc.SubscriberBlockingStub subscriber = SubscriberGrpc.newBlockingStub(caller)
                 .withDeadlineAfter(5, TimeUnit.SECONDS);
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("lease")).build()));
+        String ackId = subscriber.pull(PullRequest.newBuilder().setSubscription(subscription)
+                .setMaxMessages(1).build()).getReceivedMessages(0).getAckId();
         ModifyPushConfigRequest pushRequest = ModifyPushConfigRequest.newBuilder()
                 .setSubscription(subscription)
                 .setPushConfig(PushConfig.newBuilder().setPushEndpoint("https://example.com/push"))
                 .build();
         ModifyAckDeadlineRequest ackRequest = ModifyAckDeadlineRequest.newBuilder()
-                .setSubscription(subscription).setAckDeadlineSeconds(10).build();
+                .setSubscription(subscription).addAckIds(ackId).setAckDeadlineSeconds(10).build();
 
         subscriber.modifyAckDeadline(ackRequest);
+        given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
+                .body(Map.of("ackIds", List.of(ackId), "ackDeadlineSeconds", 10))
+                .post("/v1/" + subscription + ":modifyAckDeadline").then().statusCode(200);
         if (enforced()) {
             assertEquals(Status.Code.PERMISSION_DENIED, assertThrows(StatusRuntimeException.class,
                     () -> subscriber.modifyPushConfig(pushRequest)).getStatus().getCode());

@@ -279,6 +279,19 @@ output "enabled_service" {
   value = google_project_service.run_api.service
 }
 
+# ── Resource Manager + Cloud Billing ──────────────────────────────────────────
+resource "google_project" "compat" {
+  project_id      = "floci-compat-proj-tofu"
+  name            = "floci compat project"
+  billing_account = "000000-AAAAAA-BBBBBB"
+  deletion_policy = "DELETE"
+  labels          = { env = "compat" }
+}
+
+output "created_project_number" {
+  value = google_project.compat.number
+}
+
 # BigQuery: dataset defaults and table partitioning/clustering must round-trip, or the
 # provider plans a change on every run.
 resource "google_bigquery_dataset" "compat" {

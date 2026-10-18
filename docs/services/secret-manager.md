@@ -16,6 +16,43 @@ export SECRET_MANAGER_EMULATOR_HOST=localhost:4588
 
 The GCP Secret Manager SDK uses this variable to route requests to floci-gcp instead of `secretmanager.googleapis.com`.
 
+## IAM enforcement
+
+With `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, Floci-issued
+service-account credentials are checked on the implemented Secret Manager v1
+REST JSON and gRPC methods. Anonymous and external credentials bypass these
+checks. The default `disabled` mode does not enforce policies.
+
+| Methods | Permission target |
+|---|---|
+| Create and list secrets | Project |
+| Get, update, delete, and secret IAM policy methods | Secret |
+| Add and list versions | Secret |
+| Get, access, enable, disable, and destroy versions | Version, inheriting secret and project policies |
+
+Payload access requires `secretmanager.versions.access` separately from version
+metadata access. `testIamPermissions` reports only permissions granted to the
+caller. Denials return HTTP 403 or gRPC `PERMISSION_DENIED`.
+
+| Role | Implemented permission scope |
+|---|---|
+| `roles/secretmanager.admin` | All implemented secret, version, payload, and policy methods |
+| `roles/secretmanager.editor` | Secret and version management, metadata, and policy reads; excludes payload access and policy writes |
+| `roles/secretmanager.viewer` | Secret and version metadata and policy reads |
+| `roles/secretmanager.secretAccessor` | Version payload access only |
+| `roles/secretmanager.secretVersionAdder` | Add a version to an existing secret |
+| `roles/secretmanager.secretVersionManager` | Add, get, list, enable, disable, and destroy versions; excludes payload access |
+
+Project basic roles contribute their Secret Manager permissions.
+
+Version 3 bindings can condition grants on `resource.service`, `resource.type`,
+`resource.name`, and `request.time` using the [supported condition expressions](iam.md#supported-roles-and-conditions).
+Create checks the parent project, so its `resource.name` is
+`projects/{project}`. Version checks use the full version name.
+
+Regional `projects/*/locations/*` paths, v1beta1, and rotation methods are
+not implemented. Organization and folder policies are not evaluated.
+
 ## Quick Start
 
 === "gcloud CLI"

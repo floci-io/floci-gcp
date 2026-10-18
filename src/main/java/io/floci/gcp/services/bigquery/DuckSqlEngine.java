@@ -73,14 +73,71 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
         if (result.columns() == null) {
             List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
-            return new Result(schemaOf(columns), fetch(sql, staging.setup(), flociEndpoint, columns), "SELECT",
+            return new Result(schemaOf(columns),
+                    rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
                     staging.bytesProcessed());
         }
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
                 .toList());
-        return new Result(schemaOf(columns), decodeRows(result.rows(), columns), "SELECT",
-                staging.bytesProcessed());
+        return new Result(schemaOf(columns), rejectNullArrayElements(columns, decodeRows(result.rows(), columns)),
+                "SELECT", staging.bytesProcessed());
+    }
+
+    /**
+     * BigQuery lets an array hold NULL elements while the query runs, but fails the query when a
+     * result row would contain one, naming the field and then each field that encloses it.
+     */
+    private static List<Map<String, Object>> rejectNullArrayElements(List<Column> columns,
+                                                                      List<Map<String, Object>> rows) {
+        List<TableFieldSchema> fields = columns.stream().map(Column::field).toList();
+        for (Map<String, Object> row : rows) {
+            String path = nullElementPath(fields, row, "");
+            if (path != null) {
+                StringBuilder message = new StringBuilder("Array cannot have a null element");
+                String enclosing = path;
+                while (true) {
+                    message.append("; error in writing field ").append(enclosing);
+                    int dot = enclosing.lastIndexOf('.');
+                    if (dot < 0) {
+                        break;
+                    }
+                    enclosing = enclosing.substring(0, dot);
+                }
+                throw SqlDialectTranslator.invalidQuery(message.toString());
+            }
+        }
+        return rows;
+    }
+
+    /** The dotted path of the first array holding a NULL element in {@code record}, or null. */
+    private static String nullElementPath(List<TableFieldSchema> fields, Map<?, ?> record, String prefix) {
+        for (TableFieldSchema field : fields) {
+            String path = prefix + field.getName();
+            Object value = record.get(field.getName());
+            List<?> values = List.of();
+            if ("REPEATED".equals(field.getMode()) && value instanceof List<?> list) {
+                values = list;
+                for (Object element : list) {
+                    if (element == null) {
+                        return path;
+                    }
+                }
+            } else if (value != null) {
+                values = List.of(value);
+            }
+            if (field.getFields() != null) {
+                for (Object element : values) {
+                    if (element instanceof Map<?, ?> nested) {
+                        String found = nullElementPath(field.getFields(), nested, path + ".");
+                        if (found != null) {
+                            return found;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     @Override
@@ -188,6 +245,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     // ── Load jobs ─────────────────────────────────────────────────────────────
 
     private static final Pattern GENERIC_CSV_COLUMN = Pattern.compile("column\\d+");
+    /** A column the translator left anonymous in a nested select list (see {@code nameAnonymousColumns}). */
+    private static final Pattern ANONYMOUS_COLUMN = Pattern.compile("\\$col\\d+");
 
     @Override
     public Result readFiles(LoadSource source) {
@@ -369,7 +428,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         for (Map<String, Object> typedRow : typedRows) {
             Map<String, Object> row = new LinkedHashMap<>();
             for (Column column : columns) {
-                row.put(column.name(), DuckTypes.decodeTyped(typedRow.get(column.name()), column.type(),
+                row.put(column.field().getName(), DuckTypes.decodeTyped(typedRow.get(column.name()), column.type(),
                         column.field()));
             }
             rows.add(row);
@@ -380,8 +439,17 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private record Staging(String setup, String emptySetup, long bytesProcessed) {}
 
     /**
+     * Ends the trusted part of the setup. Staging reads table rows from floci-gcp over HTTP, but the
+     * caller's SQL must not: DuckDB's file and URL functions would let a query read another
+     * project's rows from the internal route, or anything else the sidecar can reach. Once this
+     * runs, the session can no longer touch files or URLs, and the setting cannot be changed back.
+     */
+    static final String LOCK_EXTERNAL_ACCESS = "SET enable_external_access = false;\nSET lock_configuration = true;\n";
+
+    /**
      * Setup SQL creating every referenced table in DuckDB. Views are expanded: their own
-     * references are staged first, then the view is created from its translated query.
+     * references are staged first, then the view is created from its translated query. Views come
+     * from callers' SQL, so they are created after {@link #LOCK_EXTERNAL_ACCESS}, with the tables.
      */
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs, Tables tables,
                           String flociEndpoint) {
@@ -392,11 +460,13 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                           Set<InformationSchema.Ref> informationSchema, Tables tables, String flociEndpoint) {
         StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
         StringBuilder emptySetup = new StringBuilder("SET TimeZone = 'UTC';\n");
+        StringBuilder views = new StringBuilder();
         long[] bytes = {0};
         Set<String> schemas = new HashSet<>();
         Set<SqlDialectTranslator.TableRef> staged = new HashSet<>();
         for (SqlDialectTranslator.TableRef ref : refs) {
-            stageOne(projectId, ref, tables, flociEndpoint, setup, emptySetup, schemas, staged, new LinkedHashSet<>(), bytes);
+            stageOne(projectId, ref, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
+                    new LinkedHashSet<>(), bytes);
         }
         if (!informationSchema.isEmpty()) {
             setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA))
@@ -417,12 +487,15 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             setup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), empty, url.toString())).append('\n');
             emptySetup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), true, url.toString())).append('\n');
         }
+        setup.append(LOCK_EXTERNAL_ACCESS).append(views);
+        emptySetup.append(LOCK_EXTERNAL_ACCESS).append(views);
         return new Staging(setup.toString(), emptySetup.toString(), bytes[0]);
     }
 
     private void stageOne(String projectId, SqlDialectTranslator.TableRef ref, Tables tables, String flociEndpoint,
-                          StringBuilder setup, StringBuilder emptySetup, Set<String> schemas, Set<SqlDialectTranslator.TableRef> staged,
-                          Set<SqlDialectTranslator.TableRef> expanding, long[] bytes) {
+                          StringBuilder setup, StringBuilder emptySetup, StringBuilder views, Set<String> schemas,
+                          Set<SqlDialectTranslator.TableRef> staged, Set<SqlDialectTranslator.TableRef> expanding,
+                          long[] bytes) {
         if (staged.contains(ref)) {
             return;
         }
@@ -432,31 +505,28 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         Table table = tables.table(ref.datasetId(), ref.tableId());
         String viewQuery = table.viewQuery();
-        String ddl;
-        String emptyDdl;
-        if (viewQuery != null) {
-            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
-                    ref.datasetId(), SqlDialectTranslator.QueryParameters.none());
-            for (SqlDialectTranslator.TableRef dependency : view.tables()) {
-                stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, schemas, staged, expanding, bytes);
-            }
-            ddl = "CREATE VIEW " + DuckTypes.quoteIdentifier(ref.datasetId()) + "."
-                    + DuckTypes.quoteIdentifier(ref.tableId()) + " AS " + view.sql() + ";";
-            emptyDdl = ddl;
-        } else {
-            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
-            bytes[0] += estimateBytes(rows);
-            ddl = stageTable(projectId, ref, table, rows.isEmpty(), flociEndpoint);
-            emptyDdl = stageTable(projectId, ref, table, true, flociEndpoint);
-        }
         if (schemas.add(ref.datasetId())) {
             setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
                     .append(";\n");
             emptySetup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(ref.datasetId()))
                     .append(";\n");
         }
-        setup.append(ddl).append('\n');
-        emptySetup.append(emptyDdl).append('\n');
+        if (viewQuery != null) {
+            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
+                    ref.datasetId(), SqlDialectTranslator.QueryParameters.none());
+            for (SqlDialectTranslator.TableRef dependency : view.tables()) {
+                stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
+                        expanding, bytes);
+            }
+            // Dependencies are appended first, so views stay in an order DuckDB can create them in.
+            views.append("CREATE VIEW ").append(DuckTypes.quoteIdentifier(ref.datasetId())).append('.')
+                    .append(DuckTypes.quoteIdentifier(ref.tableId())).append(" AS ").append(view.sql()).append(";\n");
+        } else {
+            List<Map<String, Object>> rows = tables.rows(ref.datasetId(), ref.tableId());
+            bytes[0] += estimateBytes(rows);
+            setup.append(stageTable(projectId, ref, table, rows.isEmpty(), flociEndpoint)).append('\n');
+            emptySetup.append(stageTable(projectId, ref, table, true, flociEndpoint)).append('\n');
+        }
         staged.add(ref);
         expanding.remove(ref);
     }
@@ -469,18 +539,38 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return columns(run("DESCRIBE " + sql, setup, flociEndpoint, null).rows());
     }
 
-    /** Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names. */
+    /**
+     * Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names.
+     * Anonymous columns a {@code *} brought up from a nested select list are named {@code f0_},
+     * {@code f1_}, ... in output order, as BigQuery names them, skipping names other columns of the
+     * result already have.
+     */
     private static List<Column> columns(List<Map<String, Object>> described) {
         List<Column> columns = new ArrayList<>(described.size());
         Set<String> seen = new LinkedHashSet<>();
         Set<String> duplicates = new LinkedHashSet<>();
+        Set<String> named = new HashSet<>();
+        for (Map<String, Object> row : described) {
+            String name = String.valueOf(row.get("column_name"));
+            if (!ANONYMOUS_COLUMN.matcher(name).matches()) {
+                named.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        int anonymous = 0;
         for (Map<String, Object> row : described) {
             String name = String.valueOf(row.get("column_name"));
             if (!seen.add(name.toLowerCase(Locale.ROOT))) {
                 duplicates.add(name);
             }
             DuckTypes.DuckType type = DuckTypes.parse(String.valueOf(row.get("column_type")));
-            columns.add(new Column(name, type, DuckTypes.toField(name, type), DuckTypes.projection(type)));
+            String output = name;
+            if (ANONYMOUS_COLUMN.matcher(name).matches()) {
+                while (named.contains("f" + anonymous + "_")) {
+                    anonymous++;
+                }
+                output = "f" + anonymous++ + "_";
+            }
+            columns.add(new Column(name, type, DuckTypes.toField(output, type), DuckTypes.projection(type)));
         }
         if (!duplicates.isEmpty()) {
             throw SqlDialectTranslator.invalidQuery("Duplicate column names in the result are not supported."
@@ -512,7 +602,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             Map<String, Object> row = new LinkedHashMap<>();
             for (int i = 0; i < columns.size(); i++) {
                 Column column = columns.get(i);
-                row.put(column.name(), DuckTypes.decode(rawRow.get("c" + i), column.projection(), column.type(),
+                row.put(column.field().getName(), DuckTypes.decode(rawRow.get("c" + i), column.projection(), column.type(),
                         column.field()));
             }
             rows.add(row);

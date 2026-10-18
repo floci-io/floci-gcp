@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs;
 
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +39,27 @@ class GcsHmacKeyControllerTest {
     void createRequiresAServiceAccountEmail() {
         given().when().post("/storage/v1/projects/" + PROJECT + "/hmacKeys")
                 .then().statusCode(400);
+    }
+
+    @Test
+    void theProjectNumberAndTheProjectIdAddressTheSameKeys() {
+        String number = ProjectNumbers.of(PROJECT);
+        String byId = createKey();
+        String byNumber = given().queryParam("serviceAccountEmail", EMAIL)
+                .when().post("/storage/v1/projects/" + number + "/hmacKeys")
+                .then().statusCode(200)
+                .body("metadata.projectId", equalTo(PROJECT))
+                .extract().path("metadata.accessId");
+
+        given().when().get("/storage/v1/projects/" + number + "/hmacKeys/" + byId)
+                .then().statusCode(200)
+                .body("projectId", equalTo(PROJECT));
+        given().when().get("/storage/v1/projects/" + PROJECT + "/hmacKeys/" + byNumber)
+                .then().statusCode(200);
+        given().when().get("/storage/v1/projects/" + number + "/hmacKeys")
+                .then().statusCode(200)
+                .body("items.accessId", hasItem(byId))
+                .body("items.accessId", hasItem(byNumber));
     }
 
     @Test

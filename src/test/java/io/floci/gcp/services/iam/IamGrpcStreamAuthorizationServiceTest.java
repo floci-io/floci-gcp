@@ -1,6 +1,5 @@
 package io.floci.gcp.services.iam;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import io.floci.gcp.core.common.GcpException;
@@ -150,7 +149,7 @@ class IamGrpcStreamAuthorizationServiceTest {
         Instance<IamAuthorizationService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(authorization);
         IamGrpcAuthorizationInterceptor interceptor = new IamGrpcAuthorizationInterceptor(instance,
-                new IamAuthorizationRegistry(List.of(adapter)), new ObjectMapper());
+                new IamAuthorizationRegistry(List.of(adapter)));
 
         ServerCall<StreamingPullRequest, StreamingPullResponse> call = mock(ServerCall.class);
         when(call.getMethodDescriptor()).thenReturn(MethodDescriptor.<StreamingPullRequest, StreamingPullResponse>

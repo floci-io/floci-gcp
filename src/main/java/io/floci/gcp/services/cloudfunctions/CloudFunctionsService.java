@@ -95,6 +95,7 @@ public class CloudFunctionsService {
                 .storageKey("cloudfunctions")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(CloudFunctionsController.class)
+                .api("cloudfunctions.googleapis.com", "Cloud Functions API")
                 .build());
     }
 

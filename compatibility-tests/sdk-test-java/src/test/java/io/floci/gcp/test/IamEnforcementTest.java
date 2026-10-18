@@ -3,6 +3,11 @@ package io.floci.gcp.test;
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.api.gax.rpc.PermissionDeniedException;
 import com.google.api.services.cloudresourcemanager.CloudResourceManager;
 import com.google.api.services.cloudresourcemanager.model.Binding;
 import com.google.api.services.cloudresourcemanager.model.Expr;
@@ -10,8 +15,20 @@ import com.google.api.services.cloudresourcemanager.model.GetIamPolicyRequest;
 import com.google.api.services.cloudresourcemanager.model.Policy;
 import com.google.api.services.cloudresourcemanager.model.SetIamPolicyRequest;
 import com.google.api.services.cloudresourcemanager.model.TestIamPermissionsRequest;
-import com.google.gson.JsonParser;
+import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.secretmanager.v1.AccessSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.AddSecretVersionRequest;
+import com.google.cloud.secretmanager.v1.CreateSecretRequest;
+import com.google.cloud.secretmanager.v1.GetSecretRequest;
+import com.google.cloud.secretmanager.v1.Replication;
+import com.google.cloud.secretmanager.v1.Secret;
+import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
+import com.google.cloud.secretmanager.v1.SecretManagerServiceSettings;
+import com.google.cloud.secretmanager.v1.SecretPayload;
 import com.google.iam.v1.IAMPolicyGrpc;
+import com.google.protobuf.ByteString;
+import com.google.gson.JsonParser;
 import io.grpc.Channel;
 import io.grpc.ClientInterceptors;
 import io.grpc.ManagedChannel;
@@ -28,6 +45,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Instant;
+import java.util.Date;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -128,6 +147,116 @@ class IamEnforcementTest {
             } else {
                 setup.projects().setIamPolicy(project, policy).execute();
             }
+        }
+    }
+
+    @Test
+    void secretManagerSdkEnforcesPayloadAccessOverRestAndGrpc() throws Exception {
+        String parent = "projects/" + project;
+        URI endpoint = URI.create(TestFixtures.endpoint());
+        Metadata headers = new Metadata();
+        headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer " + token);
+        ManagedChannel transport = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext().intercept(MetadataUtils.newAttachHeadersInterceptor(headers)).build();
+        SecretManagerServiceSettings grpcSettings = SecretManagerServiceSettings.newBuilder()
+                .setTransportChannelProvider(FixedTransportChannelProvider.create(GrpcTransportChannel.create(transport)))
+                .setCredentialsProvider(NoCredentialsProvider.create()).build();
+        GoogleCredentials credentials = GoogleCredentials.create(new AccessToken(token,
+                Date.from(Instant.now().plusSeconds(300))));
+        SecretManagerServiceSettings restSettings = SecretManagerServiceSettings.newHttpJsonBuilder()
+                .setEndpoint(TestFixtures.endpoint())
+                .setCredentialsProvider(FixedCredentialsProvider.create(credentials)).build();
+        try (SecretManagerServiceClient setupSecrets = TestFixtures.secretManagerClient();
+                SecretManagerServiceClient grpc = SecretManagerServiceClient.create(grpcSettings);
+                SecretManagerServiceClient rest = SecretManagerServiceClient.create(restSettings)) {
+            Secret secret = Secret.newBuilder().setReplication(Replication.newBuilder()
+                    .setAutomatic(Replication.Automatic.getDefaultInstance())).build();
+            String allowed = setupSecrets.createSecret(CreateSecretRequest.newBuilder()
+                    .setParent(parent).setSecretId("allowed").setSecret(secret).build()).getName();
+            String sibling = setupSecrets.createSecret(CreateSecretRequest.newBuilder()
+                    .setParent(parent).setSecretId("sibling").setSecret(secret).build()).getName();
+            String allowedVersion = setupSecrets.addSecretVersion(AddSecretVersionRequest.newBuilder()
+                    .setParent(allowed).setPayload(SecretPayload.newBuilder()
+                            .setData(ByteString.copyFromUtf8("payload"))).build()).getName();
+            String siblingVersion = setupSecrets.addSecretVersion(AddSecretVersionRequest.newBuilder()
+                    .setParent(sibling).setPayload(SecretPayload.newBuilder()
+                            .setData(ByteString.copyFromUtf8("private"))).build()).getName();
+            // The protobuf IAM policy types collide with the REST SDK types imported above.
+            setupSecrets.setIamPolicy(com.google.iam.v1.SetIamPolicyRequest.newBuilder().setResource(allowed)
+                    .setPolicy(com.google.iam.v1.Policy.newBuilder().addBindings(com.google.iam.v1.Binding.newBuilder()
+                            .setRole("roles/secretmanager.secretAccessor").addMembers(member))).build());
+
+            assertThat(rest.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                    .setName(allowedVersion).build()).getPayload().getData().toStringUtf8()).isEqualTo("payload");
+            assertThat(grpc.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                    .setName(allowedVersion).build()).getPayload().getData().toStringUtf8()).isEqualTo("payload");
+            if (enforce) {
+                assertThatThrownBy(() -> rest.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(siblingVersion).build())).isInstanceOf(PermissionDeniedException.class);
+                assertThatThrownBy(() -> grpc.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                        .setName(siblingVersion).build())).isInstanceOf(PermissionDeniedException.class);
+            } else {
+                rest.accessSecretVersion(AccessSecretVersionRequest.newBuilder().setName(siblingVersion).build());
+                grpc.accessSecretVersion(AccessSecretVersionRequest.newBuilder().setName(siblingVersion).build());
+            }
+
+            com.google.iam.v1.Policy replacement = com.google.iam.v1.Policy.newBuilder()
+                    .addBindings(com.google.iam.v1.Binding.newBuilder()
+                            .setRole("roles/secretmanager.admin").addMembers(member)).build();
+            com.google.iam.v1.SetIamPolicyRequest write = com.google.iam.v1.SetIamPolicyRequest.newBuilder()
+                    .setResource(allowed).setPolicy(replacement).build();
+            if (enforce) {
+                assertThatThrownBy(() -> rest.setIamPolicy(write)).isInstanceOf(PermissionDeniedException.class);
+                assertThatThrownBy(() -> grpc.setIamPolicy(write)).isInstanceOf(PermissionDeniedException.class);
+                assertThat(setupSecrets.getIamPolicy(com.google.iam.v1.GetIamPolicyRequest.newBuilder()
+                        .setResource(allowed).build()).getBindings(0).getRole())
+                        .isEqualTo("roles/secretmanager.secretAccessor");
+            } else {
+                rest.setIamPolicy(write);
+                grpc.setIamPolicy(write);
+            }
+
+            List<String> requested = List.of("secretmanager.versions.access", "secretmanager.secrets.setIamPolicy");
+            List<String> expected = enforce ? List.of(requested.getFirst()) : requested;
+            com.google.iam.v1.TestIamPermissionsRequest query = com.google.iam.v1.TestIamPermissionsRequest
+                    .newBuilder().setResource(allowed).addAllPermissions(requested).build();
+            assertThat(rest.testIamPermissions(query).getPermissionsList()).containsExactlyElementsOf(expected);
+            assertThat(grpc.testIamPermissions(query).getPermissionsList()).containsExactlyElementsOf(expected);
+
+            setup.projects().setIamPolicy(project, new SetIamPolicyRequest().setPolicy(new Policy()
+                    .setVersion(3).setBindings(List.of(new Binding().setRole("roles/secretmanager.admin")
+                            .setMembers(List.of(member)).setCondition(new Expr().setTitle("create")
+                                    .setExpression("resource.name == '" + parent + "'")))))).execute();
+            assertThat(rest.createSecret(CreateSecretRequest.newBuilder().setParent(parent)
+                    .setSecretId("rest-created").setSecret(secret).build()).getName())
+                    .isEqualTo(parent + "/secrets/rest-created");
+            assertThat(grpc.createSecret(CreateSecretRequest.newBuilder().setParent(parent)
+                    .setSecretId("grpc-created").setSecret(secret).build()).getName())
+                    .isEqualTo(parent + "/secrets/grpc-created");
+
+            setup.projects().setIamPolicy(project, new SetIamPolicyRequest().setPolicy(new Policy()
+                    .setVersion(3).setBindings(List.of(new Binding().setRole("roles/secretmanager.admin")
+                            .setMembers(List.of(member)).setCondition(new Expr().setTitle("create")
+                                    .setExpression("resource.name == 'projects/excluded'")))))).execute();
+            CreateSecretRequest restDeniedCreate = CreateSecretRequest.newBuilder().setParent(parent)
+                    .setSecretId("rest-denied").setSecret(secret).build();
+            CreateSecretRequest grpcDeniedCreate = CreateSecretRequest.newBuilder().setParent(parent)
+                    .setSecretId("grpc-denied").setSecret(secret).build();
+            if (enforce) {
+                assertThatThrownBy(() -> rest.createSecret(restDeniedCreate))
+                        .isInstanceOf(PermissionDeniedException.class);
+                assertThatThrownBy(() -> grpc.createSecret(grpcDeniedCreate))
+                        .isInstanceOf(PermissionDeniedException.class);
+                assertThatThrownBy(() -> setupSecrets.getSecret(GetSecretRequest.newBuilder()
+                        .setName(parent + "/secrets/rest-denied").build())).hasMessageContaining("NOT_FOUND");
+                assertThatThrownBy(() -> setupSecrets.getSecret(GetSecretRequest.newBuilder()
+                        .setName(parent + "/secrets/grpc-denied").build())).hasMessageContaining("NOT_FOUND");
+            } else {
+                rest.createSecret(restDeniedCreate);
+                grpc.createSecret(grpcDeniedCreate);
+            }
+        } finally {
+            transport.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 

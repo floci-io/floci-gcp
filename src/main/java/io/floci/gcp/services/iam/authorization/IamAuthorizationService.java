@@ -65,7 +65,8 @@ public class IamAuthorizationService {
     void onStart(@Observes StartupEvent event) {
         LOG.warnf("IAM authorization mode=%s; supported services=%s. "
                         + "Identity handling is service-specific; GCS bucket policies evaluate anonymous callers. "
-                        + "Secret Manager, Cloud Run jobs/instances/worker pools/invocation, "
+                        + "Enforce mode covers Cloud Run v2 service/revision REST, service-policy REST and shared IAM gRPC, "
+                        + "and Secret Manager REST/gRPC. Cloud Run jobs/instances/worker pools/invocation, "
                         + "GCS ACLs, GCS gRPC and all other services are NOT IAM-enforced. "
                         + "GCS Credential Access Boundary checks remain active.",
                 config.services().iam().authorizationMode(), registry.adapters().stream()
@@ -90,6 +91,10 @@ public class IamAuthorizationService {
 
     public void authorize(String authorization, IamAuthorizationAdapter adapter, IamOperation operation) {
         authorize(authorization, adapter, adapter.checks(operation));
+    }
+
+    public void authorizeCurrent(IamAuthorizationAdapter adapter, IamOperation operation) {
+        authorize(currentAuthorization(), adapter, operation);
     }
 
     public void authorize(String authorization, IamAuthorizationAdapter adapter, IamPermissionCheck check) {

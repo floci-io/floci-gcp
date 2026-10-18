@@ -20,11 +20,11 @@ which mode is active and the supported service list.
 | Surface | IAM enforcement in `enforce` mode |
 |---|---|
 | Resource Manager v1 project metadata and project policies | REST JSON; project policies also use the shared IAM gRPC mixin |
-| Cloud Run v2 services and revisions | REST JSON service management and service policies; service policies also use the shared IAM gRPC mixin. See [Cloud Run IAM enforcement](cloud-run.md#iam-enforcement-for-services) |
+| Cloud Run v2 services and revisions | REST JSON service and revision operations; service-policy methods also use the shared IAM gRPC API. See [Cloud Run IAM enforcement](cloud-run.md#iam-enforcement-for-services) |
 | GCS buckets | Supported REST bucket metadata, IAM-policy, retention-lock, storage-layout, and notification operations; bucket `testIamPermissions` filters its response |
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
 | Pub/Sub | REST JSON and gRPC topic, subscription, snapshot, and policy methods; `testIamPermissions` filters its response |
-| Secret Manager | **Not IAM-enforced.** Service enforcement is deferred |
+| Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | IAM service-account/key management, IAM Credentials, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
@@ -35,7 +35,8 @@ through your SDK credentials provider.
 For plaintext gRPC, Google credentials may refuse an insecure channel before the
 request reaches the emulator; use a fixed authorization header with the SDK's
 no-credentials provider, or use the emulator's TLS transport.
-Anonymous requests and external credentials bypass Resource Manager and Pub/Sub evaluation.
+Anonymous requests and external credentials bypass Resource Manager, Cloud Run,
+Secret Manager, and Pub/Sub evaluation.
 GCS evaluation treats those callers as anonymous so `allUsers` policies
 work. In enforce mode, an unknown or expired Floci-issued token receives
 `UNAUTHENTICATED`; an evaluated caller without a matching grant receives
@@ -51,9 +52,9 @@ external credentials can still pass without exercising IAM.
 The framework supports child-to-project inheritance and multiple required permission
 checks. Bucket evaluation includes the owning project's policy; the project cannot
 be inferred from the `projects/_/buckets/...` resource name and is read from the
-stored bucket metadata. Pub/Sub resources inherit project bindings. Project
-bindings do not authorize or restrict Secret Manager or other services without
-a registered adapter.
+stored bucket metadata. Pub/Sub resources, Cloud Run services, and Secret Manager
+secrets inherit their project policy. Project bindings do not authorize or restrict
+other services without a registered adapter.
 `testIamPermissions` evaluates each requested permission for the same caller and
 resource; missing resources keep the existing empty-result behavior. Disabled
 mode and bypass callers retain the existing permission echo.
@@ -111,8 +112,10 @@ and when evaluating previously stored project policies. Disabled mode retains
 permissive policy storage.
 
 The finite catalog also contains `roles/storage.objectViewer`,
-`roles/storage.objectCreator`, `roles/storage.objectAdmin`, and
+`roles/storage.objectCreator`, `roles/storage.objectUser`, `roles/storage.objectAdmin`, and
 `roles/storage.admin` for the explicitly enforced bucket and object permissions.
+Secret Manager roles, permission targets, and inheritance are described in the
+[Secret Manager guide](secret-manager.md#iam-enforcement).
 Uncatalogued roles grant no permissions and do not block known
 bindings, including when they apply to the caller. Missing resource/operation
 mappings on an enforcing adapter produce a named `FAILED_PRECONDITION`. The shared

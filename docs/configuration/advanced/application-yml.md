@@ -37,6 +37,8 @@ floci-gcp:
   base-url: "http://localhost:4588"  # Used to build GCS object URLs and pre-signed URLs
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-project-id: floci-local
+  projects:
+    strict: false                     # true: only the default project and created projects exist
 
   locations:
     strict: false                     # Reject unknown locations on regional create/list calls
@@ -134,7 +136,11 @@ floci-gcp:
       docker-network:                 # overrides services.docker-network for k3s sidecars
     serviceusage:
       enabled: true
+      enforcement-enabled: false      # true rejects calls to APIs not ENABLED for the project (403 SERVICE_DISABLED)
+      # default-enabled: [...]        # APIs ENABLED in every project until disabled; defaults to GCP's new-project set
     resourcemanager:
+      enabled: true
+    cloudbilling:
       enabled: true
     firebaseauth:
       enabled: true

@@ -217,7 +217,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Databases | Cloud SQL for PostgreSQL and MySQL |
 | Analytics | BigQuery |
 | Observability | Cloud Logging, Cloud Monitoring |
-| API management | Service Usage, Cloud Resource Manager (`projects.get` and IAM policy mixins) |
+| API management | Service Usage, Cloud Resource Manager v1 projects (create/get/list/update/delete, IAM policy mixins), Cloud Billing project billing info |
 
 <details>
 <summary>Detailed service notes</summary>
@@ -227,7 +227,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **[Compute Engine](docs/services/compute.md)** | REST JSON | Scoped operations, synthetic catalogs, VPC/subnets/firewalls/addresses, VM and disk lifecycle, images/snapshots, NEGs and global HTTP load-balancer configuration; no guest execution or traffic forwarding |
 | **Cloud Storage (GCS)** | gRPC v2 + REST XML + REST JSON | Buckets, objects, streaming and resumable upload, ranged download, compose, rewrite, move, soft delete and restore, ACLs, bucket IAM with opt-in allow-policy enforcement, HMAC keys, conditional requests, versioning, lifecycle, CORS, decompressive transcoding, pre-signed URLs (V4), batch API, Pub/Sub object notifications, customer-supplied encryption keys (CSEK) |
 | **Pub/Sub** | gRPC + REST JSON | Topics, subscriptions, publish, pull, streaming pull, push delivery, snapshots, seek, field masks on update, subscription filters (attribute filter language) |
-| **Firestore** | gRPC | Documents, collections, structured queries with filters, ordering, and cursors, field transforms, aggregation (COUNT), transactions, batch writes, real-time listeners (`listen` stream) |
+| **Firestore** | gRPC | Documents, collections, structured queries with filters, ordering, and cursors, field transforms, aggregation (COUNT, SUM, AVG), transactions, batch writes, real-time listeners (`listen` stream) |
 | **Datastore** | gRPC + HTTP/protobuf | Entity operations and structured queries over both transports; GQL queries and COUNT aggregation over HTTP/protobuf; transaction RPCs with limited semantics |
 | **Secret Manager** | gRPC + REST JSON | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads |
@@ -244,7 +244,9 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Cloud Tasks** | gRPC | Queues (rate limits, retry config, pause/resume/purge), tasks (HTTP and App Engine targets, schedule time), `RunTask`; control plane only, tasks are tracked but not dispatched |
 | **Cloud Scheduler** | gRPC + REST JSON | Cron jobs with Pub/Sub, HTTP, and App Engine targets; `Pause`/`Resume`/`RunJob`; unix-cron + time zones; background tick fires due jobs (Pub/Sub publishes into the local backend) |
 | **Cloud Monitoring** | gRPC + REST JSON | Metric descriptors (create/get/list/delete), monitored resource descriptors, time series write (`CreateTimeSeries` with GCP validation rules) and read (`ListTimeSeries` with alignment/reduction subset and pagination) |
-| **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services`; includes Cloud Resource Manager v1 `projects.get` and project IAM policy mixins for provider project lookups |
+| **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services` |
+| **Resource Manager** | REST JSON | Cloud Resource Manager v1 projects: create (done LRO), get by ID or number, filtered list, update, delete/undelete, `getAncestry`, project IAM policy mixins; projects are registered on first use, or only when created with `FLOCI_GCP_PROJECTS_STRICT=true` |
+| **Cloud Billing** | REST JSON | Project billing info get/update and billing-account `testIamPermissions` stub for Terraform `google_project` |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
 | **BigQuery** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) running GoogleSQL (joins, aggregation, window functions, CTEs, `UNNEST`, parameters, dry runs) on a DuckDB sidecar |
 
@@ -665,7 +667,7 @@ image: floci/floci-gcp:nightly
 
 ### Release train
 
-Maintainers cut stable releases from `main` with the manual Release Cut workflow. Between releases, `floci/floci-gcp:nightly` tracks `main`; scheduled nightly builds normally publish the current tip, and dated `nightly-mmddyyyy` tags let you pin a specific build.
+Stable releases ship on the **15th and the last day of each month**, cut automatically from `main` at 00:30 US Central time by the Release Cut workflow. Between releases, `floci/floci-gcp:nightly` tracks `main`; scheduled nightly builds normally publish the current tip, and dated `nightly-mmddyyyy` tags let you pin a specific build.
 
 Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 
@@ -673,12 +675,14 @@ Versions are derived from Conventional Commits by [semantic-release](https://git
 
 IAM policies are stored without enforcement by default. For local permission tests,
 set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
-service-account tokens. This enforces Resource Manager v1 project metadata/policies
-and supported GCS REST bucket and object operations through one shared evaluator. Project
-policies are also enforced through the shared IAM gRPC mixin. Resource Manager
-bypasses anonymous/external credentials; GCS evaluates them as anonymous so `allUsers`
-bindings work. Pub/Sub, Secret Manager, GCS ACLs, GCS gRPC, and all other services
-remain unenforced. Read the
+service-account tokens. This enforces Resource Manager v1 project metadata/policies,
+Cloud Run v2 service and revision REST operations and service policies, Secret
+Manager REST and gRPC operations, and supported GCS REST bucket and object operations
+through one shared evaluator. Project and Cloud Run service policies also use the
+shared IAM gRPC API. Resource Manager, Cloud Run, and Secret Manager bypass
+anonymous/external credentials; GCS evaluates them as anonymous so `allUsers`
+bindings work. Pub/Sub, Cloud Run jobs, worker pools, instances, invocation and
+operations, GCS ACLs, GCS gRPC, and all other services remain unenforced. Read the
 [coverage and limitations](docs/services/iam.md#opt-in-enforcement) before treating a
 green test as evidence of least privilege.
 

@@ -7,6 +7,7 @@ import (
 	"floci-gcp-sdk-test-go/internal/testutil"
 
 	"cloud.google.com/go/firestore"
+	"cloud.google.com/go/firestore/apiv1/firestorepb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
@@ -138,4 +139,93 @@ func TestFirestore(t *testing.T) {
 		n2, _ := snap2.DataAt("name")
 		assert.Equal(t, "Batch2", n2)
 	})
+}
+
+func TestFirestoreAggregation(t *testing.T) {
+	ctx := context.Background()
+	client := testutil.FirestoreClient(ctx)
+	// Registered first so it runs last: cleanups below still need the client.
+	t.Cleanup(func() { client.Close() })
+
+	col := client.Collection(uniqueName("go-agg"))
+	_, err := col.Doc("a").Set(ctx, map[string]interface{}{"price": 10})
+	require.NoError(t, err)
+	_, err = col.Doc("b").Set(ctx, map[string]interface{}{"price": 20})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		docs, _ := col.Documents(ctx).GetAll()
+		for _, d := range docs {
+			d.Ref.Delete(ctx)
+		}
+	})
+
+	t.Run("CountSumAndAvg", func(t *testing.T) {
+		res, err := col.NewAggregationQuery().
+			WithCount("n").
+			WithSum("price", "total").
+			WithAvg("price", "mean").
+			Get(ctx)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(2), aggregateValue(t, res, "n").GetIntegerValue())
+		total := aggregateValue(t, res, "total")
+		assert.IsType(t, &firestorepb.Value_IntegerValue{}, total.GetValueType())
+		assert.Equal(t, int64(30), total.GetIntegerValue())
+		mean := aggregateValue(t, res, "mean")
+		assert.IsType(t, &firestorepb.Value_DoubleValue{}, mean.GetValueType())
+		assert.Equal(t, 15.0, mean.GetDoubleValue())
+	})
+
+	t.Run("UnnamedAggregationsGetDefaultAliases", func(t *testing.T) {
+		res, err := col.NewAggregationQuery().
+			WithSum("price", "").
+			WithAvg("price", "").
+			Get(ctx)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(30), aggregateValue(t, res, "field_1").GetIntegerValue())
+		assert.Equal(t, 15.0, aggregateValue(t, res, "field_2").GetDoubleValue())
+	})
+
+	t.Run("SumIsADoubleWhenAnyValueIsADouble", func(t *testing.T) {
+		mixed := client.Collection(uniqueName("go-agg-mixed"))
+		_, err := mixed.Doc("a").Set(ctx, map[string]interface{}{"price": 10})
+		require.NoError(t, err)
+		_, err = mixed.Doc("b").Set(ctx, map[string]interface{}{"price": 2.5})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			mixed.Doc("a").Delete(ctx)
+			mixed.Doc("b").Delete(ctx)
+		})
+
+		res, err := mixed.NewAggregationQuery().WithSum("price", "total").Get(ctx)
+		require.NoError(t, err)
+
+		total := aggregateValue(t, res, "total")
+		assert.IsType(t, &firestorepb.Value_DoubleValue{}, total.GetValueType())
+		assert.Equal(t, 12.5, total.GetDoubleValue())
+	})
+
+	t.Run("SumOfNothingIsZeroAndAvgOfNothingIsNull", func(t *testing.T) {
+		res, err := client.Collection(uniqueName("go-agg-empty")).NewAggregationQuery().
+			WithSum("price", "total").
+			WithAvg("price", "mean").
+			Get(ctx)
+		require.NoError(t, err)
+
+		total := aggregateValue(t, res, "total")
+		assert.IsType(t, &firestorepb.Value_IntegerValue{}, total.GetValueType())
+		assert.Equal(t, int64(0), total.GetIntegerValue())
+		assert.IsType(t, &firestorepb.Value_NullValue{}, aggregateValue(t, res, "mean").GetValueType())
+	})
+}
+
+func aggregateValue(t *testing.T, res firestore.AggregationResult, alias string) *firestorepb.Value {
+	t.Helper()
+	v, ok := res[alias]
+	require.True(t, ok, "no aggregation result named %q", alias)
+	value, ok := v.(*firestorepb.Value)
+	require.True(t, ok, "aggregation result %q is %T, not *firestorepb.Value", alias, v)
+	return value
 }

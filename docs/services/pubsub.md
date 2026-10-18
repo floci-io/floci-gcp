@@ -79,7 +79,7 @@ provider "google" {
 }
 ```
 
-The REST surface supports topic and subscription create/read/list/update/delete, publish, pull, and acknowledge:
+The REST surface supports topic and subscription create/read/list/update/delete, publish, pull, acknowledge, and modifyAckDeadline:
 
 - `PUT /v1/projects/{project}/topics/{topic}`
 - `GET /v1/projects/{project}/topics/{topic}`
@@ -94,6 +94,7 @@ The REST surface supports topic and subscription create/read/list/update/delete,
 - `DELETE /v1/projects/{project}/subscriptions/{subscription}`
 - `POST /v1/projects/{project}/subscriptions/{subscription}:pull`
 - `POST /v1/projects/{project}/subscriptions/{subscription}:acknowledge`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:modifyAckDeadline`
 
 IAM policy methods are served for topics, subscriptions, and snapshots:
 

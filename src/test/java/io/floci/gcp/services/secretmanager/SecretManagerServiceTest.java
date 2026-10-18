@@ -2,13 +2,22 @@ package io.floci.gcp.services.secretmanager;
 
 import com.google.iam.v1.Binding;
 import com.google.iam.v1.Policy;
+import com.google.iam.v1.SetIamPolicyRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageException;
+import io.floci.gcp.services.iam.IamPolicyGrpcController;
+import io.floci.gcp.services.iam.IamResource;
+import io.floci.gcp.services.iam.IamResourceHierarchy;
+import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
+import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.secretmanager.model.StoredSecret;
 import io.floci.gcp.services.secretmanager.model.StoredSecretVersion;
+import io.grpc.stub.StreamObserver;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,12 +33,223 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SecretManagerServiceTest {
 
     private SecretManagerService service;
+
+    @Test
+    void sharedIamWriteRechecksRevokedSecretGrant() throws Exception {
+        IamService policies = IamServices.inMemory();
+        IamResourceHierarchy hierarchy = new IamResourceHierarchy();
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        CountDownLatch writeEnteredPolicyLocks = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            IamResource target = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            writeEnteredPolicyLocks.countDown();
+            return policies.withPolicyLocks(hierarchy.policyResourcesFor(target), action::get);
+        }).when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> {
+            List<IamResource> targets = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            List<String> resources = targets.stream()
+                    .flatMap(target -> hierarchy.policyResourcesFor(target).stream())
+                    .distinct().toList();
+            return policies.withPolicyLocks(resources, action::get);
+        }).when(authorization).withPolicyLocks(anyList(), any());
+        AtomicBoolean granted = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (!granted.get()) {
+                throw GcpException.permissionDenied("Grant removed");
+            }
+            return null;
+        }).when(authorization).authorizeCurrent(any(), any());
+        SecretManagerIamAuthorizationAdapter adapter = new SecretManagerIamAuthorizationAdapter();
+        SecretManagerService tested = new SecretManagerService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), policies, authorization, adapter);
+        String resource = "projects/p1/secrets/revoked";
+        tested.createSecret("p1", "revoked", "automatic");
+
+        Instance<SecretManagerService> secretManager = mock(Instance.class);
+        when(secretManager.get()).thenReturn(tested);
+        IamPolicyGrpcController shared = new IamPolicyGrpcController(policies, secretManager, adapter);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        StreamObserver<Policy> observer = new StreamObserver<>() {
+            @Override
+            public void onNext(Policy value) {
+                fail("Revoked grant permitted a policy write");
+            }
+
+            @Override
+            public void onError(Throwable failure) {
+                error.set(failure);
+            }
+
+            @Override
+            public void onCompleted() {
+                fail("Revoked grant permitted a policy write");
+            }
+        };
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> write = policies.withPolicyLock(resource, () -> {
+                Future<?> pending = executor.submit(() -> shared.setIamPolicy(
+                        SetIamPolicyRequest.newBuilder().setResource(resource)
+                                .setPolicy(policyWithBinding()).build(), observer));
+                try {
+                    assertTrue(writeEnteredPolicyLocks.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+                granted.set(false);
+                return pending;
+            });
+            write.get(5, TimeUnit.SECONDS);
+        }
+
+        assertNotNull(error.get());
+        assertTrue(policies.getPolicy(resource).getBindings().isEmpty());
+    }
+
+    @Test
+    void creationRecoveryDoesNotHoldProjectPolicyWhileWaitingForSecretPolicy() throws Exception {
+        String project = "projects/p1";
+        String name = project + "/secrets/recovery-0";
+        IamService policies = IamServices.inMemory();
+        IamResourceHierarchy hierarchy = new IamResourceHierarchy();
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        CountDownLatch createEnteredLocks = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            IamResource resource = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            createEnteredLocks.countDown();
+            return policies.withPolicyLocks(hierarchy.policyResourcesFor(resource), action::get);
+        }).when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> {
+            List<IamResource> resources = invocation.getArgument(0);
+            Supplier<?> action = invocation.getArgument(1);
+            createEnteredLocks.countDown();
+            List<String> policyResources = resources.stream()
+                    .flatMap(resource -> hierarchy.policyResourcesFor(resource).stream())
+                    .distinct().toList();
+            return policies.withPolicyLocks(policyResources, action::get);
+        }).when(authorization).withPolicyLocks(anyList(), any());
+
+        InMemoryStorage<String, String> deletions = new InMemoryStorage<>();
+        deletions.put(name, name);
+        SecretManagerService tested = new SecretManagerService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), deletions, policies, authorization,
+                new SecretManagerIamAuthorizationAdapter());
+        CountDownLatch secretPolicyHeld = new CountDownLatch(1);
+        CountDownLatch releaseSecretPolicy = new CountDownLatch(1);
+        AtomicReference<Thread> createThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(3)) {
+            Future<?> holder = executor.submit(() -> policies.withPolicyLock(name, () -> {
+                secretPolicyHeld.countDown();
+                try {
+                    assertTrue(releaseSecretPolicy.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+                return null;
+            }));
+            assertTrue(secretPolicyHeld.await(5, TimeUnit.SECONDS));
+            try {
+                Future<StoredSecret> create = executor.submit(() -> {
+                    createThread.set(Thread.currentThread());
+                    return tested.createSecret("p1", "recovery-0", "automatic");
+                });
+                assertTrue(createEnteredLocks.await(5, TimeUnit.SECONDS));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (createThread.get().getState() != Thread.State.BLOCKED && !create.isDone()) {
+                    assertTrue(System.nanoTime() < deadline);
+                    Thread.onSpinWait();
+                }
+                assertFalse(create.isDone());
+                Future<Boolean> projectAvailable = executor.submit(
+                        () -> policies.withPolicyLock(project, () -> true));
+                assertTrue(projectAvailable.get(1, TimeUnit.SECONDS));
+                releaseSecretPolicy.countDown();
+                assertEquals(name, create.get(5, TimeUnit.SECONDS).getName());
+                holder.get(5, TimeUnit.SECONDS);
+            } finally {
+                releaseSecretPolicy.countDown();
+            }
+        }
+    }
+
+    @Test
+    void accessCannotReadReplacementAfterEarlierAuthorization() throws Exception {
+        IamAuthorizationService authorization = mock(IamAuthorizationService.class);
+        CountDownLatch accessAuthorized = new CountDownLatch(1);
+        CountDownLatch finishAuthorization = new CountDownLatch(1);
+        AtomicReference<Thread> replacementThread = new AtomicReference<>();
+        doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
+                .when(authorization).withPolicyLocks(any(IamResource.class), any());
+        doAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get())
+                .when(authorization).withPolicyLocks(anyList(), any());
+        doAnswer(invocation -> {
+            IamOperation operation = invocation.getArgument(1);
+            if (operation.name().equals("AccessSecretVersion")) {
+                accessAuthorized.countDown();
+                assertTrue(finishAuthorization.await(5, TimeUnit.SECONDS));
+            }
+            return null;
+        }).when(authorization).authorizeCurrent(any(), any());
+
+        SecretManagerService tested = new SecretManagerService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), IamServices.inMemory(),
+                authorization, new SecretManagerIamAuthorizationAdapter());
+        String name = "projects/p1/secrets/recreated";
+        String version = name + "/versions/1";
+        tested.createSecret("p1", "recreated", "automatic");
+        tested.addSecretVersion(name, new byte[]{1}, null);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredSecretVersion> access = executor.submit(() -> tested.accessSecretVersion(version));
+            assertTrue(accessAuthorized.await(5, TimeUnit.SECONDS));
+            Future<?> replace = executor.submit(() -> {
+                replacementThread.set(Thread.currentThread());
+                tested.deleteSecret(name);
+                tested.createSecret("p1", "recreated", "automatic");
+                tested.addSecretVersion(name, new byte[]{2}, null);
+            });
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            boolean waitingForSecretLock = false;
+            while (!waitingForSecretLock && !replace.isDone()) {
+                Thread worker = replacementThread.get();
+                if (worker != null && worker.getState() == Thread.State.BLOCKED) {
+                    StackTraceElement[] stack = worker.getStackTrace();
+                    waitingForSecretLock = stack.length > 0
+                            && stack[0].getClassName().equals(SecretManagerService.class.getName())
+                            && stack[0].getMethodName().equals("deleteSecret");
+                }
+                assertTrue(System.nanoTime() < deadline, "replacement did not reach the secret lock");
+                Thread.onSpinWait();
+            }
+            assertTrue(waitingForSecretLock, "replacement did not reach the secret lock");
+            finishAuthorization.countDown();
+            assertArrayEquals(new byte[]{1}, access.get(5, TimeUnit.SECONDS).getPayload());
+            replace.get(5, TimeUnit.SECONDS);
+            assertArrayEquals(new byte[]{2}, tested.accessSecretVersion(version).getPayload());
+        } finally {
+            finishAuthorization.countDown();
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -97,7 +317,20 @@ class SecretManagerServiceTest {
 
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.accessSecretVersion("projects/p1/secrets/s1/versions/1"));
-        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertEquals("FAILED_PRECONDITION", ex.getGcpStatus());
+        assertEquals("Secret Version [projects/p1/secrets/s1/versions/1] is in DISABLED state.", ex.getMessage());
+    }
+
+    @Test
+    void accessDestroyedVersionThrowsFailedPrecondition() {
+        service.createSecret("p1", "s1", "automatic");
+        service.addSecretVersion("projects/p1/secrets/s1", new byte[]{1}, null);
+        service.destroySecretVersion("projects/p1/secrets/s1/versions/1");
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.accessSecretVersion("projects/p1/secrets/s1/versions/1"));
+        assertEquals("FAILED_PRECONDITION", ex.getGcpStatus());
+        assertEquals("Secret Version [projects/p1/secrets/s1/versions/1] is in DESTROYED state.", ex.getMessage());
     }
 
     @Test

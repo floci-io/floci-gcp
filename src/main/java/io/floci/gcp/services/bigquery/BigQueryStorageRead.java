@@ -91,7 +91,9 @@ public class BigQueryStorageRead {
 
     void onStart(@Observes StartupEvent event) {
         if (config.services().bigquery().enabled()) {
-            grpcServerManager.bind(new BigQueryReadController(this, vertx));
+            grpcServerManager.bindForApi(new BigQueryReadController(this, vertx),
+                    "bigquerystorage.googleapis.com", "BigQuery Storage API",
+                    new BigQueryStorageServiceUsageAdapter());
         }
     }
 

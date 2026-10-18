@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -162,6 +163,21 @@ class SqlDialectTranslatorTest {
     void anonymousColumnsAreNamedLikeBigQuery() {
         assertEquals("SELECT COUNT(*) AS f0_, name, 1 + 1 AS two, MAX(age) AS f1_ FROM \"ds\".\"t\"",
                 sql("SELECT COUNT(*), name, 1 + 1 AS two, MAX(age) FROM ds.t"));
+    }
+
+    @Test
+    void anonymousColumnsBelowTheResultKeepTheirPosition() {
+        assertEquals("SELECT * FROM (SELECT 1 + 1 AS \"$col1\", 2 AS x, 3 + 3 AS \"$col3\")",
+                sql("SELECT * FROM (SELECT 1 + 1, 2 AS x, 3 + 3)"));
+        assertEquals("WITH s AS (SELECT 1 + 1 AS \"$col1\") SELECT * FROM \"s\"",
+                sql("WITH s AS (SELECT 1 + 1) SELECT * FROM s"));
+        assertEquals("SELECT 1 + 1 AS \"$col1\", * FROM (SELECT 2 + 2 AS \"$col1\")",
+                sql("SELECT 1 + 1, * FROM (SELECT 2 + 2)"));
+        assertEquals("SELECT (SELECT 1 + 1 AS \"$col1\") AS v, 1 + 1 AS f0_", sql("SELECT (SELECT 1 + 1) AS v, 1 + 1"));
+        assertEquals("SELECT 1 + 1 AS f0_ UNION ALL SELECT 2 + 2", sql("SELECT 1 + 1 UNION ALL SELECT 2 + 2"));
+        assertEquals("SELECT 1 + 1 AS f1_, 9 AS f0_", sql("SELECT 1 + 1, 9 AS f0_"));
+        assertEquals("SELECT * FROM (SELECT * EXCLUDE (x), 9 + 9 AS \"$col2\" FROM (SELECT 2 + 2 AS \"$col1\", 3 AS x))",
+                sql("SELECT * FROM (SELECT * EXCEPT (x), 9 + 9 FROM (SELECT 2 + 2, 3 AS x))"));
     }
 
     @Test
@@ -449,6 +465,89 @@ class SqlDialectTranslatorTest {
         assertEquals("MERGE INTO \"ds\".\"t\" AS \"t\" USING \"ds\".\"s\" AS \"s\" ON t.id = s.id"
                         + " WHEN MATCHED THEN DELETE RETURNING merge_action",
                 dml("MERGE ds.t t USING ds.s s ON t.id = s.id WHEN MATCHED THEN DELETE"));
+    }
+
+    @Test
+    void notMatchedClausesReadBareColumnsFromTheSource() {
+        assertEquals("MERGE INTO \"ds\".\"t\" AS \"T\" USING \"ds\".\"s\" AS \"S\" ON S.id = T.id"
+                        + " WHEN MATCHED THEN UPDATE SET \"v\" = S.\"v\""
+                        + " WHEN NOT MATCHED THEN INSERT (\"id\", \"v\") VALUES (\"S\".\"id\", \"S\".\"v\")"
+                        + " RETURNING merge_action",
+                dml("MERGE ds.t AS T USING ds.s AS S ON S.id = T.id WHEN MATCHED THEN UPDATE SET `v` = S.`v`"
+                        + " WHEN NOT MATCHED THEN INSERT (`id`, `v`) VALUES (`id`, `v`)"));
+        assertEquals("MERGE INTO \"ds\".\"t\" USING \"ds\".\"s\" ON t.id = s.id"
+                        + " WHEN NOT MATCHED AND \"s\".v > 1 THEN INSERT (id, v, d)"
+                        + " VALUES (\"s\".id + 1, UPPER(CAST(\"s\".v AS VARCHAR)), \"s\".d + INTERVAL 1 DAY)"
+                        + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE RETURNING merge_action",
+                dml("MERGE ds.t USING ds.s ON t.id = s.id WHEN NOT MATCHED AND v > 1 THEN INSERT (id, v, d)"
+                        + " VALUES (id + 1, UPPER(CAST(v AS STRING)), d + INTERVAL 1 DAY)"
+                        + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE"));
+    }
+
+    @Test
+    void notMatchedClausesLeaveDatePartsSubqueriesTypesAndCaseAlone() {
+        String dates = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND EXTRACT(DAY FROM d) = 5"
+                + " AND d > DATE '2026-01-01' THEN INSERT (id, d) VALUES (id, DATE_TRUNC(d, MONTH))");
+        assertTrue(dates.contains("\"S\".d") && dates.contains("\"S\".id"), dates);
+        assertFalse(dates.contains("\"S\".DAY") || dates.contains("\"S\".DATE") || dates.contains("\"S\".MONTH"), dates);
+        String moreDates = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED"
+                + " AND TIMESTAMP_TRUNC(ts, DAY, 'UTC') IS NOT NULL AND d + INTERVAL '0-1' YEAR TO MONTH > d"
+                + " AND DATE_DIFF(d, d2, ISOWEEK) = 0 THEN INSERT (id) VALUES (id)");
+        assertTrue(moreDates.contains("date_trunc('day', \"S\".ts)") && moreDates.contains("YEAR TO MONTH")
+                && moreDates.contains("\"S\".d2"), moreDates);
+        assertFalse(moreDates.contains("\"S\".MONTH") || moreDates.contains("\"S\".ISOWEEK"), moreDates);
+        String dateNamedColumns = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED"
+                + " AND DATE_DIFF(d, day, DAY) > 0 AND DATE_TRUNC(date, MONTH) = d THEN INSERT (id) VALUES (id)");
+        assertTrue(dateNamedColumns.contains("\"S\".day") && dateNamedColumns.contains("\"S\".date"), dateNamedColumns);
+        assertFalse(dateNamedColumns.contains("\"S\".DAY") || dateNamedColumns.contains("\"S\".MONTH"), dateNamedColumns);
+        String arrayInDatePart = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED"
+                + " AND DATE_TRUNC(CASE WHEN [d, d2] IS NOT NULL THEN d ELSE d2 END, MONTH) = d THEN INSERT (id) VALUES (id)");
+        assertTrue(arrayInDatePart.contains("[\"S\".d, \"S\".d2]") && arrayInDatePart.contains("'month'"), arrayInDatePart);
+        assertFalse(arrayInDatePart.contains("\"S\".MONTH") || arrayInDatePart.contains("\"s\".month"), arrayInDatePart);
+
+        String subquery = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v)"
+                + " VALUES (id, (SELECT v FROM ds.lookup LIMIT 1))");
+        assertTrue(subquery.contains("\"S\".id") && subquery.contains("(SELECT v FROM"), subquery);
+        assertFalse(subquery.contains("\"S\".v"), subquery);
+
+        String compare = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND a < b"
+                + " AND CAST(v AS ARRAY<STRUCT<x INT64, y STRING>>) IS NOT NULL THEN INSERT (id) VALUES (id)");
+        assertTrue(compare.contains("\"S\".a < \"S\".b") && compare.contains("\"S\".v"), compare);
+        assertFalse(compare.contains("\"S\".x") || compare.contains("\"S\".y"), compare);
+
+        String caseWhen = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND CASE WHEN flag THEN TRUE"
+                + " ELSE FALSE END THEN INSERT (id, flag) VALUES (id, flag)");
+        assertTrue(caseWhen.contains("CASE WHEN \"S\".flag THEN") && caseWhen.contains("VALUES (\"S\".id, \"S\".flag)"),
+                caseWhen);
+
+        String parenless = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED AND d <= CURRENT_DATE"
+                + " THEN INSERT (id, ts, dt, tm, d) VALUES (id, CURRENT_TIMESTAMP, CURRENT_DATETIME, CURRENT_TIME,"
+                + " CURRENT_DATE)");
+        assertTrue(parenless.contains("\"S\".d <=") && parenless.contains("VALUES (\"S\".id"), parenless);
+        assertFalse(parenless.toLowerCase().contains("\"s\".current"), parenless);
+
+        String atTimeZone = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, d)"
+                + " VALUES (id, EXTRACT(DATE FROM TIMESTAMP(ts) AT TIME ZONE 'UTC'))");
+        assertTrue(atTimeZone.contains("\"S\".ts") && atTimeZone.contains("AT TIME ZONE 'UTC'"), atTimeZone);
+        assertFalse(atTimeZone.contains("\"S\".TIME") || atTimeZone.contains("\"S\".ZONE"), atTimeZone);
+
+        String namedArgument = dml("MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, g)"
+                + " VALUES (id, ST_GEOGFROMTEXT(w, make_valid => TRUE))");
+        assertTrue(namedArgument.contains("\"S\".w") && namedArgument.contains("make_valid => TRUE"), namedArgument);
+        assertFalse(namedArgument.contains("\"S\".make_valid"), namedArgument);
+
+        String unnest = dml("MERGE ds.t USING UNNEST([STRUCT(1 AS src_id)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (src_id)");
+        assertTrue(unnest.contains("max_depth := 2)) AS \"_merge_source\"")
+                && unnest.contains("VALUES (\"_merge_source\".src_id)"), unnest);
+        assertFalse(unnest.toUpperCase().contains("\"UNNEST\"."), unnest);
+        String aliasedUnnest = dml("MERGE ds.t USING UNNEST([STRUCT(1 AS src_id)]) AS u ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (src_id)");
+        assertTrue(aliasedUnnest.contains("VALUES (src_id)"), aliasedUnnest);
+        String takenName = dml("MERGE ds.t AS _merge_source USING UNNEST([STRUCT(9 AS id)]) ON FALSE WHEN NOT MATCHED"
+                + " THEN INSERT (id) VALUES (id)");
+        assertTrue(takenName.contains("max_depth := 2)) AS \"_merge_source_1\"")
+                && takenName.contains("VALUES (\"_merge_source_1\".id)"), takenName);
     }
 
     @Test

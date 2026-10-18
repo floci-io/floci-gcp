@@ -31,8 +31,6 @@ import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.gcs.model.StoredNotification;
 import io.floci.gcp.services.iam.IamBucketLifecycleService;
 import io.floci.gcp.services.pubsub.PubSubService;
-import io.grpc.BindableService;
-import io.grpc.ServerInterceptors;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -211,12 +209,12 @@ public class GcsService {
                         GcsBatchController.class, GcsGrpcController.class,
                         GcsProjectController.class,
                         GcsHmacKeyController.class)
+                .api("storage.googleapis.com", "Cloud Storage API")
+                .usageAdapter(new GcsServiceUsageAdapter(this))
                 .build());
         if (config.services().gcs().enabled()) {
-            GcsGrpcController controller = new GcsGrpcController(this, config, authorizationService);
-            BindableService intercepted = () -> ServerInterceptors.intercept(
-                    controller, grpcAuthorizationInterceptor);
-            grpcServerManager.bind(intercepted);
+            grpcServerManager.bind(new GcsGrpcController(this, config, authorizationService),
+                    grpcAuthorizationInterceptor);
         }
     }
 

@@ -7,15 +7,18 @@ call it before managing any other resource, and `gcloud services` is built on it
 
 The emulator is an accept-and-succeed control plane: enabling a service flips it to
 `ENABLED` (persisted, project-namespaced), disabling reverses it, and get/list echo that
-state. There is no real API gating or dependency resolution: services work whether or not
-they were "enabled".
+state. By default there is no API gating or dependency resolution: services work whether or
+not they were "enabled". Turn on [enforcement](#enforcing-api-enablement) to make the
+enable/disable state matter.
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENABLED` | `true` | Enable/disable Service Usage |
-| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Enable/disable the Cloud Resource Manager project lookup (see below) |
+| `FLOCI_GCP_SERVICES_SERVICEUSAGE_ENFORCEMENT_ENABLED` | `false` | Reject calls to APIs that are not enabled in the caller's project |
+| `FLOCI_GCP_SERVICES_SERVICEUSAGE_DEFAULT_ENABLED` | GCP default set (below) | APIs treated as enabled in every project until disabled (enforcement only) |
+| `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Enable/disable [Resource Manager](resource-manager.md) |
 
 ## Endpoints
 
@@ -34,26 +37,125 @@ they were "enabled".
 type, so SDK operation futures resolve immediately. Disabling a service that is not
 enabled returns `FAILED_PRECONDITION`, matching real GCP.
 
+## Enforcing API enablement
+
+With `floci-gcp.services.serviceusage.enforcement-enabled: true` (`FLOCI_GCP_SERVICES_SERVICEUSAGE_ENFORCEMENT_ENABLED=true`)
+every call to an emulated API checks the Service Usage state of that API in the caller's
+project and fails unless it is `ENABLED`, the way real GCP does. Enforcement is off by
+default; with it off nothing changes.
+
+A rejected call gets the `SERVICE_DISABLED` error described in
+`google/api/error_reason.proto`:
+
+```json
+{
+  "error": {
+    "code": 403,
+    "message": "Cloud Pub/Sub API has not been used in project my-project before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/pubsub.googleapis.com/overview?project=my-project then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.",
+    "status": "PERMISSION_DENIED",
+    "errors": [{"message": "...", "domain": "usageLimits", "reason": "accessNotConfigured"}],
+    "details": [{
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      "reason": "SERVICE_DISABLED",
+      "domain": "googleapis.com",
+      "metadata": {"service": "pubsub.googleapis.com", "consumer": "projects/my-project"}
+    }]
+  }
+}
+```
+
+gRPC calls fail with `PERMISSION_DENIED`, the same message, and the same `ErrorInfo` in
+the status details (`grpc-status-details-bin`), so `ApiException.getReason()` returns
+`SERVICE_DISABLED` in the Java client.
+
+The project is taken from the request. For REST it is the `projects/{project}` path segment
+or the `project` query parameter. For gRPC it is the `x-goog-request-params` routing header
+and every project named by the fields the API declares as resource names (the
+`google.api.resource_reference` and `google.api.resource` annotations of its protos, or a
+`project_id` field), wherever they sit in the message: `parent` and `read_session.table` of
+`CreateReadSession`, `secret.name` of `UpdateSecret`, every entry of `resource_names`. A
+field that only holds data, such as an object name, is not read, and neither is a
+reference to another API's resource, such as the KMS key of an object or the Pub/Sub
+topic of a Scheduler job. Every request message of a stream is checked, so a routing
+header or an earlier message does not admit a project it does not name. Requests that
+name no project at all are checked against `floci-gcp.default-project-id`. A project
+number of a known project shares the state of its project ID, for the check and for
+`services.enable` and `services.disable` alike. The `consumer` metadata and the message carry
+the project as the request names it.
+
+Some requests act on a project they do not name, and are checked against that project:
+
+| Request | Project checked |
+|---|---|
+| Cloud Storage requests that name a bucket (`/storage/v1/b/{bucket}/...`, `/{bucket}/{object}`, `projects/_/buckets/{bucket}` on gRPC) | The project that owns the bucket, whichever project the resource name carries. A copy or rewrite checks the source and the destination. |
+| BigQuery Storage `CreateReadSession` and `CreateWriteStream` | The project of the table (`read_session.table`, `parent`), as well as the session's `parent`. |
+| Cloud Storage writes resumed by `upload_id` (gRPC `WriteObject`, `BidiWriteObject`, `QueryWriteStatus`; resumable chunks on `/upload/storage/v1/b/{bucket}/o`, a retry of a finished upload included) | The project that owns the bucket the upload was started for, as well as the bucket in the path. |
+| Cloud Storage `/batch/storage/v1` | Not checked itself; each request it carries is. |
+| Firestore requests that name documents (`BatchGetDocuments`, the writes of `Commit`, `Write` and `BatchWrite`, a `Listen` target) | The project of every document named, as well as the `database`'s. |
+| IAM `projects/-/serviceAccounts/{EMAIL_ADDRESS\|UNIQUE_ID}` | The project that owns the service account. |
+| Cloud Logging `entries:write` and `entries:list`, and gRPC `WriteLogEntries` | The projects named in the body: every entry's `logName`, and the `resourceNames`. |
+| Firebase Auth client endpoints (`accounts:signUp`, the secure token endpoint) | `floci-gcp.default-project-id`. |
+
+The rejection uses the format of the route: Datastore's HTTP transport answers a
+serialized `google.rpc.Status` (`application/x-protobuf`), and the Cloud Storage XML API
+answers an `AccessDenied` XML error.
+
+### Default-enabled services
+
+A real new project starts with a set of APIs already enabled. With enforcement on,
+the APIs in `floci-gcp.services.serviceusage.default-enabled` count as `ENABLED` in every
+project until they are disabled, and `get`/`list` report them that way. The default list
+is GCP's documented default set: `analyticshub`, `apptopology`, `bigquery`,
+`bigqueryconnection`, `bigquerydatapolicy`, `bigquerydatatransfer`, `bigquerymigration`,
+`bigqueryreservation`, `bigquerystorage`, `cloudapis`, `cloudtrace`, `dataform`,
+`dataplex`, `datastore`, `logging`, `monitoring`, `servicemanagement`, `serviceusage`,
+`sql-component`, `storage-api`, `storage-component`, `storage`, `telemetry`
+(all `.googleapis.com`). So Cloud Storage, BigQuery, Datastore, Logging and Monitoring
+work out of the box, and everything else must be enabled first:
+
+```bash
+gcloud services enable pubsub.googleapis.com secretmanager.googleapis.com --project=my-project
+```
+
+### Which APIs are gated
+
+| Emulated service | API checked |
+|---|---|
+| Pub/Sub (gRPC + REST) | `pubsub.googleapis.com` |
+| Secret Manager (gRPC + REST) | `secretmanager.googleapis.com` |
+| Cloud Storage (JSON, XML, gRPC) | `storage.googleapis.com` |
+| Firestore (gRPC) | `firestore.googleapis.com` |
+| Datastore (gRPC + REST) | `datastore.googleapis.com` |
+| Cloud Tasks (gRPC) | `cloudtasks.googleapis.com` |
+| Cloud Scheduler (gRPC + REST) | `cloudscheduler.googleapis.com` |
+| Cloud KMS (gRPC + REST) | `cloudkms.googleapis.com` |
+| Cloud Logging (gRPC + REST) | `logging.googleapis.com` |
+| Cloud Monitoring (gRPC + REST) | `monitoring.googleapis.com` |
+| IAM (REST) | `iam.googleapis.com` |
+| Cloud Functions | `cloudfunctions.googleapis.com` |
+| Cloud Run (admin API and invocation proxy) | `run.googleapis.com` |
+| BigQuery | `bigquery.googleapis.com` |
+| BigQuery Storage Read and Write (gRPC) | `bigquerystorage.googleapis.com` |
+| Firebase Auth (Identity Toolkit, Secure Token) | `identitytoolkit.googleapis.com` |
+| GKE | `container.googleapis.com` |
+| Compute Engine | `compute.googleapis.com` |
+| Managed Kafka | `managedkafka.googleapis.com` |
+| Eventarc | `eventarc.googleapis.com` |
+| Cloud SQL | `sqladmin.googleapis.com` |
+
+Never gated: Service Usage itself, Cloud Resource Manager, IAM Credentials, STS, the
+OAuth token endpoint, the shared `google.iam.v1.IAMPolicy` gRPC mixin (its caller's API
+depends on the resource, so it is left open), the shared long-running operations
+endpoints, CORS preflight (`OPTIONS`) requests, and emulator-only endpoints
+(`/_floci-gcp/...`, `/emulator/...`).
+
 ## Cloud Resource Manager companion
 
 The Terraform/Pulumi Google providers verify a project exists via
 `cloudresourcemanager.v1.Projects.GetProject` before reading `google_project_service`.
-floci-gcp therefore serves a minimal Cloud Resource Manager v1 surface:
-
-| Method | Path |
-|---|---|
-| `GET` | `/v1/projects/{projectId}` |
-| `POST` | `/v1/projects/{projectId}:getIamPolicy` |
-| `POST` | `/v1/projects/{projectId}:setIamPolicy` |
-| `POST` | `/v1/projects/{projectId}:testIamPermissions` |
-
-Every project ID resolves to an `ACTIVE` project with a stable synthetic
-`projectNumber` (the emulator's multi-tenancy is keyed by project ID; projects are never
-created or deleted).
-
-Project-level IAM policies are stored with stable empty-policy and rotating write
-etags for Terraform/OpenTofu read-modify-write flows. IAM bindings are not
-enforced by the emulator; they do not restrict access to emulated resources.
+floci-gcp serves the Cloud Resource Manager v1 projects API for this; see
+[Resource Manager](resource-manager.md) for the endpoints, the project registry and
+strict mode.
 
 ## Quick Start
 
@@ -109,7 +211,7 @@ enforced by the emulator; they do not restrict access to emulated resources.
 ## Scope and deviations
 
 - `ListServices` returns only services whose state has been tracked (enabled or later
-  disabled) for the project. Real GCP also lists every public API in the `DISABLED` state;
+  disabled) for the project, plus the default-enabled set when enforcement is on. Real GCP also lists every public API in the `DISABLED` state;
   the emulator does not ship a catalog of Google APIs.
 - `Service.config` carries only the service `name`; real GCP includes title, quota, auth,
   and endpoint configuration.

@@ -39,7 +39,7 @@ class PubSubIamAuthorizationAdapterServiceTest {
 
         Method[] restHandlers = Arrays.stream(PubSubRestController.class.getDeclaredMethods())
                 .filter(method -> method.isAnnotationPresent(Path.class)).toArray(Method[]::new);
-        assertEquals(22, restHandlers.length);
+        assertEquals(23, restHandlers.length);
         for (Method method : restHandlers) {
             IamOperation operation = adapter.restOperation(method.getName(), path, body);
             assertFalse(operation.resource().isBlank(), method.getName());
@@ -80,7 +80,7 @@ class PubSubIamAuthorizationAdapterServiceTest {
                     JsonFormat.parser().ignoringUnknownFields().merge(request.toString(), builder);
                     proto = builder.build();
                 }
-                IamOperation typed = adapter.grpcOperation(name, proto, mapper);
+                IamOperation typed = adapter.grpcOperation(name, proto);
                 assertEquals(operation, typed, name);
                 grpcHandlers++;
             }

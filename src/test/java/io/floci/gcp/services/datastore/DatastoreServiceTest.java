@@ -1,5 +1,6 @@
 package io.floci.gcp.services.datastore;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.datastore.v1.ArrayValue;
 import com.google.datastore.v1.Entity;
 import com.google.datastore.v1.Filter;
@@ -17,6 +18,7 @@ import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.datastore.model.StoredEntity;
+import io.floci.gcp.services.datastore.model.StoredProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -75,6 +77,139 @@ class DatastoreServiceTest {
         assertEquals(Value.ValueTypeCase.GEO_POINT_VALUE, stored.getValueTypeCase());
         assertEquals(37.422, stored.getGeoPointValue().getLatitude());
         assertEquals(-122.084, stored.getGeoPointValue().getLongitude());
+    }
+
+    @Test
+    void keyValueReadsBackWithItsNamespaceAncestorsAndId() {
+        Key ref = Key.newBuilder()
+                .setPartitionId(PartitionId.newBuilder().setProjectId(PROJECT).setNamespaceId("tenant-a"))
+                .addPath(Key.PathElement.newBuilder().setKind("Org").setName("acme"))
+                .addPath(Key.PathElement.newBuilder().setKind("User").setId(12345))
+                .build();
+        Value value = Value.newBuilder().setKeyValue(ref).build();
+        upsertProperty("Link", "l1", "target", value);
+
+        assertEquals(value, readBack("Link", "l1").getPropertiesOrThrow("target"));
+    }
+
+    @Test
+    void entityValueReadsBackWithItsKeyAndProperties() {
+        Value value = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .setKey(namedKey("Address", "home"))
+                        .putProperties("city", Value.newBuilder().setStringValue("Lagos").build())
+                        .putProperties("owner", Value.newBuilder().setKeyValue(namedKey("Person", "alice")).build())
+                        .putProperties("geo", Value.newBuilder()
+                                .setEntityValue(Entity.newBuilder()
+                                        .putProperties("zip", Value.newBuilder().setIntegerValue(100001).build()))
+                                .build()))
+                .build();
+        upsertProperty("Person", "bob", "address", value);
+
+        assertEquals(value, readBack("Person", "bob").getPropertiesOrThrow("address"));
+    }
+
+    @Test
+    void keyAndEntityValuesInsideAnArrayReadBack() {
+        Value value = Value.newBuilder()
+                .setArrayValue(ArrayValue.newBuilder()
+                        .addValues(Value.newBuilder().setKeyValue(namedKey("Ref", "a")))
+                        .addValues(Value.newBuilder().setEntityValue(Entity.newBuilder()
+                                .putProperties("n", Value.newBuilder().setIntegerValue(1).build()))))
+                .build();
+        upsertProperty("Bag", "b1", "items", value);
+
+        assertEquals(value, readBack("Bag", "b1").getPropertiesOrThrow("items"));
+    }
+
+    @Test
+    void equalFilterOnKeyTellsAnIdFromANameWithTheSameDigits() {
+        Value byId = Value.newBuilder().setKeyValue(Key.newBuilder()
+                .setPartitionId(PartitionId.newBuilder().setProjectId(PROJECT))
+                .addPath(Key.PathElement.newBuilder().setKind("Ref").setId(12345))).build();
+        Value byName = Value.newBuilder().setKeyValue(namedKey("Ref", "12345")).build();
+        upsertProperty("Link", "id", "target", byId);
+        upsertProperty("Link", "name", "target", byName);
+
+        assertEquals(List.of("id"), namesOf(runPropertyQuery("Link", "target", PropertyFilter.Operator.EQUAL, byId)));
+        assertEquals(List.of("name"), namesOf(runPropertyQuery("Link", "target", PropertyFilter.Operator.EQUAL, byName)));
+    }
+
+    @Test
+    void keyValueSurvivesTheJsonRoundTripPersistentStorageUses() throws Exception {
+        Value value = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .setKey(namedKey("Address", "home"))
+                        .putProperties("owner", Value.newBuilder().setKeyValue(namedKey("Person", "alice")).build()))
+                .build();
+        upsertProperty("Person", "bob", "address", value);
+        StoredEntity stored = service.lookupEntity(PROJECT, namedKey("Person", "bob")).orElseThrow();
+
+        ObjectMapper mapper = new ObjectMapper();
+        StoredEntity reloaded = mapper.readValue(mapper.writeValueAsString(stored), StoredEntity.class);
+
+        assertEquals(value, service.toProto(reloaded).getPropertiesOrThrow("address"));
+    }
+
+    @Test
+    void aDamagedStoredKeyReadsBackAsNullWithoutFailingTheRead() {
+        StoredProperty damaged = new StoredProperty();
+        damaged.setType("key");
+        damaged.setKeyValue("not base64!");
+
+        assertEquals(Value.ValueTypeCase.NULL_VALUE, damaged.toProto().getValueTypeCase());
+        assertFalse(damaged.matchesEqual(Value.newBuilder().setKeyValue(namedKey("Ref", "alpha")).build()));
+    }
+
+    @Test
+    void keyStoredInTheEarlierPathFormStillMatchesAnEqualityFilter() {
+        // Entities persisted before key values were stored losslessly hold only the flattened path.
+        StoredProperty legacy = new StoredProperty();
+        legacy.setType("key");
+        legacy.setStringValue(PROJECT + "//Ref/alpha");
+
+        assertTrue(legacy.matchesEqual(Value.newBuilder().setKeyValue(namedKey("Ref", "alpha")).build()));
+        assertFalse(legacy.matchesEqual(Value.newBuilder().setKeyValue(namedKey("Ref", "beta")).build()));
+    }
+
+    @Test
+    void meaningAndExcludeFromIndexesReadBackOnEveryValue() {
+        Value value = Value.newBuilder()
+                .setEntityValue(Entity.newBuilder()
+                        .putProperties("bio", Value.newBuilder()
+                                .setStringValue("long text").setMeaning(15).setExcludeFromIndexes(true).build())
+                        .putProperties("tags", Value.newBuilder()
+                                .setArrayValue(ArrayValue.newBuilder()
+                                        .addValues(Value.newBuilder().setStringValue("a").setExcludeFromIndexes(true))
+                                        .addValues(Value.newBuilder().setIntegerValue(1).setMeaning(9)))
+                                .build()))
+                .setExcludeFromIndexes(true)
+                .build();
+        upsertProperty("Person", "carol", "profile", value);
+
+        assertEquals(value, readBack("Person", "carol").getPropertiesOrThrow("profile"));
+    }
+
+    @Test
+    void meaningAndExcludeFromIndexesSurviveTheJsonRoundTripPersistentStorageUses() throws Exception {
+        Value value = Value.newBuilder()
+                .setStringValue("long text").setMeaning(15).setExcludeFromIndexes(true).build();
+        upsertProperty("Person", "dave", "bio", value);
+        StoredEntity stored = service.lookupEntity(PROJECT, namedKey("Person", "dave")).orElseThrow();
+
+        ObjectMapper mapper = new ObjectMapper();
+        StoredEntity reloaded = mapper.readValue(mapper.writeValueAsString(stored), StoredEntity.class);
+
+        assertEquals(value, service.toProto(reloaded).getPropertiesOrThrow("bio"));
+    }
+
+    @Test
+    void aPropertyStoredWithoutMeaningOrExcludeFromIndexesStillLoads() throws Exception {
+        // The JSON shape entities were persisted in before these two fields existed.
+        StoredProperty legacy = new ObjectMapper().readValue(
+                "{\"type\":\"string\",\"stringValue\":\"hello\"}", StoredProperty.class);
+
+        assertEquals(Value.newBuilder().setStringValue("hello").build(), legacy.toProto());
     }
 
     @Test
@@ -324,6 +459,10 @@ class DatastoreServiceTest {
             array.addValues(Value.newBuilder().setStringValue(element).build());
         }
         return Value.newBuilder().setArrayValue(array.build()).build();
+    }
+
+    private Entity readBack(String kind, String name) {
+        return service.toProto(service.lookupEntity(PROJECT, namedKey(kind, name)).orElseThrow());
     }
 
     private static List<String> namesOf(List<StoredEntity> entities) {

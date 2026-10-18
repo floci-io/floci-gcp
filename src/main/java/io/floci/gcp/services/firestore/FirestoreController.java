@@ -29,12 +29,10 @@ import com.google.firestore.v1.RunAggregationQueryRequest;
 import com.google.firestore.v1.RunAggregationQueryResponse;
 import com.google.firestore.v1.RunQueryRequest;
 import com.google.firestore.v1.RunQueryResponse;
-import com.google.firestore.v1.StructuredAggregationQuery;
 import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Target;
 import com.google.firestore.v1.TargetChange;
 import com.google.firestore.v1.UpdateDocumentRequest;
-import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
 import com.google.firestore.v1.WriteRequest;
 import com.google.firestore.v1.WriteResponse;
@@ -354,15 +352,8 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
             Instant readTime = Instant.now();
             AggregationResult.Builder agg = AggregationResult.newBuilder();
             if (request.hasStructuredAggregationQuery()) {
-                StructuredAggregationQuery saq = request.getStructuredAggregationQuery();
-                long count = service.countDocuments(request.getParent(),
-                        saq.hasStructuredQuery() ? saq.getStructuredQuery()
-                                : com.google.firestore.v1.StructuredQuery.getDefaultInstance());
-                for (StructuredAggregationQuery.Aggregation aggregation : saq.getAggregationsList()) {
-                    String alias = aggregation.getAlias().isEmpty() ? "field_1" : aggregation.getAlias();
-                    agg.putAggregateFields(alias,
-                            Value.newBuilder().setIntegerValue(count).build());
-                }
+                agg.putAllAggregateFields(service.runAggregationQuery(request.getParent(),
+                        request.getStructuredAggregationQuery()));
             }
             responseObserver.onNext(RunAggregationQueryResponse.newBuilder()
                     .setResult(agg.build())

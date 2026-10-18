@@ -1,6 +1,7 @@
 package io.floci.gcp.services.secretmanager;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -130,6 +131,78 @@ class SecretManagerRestIntegrationTest {
                 .when().get("/v1/" + version + ":access")
                 .then().statusCode(200)
                 .body("payload.data", equalTo(""));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DISABLED", "DESTROYED"})
+    void latestAliasResolvesToNewestVersionRegardlessOfState(String state) {
+        String base = createPayloadSecret();
+        String name = base.substring("/v1/".length());
+        for (String data : new String[]{"djE=", "djI="}) {
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body("{\"payload\":{\"data\":\"" + data + "\"}}")
+                    .when().post(base + ":addVersion")
+                    .then().statusCode(200);
+        }
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/2:" + ("DISABLED".equals(state) ? "disable" : "destroy"))
+                .then().statusCode(200);
+
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest")
+                .then().statusCode(200)
+                .body("name", equalTo(name + "/versions/2"))
+                .body("state", equalTo(state));
+
+        Response direct = given().urlEncodingEnabled(false).when().get(base + "/versions/2:access");
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest:access")
+                .then().statusCode(direct.statusCode())
+                .body("error.status", equalTo(direct.path("error.status")))
+                .body("error.message", equalTo(direct.path("error.message")));
+    }
+
+    @Test
+    void latestAliasOnSecretWithoutVersionsIsNotFound() {
+        String base = createPayloadSecret();
+        String name = base.substring("/v1/".length());
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/latest:access")
+                .then().statusCode(404)
+                .body("error.code", equalTo(404))
+                .body("error.status", equalTo("NOT_FOUND"))
+                .body("error.message", equalTo("Secret [" + name + "] not found or has no versions."));
+    }
+
+    @Test
+    void accessingDisabledOrDestroyedVersionIsFailedPrecondition() {
+        String base = createPayloadSecret();
+        for (String data : new String[]{"djE=", "djI="}) {
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body("{\"payload\":{\"data\":\"" + data + "\"}}")
+                    .when().post(base + ":addVersion")
+                    .then().statusCode(200);
+        }
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/1:disable")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/versions/2:destroy")
+                .then().statusCode(200);
+
+        String name = base.substring("/v1/".length());
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/1:access")
+                .then().statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Secret Version [" + name + "/versions/1] is in DISABLED state."));
+        given().urlEncodingEnabled(false)
+                .when().get(base + "/versions/2:access")
+                .then().statusCode(400)
+                .body("error.code", equalTo(400))
+                .body("error.status", equalTo("FAILED_PRECONDITION"))
+                .body("error.message", equalTo("Secret Version [" + name + "/versions/2] is in DESTROYED state."));
     }
 
     private static String createPayloadSecret() {

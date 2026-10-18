@@ -393,6 +393,38 @@ setup() {
     assert_output --partial 'run.googleapis.com'
 }
 
+# ── Resource Manager + Cloud Billing Spot Checks ─────────────────────────────
+
+@test "OpenTofu: google_project created and ACTIVE" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/floci-compat-proj-tofu"
+    assert_success
+    assert_output --partial '"projectId":"floci-compat-proj-tofu"'
+    assert_output --partial '"lifecycleState":"ACTIVE"'
+    assert_output --partial '"env":"compat"'
+}
+
+@test "OpenTofu: google_project number resolves to the project" {
+    number=$(tofu output -raw created_project_number 2>/dev/null)
+    [ -n "$number" ]
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/${number}"
+    assert_success
+    assert_output --partial '"projectId":"floci-compat-proj-tofu"'
+}
+
+@test "OpenTofu: google_project billing account linked" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v1/projects/floci-compat-proj-tofu/billingInfo"
+    assert_success
+    assert_output --partial '"billingAccountName":"billingAccounts/000000-AAAAAA-BBBBBB"'
+    assert_output --partial '"billingEnabled":true'
+}
+
+@test "OpenTofu: google_project plans no changes after apply" {
+    run tofu plan -detailed-exitcode -target=google_project.compat \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
 # ── BigQuery Spot Checks ──────────────────────────────────────────────────────
 
 @test "OpenTofu: BigQuery dataset keeps its default expirations" {

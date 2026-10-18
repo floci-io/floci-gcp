@@ -2,12 +2,14 @@ package io.floci.gcp.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.iam.v1.GetIamPolicyRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.resourcemanager.ResourceManagerIamAuthorizationAdapter;
+import io.grpc.Status;
 import jakarta.ws.rs.HttpMethod;
 import org.junit.jupiter.api.Test;
 
@@ -55,6 +57,18 @@ class IamAuthorizationRegistryServiceTest {
     }
 
     @Test
+    void grpcAdapterWithoutTypedMappingRejectsProtobufRequests() {
+        IamAuthorizationAdapter adapter = new ExampleAdapter();
+        GetIamPolicyRequest request = GetIamPolicyRequest.newBuilder()
+                .setResource("projects/p/examples/e").build();
+
+        GcpException exception = assertThrows(GcpException.class,
+                () -> adapter.grpcOperation("Read", request));
+        assertEquals(Status.Code.FAILED_PRECONDITION, exception.getGrpcCode());
+        assertTrue(exception.getMessage().contains("example gRPC operation Read"));
+    }
+
+    @Test
     void registryRejectsDuplicateTransportOwnership() {
         assertThrows(IllegalStateException.class,
                 () -> new IamAuthorizationRegistry(List.of(adapters.getFirst(), adapters.getFirst())));
@@ -86,6 +100,15 @@ class IamAuthorizationRegistryServiceTest {
         for (String role : List.of("roles/owner", "roles/resourcemanager.projectIamAdmin")) {
             assertTrue(catalog.grants(role, "resourcemanager.projects.setIamPolicy"));
         }
+        for (String permission : List.of("resourcemanager.projects.update", "resourcemanager.projects.delete",
+                "resourcemanager.projects.undelete")) {
+            assertTrue(catalog.grants("roles/owner", permission));
+            assertFalse(catalog.grants("roles/viewer", permission));
+        }
+        assertTrue(catalog.grants("roles/editor", "resourcemanager.projects.update"));
+        assertFalse(catalog.grants("roles/editor", "resourcemanager.projects.delete"));
+        assertTrue(catalog.grants("roles/resourcemanager.projectDeleter", "resourcemanager.projects.delete"));
+        assertTrue(catalog.grants("roles/resourcemanager.projectMover", "resourcemanager.projects.update"));
         assertEquals(List.of("projects/p"), new IamResourceHierarchy().policyResourcesFor(IamResource.project("projects/p")));
     }
 

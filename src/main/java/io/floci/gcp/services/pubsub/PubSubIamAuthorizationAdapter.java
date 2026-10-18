@@ -1,7 +1,6 @@
 package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.Message;
 import com.google.pubsub.v1.AcknowledgeRequest;
 import com.google.pubsub.v1.CreateSnapshotRequest;
@@ -129,6 +128,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             case "createSubscription" -> new IamOperation(method, subscription,
                     required(body.path("topic").asText(), "topic"));
             case "getSubscription", "updateSubscription", "deleteSubscription", "pull", "acknowledge",
+                    "modifyAckDeadline",
                     "getSubscriptionIamPolicy", "setSubscriptionIamPolicy",
                     "testSubscriptionIamPermissions" -> new IamOperation(method, subscription);
             case "listSubscriptions" -> new IamOperation(method, project);
@@ -179,7 +179,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
     }
 
     @Override
-    public IamOperation grpcOperation(String method, Message request, ObjectMapper mapper) {
+    public IamOperation grpcOperation(String method, Message request) {
         return switch (method) {
             case "CreateTopic" -> new IamOperation("createTopic", required(((Topic) request).getName(), "name"));
             case "GetTopic" -> new IamOperation("getTopic", required(((GetTopicRequest) request).getTopic(), "topic"));

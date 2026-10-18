@@ -301,6 +301,32 @@ abstract class PubSubIamEnforcementContract {
     }
 
     @Test
+    void basicViewerCanSeekToSnapshotButPubsubViewerCannot() {
+        String topic = project + "/topics/viewer-seek";
+        String subscription = project + "/subscriptions/viewer-seek";
+        String snapshot = project + "/snapshots/viewer-seek";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        service.createSnapshot(snapshot, subscription, null);
+        grant(subscription, "roles/pubsub.subscriber", null);
+        SubscriberGrpc.SubscriberBlockingStub subscriber = SubscriberGrpc.newBlockingStub(caller)
+                .withDeadlineAfter(5, TimeUnit.SECONDS);
+        SeekRequest request = SeekRequest.newBuilder().setSubscription(subscription)
+                .setSnapshot(snapshot).build();
+
+        grant(project, "roles/viewer", null);
+        subscriber.seek(request);
+
+        grant(project, "roles/pubsub.viewer", null);
+        if (enforced()) {
+            assertEquals(Status.Code.PERMISSION_DENIED, assertThrows(StatusRuntimeException.class,
+                    () -> subscriber.seek(request)).getStatus().getCode());
+        } else {
+            subscriber.seek(request);
+        }
+    }
+
+    @Test
     void pushConfigAndAckDeadlineUseDifferentSubscriptionPermissions() {
         String topic = project + "/topics/config";
         String subscription = project + "/subscriptions/config";

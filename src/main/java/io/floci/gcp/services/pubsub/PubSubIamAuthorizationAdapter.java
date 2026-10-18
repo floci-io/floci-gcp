@@ -68,6 +68,8 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             "pubsub.topics.get", "pubsub.topics.list",
             "pubsub.subscriptions.get", "pubsub.subscriptions.list",
             "pubsub.snapshots.get", "pubsub.snapshots.list");
+    private static final Set<String> BASIC_VIEWER_PERMISSIONS = withPermission(
+            VIEWER_PERMISSIONS, "pubsub.snapshots.seek");
 
     private final PubSubService service;
 
@@ -316,7 +318,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
     public Map<String, Set<String>> basicRoles() {
         return Map.of("roles/owner", ADMIN_PERMISSIONS,
                 "roles/editor", EDITOR_PERMISSIONS,
-                "roles/viewer", VIEWER_PERMISSIONS);
+                "roles/viewer", BASIC_VIEWER_PERMISSIONS);
     }
 
     private static IamOperation named(String method, JsonNode request, String field) {
@@ -345,5 +347,11 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
         permissions.addAll(second);
         permissions.addAll(third);
         return Set.copyOf(permissions);
+    }
+
+    private static Set<String> withPermission(Set<String> permissions, String extra) {
+        HashSet<String> result = new HashSet<>(permissions);
+        result.add(extra);
+        return Set.copyOf(result);
     }
 }

@@ -620,6 +620,9 @@ class SqlDialectTranslatorTest {
         String merge = "MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED";
         dmlWithSchemas(merge + " AND ('a') IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)");
         dmlWithSchemas(merge + " AND UPPER('a') IN (SELECT UPPER(lk) FROM ds.lookup) THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND DATE '2026-01-01' IN (SELECT DATE '2026-01-01') THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND TIMESTAMP '2026-01-01 00:00:00' IN (SELECT TIMESTAMP '2026-01-01 00:00:00')"
+                + " THEN INSERT (id) VALUES (id)");
         dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(S.name) FROM (ds.s x JOIN ds.lookup S ON TRUE)))");
         assertEquals("Correlated Subquery is unsupported in WHEN clause.", assertThrows(GcpException.class,
                 () -> dmlWithSchemas(merge + " AND UPPER(v) IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)"))

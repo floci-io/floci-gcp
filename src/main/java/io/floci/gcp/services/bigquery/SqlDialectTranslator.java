@@ -879,7 +879,8 @@ final class SqlDialectTranslator {
     /**
      * Whether the subquery opening at {@code open} is the right side of {@code x [NOT] IN} where {@code x}
      * reads a column: walking back from {@code IN} to the start of its operand (a comparison, a logical
-     * operator, a comma or an enclosing bracket), some token is a name that is not a function being called.
+     * operator, a comma or an enclosing bracket), some token is a name that is not a function being called
+     * or the type of a typed literal ({@code DATE '2026-01-01'}).
      */
     private boolean isInSubqueryOfAnExpression(int open) {
         int in = previousSignificantIndex(open);
@@ -909,8 +910,9 @@ final class SqlDialectTranslator {
                 return false;
             }
             int next = nextSignificant(k + 1, tokens.size());
-            boolean called = next >= 0 && tokens.get(next).isPunct("(");
-            if (t.kind == Kind.QIDENT || (t.kind == Kind.IDENT && !called
+            Token n = next >= 0 ? tokens.get(next) : null;
+            boolean calledOrTyped = n != null && (n.isPunct("(") || n.kind == Kind.STRING || n.kind == Kind.BYTES);
+            if (t.kind == Kind.QIDENT || (t.kind == Kind.IDENT && !calledOrTyped
                     && !GOOGLESQL_RESERVED.contains(t.upper()) && !PARENLESS_FUNCTIONS.contains(t.upper()))) {
                 return true;
             }

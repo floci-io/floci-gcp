@@ -340,6 +340,25 @@ class ResourceManagerRestIntegrationTest {
     }
 
     @Test
+    void anXmlObjectNameThatLooksLikeAProjectRouteRegistersNoProject() {
+        String bucket = uniqueId("crm-xml");
+        String phantom = uniqueId("crm-phantom");
+        given().contentType("application/json").queryParam("project", "test-project")
+                .body("{\"name\":\"" + bucket + "\"}")
+                .when().post("/storage/v1/b")
+                .then().statusCode(200);
+
+        given().urlEncodingEnabled(false).body("x")
+                .when().put("/" + bucket + "/backups/v2/projects/" + phantom + "/data.json")
+                .then().statusCode(200);
+
+        given().queryParam("filter", "id:" + phantom)
+                .when().get("/v1/projects")
+                .then().statusCode(200)
+                .body("projects.projectId", not(hasItem(phantom)));
+    }
+
+    @Test
     void sharedRoutesKeepWorking() {
         given().when().get("/v1/operations/cp.1")
                 .then().statusCode(404);

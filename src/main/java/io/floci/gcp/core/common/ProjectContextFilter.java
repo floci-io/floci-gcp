@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.core.UriInfo;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URLDecoder;
@@ -32,13 +33,15 @@ public class ProjectContextFilter implements ContainerRequestFilter {
      * A project in the path sits right after the API prefix: {@code /projects/p}, up to two
      * segments and a version ({@code /v1/projects/p}, {@code /storage/v1/projects/p},
      * {@code /upload/bigquery/v2/projects/p}), or a Floci internal route
-     * ({@code /_floci-gcp/bigquery/projects/p}). Anchoring it keeps a {@code projects/} inside a GCS
-     * object name ({@code /bucket/dir/projects/x/file}) from being read as the request's project;
-     * {@code _floci-gcp} cannot be a bucket name, which must start with a letter or digit.
+     * ({@code /_floci-gcp/bigquery/projects/p}). Anchoring it keeps a {@code projects/} deeper in a
+     * path from being read as the request's project; {@code _floci-gcp} cannot be a bucket name,
+     * which must start with a letter or digit. GCS object routes skip the path entirely
+     * ({@link #projectPath}), since an object name can imitate any prefix.
      */
     private static final Pattern PATH_PROJECT = Pattern.compile(
             "^(?:/_floci-gcp/[^/]+|(?:/[^/]+){0,2}/v\\d+[a-z0-9]*)?/projects/([^/]+)");
     private static final Pattern PARAM_PROJECT = Pattern.compile("(?:^|&)project=([^&]+)");
+    private static final String OBJECT_PATH_PARAMETER = "object";
 
     private final RequestContext requestContext;
     private final ProjectRegistry projectRegistry;
@@ -53,7 +56,7 @@ public class ProjectContextFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
-        String explicit = explicitProject(ctx.getUriInfo().getRequestUri().getRawPath(),
+        String explicit = explicitProject(projectPath(ctx),
                 ctx.getUriInfo().getQueryParameters().getFirst("project"),
                 ctx.getHeaderString("x-goog-request-params"));
         if (explicit == null) {
@@ -73,10 +76,23 @@ public class ProjectContextFilter implements ContainerRequestFilter {
 
     /** The project the request names, or the default project; it is neither registered nor validated. */
     public String resolveProjectId(ContainerRequestContext ctx) {
-        String explicit = explicitProject(ctx.getUriInfo().getRequestUri().getRawPath(),
+        String explicit = explicitProject(projectPath(ctx),
                 ctx.getUriInfo().getQueryParameters().getFirst("project"),
                 ctx.getHeaderString("x-goog-request-params"));
         return explicit != null ? explicit : defaultProjectId;
+    }
+
+    /**
+     * The path to read a project from, or null on a GCS object route: the XML API serves
+     * {@code /{bucket}/{object}} with the object name unencoded, so a name such as
+     * {@code v1/projects/x/file} would otherwise pass for an API prefix and a project.
+     */
+    private static String projectPath(ContainerRequestContext ctx) {
+        UriInfo uriInfo = ctx.getUriInfo();
+        if (uriInfo.getPathParameters().containsKey(OBJECT_PATH_PARAMETER)) {
+            return null;
+        }
+        return uriInfo.getRequestUri().getRawPath();
     }
 
     static String explicitProject(String rawPath, String projectParam, String requestParams) {

@@ -74,6 +74,26 @@ class ResourceManagerStrictRestIntegrationTest {
                 .body("billingEnabled", equalTo(false));
     }
 
+    @Test
+    void anXmlObjectNameThatLooksLikeAProjectRouteIsStillAnObject() {
+        String bucket = "strict-xml-" + System.nanoTime();
+        given().contentType("application/json").queryParam("project", "test-project")
+                .body(Map.of("name", bucket))
+                .when().post("/storage/v1/b")
+                .then().statusCode(200);
+
+        given().urlEncodingEnabled(false).body("object data")
+                .when().put("/" + bucket + "/v1/projects/strict-phantom/file.txt")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false)
+                .when().get("/" + bucket + "/v1/projects/strict-phantom/file.txt")
+                .then().statusCode(200)
+                .body(equalTo("object data"));
+
+        given().when().get("/v1/projects/strict-phantom")
+                .then().statusCode(403);
+    }
+
     public static class StrictProjectsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {

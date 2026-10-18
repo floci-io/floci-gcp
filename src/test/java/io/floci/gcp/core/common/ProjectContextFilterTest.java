@@ -40,6 +40,8 @@ class ProjectContextFilterTest {
         assertEquals("p-one", ProjectContextFilter.explicitProject("/storage/v1/projects/p-one/hmacKeys", null, null));
         assertEquals("p-one", ProjectContextFilter.explicitProject("/upload/bigquery/v2/projects/p-one/jobs", null, null));
         assertEquals("p-one", ProjectContextFilter.explicitProject("/compute/v1/projects/p-one/zones", null, null));
+        assertEquals("p-one", ProjectContextFilter.explicitProject(
+                "/_floci-gcp/bigquery/projects/p-one/datasets/d/tables/t/rows.ndjson", null, null));
     }
 
     @Test

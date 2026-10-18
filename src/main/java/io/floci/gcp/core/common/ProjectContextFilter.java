@@ -29,13 +29,15 @@ import java.util.regex.Pattern;
 public class ProjectContextFilter implements ContainerRequestFilter {
 
     /**
-     * A project in the path sits right after the API prefix: {@code /projects/p}, or up to two
+     * A project in the path sits right after the API prefix: {@code /projects/p}, up to two
      * segments and a version ({@code /v1/projects/p}, {@code /storage/v1/projects/p},
-     * {@code /upload/bigquery/v2/projects/p}). Anchoring it keeps a {@code projects/} inside a GCS
-     * object name ({@code /bucket/dir/projects/x/file}) from being read as the request's project.
+     * {@code /upload/bigquery/v2/projects/p}), or a Floci internal route
+     * ({@code /_floci-gcp/bigquery/projects/p}). Anchoring it keeps a {@code projects/} inside a GCS
+     * object name ({@code /bucket/dir/projects/x/file}) from being read as the request's project;
+     * {@code _floci-gcp} cannot be a bucket name, which must start with a letter or digit.
      */
-    private static final Pattern PATH_PROJECT =
-            Pattern.compile("^(?:(?:/[^/]+){0,2}/v\\d+[a-z0-9]*)?/projects/([^/]+)");
+    private static final Pattern PATH_PROJECT = Pattern.compile(
+            "^(?:/_floci-gcp/[^/]+|(?:/[^/]+){0,2}/v\\d+[a-z0-9]*)?/projects/([^/]+)");
     private static final Pattern PARAM_PROJECT = Pattern.compile("(?:^|&)project=([^&]+)");
 
     private final RequestContext requestContext;

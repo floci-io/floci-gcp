@@ -13,6 +13,7 @@ import com.google.cloud.bigquery.storage.v1.FlushRowsResponse;
 import com.google.cloud.bigquery.storage.v1.GetWriteStreamRequest;
 import com.google.cloud.bigquery.storage.v1.WriteStream;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.RequestScopes;
 import io.grpc.stub.StreamObserver;
 
 import java.util.function.Supplier;
@@ -80,7 +81,7 @@ public class BigQueryWriteController extends BigQueryWriteGrpc.BigQueryWriteImpl
 
             private AppendRowsResponse respond(AppendRowsRequest request, String destination) {
                 try {
-                    return BigQueryGrpcContext.withProject(
+                    return RequestScopes.callAs(
                             destination != null ? BigQueryStorageWrite.projectOf(destination) : null,
                             () -> write.append(connection, request));
                 } catch (BigQueryStorageWrite.AppendException e) {
@@ -105,7 +106,7 @@ public class BigQueryWriteController extends BigQueryWriteGrpc.BigQueryWriteImpl
 
     private static <T> void unary(StreamObserver<T> observer, String name, Supplier<T> action) {
         try {
-            T response = BigQueryGrpcContext.withProject(BigQueryStorageWrite.projectOf(name), action);
+            T response = RequestScopes.callAs(BigQueryStorageWrite.projectOf(name), action);
             observer.onNext(response);
             observer.onCompleted();
         } catch (Throwable t) {

@@ -43,9 +43,10 @@ On REST requests, a project number in any of these positions resolves to the ID 
 project it belongs to. Projects named in a request are registered on first use and then
 show up in the [Resource Manager](../services/resource-manager.md) API.
 
-gRPC requests carry the project in the resource names of the request message
-(`projects/{project}/topics/{topic}`) or in a `project_id` field, and each service reads it from
-there.
+gRPC requests resolve the project in this order: the request message's own target
+(`projects/{project}/topics/{topic}`, or a `project_id` field), then the `x-goog-request-params`
+routing header, then the default project. Over gRPC a project number is not yet mapped to its
+project ID.
 
 ## Strict Mode
 

@@ -131,7 +131,7 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
         return COMMON_DOMAINS.contains(domain) || domains.contains(domain);
     }
 
-    private static String projectOf(String field, String value) {
+    static String projectOf(String field, String value) {
         if (field.equals("project_id") || field.equals("project")) {
             String project = value.startsWith("projects/") ? value.substring("projects/".length()) : value;
             if (isConcrete(project)) {

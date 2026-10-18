@@ -1,6 +1,7 @@
 package io.floci.gcp.lifecycle;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ProjectContextGrpcInterceptor;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.common.ServiceUsageAdapter;
@@ -99,8 +100,11 @@ public class GrpcServerManager {
     }
 
     private void bindGated(BindableService service, Optional<ServiceDescriptor> api, ServerInterceptor... interceptors) {
+        // Innermost, so the handler and the service's own interceptors see the project of the call.
+        ServerServiceDefinition scoped = ServerInterceptors.intercept(service,
+                new ProjectContextGrpcInterceptor(defaultProjectId));
         ServerServiceDefinition authorized = ServerInterceptors.intercept(
-                ServerInterceptors.intercept(service, interceptors), authorization);
+                ServerInterceptors.intercept(scoped, interceptors), authorization);
         // The interceptor applied last runs first, so a disabled API answers SERVICE_DISABLED before IAM runs.
         ServerServiceDefinition gated = api
                 .filter(serviceUsageGate::gates)

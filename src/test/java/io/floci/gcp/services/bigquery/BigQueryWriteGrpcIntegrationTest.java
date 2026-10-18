@@ -28,6 +28,7 @@ import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Int64Value;
+import io.floci.gcp.core.common.RequestScopes;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
@@ -525,7 +526,7 @@ class BigQueryWriteGrpcIntegrationTest {
      * loop Vert.x assigned it, and two connections landing on one loop could never meet.
      */
     private static <T> FutureTask<T> call(String project, Supplier<T> action) {
-        FutureTask<T> task = new FutureTask<>(() -> BigQueryGrpcContext.withProject(project, action));
+        FutureTask<T> task = new FutureTask<>(() -> RequestScopes.callAs(project, action));
         Thread thread = new Thread(task);
         thread.setDaemon(true);
         thread.start();

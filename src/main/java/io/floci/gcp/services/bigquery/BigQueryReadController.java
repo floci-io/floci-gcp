@@ -8,6 +8,7 @@ import com.google.cloud.bigquery.storage.v1.ReadSession;
 import com.google.cloud.bigquery.storage.v1.SplitReadStreamRequest;
 import com.google.cloud.bigquery.storage.v1.SplitReadStreamResponse;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.RequestScopes;
 import io.grpc.stub.StreamObserver;
 import io.vertx.core.Vertx;
 
@@ -29,7 +30,7 @@ public class BigQueryReadController extends BigQueryReadGrpc.BigQueryReadImplBas
 
     @Override
     public void createReadSession(CreateReadSessionRequest request, StreamObserver<ReadSession> observer) {
-        vertx.executeBlocking(() -> BigQueryGrpcContext.withProject(BigQueryStorageRead.projectOf(request),
+        vertx.executeBlocking(() -> RequestScopes.callAs(BigQueryStorageRead.projectOf(request),
                         () -> read.createReadSession(request)), false)
                 .onSuccess(session -> {
                     observer.onNext(session);

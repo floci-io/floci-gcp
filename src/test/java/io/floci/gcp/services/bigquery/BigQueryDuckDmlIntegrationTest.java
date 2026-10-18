@@ -293,6 +293,14 @@ class BigQueryDuckDmlIntegrationTest {
                 .then().statusCode(200);
         assertEquals(List.of(List.of("1", "name_b"), List.of("2", "name_b")),
                 rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
+
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) AS v FROM shop.corr_lookup WHERE lk = v))")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
+        query("DELETE FROM shop.corr_t WHERE TRUE").then().statusCode(200);
+        query(merge + " AND ('a') IN (SELECT lk FROM shop.corr_lookup) THEN INSERT (id, k) VALUES (id, k)")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "a"), List.of("2", "b")), rows("SELECT id, k FROM shop.corr_t ORDER BY id"));
     }
 
     @Test

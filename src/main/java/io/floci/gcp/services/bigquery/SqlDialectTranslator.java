@@ -768,8 +768,9 @@ final class SqlDialectTranslator {
     /**
      * Rejects the query in {@code (open, close)} when it reads an enclosing name: a name qualified with
      * one of {@code outerNames} that none of its own FROM items hides, or, when the columns of all its
-     * FROM items are known, a bare name in {@code outerColumns} that is not one of their columns or a
-     * select-list alias. {@code outerColumns} is null when the enclosing columns are unknown. Then checks
+     * FROM items are known, a bare name in {@code outerColumns} that is not one of their columns or, from
+     * {@code GROUP BY} on, a select-list alias. {@code outerColumns} is null when the enclosing columns
+     * are unknown. Then checks
      * each subquery nested in it, with this level's names and columns added to the enclosing ones.
      */
     private void rejectCorrelatedQuery(int open, int close, String clause, Set<String> outerNames,
@@ -783,6 +784,7 @@ final class SqlDialectTranslator {
         boolean known = first < 0 || !tokens.get(first).isKeyword("WITH");
         boolean seenFrom = false;
         boolean inFrom = false;
+        int aliasesVisibleFrom = -1;
         int depth = 0;
         for (int k = open + 1; k < close; k++) {
             Token t = tokens.get(k);
@@ -813,6 +815,9 @@ final class SqlDialectTranslator {
                 known &= fromItem(nextSignificant(k + 1, close), close, localNames, localColumns, fromItems);
             } else if (t.kind == Kind.IDENT && FROM_CLAUSE_ENDS.contains(t.upper())) {
                 inFrom = false;
+                if (aliasesVisibleFrom < 0 && ALIAS_CLAUSES.contains(t.upper())) {
+                    aliasesVisibleFrom = k;
+                }
             } else if (!seenFrom && t.isKeyword("AS")) {
                 int alias = nextSignificant(k + 1, close);
                 if (alias >= 0 && (tokens.get(alias).kind == Kind.IDENT || tokens.get(alias).kind == Kind.QIDENT)) {
@@ -854,8 +859,8 @@ final class SqlDialectTranslator {
             collectBareColumns(open + 1, close, bare);
             for (int k : bare) {
                 String name = tokens.get(k).identifierText().toLowerCase(Locale.ROOT);
-                if (!fromItems.contains(k) && outerColumns.contains(name) && !localColumns.contains(name)
-                        && !aliases.contains(name)) {
+                boolean alias = aliases.contains(name) && aliasesVisibleFrom >= 0 && k > aliasesVisibleFrom;
+                if (!fromItems.contains(k) && outerColumns.contains(name) && !localColumns.contains(name) && !alias) {
                     throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
                 }
             }
@@ -865,7 +870,6 @@ final class SqlDialectTranslator {
         if (outerColumns != null && known) {
             enclosingColumns = new HashSet<>(outerColumns);
             enclosingColumns.addAll(localColumns);
-            enclosingColumns.addAll(aliases);
         }
         for (int[] sub : nested) {
             rejectCorrelatedQuery(sub[0], sub[1], clause, visible, enclosingColumns);
@@ -874,24 +878,52 @@ final class SqlDialectTranslator {
 
     /**
      * Whether the subquery opening at {@code open} is the right side of {@code x [NOT] IN} where {@code x}
-     * ends with a name or a closing bracket, so it is not a constant.
+     * reads a column: walking back from {@code IN} to the start of its operand (a comparison, a logical
+     * operator, a comma or an enclosing bracket), some token is a name that is not a function being called.
      */
     private boolean isInSubqueryOfAnExpression(int open) {
         int in = previousSignificantIndex(open);
         if (in < 0 || !tokens.get(in).isKeyword("IN")) {
             return false;
         }
-        int operand = previousSignificantIndex(in);
-        if (operand >= 0 && tokens.get(operand).isKeyword("NOT")) {
-            operand = previousSignificantIndex(operand);
+        int end = previousSignificantIndex(in);
+        if (end >= 0 && tokens.get(end).isKeyword("NOT")) {
+            end = previousSignificantIndex(end);
         }
-        if (operand < 0) {
-            return false;
+        int depth = 0;
+        for (int k = end; k >= 0; k--) {
+            Token t = tokens.get(k);
+            if (t.isPunct(")") || t.isPunct("]")) {
+                depth++;
+                continue;
+            }
+            if (t.isPunct("(") || t.isPunct("[")) {
+                if (depth == 0) {
+                    return false;
+                }
+                depth--;
+                continue;
+            }
+            if (depth == 0 && (t.isPunct(",") || (t.kind == Kind.PUNCT && t.text.matches("[=<>!]+"))
+                    || (t.kind == Kind.IDENT && IN_OPERAND_BOUNDARIES.contains(t.upper())))) {
+                return false;
+            }
+            int next = nextSignificant(k + 1, tokens.size());
+            boolean called = next >= 0 && tokens.get(next).isPunct("(");
+            if (t.kind == Kind.QIDENT || (t.kind == Kind.IDENT && !called
+                    && !GOOGLESQL_RESERVED.contains(t.upper()) && !PARENLESS_FUNCTIONS.contains(t.upper()))) {
+                return true;
+            }
         }
-        Token t = tokens.get(operand);
-        return t.isPunct(")") || t.isPunct("]") || t.kind == Kind.QIDENT
-                || (t.kind == Kind.IDENT && !GOOGLESQL_RESERVED.contains(t.upper()));
+        return false;
     }
+
+    /** Words before the left operand of {@code IN}: walking back past one leaves the operand. */
+    private static final Set<String> IN_OPERAND_BOUNDARIES = Set.of("AND", "OR", "NOT", "WHEN", "THEN", "ELSE",
+            "CASE", "SELECT", "WHERE", "ON", "HAVING", "QUALIFY", "BETWEEN", "IS");
+
+    /** The clauses from which on a select-list alias hides a column of the same name. */
+    private static final Set<String> ALIAS_CLAUSES = Set.of("GROUP", "HAVING", "QUALIFY", "ORDER");
 
     /** Words that end a FROM clause, so that a comma after them no longer starts a FROM item. */
     private static final Set<String> FROM_CLAUSE_ENDS = Set.of("WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW",
@@ -909,7 +941,11 @@ final class SqlDialectTranslator {
         Token t = tokens.get(item);
         int end;
         boolean known;
-        if (t.isPunct("(") || t.isKeyword("UNNEST")) {
+        int inner = t.isPunct("(") ? nextSignificant(item + 1, close) : -1;
+        if (inner >= 0 && !tokens.get(inner).isKeyword("SELECT") && !tokens.get(inner).isKeyword("WITH")) {
+            end = matchingParen(item);
+            known = joinedItems(item, end, names, columns, fromItems);
+        } else if (t.isPunct("(") || t.isKeyword("UNNEST")) {
             int paren = t.isPunct("(") ? item : nextSignificant(item + 1, close);
             if (paren < 0 || !tokens.get(paren).isPunct("(")) {
                 return false;
@@ -950,6 +986,27 @@ final class SqlDialectTranslator {
                 && !NON_ALIAS_KEYWORDS.contains(tokens.get(alias).upper())))) {
             fromItems.add(alias);
             names.add(tokens.get(alias).identifierText().toLowerCase(Locale.ROOT));
+        }
+        return known;
+    }
+
+    /**
+     * Records the FROM items of the parenthesized join in {@code (open, close)}, as {@link #fromItem} does;
+     * false when the columns of any of them are unknown.
+     */
+    private boolean joinedItems(int open, int close, Set<String> names, Set<String> columns,
+                                Set<Integer> fromItems) {
+        boolean known = fromItem(nextSignificant(open + 1, close), close, names, columns, fromItems);
+        int depth = 0;
+        for (int k = open + 1; k < close; k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && (t.isKeyword("JOIN") || t.isPunct(","))) {
+                known &= fromItem(nextSignificant(k + 1, close), close, names, columns, fromItems);
+            }
         }
         return known;
     }

@@ -615,6 +615,27 @@ class SqlDialectTranslatorTest {
                 .contains("VALUES (id, (SELECT MAX(name) FROM \"ds\".\"lookup\"))"));
     }
 
+    @Test
+    void constantInOperandsAndNamesInsideParenthesizedJoinsAreNotCorrelations() {
+        String merge = "MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED";
+        dmlWithSchemas(merge + " AND ('a') IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND UPPER('a') IN (SELECT UPPER(lk) FROM ds.lookup) THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(S.name) FROM (ds.s x JOIN ds.lookup S ON TRUE)))");
+        assertEquals("Correlated Subquery is unsupported in WHEN clause.", assertThrows(GcpException.class,
+                () -> dmlWithSchemas(merge + " AND UPPER(v) IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)"))
+                .getMessage());
+    }
+
+    @Test
+    void aSelectListAliasHidesAnOuterColumnOnlyFromGroupByOn() {
+        String merge = "MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (id, ";
+        assertEquals("Correlated Subquery is unsupported in INSERT clause.", assertThrows(GcpException.class,
+                () -> dmlWithSchemas(merge + "(SELECT MAX(name) AS v FROM ds.lookup WHERE lk = v))")).getMessage());
+        dmlWithSchemas(merge + "(SELECT lk AS v FROM ds.lookup GROUP BY v ORDER BY v LIMIT 1))");
+        dmlWithSchemas(merge + "(SELECT MAX(name) AS v FROM ds.lookup HAVING v IS NOT NULL))");
+        dmlWithSchemas(merge + "(SELECT lk AS v FROM ds.lookup QUALIFY ROW_NUMBER() OVER (ORDER BY v) = 1))");
+    }
+
     /**
      * {@code ds.t} and {@code ds.s} share {@code id} and {@code v}; {@code ds.lookup} has {@code lk, name},
      * {@code ds.a} has {@code a_col} and {@code ds.b} has {@code v}.

@@ -260,9 +260,38 @@ class BigQueryDuckDmlIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
 
+        query(merge + " AND EXISTS (SELECT 1 FROM shop.corr_lookup l WHERE l.lk = S.k"
+                + " AND EXISTS (SELECT 1 FROM shop.corr_lookup S)) THEN INSERT (id, k) VALUES (id, k)")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in WHEN clause."));
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(l.name) FROM shop.corr_lookup l"
+                + " WHERE l.lk IN (SELECT k FROM shop.corr_lookup_k)))")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
+        query(merge + " AND k IN (SELECT lk FROM shop.corr_lookup) THEN INSERT (id, k) VALUES (id, k)")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in WHEN clause."));
+        query("MERGE shop.corr_t T USING UNNEST([STRUCT(9 AS id, 'a' AS v)]) AS u ON T.id = u.id WHEN NOT MATCHED"
+                + " THEN INSERT (id, v) VALUES (id, (SELECT u.v))")
+                .then().statusCode(400)
+                .body("error.message", containsString("Correlated Subquery is unsupported in INSERT clause."));
+
         query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM shop.corr_lookup_k WHERE k = 'a'))")
                 .then().statusCode(200);
         assertEquals(List.of(List.of("1", "inner_a"), List.of("2", "inner_a")),
+                rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
+
+        query("CREATE TABLE shop.corr_a AS SELECT 'x' AS a_col").then().statusCode(200);
+        query("CREATE TABLE shop.corr_b AS SELECT 'from_b' AS v").then().statusCode(200);
+        query("DELETE FROM shop.corr_t WHERE TRUE").then().statusCode(200);
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(v) FROM shop.corr_a, shop.corr_b))")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "from_b"), List.of("2", "from_b")),
+                rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
+        query("DELETE FROM shop.corr_t WHERE TRUE").then().statusCode(200);
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) AS v FROM shop.corr_lookup ORDER BY v LIMIT 1))")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "name_b"), List.of("2", "name_b")),
                 rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
     }
 

@@ -576,10 +576,52 @@ class SqlDialectTranslatorTest {
         assertTrue(inner.contains("(SELECT MAX(name) FROM \"ds\".\"lookup\" WHERE lk = 'a')"), inner);
     }
 
-    /** {@code ds.t} and {@code ds.s} share {@code id} and {@code v}; {@code ds.lookup} has {@code lk, name}. */
+    @Test
+    void notMatchedSubqueriesThatReadOnlyTheirOwnTablesAreAccepted() {
+        String merge = "MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED";
+        assertTrue(dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(v) FROM ds.a, ds.b))")
+                .contains("(SELECT MAX(v) FROM \"ds\".\"a\", \"ds\".\"b\")"));
+        dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(b.v) FROM ds.a a, ds.b b WHERE a.a_col = 'x'))");
+        dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) AS v FROM ds.lookup ORDER BY v LIMIT 1))");
+        dmlWithSchemas(merge + " AND EXISTS (SELECT 1 FROM ds.lookup l WHERE EXISTS (SELECT 1 FROM ds.lookup WHERE name = 'x'))"
+                + " THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM ds.lookup WHERE lk IN ('a')))");
+    }
+
+    @Test
+    void nestedInAndUnnestSourceCorrelationsAreRejectedLikeBigQuery() {
+        String merge = "MERGE ds.t T USING ds.s S ON T.id = S.id WHEN NOT MATCHED";
+        String when = "Correlated Subquery is unsupported in WHEN clause.";
+        String insert = "Correlated Subquery is unsupported in INSERT clause.";
+        assertEquals(when, assertThrows(GcpException.class, () -> dmlWithSchemas(merge + " AND EXISTS (SELECT 1 FROM ds.lookup l"
+                + " WHERE l.lk = S.v AND EXISTS (SELECT 1 FROM ds.lookup S)) THEN INSERT (id) VALUES (id)")).getMessage());
+        assertEquals(when, assertThrows(GcpException.class, () -> dmlWithSchemas(merge + " AND EXISTS (SELECT 1 FROM ds.lookup l"
+                + " WHERE EXISTS (SELECT 1 FROM ds.lookup m WHERE m.lk = v)) THEN INSERT (id) VALUES (id)")).getMessage());
+        assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id,"
+                + " (SELECT MAX(l.name) FROM ds.lookup l WHERE EXISTS (SELECT 1 FROM ds.b m WHERE m.v = l.lk)))")).getMessage());
+        assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id,"
+                + " (SELECT MAX(l.name) FROM ds.lookup l WHERE l.lk IN (SELECT v FROM ds.b)))")).getMessage());
+        assertEquals(when, assertThrows(GcpException.class, () -> dmlWithSchemas(merge
+                + " AND v IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)")).getMessage());
+        assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas(merge
+                + " THEN INSERT (id, v) VALUES (id, CASE WHEN v IN (SELECT lk FROM ds.lookup) THEN 'y' END)")).getMessage());
+
+        String unnest = "MERGE ds.t T USING UNNEST([STRUCT(1 AS id, 'a' AS v)]) AS u ON T.id = u.id WHEN NOT MATCHED";
+        assertEquals(insert, assertThrows(GcpException.class,
+                () -> dmlWithSchemas(unnest + " THEN INSERT (id, v) VALUES (id, (SELECT u.v))")).getMessage());
+        assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas(unnest
+                + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM ds.lookup WHERE lk = u.v))")).getMessage());
+        assertTrue(dmlWithSchemas(unnest + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM ds.lookup))")
+                .contains("VALUES (id, (SELECT MAX(name) FROM \"ds\".\"lookup\"))"));
+    }
+
+    /**
+     * {@code ds.t} and {@code ds.s} share {@code id} and {@code v}; {@code ds.lookup} has {@code lk, name},
+     * {@code ds.a} has {@code a_col} and {@code ds.b} has {@code v}.
+     */
     private static String dmlWithSchemas(String sql) {
         Map<String, Set<String>> columns = Map.of("t", Set.of("id", "v"), "s", Set.of("id", "v", "only_in_source"),
-                "lookup", Set.of("lk", "name"));
+                "lookup", Set.of("lk", "name"), "a", Set.of("a_col"), "b", Set.of("v"));
         return SqlDialectTranslator.translateDml(sql, "test-project", "ds", SqlDialectTranslator.QueryParameters.none(),
                 ref -> columns.get(ref.tableId())).sql();
     }

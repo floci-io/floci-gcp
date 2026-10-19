@@ -654,7 +654,7 @@ final class SqlDialectTranslator {
                 int first = nextSignificant(i + 1, to);
                 if (first >= 0 && (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH"))) {
                     int close = matchingParen(i);
-                    if (mergeScope != null && isInSubqueryOfAnExpression(i)) {
+                    if (mergeScope != null && isInSubqueryOfAnExpression(i, mergeScope.names(), mergeScope.columns())) {
                         throw invalidQuery("Correlated Subquery is unsupported in " + (inInsert ? "INSERT" : "WHEN")
                                 + " clause.");
                     }
@@ -785,15 +785,13 @@ final class SqlDialectTranslator {
         boolean seenFrom = false;
         boolean inFrom = false;
         int aliasesVisibleFrom = -1;
+        int itemStart = -1;
         int depth = 0;
         for (int k = open + 1; k < close; k++) {
             Token t = tokens.get(k);
             if (t.isPunct("(")) {
                 int inner = nextSignificant(k + 1, close);
                 if (inner >= 0 && (tokens.get(inner).isKeyword("SELECT") || tokens.get(inner).isKeyword("WITH"))) {
-                    if (isInSubqueryOfAnExpression(k)) {
-                        throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
-                    }
                     int end = matchingParen(k);
                     nested.add(new int[] {k, end});
                     k = end;
@@ -808,6 +806,17 @@ final class SqlDialectTranslator {
             }
             if (depth != 0) {
                 continue;
+            }
+            if (!seenFrom && t.isKeyword("SELECT")) {
+                itemStart = k;
+                continue;
+            }
+            if (!seenFrom && itemStart >= 0 && (t.isPunct(",") || t.isKeyword("FROM"))) {
+                recordImplicitAlias(itemStart, k, aliases);
+                itemStart = t.isPunct(",") ? k : -1;
+                if (t.isPunct(",")) {
+                    continue;
+                }
             }
             if (t.isKeyword("FROM") || t.isKeyword("JOIN") || (inFrom && t.isPunct(","))) {
                 seenFrom = true;
@@ -825,8 +834,23 @@ final class SqlDialectTranslator {
                 }
             }
         }
+        if (!seenFrom && itemStart >= 0) {
+            recordImplicitAlias(itemStart, close, aliases);
+        }
         Set<String> visible = new HashSet<>(outerNames);
         visible.removeAll(localNames);
+        Set<String> operandNames = new HashSet<>(outerNames);
+        operandNames.addAll(localNames);
+        Set<String> enclosingColumns = null;
+        if (outerColumns != null && known) {
+            enclosingColumns = new HashSet<>(outerColumns);
+            enclosingColumns.addAll(localColumns);
+        }
+        for (int[] sub : nested) {
+            if (isInSubqueryOfAnExpression(sub[0], operandNames, enclosingColumns)) {
+                throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
+            }
+        }
         int nextNested = 0;
         for (int k = open + 1; k < close; k++) {
             if (nextNested < nested.size() && k == nested.get(nextNested)[0]) {
@@ -866,11 +890,6 @@ final class SqlDialectTranslator {
             }
         }
         visible.addAll(localNames);
-        Set<String> enclosingColumns = null;
-        if (outerColumns != null && known) {
-            enclosingColumns = new HashSet<>(outerColumns);
-            enclosingColumns.addAll(localColumns);
-        }
         for (int[] sub : nested) {
             rejectCorrelatedQuery(sub[0], sub[1], clause, visible, enclosingColumns);
         }
@@ -878,11 +897,14 @@ final class SqlDialectTranslator {
 
     /**
      * Whether the subquery opening at {@code open} is the right side of {@code x [NOT] IN} where {@code x}
-     * reads a column: walking back from {@code IN} to the start of its operand (a comparison, a logical
-     * operator, a comma or an enclosing bracket), some token is a name that is not a function being called
-     * or the type of a typed literal ({@code DATE '2026-01-01'}).
+     * reads an enclosing row, which BigQuery runs as a semi-join correlated through {@code x}. The operand
+     * is walked back from {@code IN} to its start (a comparison, a logical operator, a comma or an enclosing
+     * bracket). It reads a row through a name qualified with one of {@code names}, or through a bare name
+     * that is one of {@code columns}, or any bare name when {@code columns} is null. Not a name: a function
+     * being called, the type of a typed literal ({@code DATE '2026-01-01'}), a word after {@code AS} (the
+     * type in {@code CAST(x AS STRING)}) or after an operand (the date part in {@code INTERVAL 1 DAY}).
      */
-    private boolean isInSubqueryOfAnExpression(int open) {
+    private boolean isInSubqueryOfAnExpression(int open, Set<String> names, Set<String> columns) {
         int in = previousSignificantIndex(open);
         if (in < 0 || !tokens.get(in).isKeyword("IN")) {
             return false;
@@ -909,15 +931,61 @@ final class SqlDialectTranslator {
                     || (t.kind == Kind.IDENT && IN_OPERAND_BOUNDARIES.contains(t.upper())))) {
                 return false;
             }
+            if (t.kind != Kind.IDENT && t.kind != Kind.QIDENT) {
+                continue;
+            }
+            if (t.kind == Kind.IDENT && (GOOGLESQL_RESERVED.contains(t.upper()) || PARENLESS_FUNCTIONS.contains(t.upper()))) {
+                continue;
+            }
             int next = nextSignificant(k + 1, tokens.size());
             Token n = next >= 0 ? tokens.get(next) : null;
-            boolean calledOrTyped = n != null && (n.isPunct("(") || n.kind == Kind.STRING || n.kind == Kind.BYTES);
-            if (t.kind == Kind.QIDENT || (t.kind == Kind.IDENT && !calledOrTyped
-                    && !GOOGLESQL_RESERVED.contains(t.upper()) && !PARENLESS_FUNCTIONS.contains(t.upper()))) {
+            if (n != null && (n.isPunct("(") || n.kind == Kind.STRING || n.kind == Kind.BYTES)) {
+                continue;
+            }
+            int previous = previousSignificantIndex(k);
+            Token p = previous >= 0 ? tokens.get(previous) : null;
+            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || endsMergeOperand(p))) {
+                continue;
+            }
+            String qualifier = null;
+            if (t.kind == Kind.QIDENT && t.value.contains(".")) {
+                qualifier = t.value.substring(0, t.value.indexOf('.'));
+            } else if (n != null && n.isPunct(".")) {
+                qualifier = t.identifierText();
+            }
+            if (qualifier != null) {
+                if (names.contains(qualifier.toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+                continue;
+            }
+            if (columns == null || columns.contains(t.identifierText().toLowerCase(Locale.ROOT))) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Records the implicit alias of the select item in {@code (start, end)}: its last name when no
+     * {@code AS} comes before it and an operand ends right before it ({@code MAX(name) v}, {@code lk v}).
+     */
+    private void recordImplicitAlias(int start, int end, Set<String> aliases) {
+        int last = previousSignificantIndex(end);
+        if (last <= start) {
+            return;
+        }
+        Token alias = tokens.get(last);
+        boolean name = alias.kind == Kind.QIDENT || (alias.kind == Kind.IDENT
+                && !GOOGLESQL_RESERVED.contains(alias.upper()) && !NON_ALIAS_KEYWORDS.contains(alias.upper()));
+        int previous = previousSignificantIndex(last);
+        if (!name || previous <= start) {
+            return;
+        }
+        Token p = tokens.get(previous);
+        if (!p.isPunct(".") && !p.isKeyword("AS") && (endsMergeOperand(p) || p.isKeyword("END"))) {
+            aliases.add(alias.identifierText().toLowerCase(Locale.ROOT));
+        }
     }
 
     /** Words before the left operand of {@code IN}: walking back past one leaves the operand. */

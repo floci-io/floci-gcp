@@ -301,6 +301,22 @@ class BigQueryDuckDmlIntegrationTest {
         query(merge + " AND ('a') IN (SELECT lk FROM shop.corr_lookup) THEN INSERT (id, k) VALUES (id, k)")
                 .then().statusCode(200);
         assertEquals(List.of(List.of("1", "a"), List.of("2", "b")), rows("SELECT id, k FROM shop.corr_t ORDER BY id"));
+
+        query("CREATE TABLE shop.corr_lookup_d AS SELECT 'a' AS lk, 'name_a' AS name, DATE '2026-01-01' AS d"
+                + " UNION ALL SELECT 'b', 'name_b', DATE '2026-01-05'").then().statusCode(200);
+        for (String constantOperand : List.of("CAST('a' AS STRING) IN (SELECT lk FROM shop.corr_lookup_d)",
+                "SAFE_CAST('1' AS INT64) IN (SELECT 1)",
+                "DATE_SUB(DATE '2026-01-02', INTERVAL 1 DAY) IN (SELECT d FROM shop.corr_lookup_d)")) {
+            query("DELETE FROM shop.corr_t WHERE TRUE").then().statusCode(200);
+            query(merge + " AND " + constantOperand + " THEN INSERT (id, k) VALUES (id, k)").then().statusCode(200);
+            assertEquals(List.of(List.of("1", "a"), List.of("2", "b")), rows("SELECT id, k FROM shop.corr_t ORDER BY id"),
+                    constantOperand);
+        }
+        query("DELETE FROM shop.corr_t WHERE TRUE").then().statusCode(200);
+        query(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) v FROM shop.corr_lookup_d ORDER BY v LIMIT 1))")
+                .then().statusCode(200);
+        assertEquals(List.of(List.of("1", "name_b"), List.of("2", "name_b")),
+                rows("SELECT id, v FROM shop.corr_t ORDER BY id"));
     }
 
     @Test

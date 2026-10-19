@@ -623,6 +623,13 @@ class SqlDialectTranslatorTest {
         dmlWithSchemas(merge + " AND DATE '2026-01-01' IN (SELECT DATE '2026-01-01') THEN INSERT (id) VALUES (id)");
         dmlWithSchemas(merge + " AND TIMESTAMP '2026-01-01 00:00:00' IN (SELECT TIMESTAMP '2026-01-01 00:00:00')"
                 + " THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND CAST('a' AS STRING) IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND SAFE_CAST('1' AS INT64) IN (SELECT 1) THEN INSERT (id) VALUES (id)");
+        dmlWithSchemas(merge + " AND DATE_SUB(DATE '2026-01-02', INTERVAL 1 DAY) IN (SELECT lk FROM ds.lookup)"
+                + " THEN INSERT (id) VALUES (id)");
+        assertEquals("Correlated Subquery is unsupported in WHEN clause.", assertThrows(GcpException.class,
+                () -> dmlWithSchemas(merge + " AND CAST(v AS STRING) IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)"))
+                .getMessage());
         dmlWithSchemas(merge + " THEN INSERT (id, v) VALUES (id, (SELECT MAX(S.name) FROM (ds.s x JOIN ds.lookup S ON TRUE)))");
         assertEquals("Correlated Subquery is unsupported in WHEN clause.", assertThrows(GcpException.class,
                 () -> dmlWithSchemas(merge + " AND UPPER(v) IN (SELECT lk FROM ds.lookup) THEN INSERT (id) VALUES (id)"))
@@ -637,6 +644,9 @@ class SqlDialectTranslatorTest {
         dmlWithSchemas(merge + "(SELECT lk AS v FROM ds.lookup GROUP BY v ORDER BY v LIMIT 1))");
         dmlWithSchemas(merge + "(SELECT MAX(name) AS v FROM ds.lookup HAVING v IS NOT NULL))");
         dmlWithSchemas(merge + "(SELECT lk AS v FROM ds.lookup QUALIFY ROW_NUMBER() OVER (ORDER BY v) = 1))");
+        dmlWithSchemas(merge + "(SELECT MAX(name) v FROM ds.lookup ORDER BY v LIMIT 1))");
+        assertEquals("Correlated Subquery is unsupported in INSERT clause.", assertThrows(GcpException.class,
+                () -> dmlWithSchemas(merge + "(SELECT MAX(name) v FROM ds.lookup WHERE lk = v))")).getMessage());
     }
 
     /**

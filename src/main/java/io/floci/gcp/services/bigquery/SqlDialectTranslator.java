@@ -112,8 +112,11 @@ final class SqlDialectTranslator {
     private TableRef mergeSource;
     private MergeScope mergeScope;
 
-    /** Names that refer to the MERGE target or source, and the columns of both when they are known. */
-    private record MergeScope(Set<String> names, Set<String> columns) {}
+    /**
+     * Names that refer to the MERGE target or source; the columns known of either (null when neither's
+     * are known); and whether those are all of their columns.
+     */
+    private record MergeScope(Set<String> names, Set<String> columns, boolean complete) {}
 
     private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
         this.projectId = projectId;
@@ -498,12 +501,14 @@ final class SqlDialectTranslator {
         Set<String> targetColumns = columnsOf.apply(target);
         Set<String> sourceColumns = mergeSource == null ? null : columnsOf.apply(mergeSource);
         Set<String> outerColumns = null;
-        if (targetColumns != null && sourceColumns != null) {
-            outerColumns = new HashSet<>(targetColumns);
-            outerColumns.addAll(sourceColumns);
+        if (targetColumns != null || sourceColumns != null) {
+            outerColumns = new HashSet<>();
+            outerColumns.addAll(targetColumns != null ? targetColumns : Set.of());
+            outerColumns.addAll(sourceColumns != null ? sourceColumns : Set.of());
         }
         mergeScope = new MergeScope(new HashSet<>(List.of(correlationSource.toLowerCase(Locale.ROOT),
-                targetAlias.toLowerCase(Locale.ROOT), target.tableId().toLowerCase(Locale.ROOT))), outerColumns);
+                targetAlias.toLowerCase(Locale.ROOT), target.tableId().toLowerCase(Locale.ROOT))), outerColumns,
+                targetColumns != null && sourceColumns != null);
         List<Integer> columns = new ArrayList<>();
         int depth = 0;
         int caseDepth = 0;
@@ -653,7 +658,8 @@ final class SqlDialectTranslator {
                 int first = nextSignificant(i + 1, to);
                 if (first >= 0 && (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH"))) {
                     int close = matchingParen(i);
-                    if (mergeScope != null && isInSubqueryOfAnExpression(i, mergeScope.names(), mergeScope.columns())) {
+                    if (mergeScope != null && isInSubqueryOfAnExpression(i, mergeScope.names(),
+                            mergeScope.complete() ? mergeScope.columns() : null)) {
                         throw invalidQuery("Correlated Subquery is unsupported in " + (inInsert ? "INSERT" : "WHEN")
                                 + " clause.");
                     }
@@ -846,7 +852,7 @@ final class SqlDialectTranslator {
             enclosingColumns.addAll(localColumns);
         }
         for (int[] sub : nested) {
-            if (isInSubqueryOfAnExpression(sub[0], operandNames, enclosingColumns)) {
+            if (isInSubqueryOfAnExpression(sub[0], operandNames, null)) {
                 throw invalidQuery("Correlated Subquery is unsupported in " + clause + " clause.");
             }
         }
@@ -898,10 +904,9 @@ final class SqlDialectTranslator {
      * Whether the subquery opening at {@code open} is the right side of {@code x [NOT] IN} where {@code x}
      * reads an enclosing row, which BigQuery runs as a semi-join correlated through {@code x}. The operand
      * is walked back from {@code IN} to its start (a comparison, a logical operator, a comma or an enclosing
-     * bracket). It reads a row through a name qualified with one of {@code names}, or through a bare name
-     * that is one of {@code columns}, or any bare name when {@code columns} is null. Not a name: a function
-     * being called, the type of a typed literal ({@code DATE '2026-01-01'}), a word after {@code AS} (the
-     * type in {@code CAST(x AS STRING)}) or after an operand (the date part in {@code INTERVAL 1 DAY}).
+     * bracket). It reads a row through a name qualified with one of {@code names}, or through a bare column
+     * name as {@link #collectBareColumns} finds them (so not a function, a cast type, a date part or the
+     * type of a typed literal) that is one of {@code columns}, or any such name when {@code columns} is null.
      */
     private boolean isInSubqueryOfAnExpression(int open, Set<String> names, Set<String> columns) {
         int in = previousSignificantIndex(open);
@@ -912,53 +917,59 @@ final class SqlDialectTranslator {
         if (end >= 0 && tokens.get(end).isKeyword("NOT")) {
             end = previousSignificantIndex(end);
         }
+        if (end < 0) {
+            return false;
+        }
+        int start = 0;
         int depth = 0;
         for (int k = end; k >= 0; k--) {
             Token t = tokens.get(k);
             if (t.isPunct(")") || t.isPunct("]")) {
                 depth++;
-                continue;
-            }
-            if (t.isPunct("(") || t.isPunct("[")) {
+            } else if (t.isPunct("(") || t.isPunct("[")) {
                 if (depth == 0) {
-                    return false;
+                    start = k + 1;
+                    break;
                 }
                 depth--;
-                continue;
-            }
-            if (depth == 0 && (t.isPunct(",") || (t.kind == Kind.PUNCT && t.text.matches("[=<>!]+"))
+            } else if (depth == 0 && (t.isPunct(",") || (t.kind == Kind.PUNCT && t.text.matches("[=<>!]+"))
                     || (t.kind == Kind.IDENT && IN_OPERAND_BOUNDARIES.contains(t.upper())))) {
-                return false;
+                start = k + 1;
+                break;
             }
+        }
+        for (int k = start; k <= end; k++) {
+            Token t = tokens.get(k);
             if (t.kind != Kind.IDENT && t.kind != Kind.QIDENT) {
                 continue;
             }
-            if (t.kind == Kind.IDENT && (GOOGLESQL_RESERVED.contains(t.upper()) || PARENLESS_FUNCTIONS.contains(t.upper()))) {
-                continue;
-            }
-            int next = nextSignificant(k + 1, tokens.size());
-            Token n = next >= 0 ? tokens.get(next) : null;
-            if (n != null && (n.isPunct("(") || n.kind == Kind.STRING || n.kind == Kind.BYTES)) {
-                continue;
-            }
             int previous = previousSignificantIndex(k);
-            Token p = previous >= 0 ? tokens.get(previous) : null;
-            if (p != null && (p.isPunct(".") || p.isKeyword("AS") || endsMergeOperand(p))) {
+            if (previous >= 0 && tokens.get(previous).isPunct(".")) {
                 continue;
             }
             String qualifier = null;
             if (t.kind == Kind.QIDENT && t.value.contains(".")) {
                 qualifier = t.value.substring(0, t.value.indexOf('.'));
-            } else if (n != null && n.isPunct(".")) {
-                qualifier = t.identifierText();
-            }
-            if (qualifier != null) {
-                if (names.contains(qualifier.toLowerCase(Locale.ROOT))) {
-                    return true;
+            } else {
+                int next = nextSignificant(k + 1, end + 1);
+                if (next >= 0 && tokens.get(next).isPunct(".")) {
+                    qualifier = t.identifierText();
                 }
-                continue;
             }
-            if (columns == null || columns.contains(t.identifierText().toLowerCase(Locale.ROOT))) {
+            if (qualifier != null && names.contains(qualifier.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        List<Integer> bare = new ArrayList<>();
+        MergeScope scope = mergeScope;
+        mergeScope = null;
+        try {
+            collectBareColumns(start, end + 1, bare);
+        } finally {
+            mergeScope = scope;
+        }
+        for (int k : bare) {
+            if (columns == null || columns.contains(tokens.get(k).identifierText().toLowerCase(Locale.ROOT))) {
                 return true;
             }
         }

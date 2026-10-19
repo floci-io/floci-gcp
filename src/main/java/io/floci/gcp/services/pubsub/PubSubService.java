@@ -658,6 +658,12 @@ public class PubSubService {
     // ── ModifyAckDeadline ──────────────────────────────────────────────────────
 
     public void modifyAckDeadline(String subName, List<String> ackIds, int ackDeadlineSeconds) {
+        if (modifyAckDeadlineWithoutNotification(subName, ackIds, ackDeadlineSeconds)) {
+            notifyListeners(subName);
+        }
+    }
+
+    boolean modifyAckDeadlineWithoutNotification(String subName, List<String> ackIds, int ackDeadlineSeconds) {
         LOG.debugf("modifyAckDeadline subscription=%s ackIds=%d deadline=%d",
                 subName, ackIds.size(), ackDeadlineSeconds);
         if (ackDeadlineSeconds < 0 || ackDeadlineSeconds > MAX_ACK_DEADLINE_SECONDS) {
@@ -673,17 +679,17 @@ public class PubSubService {
         }
         if (ackDeadlineSeconds > 0) {
             // Leases never expire yet (#327), so extending one changes nothing.
-            return;
+            return false;
         }
-        nack(subName, ackIds);
+        return nack(subName, ackIds);
     }
 
-    private void nack(String subName, List<String> ackIds) {
+    private boolean nack(String subName, List<String> ackIds) {
         ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subName);
         ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
         if (deliveredMap == null || queue == null) {
             // Deleted or detached in the meantime: there is no live queue to return the messages to.
-            return;
+            return false;
         }
         List<StoredMessage> requeued = new ArrayList<>();
         for (String ackId : ackIds) {
@@ -693,11 +699,11 @@ public class PubSubService {
             }
         }
         if (requeued.isEmpty()) {
-            return;
+            return false;
         }
         LOG.debugf("nack subscription=%s requeued=%d", subName, requeued.size());
         requeueAtFront(queue, requeued);
-        notifyListeners(subName);
+        return true;
     }
 
     Runnable registerMessageListener(String subName, MessageListener listener) {
@@ -708,7 +714,7 @@ public class PubSubService {
         return () -> subscriptionListeners.remove(listener);
     }
 
-    private void notifyListeners(String subName) {
+    void notifyListeners(String subName) {
         CopyOnWriteArrayList<MessageListener> subscriptionListeners = listeners.get(subName);
         if (subscriptionListeners == null) {
             return;

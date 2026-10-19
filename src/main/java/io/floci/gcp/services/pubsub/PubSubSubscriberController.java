@@ -249,7 +249,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         };
     }
 
-    private void modifyStreamingAckDeadlines(String sub, StreamingPullRequest request) {
+    private void modifyStreamingAckDeadlines(String sub, StreamingPullRequest request, AtomicBoolean requeued) {
         if (request.getModifyDeadlineAckIdsCount() != request.getModifyDeadlineSecondsCount()) {
             throw GcpException.invalidArgument("modify_deadline_ack_ids has " + request.getModifyDeadlineAckIdsCount()
                     + " entries but modify_deadline_seconds has " + request.getModifyDeadlineSecondsCount()
@@ -263,7 +263,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     .add(request.getModifyDeadlineAckIds(i));
         }
         for (Map.Entry<Integer, List<String>> entry : ackIdsByDeadline.entrySet()) {
-            service.modifyAckDeadline(sub, entry.getValue(), entry.getKey());
+            if (service.modifyAckDeadlineWithoutNotification(sub, entry.getValue(), entry.getKey())) {
+                requeued.set(true);
+            }
         }
     }
 
@@ -274,18 +276,19 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             Object deliveryLock,
             IamGrpcDeliveryAuthorization.Delivery deliveryAuthorization,
             StreamingPullRequest request) {
-        synchronized (deliveryLock) {
-            if (closed.get()) {
-                return;
-            }
-            try {
-                Runnable delivery = () -> {
+        AtomicBoolean requeued = new AtomicBoolean(false);
+        try {
+            Runnable delivery = () -> {
+                synchronized (deliveryLock) {
+                    if (closed.get()) {
+                        return;
+                    }
                     if (!request.getAckIdsList().isEmpty()) {
                         LOG.debugf("streamingPull ack subscription=%s ackIds=%d", sub, request.getAckIdsCount());
                         service.acknowledge(sub, request.getAckIdsList());
                     }
                     if (request.getModifyDeadlineAckIdsCount() > 0 || request.getModifyDeadlineSecondsCount() > 0) {
-                        modifyStreamingAckDeadlines(sub, request);
+                        modifyStreamingAckDeadlines(sub, request, requeued);
                     }
                     List<ReceivedMessage> messages = service.pull(sub, 1000);
                     if (!messages.isEmpty()) {
@@ -293,14 +296,18 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                         responseObserver.onNext(StreamingPullResponse.newBuilder()
                                 .addAllReceivedMessages(messages).build());
                     }
-                };
-                if (deliveryAuthorization == null) {
-                    delivery.run();
-                } else {
-                    deliveryAuthorization.run(sub, delivery);
                 }
-            } catch (Exception e) {
-                failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
+            };
+            if (deliveryAuthorization == null) {
+                delivery.run();
+            } else {
+                deliveryAuthorization.run(sub, delivery);
+            }
+        } catch (Exception e) {
+            failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
+        } finally {
+            if (requeued.get()) {
+                service.notifyListeners(sub);
             }
         }
     }

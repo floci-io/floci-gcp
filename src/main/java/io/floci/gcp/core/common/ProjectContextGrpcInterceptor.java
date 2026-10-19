@@ -53,14 +53,20 @@ public final class ProjectContextGrpcInterceptor implements ServerInterceptor {
         }
         return new SimpleForwardingServerCallListener<>(delegate) {
 
-            // A unary handler runs on half-close, so the project of the last message is kept.
             private String project = initial;
+
+            // The first message that names a project sets it for the rest of the call, so later
+            // messages of a stream (upload chunks, appended rows) are not read again.
+            private boolean named;
 
             @Override
             public void onMessage(ReqT message) {
-                String named = message instanceof Message proto ? targetProject(proto) : null;
-                if (named != null) {
-                    project = named;
+                if (!named && message instanceof Message proto) {
+                    String target = targetProject(proto);
+                    if (target != null) {
+                        project = target;
+                        named = true;
+                    }
                 }
                 scoped(() -> super.onMessage(message));
             }

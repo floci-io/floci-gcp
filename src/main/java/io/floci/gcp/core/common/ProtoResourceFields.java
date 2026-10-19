@@ -5,6 +5,8 @@ import com.google.api.ResourceProto;
 import com.google.api.ResourceReference;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
+import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 
 import java.util.ArrayList;
@@ -47,8 +49,24 @@ public final class ProtoResourceFields {
 
     public static List<Ref> refs(Message message) {
         List<Ref> refs = new ArrayList<>();
-        collect(message, true, MAX_DEPTH, refs);
+        collect(readable(message), true, MAX_DEPTH, refs);
         return refs;
+    }
+
+    /**
+     * A generated message answers {@code getField} by calling its generated getters through
+     * reflection, which a native image does not register for every API's messages. A
+     * {@link DynamicMessage} of the same bytes reads its fields from the descriptor alone.
+     */
+    private static Message readable(Message message) {
+        if (message instanceof DynamicMessage) {
+            return message;
+        }
+        try {
+            return DynamicMessage.parseFrom(message.getDescriptorForType(), message.toByteString());
+        } catch (InvalidProtocolBufferException e) {
+            throw new IllegalStateException("A message failed to parse its own bytes", e);
+        }
     }
 
     private static void collect(Message message, boolean top, int depth, List<Ref> refs) {

@@ -498,10 +498,9 @@ final class SqlDialectTranslator {
         Set<String> targetColumns = columnsOf.apply(target);
         Set<String> sourceColumns = mergeSource == null ? null : columnsOf.apply(mergeSource);
         Set<String> outerColumns = null;
-        if (targetColumns != null || sourceColumns != null) {
-            outerColumns = new HashSet<>();
-            outerColumns.addAll(targetColumns != null ? targetColumns : Set.of());
-            outerColumns.addAll(sourceColumns != null ? sourceColumns : Set.of());
+        if (targetColumns != null && sourceColumns != null) {
+            outerColumns = new HashSet<>(targetColumns);
+            outerColumns.addAll(sourceColumns);
         }
         mergeScope = new MergeScope(new HashSet<>(List.of(correlationSource.toLowerCase(Locale.ROOT),
                 targetAlias.toLowerCase(Locale.ROOT), target.tableId().toLowerCase(Locale.ROOT))), outerColumns);

@@ -606,6 +606,11 @@ class SqlDialectTranslatorTest {
         assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas(merge
                 + " THEN INSERT (id, v) VALUES (id, CASE WHEN v IN (SELECT lk FROM ds.lookup) THEN 'y' END)")).getMessage());
 
+        String subquerySource = "MERGE ds.t T USING (SELECT 1 AS id, 'a' AS k) S ON T.id = S.id WHEN NOT MATCHED";
+        assertEquals(when, assertThrows(GcpException.class, () -> dmlWithSchemas(subquerySource
+                + " AND k IN (SELECT 'a') THEN INSERT (id) VALUES (id)")).getMessage());
+        dmlWithSchemas(subquerySource + " AND CAST('a' AS STRING) IN (SELECT 'a') THEN INSERT (id) VALUES (id)");
+
         String unnest = "MERGE ds.t T USING UNNEST([STRUCT(1 AS id, 'a' AS v)]) AS u ON T.id = u.id WHEN NOT MATCHED";
         assertEquals(insert, assertThrows(GcpException.class,
                 () -> dmlWithSchemas(unnest + " THEN INSERT (id, v) VALUES (id, (SELECT u.v))")).getMessage());

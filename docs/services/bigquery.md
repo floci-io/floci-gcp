@@ -353,6 +353,24 @@ Errors: invalid SQL via `jobs.query` returns HTTP 400 with reason `invalidQuery`
 `getQueryResults` on that job returns HTTP 400), matching real job semantics. Error messages
 come from DuckDB, so their wording differs from BigQuery's.
 
+## Job locations
+
+A query job runs in one location, and every dataset it reads must live there:
+
+- `jobReference.location` (`jobs.insert`) or `location` (`jobs.query`) sets the job's location.
+  When it is absent the job takes the location of the datasets the query references, and `US`
+  when it references none. Locations compare case-insensitively (`US` and `us` are the same), but
+  a multi-region and a region inside it are different locations (`US` is not `us-central1`).
+- A referenced dataset in another location returns 404 with reason `notFound` and the message
+  `Not found: Dataset {project}:{dataset} was not found in location {LOCATION}`: an HTTP error
+  from `jobs.query`, a `DONE` job carrying `status.errorResult` from `jobs.insert`. A query that
+  reads datasets from two locations fails the same way. Only `SELECT` queries are checked so far;
+  DML and DDL statements run in the requested location (or `US`) without comparing it to the
+  datasets they touch.
+- `jobs.get`, `jobs.getQueryResults`, `jobs.cancel` and `jobs.delete` honor the `location` query
+  parameter: a job in another location is not found (404 `notFound`,
+  `Not found: Job {project}:{LOCATION}.{jobId}`). Without the parameter the job is found by id.
+
 ## Mock mode
 
 With `FLOCI_GCP_SERVICES_BIGQUERY_MOCK=true` no container is started and queries run on a small

@@ -553,4 +553,28 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", containsString("Legacy SQL"));
     }
+    @Test
+    @Order(8)
+    void everyReferencedDatasetMustShareTheJobLocation() {
+        given().contentType("application/json")
+                .body("{\"datasetReference\": {\"datasetId\": \"eu_shop\"}, \"location\": \"EU\"}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "refunds"}, "schema": {"fields": [{"name": "user_id", "type": "INT64"}]}}
+                """).when().post(BASE + "/datasets/eu_shop/tables").then().statusCode(200);
+
+        query("""
+                {"query": "SELECT COUNT(*) AS n FROM eu_shop.refunds", "useLegacySql": false}
+                """).then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"))
+                .body("rows[0].f[0].v", equalTo("0"));
+
+        query("""
+                {"query": "SELECT u.id FROM shop.users u JOIN eu_shop.refunds r ON u.id = r.user_id",
+                 "useLegacySql": false}
+                """).then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"))
+                .body("error.message", equalTo(
+                        "Not found: Dataset " + PROJECT + ":eu_shop was not found in location US"));
+    }
 }

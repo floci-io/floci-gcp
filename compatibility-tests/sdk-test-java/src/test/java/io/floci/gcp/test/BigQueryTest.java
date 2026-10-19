@@ -490,6 +490,39 @@ class BigQueryTest {
     }
 
     @Test
+    @Order(21)
+    void jobLocationMustMatchTheDatasetLocation() throws InterruptedException {
+        String dataset = DATASET + "_eu";
+        bigquery.create(DatasetInfo.newBuilder(dataset).setLocation("EU").build());
+        bigquery.create(TableInfo.of(TableId.of(dataset, "items"),
+                StandardTableDefinition.of(Schema.of(Field.of("name", StandardSQLTypeName.STRING)))));
+        bigquery.insertAll(InsertAllRequest.newBuilder(TableId.of(dataset, "items"))
+                .addRow(Map.of("name", "widget")).build());
+        String sql = "SELECT name FROM `" + PROJECT_ID + "." + dataset + ".items`";
+
+        BigQuery euClient = bigquery.getOptions().toBuilder().setLocation("EU").build().getService();
+        Job job = euClient.create(JobInfo.of(QueryJobConfiguration.newBuilder(sql).build())).waitFor();
+        assertThat(job.getStatus().getError()).isNull();
+        assertThat(job.getJobId().getLocation()).isEqualTo("EU");
+        assertThat(job.getQueryResults().getTotalRows()).isEqualTo(1);
+
+        String jobId = job.getJobId().getJob();
+        assertThat(bigquery.getJob(JobId.newBuilder().setJob(jobId).setLocation("EU").build())).isNotNull();
+        assertThat(bigquery.getJob(JobId.newBuilder().setJob(jobId).setLocation("US").build())).isNull();
+
+        // The shared client runs jobs in US, so the EU dataset is not found there.
+        assertThatThrownBy(() -> bigquery.query(QueryJobConfiguration.newBuilder(sql).build()))
+                .isInstanceOfSatisfying(BigQueryException.class, e -> {
+                    assertThat(e.getCode()).isEqualTo(404);
+                    assertThat(e.getMessage()).contains("was not found in location US");
+                });
+
+        assertThat(euClient.delete(JobId.newBuilder().setJob(jobId).setLocation("EU").build())).isTrue();
+        assertThat(bigquery.delete(DatasetId.of(PROJECT_ID, dataset),
+                BigQuery.DatasetDeleteOption.deleteContents())).isTrue();
+    }
+
+    @Test
     @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),

@@ -436,6 +436,37 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void jobLocationDefaultsToTheReferencedDatasetAndMustMatchIt() {
+        seedTwoRows();
+        Dataset eu = newDataset("eu_ds");
+        eu.setLocation("EU");
+        service.createDataset(PROJECT, eu);
+        service.createTable(PROJECT, "eu_ds", newTable("eu_ds", TABLE));
+
+        assertEquals("US", service.query(PROJECT, null, null, "SELECT * FROM ds1.t1", null).getLocation());
+        StoredJob inferred = service.query(PROJECT, null, null, "SELECT * FROM eu_ds.t1", null);
+        assertEquals("EU", inferred.getLocation());
+        assertEquals("eu", service.query(PROJECT, "eu", null, "SELECT * FROM eu_ds.t1", null).getLocation());
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "US", null, "SELECT * FROM eu_ds.t1", null));
+        assertEquals(404, ex.getHttpStatus());
+        assertEquals("notFound", ex.getReason());
+        assertEquals("Not found: Dataset p1:eu_ds was not found in location US", ex.getMessage());
+
+        GcpException regional = assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "us-central1", null, "SELECT * FROM ds1.t1", null));
+        assertEquals("Not found: Dataset p1:ds1 was not found in location us-central1", regional.getMessage());
+
+        assertEquals(inferred.getJobId(), service.getJob(PROJECT, inferred.getJobId(), "eu").getJobId());
+        GcpException wrong = assertThrows(GcpException.class,
+                () -> service.getJob(PROJECT, inferred.getJobId(), "US"));
+        assertEquals("Not found: Job p1:US." + inferred.getJobId(), wrong.getMessage());
+        assertThrows(GcpException.class, () -> service.deleteJob(PROJECT, inferred.getJobId(), "US"));
+        service.deleteJob(PROJECT, inferred.getJobId(), "EU");
+    }
+
+    @Test
     void anonymousDatasetNeverAppearsInListings() {
         seedTwoRows();
         service.query(PROJECT, "US", null, "SELECT * FROM ds1.t1", null);

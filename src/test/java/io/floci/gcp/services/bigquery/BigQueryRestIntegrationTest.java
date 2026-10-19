@@ -796,4 +796,80 @@ class BigQueryRestIntegrationTest {
             loadFiles.release(List.of(id));
         }
     }
+
+    @Test
+    @Order(21)
+    void jobLocationIsInferredFromTheDatasetAndChecked() {
+        given().contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "eu_ds"}, "location": "EU"}
+                        """)
+                .when().post(BASE + "/datasets")
+                .then().statusCode(200).body("location", equalTo("EU"));
+        given().contentType("application/json")
+                .body("""
+                        {"tableReference": {"tableId": "t"}, "schema": {"fields": [{"name": "n", "type": "STRING"}]}}
+                        """)
+                .when().post(BASE + "/datasets/eu_ds/tables")
+                .then().statusCode(200);
+
+        String jobId = given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT * FROM eu_ds.t", "useLegacySql": false}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"))
+                .extract().path("jobReference.jobId");
+
+        given().queryParam("location", "eu").when().get(BASE + "/jobs/" + jobId)
+                .then().statusCode(200).body("jobReference.location", equalTo("EU"));
+        given().queryParam("location", "EU").when().get(BASE + "/queries/" + jobId)
+                .then().statusCode(200).body("jobComplete", equalTo(true));
+        given().queryParam("location", "EU").when().post(BASE + "/jobs/" + jobId + "/cancel")
+                .then().statusCode(200);
+
+        for (String path : new String[] {"/jobs/" + jobId, "/queries/" + jobId}) {
+            given().queryParam("location", "US").when().get(BASE + path)
+                    .then().statusCode(404)
+                    .body("error.message", equalTo("Not found: Job " + PROJECT + ":US." + jobId))
+                    .body("error.errors[0].reason", equalTo("notFound"));
+        }
+        given().queryParam("location", "US").when().post(BASE + "/jobs/" + jobId + "/cancel")
+                .then().statusCode(404);
+        given().queryParam("location", "US").when().delete(BASE + "/jobs/" + jobId + "/delete")
+                .then().statusCode(404);
+        given().queryParam("location", "EU").when().delete(BASE + "/jobs/" + jobId + "/delete")
+                .then().statusCode(204);
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT * FROM eu_ds.t", "useLegacySql": false, "location": "US"}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(404)
+                .body("error.message", equalTo(
+                        "Not found: Dataset " + PROJECT + ":eu_ds was not found in location US"))
+                .body("error.errors[0].reason", equalTo("notFound"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT * FROM eu_ds.t", "useLegacySql": false, "location": "europe-west1"}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(404);
+
+        given().contentType("application/json")
+                .body("""
+                        {"jobReference": {"location": "US"},
+                         "configuration": {"query": {"query": "SELECT * FROM eu_ds.t", "useLegacySql": false}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("US"))
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult.reason", equalTo("notFound"))
+                .body("status.errorResult.message", equalTo(
+                        "Not found: Dataset " + PROJECT + ":eu_ds was not found in location US"));
+    }
 }

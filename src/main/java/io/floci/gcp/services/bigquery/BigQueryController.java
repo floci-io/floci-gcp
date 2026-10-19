@@ -273,12 +273,13 @@ public class BigQueryController {
     @Path("/{projectId}/queries/{jobId}")
     public Response getQueryResults(@PathParam("projectId") String projectId,
             @PathParam("jobId") String jobId,
+            @QueryParam("location") String location,
             @QueryParam("maxResults") Long maxResults,
             @QueryParam("pageToken") String pageToken,
             @QueryParam("startIndex") Long startIndex,
             @QueryParam("formatOptions.useInt64Timestamp") Boolean useInt64Timestamp,
             @QueryParam("formatOptions.timestampOutputFormat") String timestampOutputFormat) {
-        StoredJob job = service.getJob(projectId, jobId);
+        StoredJob job = service.getJob(projectId, jobId, location);
         QueryResponse resp = buildQueryResponse(job, maxResults, pageToken, startIndex,
                 RowCodec.TimestampFormat.of(useInt64Timestamp, timestampOutputFormat));
         resp.setKind("bigquery#getQueryResultsResponse");
@@ -320,8 +321,9 @@ public class BigQueryController {
 
     @GET
     @Path("/{projectId}/jobs/{jobId}")
-    public Response getJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId) {
-        return Response.ok(buildJob(service.getJob(projectId, jobId))).build();
+    public Response getJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId,
+            @QueryParam("location") String location) {
+        return Response.ok(buildJob(service.getJob(projectId, jobId, location))).build();
     }
 
     @GET
@@ -344,9 +346,10 @@ public class BigQueryController {
 
     @POST
     @Path("/{projectId}/jobs/{jobId}/cancel")
-    public Response cancelJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId) {
+    public Response cancelJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId,
+            @QueryParam("location") String location) {
         // Jobs complete synchronously, so cancel just echoes the (already DONE) job.
-        StoredJob job = service.getJob(projectId, jobId);
+        StoredJob job = service.getJob(projectId, jobId, location);
         return Response.ok(Map.of(
                 "kind", "bigquery#jobCancelResponse",
                 "job", buildJob(job))).build();
@@ -354,8 +357,9 @@ public class BigQueryController {
 
     @DELETE
     @Path("/{projectId}/jobs/{jobId}/delete")
-    public Response deleteJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId) {
-        service.deleteJob(projectId, jobId);
+    public Response deleteJob(@PathParam("projectId") String projectId, @PathParam("jobId") String jobId,
+            @QueryParam("location") String location) {
+        service.deleteJob(projectId, jobId, location);
         return Response.noContent().build();
     }
 

@@ -611,6 +611,8 @@ class SqlDialectTranslatorTest {
                 + " AND k IN (SELECT 'a') THEN INSERT (id) VALUES (id)")).getMessage());
         dmlWithSchemas(subquerySource + " AND CAST('a' AS STRING) IN (SELECT 'a') THEN INSERT (id) VALUES (id)");
         dmlWithSchemas(subquerySource + " AND EXTRACT(DAY FROM DATE '2026-01-01') IN (SELECT 1) THEN INSERT (id) VALUES (id)");
+        assertEquals(when, assertThrows(GcpException.class, () -> dmlWithSchemas("MERGE ds.t T USING (SELECT 1 AS id, 'a' AS source) S"
+                + " ON T.id = S.id WHEN NOT MATCHED AND source IN (SELECT 'a') THEN INSERT (id) VALUES (id)")).getMessage());
         assertEquals(insert, assertThrows(GcpException.class, () -> dmlWithSchemas("MERGE ds.t T USING (SELECT 1 AS id, 'a' AS v) S"
                 + " ON T.id = S.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (id, (SELECT MAX(name) FROM ds.lookup WHERE lk = v))"))
                 .getMessage());

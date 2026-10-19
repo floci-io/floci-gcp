@@ -641,12 +641,20 @@ final class SqlDialectTranslator {
      * its own tables.
      */
     private void collectBareColumns(int from, int to, List<Integer> columns) {
+        collectBareColumns(from, to, columns, true);
+    }
+
+    /**
+     * As {@link #collectBareColumns(int, int, List)}; when {@code mergeClause} is false the range is a plain
+     * expression, where the MERGE clause words ({@code SOURCE}, {@code INSERT}, ...) are column names.
+     */
+    private void collectBareColumns(int from, int to, List<Integer> columns, boolean mergeClause) {
         Deque<String> calls = new ArrayDeque<>();
         Deque<int[]> argumentIndexes = new ArrayDeque<>();
         boolean inInsert = false;
         for (int i = from; i < to; i++) {
             Token t = tokens.get(i);
-            if (t.isKeyword("INSERT")) {
+            if (mergeClause && t.isKeyword("INSERT")) {
                 inInsert = true;
                 int open = nextSignificant(i + 1, to);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
@@ -695,7 +703,8 @@ final class SqlDialectTranslator {
             }
             boolean name = t.kind == Kind.QIDENT ? !t.value.contains(".")
                     : t.kind == Kind.IDENT && !GOOGLESQL_RESERVED.contains(t.upper())
-                            && !NON_ALIAS_KEYWORDS.contains(t.upper()) && !MERGE_CLAUSE_WORDS.contains(t.upper());
+                            && !NON_ALIAS_KEYWORDS.contains(t.upper())
+                            && !(mergeClause && MERGE_CLAUSE_WORDS.contains(t.upper()));
             if (!name) {
                 continue;
             }
@@ -964,7 +973,7 @@ final class SqlDialectTranslator {
         MergeScope scope = mergeScope;
         mergeScope = null;
         try {
-            collectBareColumns(start, end + 1, bare);
+            collectBareColumns(start, end + 1, bare, false);
         } finally {
             mergeScope = scope;
         }

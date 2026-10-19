@@ -872,4 +872,24 @@ class BigQueryRestIntegrationTest {
                 .body("status.errorResult.message", equalTo(
                         "Not found: Dataset " + PROJECT + ":eu_ds was not found in location US"));
     }
+
+    @Test
+    @Order(22)
+    void aFailedInsertedJobKeepsTheLocationItResolvedTo() {
+        String jobId = given().contentType("application/json")
+                .body("""
+                        {"configuration": {"query": {"query": "SELECT * FROM eu_ds.missing", "useLegacySql": false}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"))
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult.reason", equalTo("notFound"))
+                .extract().path("jobReference.jobId");
+
+        given().queryParam("location", "EU").when().get(BASE + "/jobs/" + jobId)
+                .then().statusCode(200).body("status.errorResult.reason", equalTo("notFound"));
+        given().queryParam("location", "US").when().get(BASE + "/jobs/" + jobId)
+                .then().statusCode(404);
+    }
 }

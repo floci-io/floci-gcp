@@ -367,6 +367,11 @@ A query job runs in one location, and every dataset it reads must live there:
   reads datasets from two locations fails the same way. Only `SELECT` queries are checked so far;
   DML and DDL statements run in the requested location (or `US`) without comparing it to the
   datasets they touch.
+- A query that fails in `jobs.insert` is recorded in the location it had resolved to, so the
+  failed job is found there.
+- A dataset-qualified INFORMATION_SCHEMA view (`eu_ds.INFORMATION_SCHEMA.TABLES`) is checked like a
+  table of that dataset. A region-qualified view (`region-eu.INFORMATION_SCHEMA.TABLES`) sets the
+  location when nothing else has, but a region that differs from the job's location is not rejected.
 - `jobs.get`, `jobs.getQueryResults`, `jobs.cancel` and `jobs.delete` honor the `location` query
   parameter: a job in another location is not found (404 `notFound`,
   `Not found: Job {project}:{LOCATION}.{jobId}`). Without the parameter the job is found by id.

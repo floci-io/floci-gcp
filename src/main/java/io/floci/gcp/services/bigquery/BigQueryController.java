@@ -305,18 +305,7 @@ public class BigQueryController {
         boolean dryRun = Boolean.TRUE.equals(configuration.get("dryRun"));
         BigQueryService.QueryOptions options = queryOptions(queryConfig, dryRun);
 
-        StoredJob job;
-        try {
-            job = service.query(projectId, location, jobId, options);
-        } catch (GcpException e) {
-            // A dry run reports an invalid query as an HTTP error; a real job records it
-            // in its status instead.
-            if (BigQueryService.isDuplicateJobId(e) || dryRun) {
-                throw e;
-            }
-            job = service.failedJob(projectId, location, jobId, options.sql(), e);
-        }
-        return Response.ok(buildJob(job)).build();
+        return Response.ok(buildJob(service.insertQuery(projectId, location, jobId, options))).build();
     }
 
     @GET

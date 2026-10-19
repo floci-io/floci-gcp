@@ -173,4 +173,19 @@ class BigQueryDuckInformationSchemaIntegrationTest {
                 + " WHERE table_name = 'orders'").then().statusCode(200);
         assertEquals(List.of(List.of("orders")), rows("SELECT name FROM shop.table_names"));
     }
+
+    @Test
+    @Order(9)
+    void viewsTakePartInTheJobLocation() {
+        query("SELECT table_name FROM eu_data.INFORMATION_SCHEMA.TABLES").then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"));
+        given().contentType("application/json")
+                .body(Map.of("query", "SELECT table_name FROM eu_data.INFORMATION_SCHEMA.TABLES",
+                        "useLegacySql", false, "location", "US"))
+                .when().post(BASE + "/queries")
+                .then().statusCode(404)
+                .body("error.message", equalTo("Not found: Dataset " + PROJECT + ":eu_data was not found in location US"));
+        query("SELECT table_name FROM `region-eu`.INFORMATION_SCHEMA.TABLES").then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"));
+    }
 }

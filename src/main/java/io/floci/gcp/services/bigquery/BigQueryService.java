@@ -570,6 +570,27 @@ public class BigQueryService {
      * Dry runs return an unpersisted job carrying the result schema.
      */
     public StoredJob query(String projectId, String location, String jobId, QueryOptions options) {
+        return query(projectId, new JobLocation(projectId, location), jobId, options);
+    }
+
+    /**
+     * jobs.insert for a query: an invalid query is not an HTTP error but a DONE job whose status
+     * carries the error, recorded in the location the job had resolved to when it failed.
+     */
+    public StoredJob insertQuery(String projectId, String location, String jobId, QueryOptions options) {
+        JobLocation jobLocation = new JobLocation(projectId, location);
+        try {
+            return query(projectId, jobLocation, jobId, options);
+        } catch (GcpException e) {
+            // A dry run reports an invalid query as an HTTP error, as does a duplicate job ID.
+            if (isDuplicateJobId(e) || options.dryRun()) {
+                throw e;
+            }
+            return failedJob(projectId, jobLocation.resolved(), jobId, options.sql(), e);
+        }
+    }
+
+    private StoredJob query(String projectId, JobLocation jobLocation, String jobId, QueryOptions options) {
         // Reserve the ID before any parsing/lookup so a duplicate explicit jobId always
         // 409s, even when the query would otherwise fail, matching failedJob's path.
         String resolvedJobId = options.dryRun() ? null : reserveJobId(projectId, jobId);
@@ -579,7 +600,6 @@ public class BigQueryService {
         }
         SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(options.sql(), projectId,
                 options.defaultDatasetId());
-        JobLocation jobLocation = new JobLocation(projectId, location);
 
         StoredJob job = new StoredJob();
         job.setJobId(resolvedJobId);
@@ -1035,6 +1055,13 @@ public class BigQueryService {
 
             @Override
             public List<Map<String, Object>> informationSchema(InformationSchema.Ref ref) {
+                if (jobLocation != null) {
+                    if (ref.dataset() != null) {
+                        datasetStore.get(ref.dataset()).ifPresent(jobLocation::admit);
+                    } else if (ref.region() != null) {
+                        jobLocation.adoptRegion(ref.region());
+                    }
+                }
                 return informationSchemaRows(projectId, ref.view(), ref.dataset(), ref.region());
             }
         };
@@ -1325,6 +1352,17 @@ public class BigQueryService {
                 throw GcpException.notFound("Not found: Dataset " + projectId + ":"
                         + dataset.getDatasetReference().getDatasetId() + " was not found in location " + location)
                         .withReason("notFound");
+            }
+        }
+
+        /**
+         * A region-qualified INFORMATION_SCHEMA view ({@code region-eu}) runs in that region when no
+         * location is known yet. A conflicting region is not rejected: the references do not say
+         * which error BigQuery returns for it.
+         */
+        void adoptRegion(String region) {
+            if (location == null) {
+                location = region.indexOf('-') < 0 ? region.toUpperCase(Locale.ROOT) : region;
             }
         }
 

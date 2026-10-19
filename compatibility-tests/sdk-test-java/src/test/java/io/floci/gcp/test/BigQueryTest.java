@@ -1,7 +1,9 @@
 package io.floci.gcp.test;
 
+import com.google.cloud.NoCredentials;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryException;
+import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.DatasetId;
 import com.google.cloud.bigquery.DatasetInfo;
 import com.google.cloud.bigquery.Field;
@@ -505,6 +507,18 @@ class BigQueryTest {
         assertThat(job.getStatus().getError()).isNull();
         assertThat(job.getJobId().getLocation()).isEqualTo("EU");
         assertThat(job.getQueryResults().getTotalRows()).isEqualTo(1);
+
+        // With no location of its own, the client gets the job run where the dataset lives.
+        BigQuery anyLocation = BigQueryOptions.newBuilder()
+                .setHost(bigquery.getOptions().getHost())
+                .setProjectId(PROJECT_ID)
+                .setCredentials(NoCredentials.getInstance())
+                .build()
+                .getService();
+        Job inferred = anyLocation.create(JobInfo.of(QueryJobConfiguration.newBuilder(sql).build())).waitFor();
+        assertThat(inferred.getStatus().getError()).isNull();
+        assertThat(inferred.getJobId().getLocation()).isEqualTo("EU");
+        assertThat(inferred.getQueryResults().getTotalRows()).isEqualTo(1);
 
         String jobId = job.getJobId().getJob();
         assertThat(bigquery.getJob(JobId.newBuilder().setJob(jobId).setLocation("EU").build())).isNotNull();

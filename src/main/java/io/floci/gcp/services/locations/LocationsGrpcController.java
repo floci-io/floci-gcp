@@ -4,7 +4,9 @@ import com.google.cloud.location.GetLocationRequest;
 import com.google.cloud.location.ListLocationsRequest;
 import com.google.cloud.location.ListLocationsResponse;
 import com.google.cloud.location.Location;
+import com.google.cloud.location.LocationsProto;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.ProtoMethodSchema;
 import io.grpc.BindableService;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerServiceDefinition;
@@ -28,6 +30,7 @@ public class LocationsGrpcController implements BindableService {
             MethodDescriptor.<ListLocationsRequest, ListLocationsResponse>newBuilder()
                     .setType(MethodDescriptor.MethodType.UNARY)
                     .setFullMethodName(SERVICE_NAME + "/ListLocations")
+                    .setSchemaDescriptor(ProtoMethodSchema.of(LocationsProto.getDescriptor(), "Locations", "ListLocations"))
                     .setRequestMarshaller(ProtoUtils.marshaller(ListLocationsRequest.getDefaultInstance()))
                     .setResponseMarshaller(ProtoUtils.marshaller(ListLocationsResponse.getDefaultInstance()))
                     .build();
@@ -36,6 +39,7 @@ public class LocationsGrpcController implements BindableService {
             MethodDescriptor.<GetLocationRequest, Location>newBuilder()
                     .setType(MethodDescriptor.MethodType.UNARY)
                     .setFullMethodName(SERVICE_NAME + "/GetLocation")
+                    .setSchemaDescriptor(ProtoMethodSchema.of(LocationsProto.getDescriptor(), "Locations", "GetLocation"))
                     .setRequestMarshaller(ProtoUtils.marshaller(GetLocationRequest.getDefaultInstance()))
                     .setResponseMarshaller(ProtoUtils.marshaller(Location.getDefaultInstance()))
                     .build();

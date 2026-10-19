@@ -8,11 +8,16 @@ import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
+import io.grpc.MethodDescriptor;
+import io.grpc.ServerMethodDefinition;
+import io.grpc.ServerServiceDefinition;
+import io.grpc.protobuf.ProtoMethodDescriptorSupplier;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -44,8 +49,35 @@ public final class ProtoResourceFields {
     private static final int MAX_DEPTH = 4;
     private static final Set<String> TARGET_FIELDS = Set.of("name", "parent", "resource", "project", "project_id");
     private static final Map<Descriptor, Plan> PLANS = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Descriptor> REQUEST_TYPES = new ConcurrentHashMap<>();
+    private static final Set<String> METHODS_WITHOUT_SCHEMA = ConcurrentHashMap.newKeySet();
 
     private ProtoResourceFields() {}
+
+    /**
+     * Records the request type of every method of a bound gRPC service, from the method's proto
+     * schema rather than from the message: in a native image a generated message's own
+     * {@code getDescriptorForType} and {@code getField} go through reflection on its getters, which
+     * is not registered.
+     */
+    public static void register(ServerServiceDefinition service) {
+        for (ServerMethodDefinition<?, ?> definition : service.getMethods()) {
+            MethodDescriptor<?, ?> method = definition.getMethodDescriptor();
+            if (method.getSchemaDescriptor() instanceof ProtoMethodDescriptorSupplier schema
+                    && method.getRequestMarshaller() instanceof MethodDescriptor.PrototypeMarshaller<?> marshaller
+                    && marshaller.getMessagePrototype() != null) {
+                REQUEST_TYPES.put(marshaller.getMessagePrototype().getClass(),
+                        schema.getMethodDescriptor().getInputType());
+            } else {
+                METHODS_WITHOUT_SCHEMA.add(method.getFullMethodName());
+            }
+        }
+    }
+
+    /** Bound methods whose requests could only be read by reflection; empty when every service has a schema. */
+    static Set<String> methodsWithoutSchema() {
+        return new TreeSet<>(METHODS_WITHOUT_SCHEMA);
+    }
 
     public static List<Ref> refs(Message message) {
         List<Ref> refs = new ArrayList<>();
@@ -54,16 +86,18 @@ public final class ProtoResourceFields {
     }
 
     /**
-     * A generated message answers {@code getField} by calling its generated getters through
-     * reflection, which a native image does not register for every API's messages. A
-     * {@link DynamicMessage} of the same bytes reads its fields from the descriptor alone.
+     * A {@link DynamicMessage} of the message's bytes, which reads its fields from the descriptor
+     * alone. The descriptor comes from {@link #register} for a request of a bound service; a message
+     * of any other type (a test building one directly) falls back to its own descriptor.
      */
     private static Message readable(Message message) {
         if (message instanceof DynamicMessage) {
             return message;
         }
+        Descriptor type = REQUEST_TYPES.get(message.getClass());
         try {
-            return DynamicMessage.parseFrom(message.getDescriptorForType(), message.toByteString());
+            return DynamicMessage.parseFrom(type != null ? type : message.getDescriptorForType(),
+                    message.toByteString());
         } catch (InvalidProtocolBufferException e) {
             throw new IllegalStateException("A message failed to parse its own bytes", e);
         }

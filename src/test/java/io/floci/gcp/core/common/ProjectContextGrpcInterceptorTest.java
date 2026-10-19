@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -146,6 +147,16 @@ class ProjectContextGrpcInterceptorTest {
         listener.onMessage(Topic.newBuilder().setName("projects/second/topics/t").build());
 
         assertEquals(List.of("first", "first"), seen);
+    }
+
+    /**
+     * The interceptor reads a request through its method's proto schema, because in a native image
+     * the message's own descriptor is reached by reflection; a hand-built method without a schema
+     * would fail every call there while the JVM tests stay green.
+     */
+    @Test
+    void everyBoundGrpcMethodHasAProtoSchema() {
+        assertEquals(Set.of(), ProtoResourceFields.methodsWithoutSchema());
     }
 
     /** A duplicated Vert.x context, which is what the gRPC server gives each call. */

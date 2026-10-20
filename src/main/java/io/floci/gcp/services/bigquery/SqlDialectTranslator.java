@@ -3778,7 +3778,8 @@ final class SqlDialectTranslator {
                 boolean bareJoin = modifier < 0 || !(tokens.get(modifier).isKeyword("LEFT")
                         || tokens.get(modifier).isKeyword("RIGHT") || tokens.get(modifier).isKeyword("FULL")
                         || tokens.get(modifier).isKeyword("INNER") || tokens.get(modifier).isKeyword("CROSS"));
-                if (bareJoin && joined >= 0 && tokens.get(joined).isKeyword("UNNEST")) {
+                if (bareJoin && joined >= 0 && tokens.get(joined).isKeyword("UNNEST")
+                        && !unnestHasJoinCondition(joined, end)) {
                     out.append("CROSS JOIN");
                     expectTable = true;
                     i++;
@@ -3887,6 +3888,35 @@ final class SqlDialectTranslator {
             i++;
         }
         return out.toString();
+    }
+
+    private boolean unnestHasJoinCondition(int unnest, int end) {
+        int open = nextSignificant(unnest + 1, end);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int close = matchingParen(open);
+        int depth = 0;
+        for (int i = close + 1; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                if (depth == 0) {
+                    return false;
+                }
+                depth--;
+            } else if (depth == 0 && (token.isKeyword("ON") || token.isKeyword("USING"))) {
+                return true;
+            } else if (depth == 0 && (token.isPunct(",") || token.isKeyword("JOIN")
+                    || token.isKeyword("WHERE") || token.isKeyword("GROUP") || token.isKeyword("HAVING")
+                    || token.isKeyword("QUALIFY") || token.isKeyword("WINDOW") || token.isKeyword("ORDER")
+                    || token.isKeyword("LIMIT") || token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+                    || token.isKeyword("EXCEPT"))) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private String scalarUdfParameterAlias(Token token, int index, int start, int end) {

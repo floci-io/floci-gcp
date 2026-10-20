@@ -426,6 +426,19 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void conditionedJoinUnnestFiltersArrayElements() {
+        query(Map.of("query", """
+                SELECT x
+                FROM UNNEST([1, 2]) x
+                JOIN UNNEST([2, 3]) y ON x = y
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
     void arrayAggIgnoreNullsOrdersValuesBeforeAggregation() {
         query(Map.of("query", """
                 WITH source AS (

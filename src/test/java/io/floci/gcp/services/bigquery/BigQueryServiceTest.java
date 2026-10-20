@@ -1015,6 +1015,20 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void invalidReplacementPreservesExistingTableAndRows() {
+        seedTwoRows();
+
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE OR REPLACE TABLE " + DATASET + "." + TABLE
+                        + " (id INT64) PARTITION BY missing", null));
+
+        assertEquals("invalid", error.getReason());
+        assertEquals(List.of("name", "age"), service.getTable(PROJECT, DATASET, TABLE).getSchema().getFields()
+                .stream().map(TableFieldSchema::getName).toList());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    @Test
     void truncateAndDropStatements() {
         seedTwoRows();
 

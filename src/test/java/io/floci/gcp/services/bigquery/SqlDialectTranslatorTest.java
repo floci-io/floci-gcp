@@ -565,6 +565,13 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void conditionedJoinUnnestRemainsAnInnerJoin() {
+        assertEquals("SELECT x FROM UNNEST([1]) AS \"_unnest_x\"(\"x\")"
+                        + " JOIN UNNEST([1]) AS \"_unnest_y\"(\"y\") ON x = y",
+                sql("SELECT x FROM UNNEST([1]) x JOIN UNNEST([1]) y ON x = y"));
+    }
+
+    @Test
     void ctesOfParenthesizedQueriesAndSubqueriesAreNotTreatedAsTables() {
         SqlDialectTranslator.Translation t = translate("(WITH s AS (SELECT * FROM ds.t) SELECT x + 1 FROM s)");
         assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), t.tables());

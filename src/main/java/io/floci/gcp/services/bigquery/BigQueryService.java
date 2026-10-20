@@ -1339,6 +1339,7 @@ public class BigQueryService {
         if (statement.timePartitioning() != null) {
             table.getExtra().put("timePartitioning", new LinkedHashMap<>(statement.timePartitioning()));
         }
+        BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
         if (exists) {
             deleteTable(projectId, target.datasetId(), target.tableId());
         }

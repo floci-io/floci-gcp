@@ -157,6 +157,28 @@ class IamServiceAccountAuthorizationServiceTest {
     }
 
     @Test
+    void accountCreationClearsStalePoliciesWithoutPriorDeletion() {
+        String canonical = "projects/p/serviceAccounts/target@p.iam.gserviceaccount.com";
+        for (String staleResource : List.of(canonical, "projects/p/serviceAccounts/target")) {
+            InMemoryStorage<String, StoredServiceAccount> accounts = new InMemoryStorage<>();
+            InMemoryStorage<String, StoredPolicy> policies = new InMemoryStorage<>();
+            StoredPolicy grant = new StoredPolicy();
+            grant.setBindings(List.of(Map.of("role", "roles/iam.serviceAccountTokenCreator",
+                    "members", List.of("serviceAccount:caller@p.iam.gserviceaccount.com"))));
+            policies.put("policy:" + staleResource, grant);
+            IamService service = new IamService(accounts, new InMemoryStorage<>(), policies);
+            assertTrue(accounts.keys().isEmpty());
+            assertFalse(service.policyForEvaluation(canonical).getBindings().isEmpty(), staleResource);
+
+            StoredServiceAccount created = service.createServiceAccount("p", "target", "target", "");
+
+            assertEquals(canonical, created.getName());
+            assertTrue(service.policyForEvaluation(canonical).getBindings().isEmpty(), staleResource);
+            assertTrue(policies.keys().isEmpty(), staleResource);
+        }
+    }
+
+    @Test
     void accountUpdateCannotPublishAfterDeletionOrKeepItsPolicyAlive() throws Exception {
         for (boolean updateFirst : List.of(true, false)) {
             InMemoryStorage<String, StoredServiceAccount> accounts = spy(new InMemoryStorage<>());

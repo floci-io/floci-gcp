@@ -223,7 +223,7 @@ class SqlDialectTranslatorTest {
                 new SqlDialectTranslator.QueryParameters(two, "POSITIONAL")).sql();
         assertTrue(ordered.contains("struct_pack(a := [CAST(5 AS BIGINT), 20], i := CAST(1 AS BIGINT))"), ordered);
 
-        String chained = sql("SELECT [1]" + "[0]".repeat(20) + " AS v");
+        String chained = sql("SELECT [1]" + "[OFFSET(0)]".repeat(20) + " AS v");
         assertTrue(chained.length() < 20_000, "a chain of subscripts grows linearly: " + chained.length());
     }
 
@@ -249,7 +249,8 @@ class SqlDialectTranslatorTest {
         assertTrue(offset.contains("WHEN _s.i < 0 THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (underflow)')"), offset);
         assertTrue(offset.contains("WHEN _s.i >= len(_s.a) THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (overflow)')"), offset);
         assertTrue(offset.contains("ELSE _s.a[_s.i + 1] END)[1]) AS v"), offset);
-        assertEquals(offset, sql("SELECT a[i] AS v FROM ds.t"), "a bare index is an OFFSET");
+        assertEquals("SELECT a[i] AS v, j['a'] AS f FROM \"ds\".\"t\"", sql("SELECT a[i] AS v, j['a'] AS f FROM ds.t"),
+                "a bare subscript is left as it is: it is also the JSON subscript operator");
         String ordinal = sql("SELECT a[ORDINAL(i)] AS v FROM ds.t");
         assertTrue(ordinal.contains("WHEN _s.i < 1 THEN") && ordinal.contains("WHEN _s.i >= len(_s.a) + 1 THEN")
                 && ordinal.contains("ELSE _s.a[_s.i] END)[1]) AS v"), ordinal);

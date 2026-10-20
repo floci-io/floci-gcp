@@ -193,9 +193,10 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * GoogleSQL array subscripts are 0-based ({@code arr[OFFSET(i)]}, or a bare {@code arr[i]}) or 1-based
-     * ({@code arr[ORDINAL(i)]}). The plain forms fail on an index outside the array, the {@code SAFE_}
-     * forms return NULL. DuckDB lists are 1-based, return NULL out of range and count a negative index from
+     * GoogleSQL array subscripts are 0-based ({@code arr[OFFSET(i)]}) or 1-based ({@code arr[ORDINAL(i)]}).
+     * The plain forms fail on an index outside the array, the {@code SAFE_} forms return NULL. A bare
+     * {@code x[i]} is left as it is: GoogleSQL's JSON subscript operator has that form too
+     * ({@code json[0]}, {@code json['field']}), and a JSON value cannot be told from an array by its tokens. DuckDB lists are 1-based, return NULL out of range and count a negative index from
      * the end, so every subscript is rewritten to a CASE over the array and the index: a {@code SAFE_} form
      * is NULL out of range, a plain form raises BigQuery's error. The bounds are checked before the index is
      * moved to DuckDB's 1-based one, so the largest INT64 is out of range rather than an overflow. The array
@@ -218,20 +219,18 @@ final class SqlDialectTranslator {
             int close = matchingBracket(i);
             int first = nextSignificant(i + 1, close);
             String accessor = first >= 0 ? tokens.get(first).upper() : "";
-            int indexFrom = i + 1;
-            int indexTo = close;
             boolean wrapped = Set.of("OFFSET", "SAFE_OFFSET", "ORDINAL", "SAFE_ORDINAL").contains(accessor)
                     && tokens.get(first).kind == Kind.IDENT;
-            if (wrapped) {
-                int open = nextSignificant(first + 1, close);
-                if (open < 0 || !tokens.get(open).isPunct("(") || nextSignificant(matchingParen(open) + 1, close) >= 0) {
-                    throw invalidQuery("Syntax error: Expected \")\" after " + accessor + " in an array subscript");
-                }
-                indexFrom = open + 1;
-                indexTo = matchingParen(open);
-            } else {
-                accessor = "OFFSET";
+            if (!wrapped) {
+                i++;
+                continue;
             }
+            int open = nextSignificant(first + 1, close);
+            if (open < 0 || !tokens.get(open).isPunct("(") || nextSignificant(matchingParen(open) + 1, close) >= 0) {
+                throw invalidQuery("Syntax error: Expected \")\" after " + accessor + " in an array subscript");
+            }
+            int indexFrom = open + 1;
+            int indexTo = matchingParen(open);
             List<Token> index = new ArrayList<>(tokens.subList(indexFrom, indexTo));
             int ordinalBase = accessor.endsWith("ORDINAL") ? 1 : 0;
             int start = arrayOperandStart(previous);

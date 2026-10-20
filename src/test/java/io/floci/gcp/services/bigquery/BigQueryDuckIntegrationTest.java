@@ -349,11 +349,22 @@ class BigQueryDuckIntegrationTest {
     @Order(5)
     void arraySubscriptsMatchBigQuery() {
         query("""
-                {"query": "SELECT [10,20,30][OFFSET(1)] o, [10,20,30][SAFE_OFFSET(5)] so, [10,20,30][ORDINAL(1)] ord, [10,20,30][SAFE_ORDINAL(9)] sord, [10,20,30][2] bare, [10,20,30][SAFE_OFFSET(NULL)] n", "useLegacySql": false}
+                {"query": "SELECT [10,20,30][OFFSET(1)] o, [10,20,30][SAFE_OFFSET(5)] so, [10,20,30][ORDINAL(1)] ord, [10,20,30][SAFE_ORDINAL(9)] sord, [10,20,30][SAFE_OFFSET(NULL)] n", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
-                .body("schema.fields.name", equalTo(List.of("o", "so", "ord", "sord", "bare", "n")))
-                .body("rows[0].f.v", equalTo(Arrays.asList("20", null, "10", null, "30", null)));
+                .body("schema.fields.name", equalTo(List.of("o", "so", "ord", "sord", "n")))
+                .body("rows[0].f.v", equalTo(Arrays.asList("20", null, "10", null, null)));
+        // A bare subscript is also GoogleSQL's JSON subscript operator, so it is left as it is.
+        query("""
+                {"query": "WITH t AS (SELECT JSON '{\\"a\\":[1,2]}' AS j, JSON '[5,6]' AS k) SELECT j['a'] field, j['a'][1] field_index, TO_JSON(STRUCT(1 AS x))['x'] to_json_field, k[0] index0, j.a[1] dotted_index, JSON_QUERY(j, '$.a')[0] json_query_index FROM t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("[1,2]", "2", "1", "5", "2", "1")));
+        query("""
+                {"query": "SELECT json_value.class.students[0]['name'] AS first_student FROM UNNEST([JSON '{\\"class\\" : {\\"students\\" : [{\\"name\\" : \\"Jane\\"}]}}', JSON '{\\"class\\" : {\\"students\\" : []}}', JSON '{\\"class\\" : {\\"students\\" : [{\\"name\\" : \\"John\\"}, {\\"name\\": \\"Jamie\\"}]}}']) AS json_value", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(Arrays.asList(List.of("\"Jane\""), Arrays.asList((Object) null), List.of("\"John\""))));
         query("""
                 {"query": "SELECT ARRAY_AGG(x ORDER BY x DESC)[SAFE_OFFSET(0)] top, ARRAY_AGG(STRUCT(x AS v) ORDER BY x)[OFFSET(0)].v low FROM UNNEST([3,1,2]) x", "useLegacySql": false}
                 """)

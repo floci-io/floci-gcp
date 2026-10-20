@@ -374,6 +374,39 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(400)
                 .body("error.message", containsString("Array index 0 is out of bounds (underflow)"));
+        query("""
+                {"query": "SELECT [STRUCT([10, 20] AS a)][SAFE_OFFSET(0)].a[SAFE_OFFSET(1)] AS v", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("20")));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x) OVER ()[SAFE_OFFSET(0)] AS v FROM UNNEST([1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("1"))));
+        query("""
+                {"query": "SELECT [10, 20][SAFE_OFFSET(?)] AS v, [?, 20][OFFSET(?)] AS w",
+                 "parameterMode": "POSITIONAL", "useLegacySql": false,
+                 "queryParameters": [{"parameterType": {"type": "INT64"}, "parameterValue": {"value": "1"}},
+                                     {"parameterType": {"type": "INT64"}, "parameterValue": {"value": "5"}},
+                                     {"parameterType": {"type": "INT64"}, "parameterValue": {"value": "1"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("20", "20")));
+        query("""
+                {"query": "SELECT [10][SAFE_OFFSET(@i)] AS v, [10][SAFE_ORDINAL(@i)] AS w",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "i", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "9223372036854775807"}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null)));
+        query("""
+                {"query": "SELECT [10][OFFSET(@i)] AS v",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "i", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "9223372036854775807"}}]}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 9223372036854775807 is out of bounds (overflow)"));
     }
 
     @Test

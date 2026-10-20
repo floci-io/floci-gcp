@@ -199,12 +199,41 @@ class SqlDialectTranslatorTest {
 
     @Test
     void safeArraySubscriptsBecomeOneBasedIndexes() {
-        assertEquals("SELECT (a[CASE WHEN (i) >= 0 THEN (i) + 1 END]) AS f0_, (a[CASE WHEN (2) >= 1 THEN (2) END]) AS f1_"
-                + " FROM \"ds\".\"t\"", sql("SELECT a[SAFE_OFFSET(i)], a[SAFE_ORDINAL(2)] FROM ds.t"));
-        assertEquals("SELECT (ARRAY_AGG(x ORDER BY x)[CASE WHEN (0) >= 0 THEN (0) + 1 END]) AS top FROM \"ds\".\"t\"",
-                sql("SELECT ARRAY_AGG(x ORDER BY x)[SAFE_OFFSET(0)] AS top FROM ds.t"));
-        assertEquals("SELECT (t.a[CASE WHEN (0) >= 0 THEN (0) + 1 END]) AS f FROM \"ds\".\"t\" AS \"t\"",
-                sql("SELECT t.a[SAFE_OFFSET(0)] AS f FROM ds.t t"));
+        assertEquals("SELECT (list_transform([struct_pack(a := a, i := i)], lambda _s: CASE WHEN _s.i >= 0 AND _s.i < len(_s.a)"
+                + " THEN _s.a[_s.i + 1] END)[1]) AS f0_, (list_transform([struct_pack(a := a, i := 2)], lambda _s: CASE"
+                + " WHEN _s.i >= 1 AND _s.i < len(_s.a) + 1 THEN _s.a[_s.i] END)[1]) AS f1_ FROM \"ds\".\"t\"",
+                sql("SELECT a[SAFE_OFFSET(i)], a[SAFE_ORDINAL(2)] FROM ds.t"));
+        assertTrue(sql("SELECT ARRAY_AGG(x ORDER BY x)[SAFE_OFFSET(0)] AS top FROM ds.t")
+                .startsWith("SELECT (list_transform([struct_pack(a := ARRAY_AGG(x ORDER BY x), i := 0)]"));
+        assertTrue(sql("SELECT t.a[SAFE_OFFSET(0)] AS f FROM ds.t t")
+                .startsWith("SELECT (list_transform([struct_pack(a := t.a, i := 0)]"));
+    }
+
+    @Test
+    void subscriptsWriteTheArrayAndTheIndexOnce() {
+        List<Map<String, Object>> one = List.of(Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1")));
+        String safe = SqlDialectTranslator.translate("SELECT [10, 20][SAFE_OFFSET(?)] AS v", "test-project", null,
+                new SqlDialectTranslator.QueryParameters(one, "POSITIONAL")).sql();
+        assertTrue(safe.contains("struct_pack(a := [10, 20], i := CAST(1 AS BIGINT))"), safe);
+        List<Map<String, Object>> two = List.of(
+                Map.of("parameterType", Map.of("type", "INT64"), "parameterValue", Map.of("value", "5")),
+                Map.of("parameterType", Map.of("type", "INT64"), "parameterValue", Map.of("value", "1")));
+        String ordered = SqlDialectTranslator.translate("SELECT [?, 20][OFFSET(?)] AS v", "test-project", null,
+                new SqlDialectTranslator.QueryParameters(two, "POSITIONAL")).sql();
+        assertTrue(ordered.contains("struct_pack(a := [CAST(5 AS BIGINT), 20], i := CAST(1 AS BIGINT))"), ordered);
+
+        String chained = sql("SELECT [1]" + "[0]".repeat(20) + " AS v");
+        assertTrue(chained.length() < 20_000, "a chain of subscripts grows linearly: " + chained.length());
+    }
+
+    @Test
+    void aSubscriptAppliesToTheWholeExpressionBeforeIt() {
+        String field = sql("SELECT [STRUCT([10, 20] AS a)][SAFE_OFFSET(0)].a[SAFE_OFFSET(1)] AS v");
+        assertTrue(field.startsWith("SELECT (list_transform([struct_pack(a := (list_transform([struct_pack(a := "), field);
+        assertTrue(field.contains(")[1]).a, i := 1)]"), field);
+        String window = sql("SELECT ARRAY_AGG(x) OVER ()[SAFE_OFFSET(0)] AS v FROM ds.t");
+        assertTrue(window.contains("struct_pack(a := ARRAY_AGG(x) OVER (), i := 0)"), window);
     }
 
     @Test
@@ -217,12 +246,13 @@ class SqlDialectTranslatorTest {
     @Test
     void plainArraySubscriptsCheckTheirBounds() {
         String offset = sql("SELECT a[OFFSET(i)] AS v FROM ds.t");
-        assertTrue(offset.contains("WHEN (i) < 0 THEN error('Array index ' || CAST((i) AS VARCHAR) || ' is out of bounds (underflow)')"), offset);
-        assertTrue(offset.contains("WHEN (i) >= len(a) + 0 THEN error('Array index ' || CAST((i) AS VARCHAR) || ' is out of bounds (overflow)')"), offset);
-        assertTrue(offset.contains("ELSE (a)[(i) + 1] END) AS v"), offset);
+        assertTrue(offset.contains("WHEN _s.i < 0 THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (underflow)')"), offset);
+        assertTrue(offset.contains("WHEN _s.i >= len(_s.a) THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (overflow)')"), offset);
+        assertTrue(offset.contains("ELSE _s.a[_s.i + 1] END)[1]) AS v"), offset);
         assertEquals(offset, sql("SELECT a[i] AS v FROM ds.t"), "a bare index is an OFFSET");
         String ordinal = sql("SELECT a[ORDINAL(i)] AS v FROM ds.t");
-        assertTrue(ordinal.contains("WHEN (i) < 1 THEN") && ordinal.contains("ELSE (a)[(i)] END) AS v"), ordinal);
+        assertTrue(ordinal.contains("WHEN _s.i < 1 THEN") && ordinal.contains("WHEN _s.i >= len(_s.a) + 1 THEN")
+                && ordinal.contains("ELSE _s.a[_s.i] END)[1]) AS v"), ordinal);
         assertEquals("SELECT [1, 2] AS a", sql("SELECT [1, 2] AS a"), "an array literal is not a subscript");
     }
 
@@ -325,7 +355,7 @@ class SqlDialectTranslatorTest {
     @Test
     void offsetKeywordsStayKeywords() {
         assertEquals("SELECT x, 5 \"offset\" FROM \"ds\".\"t\" ORDER BY x LIMIT 1 OFFSET 1", sql("SELECT x, 5 offset FROM ds.t ORDER BY x LIMIT 1 OFFSET 1"));
-        assertTrue(sql("SELECT a[OFFSET(1)] FROM ds.t").startsWith("SELECT (CASE WHEN (1) IS NULL OR (a) IS NULL"));
+        assertTrue(sql("SELECT a[OFFSET(1)] FROM ds.t").startsWith("SELECT (list_transform([struct_pack(a := a, i := 1)]"));
         assertEquals("invalidQuery", assertThrows(GcpException.class,
                 () -> sql("SELECT x FROM UNNEST([1]) x WITH OFFSET")).getReason());
     }

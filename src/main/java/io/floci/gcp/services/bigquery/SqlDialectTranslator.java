@@ -196,9 +196,13 @@ final class SqlDialectTranslator {
      * GoogleSQL array subscripts are 0-based ({@code arr[OFFSET(i)]}, or a bare {@code arr[i]}) or 1-based
      * ({@code arr[ORDINAL(i)]}). The plain forms fail on an index outside the array, the {@code SAFE_}
      * forms return NULL. DuckDB lists are 1-based, return NULL out of range and count a negative index from
-     * the end, so every subscript is rewritten: a {@code SAFE_} form to a 1-based index that is NULL out of
-     * range, a plain form to a CASE that raises BigQuery's error. The brackets written here are RAW tokens,
-     * so a rewritten subscript is not seen again; scanning resumes at the array, so nested ones are too.
+     * the end, so every subscript is rewritten to a CASE over the array and the index: a {@code SAFE_} form
+     * is NULL out of range, a plain form raises BigQuery's error. The bounds are checked before the index is
+     * moved to DuckDB's 1-based one, so the largest INT64 is out of range rather than an overflow. The array
+     * and the index are bound once, as the fields of a struct a one-element {@code list_transform} reads, so
+     * each is written (and each positional parameter consumed) once and in its own order, and a chain of
+     * subscripts grows linearly. The brackets written here are RAW tokens, so a rewritten subscript is not
+     * seen again; scanning resumes at the array, so nested ones are too.
      * Only the DuckDB renderings run it, not {@link #prepare}: a CREATE TABLE/VIEW keeps its query as
      * GoogleSQL text and translates it again when it runs, and this rewrite is not idempotent.
      */
@@ -232,39 +236,23 @@ final class SqlDialectTranslator {
             int ordinalBase = accessor.endsWith("ORDINAL") ? 1 : 0;
             int start = arrayOperandStart(previous);
             List<Token> array = new ArrayList<>(tokens.subList(start, i));
+            String bound = ordinalBase == 0 ? "" : " + 1";
+            String position = ordinalBase == 0 ? "_s.i + 1" : "_s.i";
+            String body = accessor.startsWith("SAFE_")
+                    ? "CASE WHEN _s.i >= " + ordinalBase + " AND _s.i < len(_s.a)" + bound + " THEN _s.a[" + position + "] END"
+                    : "CASE WHEN _s.i IS NULL OR _s.a IS NULL THEN NULL WHEN _s.i < " + ordinalBase
+                            + " THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (underflow)')"
+                            + " WHEN _s.i >= len(_s.a)" + bound
+                            + " THEN error('Array index ' || CAST(_s.i AS VARCHAR) || ' is out of bounds (overflow)')"
+                            + " ELSE _s.a[" + position + "] END";
             List<Token> replacement = new ArrayList<>();
-            if (accessor.startsWith("SAFE_")) {
-                replacement.add(new Token(Kind.PUNCT, "(", "("));
-                replacement.addAll(array);
-                replacement.add(Token.raw("[CASE WHEN ("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") >= " + ordinalBase + " THEN ("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(")" + (ordinalBase == 0 ? " + 1" : "") + " END]"));
-                replacement.add(new Token(Kind.PUNCT, ")", ")"));
-            } else {
-                replacement.add(new Token(Kind.PUNCT, "(", "("));
-                replacement.add(Token.raw("CASE WHEN ("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") IS NULL OR ("));
-                replacement.addAll(array);
-                replacement.add(Token.raw(") IS NULL THEN NULL WHEN ("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") < " + ordinalBase + " THEN error('Array index ' || CAST(("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") AS VARCHAR) || ' is out of bounds (underflow)') WHEN ("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") >= len("));
-                replacement.addAll(array);
-                replacement.add(Token.raw(") + " + ordinalBase + " THEN error('Array index ' || CAST(("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(") AS VARCHAR) || ' is out of bounds (overflow)') ELSE ("));
-                replacement.addAll(array);
-                replacement.add(Token.raw(")[("));
-                replacement.addAll(index);
-                replacement.add(Token.raw(")" + (ordinalBase == 0 ? " + 1" : "") + "] END"));
-                replacement.add(new Token(Kind.PUNCT, ")", ")"));
-            }
+            replacement.add(new Token(Kind.PUNCT, "(", "("));
+            replacement.add(Token.raw("list_transform([struct_pack(a := "));
+            replacement.addAll(array);
+            replacement.add(Token.raw(", i := "));
+            replacement.addAll(index);
+            replacement.add(Token.raw(")], lambda _s: " + body + ")[1]"));
+            replacement.add(new Token(Kind.PUNCT, ")", ")"));
             tokens.subList(start, close + 1).clear();
             tokens.addAll(start, replacement);
             i = start;
@@ -281,7 +269,8 @@ final class SqlDialectTranslator {
 
     /**
      * First token of the array a subscript applies to, given its last token: a dotted path, a function
-     * call, a parenthesized expression, an array literal or another subscript.
+     * call (with its {@code OVER} clause), a parenthesized expression, an array literal or another
+     * subscript, and any field access after a call, a parenthesized expression or a subscript.
      */
     private int arrayOperandStart(int last) {
         Token t = tokens.get(last);
@@ -289,6 +278,10 @@ final class SqlDialectTranslator {
         if (t.isPunct(")")) {
             start = matchingOpen(last, "(", ")");
             int name = previousSignificant(start);
+            if (name >= 0 && tokens.get(name).isKeyword("OVER")) {
+                int call = previousSignificant(name);
+                return call >= 0 && tokens.get(call).isPunct(")") ? arrayOperandStart(call) : start;
+            }
             if (name >= 0 && tokens.get(name).kind == Kind.IDENT && (endsArrayOperand(tokens.get(name))
                     || Set.of("IF", "CAST", "EXTRACT", "ARRAY").contains(tokens.get(name).upper()))) {
                 start = name;
@@ -305,10 +298,18 @@ final class SqlDialectTranslator {
             return start;
         } else {
             start = last;
+            int over = previousSignificant(last);
+            if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
+                int call = previousSignificant(over);
+                return call >= 0 && tokens.get(call).isPunct(")") ? arrayOperandStart(call) : start;
+            }
         }
         int dot = previousSignificant(start);
         while (dot >= 0 && tokens.get(dot).isPunct(".")) {
             int name = previousSignificant(dot);
+            if (name >= 0 && (tokens.get(name).isPunct(")") || tokens.get(name).isPunct("]"))) {
+                return arrayOperandStart(name);
+            }
             if (name < 0 || !(tokens.get(name).kind == Kind.IDENT || tokens.get(name).kind == Kind.QIDENT)) {
                 break;
             }

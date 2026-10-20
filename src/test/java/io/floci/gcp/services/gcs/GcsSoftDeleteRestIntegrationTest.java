@@ -1,21 +1,34 @@
 package io.floci.gcp.services.gcs;
 
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Soft delete: retention policy, softDeleted listing, and objects.restore. */
 @QuarkusTest
 class GcsSoftDeleteRestIntegrationTest {
 
     private static final String BUCKET = "soft-delete-bucket";
+
+    @Inject
+    GcsSoftDeleteReaper reaper;
 
     private static void ensureBucket() {
         given().contentType("application/json")
@@ -101,10 +114,34 @@ class GcsSoftDeleteRestIntegrationTest {
     }
 
     @Test
-    void aBucketWithoutAPolicyHardDeletes() {
-        String plain = "no-soft-delete-bucket";
+    void aBucketCreatedWithoutAPolicyGetsTheSevenDayDefault() {
+        String plain = "default-soft-delete-bucket";
         given().contentType("application/json").body(Map.of("name", plain))
-                .when().post("/storage/v1/b?project=test-project");
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200)
+                .body("softDeletePolicy.retentionDurationSeconds", equalTo("604800"))
+                .body("softDeletePolicy.effectiveTime", notNullValue());
+        String generation = given().contentType("text/plain").body("bytes")
+                .queryParam("uploadType", "media").queryParam("name", "kept")
+                .when().post("/upload/storage/v1/b/" + plain + "/o")
+                .then().statusCode(200).extract().path("generation");
+        given().when().delete("/storage/v1/b/" + plain + "/o/kept").then().statusCode(204);
+
+        given().queryParam("generation", generation)
+                .when().post("/storage/v1/b/" + plain + "/o/kept/restore")
+                .then().statusCode(200)
+                .body("name", equalTo("kept"));
+    }
+
+    @Test
+    void aZeroRetentionHardDeletes() {
+        String plain = "no-soft-delete-bucket";
+        given().contentType("application/json")
+                .body(Map.of("name", plain, "softDeletePolicy", Map.of("retentionDurationSeconds", "0")))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200)
+                .body("softDeletePolicy.retentionDurationSeconds", equalTo("0"))
+                .body("softDeletePolicy.effectiveTime", nullValue());
         given().contentType("text/plain").body("bytes")
                 .queryParam("uploadType", "media").queryParam("name", "vanishes")
                 .when().post("/upload/storage/v1/b/" + plain + "/o");
@@ -113,8 +150,69 @@ class GcsSoftDeleteRestIntegrationTest {
         given().queryParam("softDeleted", true)
                 .when().get("/storage/v1/b/" + plain + "/o")
                 .then().statusCode(200)
-                .body("items", org.hamcrest.Matchers.anyOf(
-                        org.hamcrest.Matchers.nullValue(), org.hamcrest.Matchers.empty()));
+                .body("items", anyOf(nullValue(), empty()));
+    }
+
+    @Test
+    void aRetentionOutsideSevenToNinetyDaysIsRejected() {
+        for (String retention : List.of("86400", "7776001", "seven days")) {
+            given().contentType("application/json")
+                    .body(Map.of("name", "invalid-soft-delete-bucket",
+                            "softDeletePolicy", Map.of("retentionDurationSeconds", retention)))
+                    .when().post("/storage/v1/b?project=test-project")
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalid"));
+        }
+        given().contentType("application/json")
+                .body(Map.of("name", "ninety-day-soft-delete-bucket",
+                        "softDeletePolicy", Map.of("retentionDurationSeconds", 7776000)))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200)
+                .body("softDeletePolicy.retentionDurationSeconds", equalTo("7776000"));
+    }
+
+    @Test
+    void effectiveTimeMovesWhenTheRetentionGrows() {
+        String bucket = "effective-time-soft-delete-bucket";
+        String created = given().contentType("application/json").body(Map.of("name", bucket))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200).extract().path("softDeletePolicy.effectiveTime");
+
+        String grown = given().contentType("application/json")
+                .body(Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "1209600")))
+                .when().patch("/storage/v1/b/" + bucket)
+                .then().statusCode(200)
+                .body("softDeletePolicy.retentionDurationSeconds", equalTo("1209600"))
+                .extract().path("softDeletePolicy.effectiveTime");
+        assertNotEquals(created, grown);
+
+        given().contentType("application/json")
+                .body(Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")))
+                .when().patch("/storage/v1/b/" + bucket)
+                .then().statusCode(200)
+                .body("softDeletePolicy.effectiveTime", equalTo(grown));
+    }
+
+    @Test
+    void theSweepPurgesObjectsPastTheirHardDeleteTime() {
+        ensureBucket();
+        String generation = writeObject("expires");
+        given().when().delete("/storage/v1/b/" + BUCKET + "/o/expires").then().statusCode(204);
+
+        reaper.sweep(Instant.now());
+        assertTrue(softDeletedNames().contains("expires"));
+        assertTrue(reaper.sweep(Instant.now().plus(Duration.ofDays(8))) > 0);
+        assertFalse(softDeletedNames().contains("expires"));
+        given().queryParam("generation", generation)
+                .when().post("/storage/v1/b/" + BUCKET + "/o/expires/restore")
+                .then().statusCode(404);
+    }
+
+    private static List<String> softDeletedNames() {
+        List<String> names = given().queryParam("softDeleted", true)
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200).extract().path("items.name");
+        return names == null ? List.of() : names;
     }
 
     @Test

@@ -360,6 +360,13 @@ public interface EmulatorConfig {
         /** Interval between sweeps for expired upload sessions. Zero or less disables the sweeper. */
         @WithDefault("3600")
         long uploadSessionSweepIntervalSeconds();
+
+        /**
+         * Interval between sweeps that permanently delete soft-deleted objects past their
+         * {@code hardDeleteTime}. Zero or less disables the sweeper.
+         */
+        @WithDefault("3600")
+        long softDeleteSweepIntervalSeconds();
     }
 
     interface PubSubServiceConfig {

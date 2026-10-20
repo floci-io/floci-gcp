@@ -86,7 +86,9 @@ public class IamCredentialsService {
 
         long lifetimeSeconds = parseLifetimeSeconds(lifetime);
         Instant expireTime = clock.instant().plusSeconds(lifetimeSeconds);
-        StoredCredentialToken token = tokenService.mintImpersonatedToken(serviceAccount, expireTime);
+        String principal = iamService != null && serviceAccount.chars().allMatch(Character::isDigit)
+                ? iamService.getServiceAccount("-", serviceAccount).getEmail() : serviceAccount;
+        StoredCredentialToken token = tokenService.mintImpersonatedToken(principal, expireTime);
         return new GeneratedAccessToken(token.getTokenValue(), expireTime);
     }
 

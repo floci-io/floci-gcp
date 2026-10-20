@@ -47,7 +47,7 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
         try {
             Policy policy = isSecret(request.getResource())
                     ? secretManager.get().getIamPolicy(request.getResource())
-                    : IamPolicyCodec.toProtoPolicy(iamService.getPolicy(request.getResource()));
+                    : IamPolicyCodec.toProtoPolicy(iamService.getPolicy(policyResource(request.getResource())));
             responseObserver.onNext(policy);
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -63,7 +63,7 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
             Policy policy = isSecret(request.getResource())
                     ? secretManager.get().setIamPolicy(request.getResource(), request.getPolicy())
                     : IamPolicyCodec.toProtoPolicy(iamService.setPolicy(
-                            request.getResource(), IamPolicyCodec.toStoredPolicy(request.getPolicy())));
+                            policyResource(request.getResource()), IamPolicyCodec.toStoredPolicy(request.getPolicy())));
             responseObserver.onNext(policy);
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -81,13 +81,21 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
                     .addAllPermissions(isSecret(request.getResource())
                             ? secretManager.get().testIamPermissions(
                                     request.getResource(), request.getPermissionsList())
-                            : iamService.testPermissions(request.getResource(), request.getPermissionsList()))
+                            : iamService.testPermissions(policyResource(request.getResource()), request.getPermissionsList()))
                     .build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("testIamPermissions failed: %s", e.getMessage());
             GcpGrpcController.grpcError(responseObserver, e);
         }
+    }
+
+    private String policyResource(String resource) {
+        if (resource.matches("projects/[^/:]+/serviceAccounts/[^/:]+")) {
+            String[] parts = resource.split("/", 4);
+            return iamService.serviceAccountResource(parts[1], parts[3]);
+        }
+        return resource;
     }
 
     private boolean isSecret(String resource) {

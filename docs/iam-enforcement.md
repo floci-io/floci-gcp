@@ -7,7 +7,10 @@ The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
-secrets and versions, Pub/Sub, and GCS bucket/object operations are integrated. Cloud Run
+secrets and versions, Pub/Sub, IAM service-account/key management and direct access-token
+issuance, and GCS bucket/object operations are integrated. IAM policy methods also
+use REST and the shared IAM gRPC mixin; the [IAM inventory](services/iam.md#service-account-enforcement)
+lists exact methods, permission targets, role slices, and local condition limits. Cloud Run
 service-policy methods use REST and the shared IAM gRPC API. Secret Manager secret
 policy methods work over REST and gRPC. GCS invokes the shared evaluator from its
 service-level authorization path so JSON filtering does not bypass its
@@ -128,3 +131,33 @@ The shared policy transport uses the [IAM v1 policy proto](https://github.com/go
 Denial codes and permission requirements follow these contracts. Exact production
 message text, error metadata, revocation timing, and alias resolution are not
 compatibility guarantees.
+
+### IAM service-account evidence
+
+- [IAM v1 discovery document](https://iam.googleapis.com/$discovery/rest?version=v1)
+  and [IAM admin proto](https://github.com/googleapis/googleapis/blob/master/google/iam/admin/v1/iam.proto).
+- [IAM roles and permissions](https://docs.cloud.google.com/iam/docs/roles-permissions/iam),
+  including the basic-role membership listed for each checked permission.
+- [Credentials v1 discovery document](https://iamcredentials.googleapis.com/$discovery/rest?version=v1)
+  and [Credentials proto](https://github.com/googleapis/googleapis/blob/master/google/iam/credentials/v1/iamcredentials.proto).
+- [Credentials signBlob](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signBlob)
+  and [signJwt](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt)
+  permission references.
+- [IAM REST Java SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-iam/v1/2.0.0/com/google/api/services/iam/v1/Iam.java)
+  and [Credentials HTTP JSON stub](https://github.com/googleapis/google-cloud-java/blob/main/java-iamcredentials/google-cloud-iamcredentials/src/main/java/com/google/cloud/iam/credentials/v1/stub/HttpJsonIamCredentialsStub.java).
+
+`IamServiceAccountAuthorizationServiceTest` inventories the implemented handlers
+and permission targets. The service-account integration tests exercise denial
+state, conditions, policy escalation, alias resolution, role slices, and disabled
+controls. `IamServiceAccountIamEnforcementTest` exercises official IAM REST,
+Credentials HTTP JSON, and generated shared IAM policy gRPC clients in both modes.
+The compatibility workflow runs it against its isolated enforcing native server.
+Local evidence does not establish production IAM condition or Organization Policy
+compatibility.
+
+The IAM v1 Java REST client sends an empty form content type for bodyless policy
+reads and deletes. The matching IAM REST handlers accept that empty-body path as
+well as JSON; payload-bearing operations retain their JSON contract. This behavior
+is exercised by the unmodified official SDK request builders above; the shared
+[Google Java request builder](https://github.com/googleapis/google-api-java-client/blob/main/google-api-client/src/main/java/com/google/api/client/googleapis/services/AbstractGoogleClientRequest.java)
+uses empty content for bodyless custom POST methods.

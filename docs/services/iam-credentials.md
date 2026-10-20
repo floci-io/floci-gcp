@@ -2,7 +2,14 @@
 
 floci-gcp emulates the [IAM Service Account Credentials](https://cloud.google.com/iam/docs/reference/credentials/rest) API (`iamcredentials.googleapis.com` v1) with REST JSON, supporting `generateAccessToken`, `signBlob` and `signJwt` for service-account impersonation flows (for example `ImpersonatedCredentials` in the GCP SDKs, which call `signBlob` to make GCS signed URLs).
 
-Since the emulator accepts all requests without credential validation, impersonation is **shape-only**: the endpoint returns a wire-compatible response, but the vended token is an opaque stub (`floci-gcp-impersonated-<uuid>`) that no other emulated service validates.
+The endpoint returns an opaque emulator token (`floci-gcp-impersonated-<uuid>`)
+that the supported IAM-enforcing services resolve to a service-account identity.
+With `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, a recognized caller needs
+`iam.serviceAccounts.getAccessToken` on the target account, including applicable
+project policies. Signing requires `iam.serviceAccounts.signBlob` or
+`iam.serviceAccounts.signJwt` respectively. See the [method and role inventory](iam.md#service-account-enforcement).
+Anonymous/external credentials bypass this evaluation, including bootstrap token
+issuance. Tokens are local emulator credentials and cannot be used with real GCP.
 
 ## Configuration
 
@@ -20,9 +27,9 @@ Request body:
 
 | Field | Behavior |
 |---|---|
-| `scope` | Required. Must include `https://www.googleapis.com/auth/cloud-platform` or `https://www.googleapis.com/auth/devstorage.read_write`; other scopes are rejected with `INVALID_ARGUMENT` |
+| `scope` | Required. Must include at least one of `https://www.googleapis.com/auth/cloud-platform` or `https://www.googleapis.com/auth/devstorage.read_write`; a request containing neither is rejected with `INVALID_ARGUMENT` |
 | `lifetime` | Optional `"<n>s"` duration string. Defaults to `3600s`; values above 3600s are capped; non-positive values are rejected |
-| `delegates` | Accepted and ignored (no delegation chain is enforced) |
+| `delegates` | Empty or omitted for direct requests. Non-empty chains are unsupported and fail with `FAILED_PRECONDITION` for evaluated callers in enforce mode; bypass/disabled callers retain the previous ignored behavior |
 
 Response: `{ "accessToken": "...", "expireTime": "..." }`.
 
@@ -55,5 +62,5 @@ ImpersonatedCredentials credentials = ImpersonatedCredentials.newBuilder()
 ## Not Yet Supported
 
 - `generateIdToken`
-- Scope-based authorization of the vended token (tokens are never validated)
-- Delegation chains (`delegates` is ignored)
+- Scope-based authorization of the vended token (the supported IAM evaluator checks identity and policies, not OAuth scopes)
+- Delegation chains (only direct impersonation is IAM-enforced)

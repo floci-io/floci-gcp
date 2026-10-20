@@ -25,8 +25,9 @@ which mode is active and the supported service list.
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
 | Pub/Sub | REST JSON and gRPC topic, subscription, snapshot, and policy methods; `testIamPermissions` filters its response |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
+| IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `signBlob`, and `signJwt` |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
-| IAM service-account/key management, IAM Credentials, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
+| IAM custom roles, IAM Credentials `generateIdToken`, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
 Valid **Floci-issued service-account tokens** activate IAM evaluation on every
 supported surface. Mint one through the existing IAM Credentials
@@ -36,7 +37,7 @@ For plaintext gRPC, Google credentials may refuse an insecure channel before the
 request reaches the emulator; use a fixed authorization header with the SDK's
 no-credentials provider, or use the emulator's TLS transport.
 Anonymous requests and external credentials bypass Resource Manager, Cloud Run,
-Secret Manager, and Pub/Sub evaluation.
+Secret Manager, Pub/Sub, and IAM service-account evaluation.
 GCS evaluation treats those callers as anonymous so `allUsers` policies
 work. In enforce mode, an unknown or expired Floci-issued token receives
 `UNAUTHENTICATED`; an evaluated caller without a matching grant receives
@@ -46,8 +47,9 @@ IAM evaluation of valid downscoped credentials. Downscoped tokens cannot expand
 their boundary into project or bucket management permissions.
 
 This is a local permission-testing tool, **not an authentication/security boundary**.
-Token minting and impersonation remain unrestricted. A test using anonymous or
-external credentials can still pass without exercising IAM.
+Anonymous or external callers can still mint emulator credentials because those
+identities bypass policy evaluation. A test using such credentials can pass
+without exercising IAM.
 
 The framework supports child-to-project inheritance and multiple required permission
 checks. Bucket evaluation includes the owning project's policy; the project cannot
@@ -103,7 +105,7 @@ The finite catalog includes the implemented-operation permissions from:
 
 - `roles/browser` and `roles/resourcemanager.projectIamAdmin`.
 - `roles/owner`, `roles/editor`, and `roles/viewer`, restricted to the declared
-  project permissions. Editor/viewer permit project metadata and policy reads,
+  service permissions. Editor/viewer permit project metadata and policy reads,
   but not project policy writes.
 
 In enforce mode, project policies cannot contain `allUsers` or
@@ -119,8 +121,8 @@ Secret Manager roles, permission targets, and inheritance are described in the
 Uncatalogued roles grant no permissions and do not block known
 bindings, including when they apply to the caller. Missing resource/operation
 mappings on an enforcing adapter produce a named `FAILED_PRECONDITION`. The shared
-`google.iam.v1.IAMPolicy` gRPC mixin enforces project and Pub/Sub topic,
-subscription, and snapshot policy resources. It rejects resource kinds without
+`google.iam.v1.IAMPolicy` gRPC mixin enforces project, service-account, Cloud Run
+service, Secret Manager secret, and Pub/Sub topic, subscription, and snapshot policy resources. It rejects resource kinds without
 a registered mapping for recognized callers in enforce mode.
 Those policy APIs support anonymous setup calls. Unsupported CEL expressions produce
 `INVALID_ARGUMENT`; they are not silently treated as a policy denial.
@@ -129,6 +131,104 @@ Version 3 bindings use the existing restricted IAM Conditions profile, including
 resource service/type/name, string comparisons and prefixes, logical operators,
 and request-time comparison. The CEL standard library is not enabled.
 The catalog and condition profile are subsets of Google Cloud IAM.
+
+### Service-account enforcement
+
+The following inventory covers the implemented IAM v1 REST methods. Links point
+at the exact Google API method contract. `P` is `projects/{project}`; `SA` is
+`P/serviceAccounts/{email}`; `K` is `SA/keys/{key}`.
+
+| Method | Required permission | Authorization target | Implemented transport |
+|---|---|---|---|
+| [create](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/create) | `iam.serviceAccounts.create` | P | REST POST |
+| [list](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/list) | `iam.serviceAccounts.list` | P | REST GET |
+| [get](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/get) | `iam.serviceAccounts.get` | SA | REST GET |
+| [update](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/update), [patch](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/patch) | `iam.serviceAccounts.update` | SA | REST PUT, PATCH |
+| [delete](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/delete) | `iam.serviceAccounts.delete` | SA | REST DELETE |
+| [keys.create](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/create) | `iam.serviceAccountKeys.create` | SA | REST POST |
+| [keys.list](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/list) | `iam.serviceAccountKeys.list` | SA | REST GET |
+| [keys.get](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/get) | `iam.serviceAccountKeys.get` | K | REST GET |
+| [keys.delete](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/delete) | `iam.serviceAccountKeys.delete` | K | REST DELETE |
+| [getIamPolicy](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/getIamPolicy) | `iam.serviceAccounts.getIamPolicy` | SA | REST POST, shared IAM v1 gRPC |
+| [setIamPolicy](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/setIamPolicy) | `iam.serviceAccounts.setIamPolicy` | SA | REST POST, shared IAM v1 gRPC |
+| [testIamPermissions](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/testIamPermissions) | No prerequisite permission; filters requested permissions through the evaluator | SA | REST POST, shared IAM v1 gRPC |
+| [signBlob](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/signBlob) | `iam.serviceAccounts.signBlob` | SA | IAM v1 REST POST |
+| [generateAccessToken](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken) | `iam.serviceAccounts.getAccessToken` | SA | IAM Credentials v1 REST POST |
+| [Credentials signBlob](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signBlob) | `iam.serviceAccounts.signBlob` | SA | IAM Credentials v1 REST POST |
+| [Credentials signJwt](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt) | `iam.serviceAccounts.signJwt` | SA | IAM Credentials v1 REST POST |
+
+Service-account policies and project policies participate in each account/key
+check. Key operations use the account's policy and owning project, with the key
+name as the evaluation target for get/delete. Account IDs, unique IDs, and the
+`projects/-` wildcard resolve through the existing service-account resolver to a
+canonical email policy key. Authorization resolves names without migrating
+policies. When the canonical email policy is absent, it reads legacy
+account-ID, unique-ID, and wildcard-address policies without changing their keys. An existing canonical policy takes
+precedence, including an empty policy. Policy methods may subsequently adopt
+legacy policy keys using the existing migration path.
+
+Creation and deletion clear the account's direct policies, including legacy aliases.
+Account updates, policy writes, migration, and these lifecycle transitions use
+ordered policy locks, so an update cannot republish a deleted account and a
+replacement cannot inherit its previous direct policy. Policy methods require
+an existing account. This implements the local resource boundary;
+[Google treats a recreated service account as a separate identity](https://docs.cloud.google.com/iam/docs/service-accounts-delete-undelete).
+Floci's email-based principal matching does not reproduce Google's deleted-principal
+and undelete lifecycle.
+
+The [Google IAM roles and permissions reference](https://docs.cloud.google.com/iam/docs/roles-permissions/iam)
+defines these finite role slices for the implemented permissions:
+
+| Role | Supported IAM permission slice |
+|---|---|
+| `roles/iam.serviceAccountAdmin` | Service-account create, get, list, update, delete, getIamPolicy, setIamPolicy |
+| `roles/iam.serviceAccountKeyAdmin` | Key create, get, list, delete; service-account get, list |
+| `roles/iam.serviceAccountUser` | Service-account get, list; `actAs` is not an implemented operation |
+| `roles/iam.serviceAccountTokenCreator` | Service-account get, list, getAccessToken, signBlob, signJwt |
+| `roles/viewer` | Service-account get, list, getIamPolicy; key get, list |
+| `roles/editor` | Viewer slice plus service-account create, update, delete and key create, delete |
+| `roles/owner` | Editor slice plus service-account setIamPolicy |
+
+Each listed predefined IAM role also contributes `resourcemanager.projects.get`
+for the supported Resource Manager adapter. Basic roles do not grant
+`getAccessToken`, `signBlob`, or `signJwt`. These are explicit slices of Google's roles,
+not the full production role catalog.
+
+The local evaluator exposes `resource.service = 'iam.googleapis.com'`,
+`resource.type = 'iam.googleapis.com/ServiceAccount'` (or `iam.googleapis.com/Key`),
+and canonical email-based `resource.name` values. Create/list use the project
+attributes. Supported equality, prefix, and logical conditions use the shared
+[condition subset](#supported-roles-and-conditions). Google does not document these IAM resource
+attributes in its [supported resource attribute table](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes).
+Treat this as local scope-testing behavior, not proof that the same expression
+or alias representation works in production. Exact GCP condition evaluation,
+error messages/metadata, and revocation timing have not been verified live.
+
+Authorization happens in the shared REST filter or gRPC interceptor before the
+controller invokes an operation. Denied management requests must leave accounts,
+keys, and policies unchanged; denied credential requests must not issue a token
+or signing response. The existing filters do not hold policy locks across the
+subsequent mutation, so they provide no atomic policy-revocation guarantee.
+
+IAM custom-role management is not implemented by this API surface. Custom-role
+creation, update, deletion, and effective permissions defined by custom roles
+remain unsupported. Service-account enable, disable, undelete, key upload,
+enable/disable, IAM v1 signJwt, and Credentials generateIdToken
+are also unimplemented. Only the shared IAM policy gRPC mixin is exposed;
+IAM admin and IAM Credentials gRPC services are not implemented. Non-empty
+credential delegation chains fail with `FAILED_PRECONDITION` for evaluated
+callers; disabled and bypass callers retain the existing permissive behavior.
+IAM permissions alone do not define a fixed list of roles a caller may grant;
+Organization Policy constraints for limiting grants are unsupported.
+
+OAuth `/token`, STS exchanges, and metadata credentials retain their existing
+emulator behavior. OAuth's stub exchange does not authenticate a service-account
+JWT; its token is not a recognized service-account identity. Anonymous/external
+credential bypass makes this emulator a local testing tool, not a security
+boundary. IAM v1 `signBlob` returns the `keyId` and `signature` fields required by
+its contract. IAM v1 and Credentials signing share the emulator's per-account
+RSA key described in [Sign Blob](#sign-blob-v4-signed-urls). This is a local key,
+not a Google-managed production credential.
 
 ### Remaining limitations
 
@@ -144,7 +244,8 @@ The catalog and condition profile are subsets of Google Cloud IAM.
 - Organization/folder inheritance, deny policies, principal access boundaries,
   custom roles, group/domain membership expansion, workforce/workload identities,
   and organization policy constraints are not implemented.
-- Resource names are evaluated as requested. Project ID/number aliases are not
+- Service-account address aliases resolve to canonical email policy names. Other
+  resource names are evaluated as requested. Project ID/number aliases are not
   canonicalized to equivalent numeric resource names.
 - Only declared operation permissions are checked. Dependent service-agent,
   `actAs`, push-authentication, BigQuery/Storage export, CMEK, and other cross-service
@@ -255,6 +356,8 @@ The signing key is not returned by `ListServiceAccountKeys` (real IAM lists it a
 - `CreateServiceAccount`
 - `GetServiceAccount`
 - `ListServiceAccounts`
+- `UpdateServiceAccount`
+- `PatchServiceAccount`
 - `DeleteServiceAccount`
 - `CreateServiceAccountKey` (real RSA-2048 key pair; returns JSON key file)
 - `GetServiceAccountKey`

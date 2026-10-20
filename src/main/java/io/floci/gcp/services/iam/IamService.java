@@ -36,6 +36,7 @@ import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -91,6 +92,7 @@ public class IamService {
                 new TypeReference<Map<String, StoredPolicy>>() {});
         this.signingKeyStore = storageFactory.createGlobal("iam-signing-keys", "iam-signing-keys.json",
                 new TypeReference<Map<String, StoredSigningKey>>() {});
+        registerServiceAccountPolicyResolver();
     }
 
     IamService(StorageBackend<String, StoredServiceAccount> saStore,
@@ -113,6 +115,14 @@ public class IamService {
         this.authorization = null;
         this.secretManager = null;
         this.secretManagerIamAdapter = null;
+        registerServiceAccountPolicyResolver();
+    }
+
+    private void registerServiceAccountPolicyResolver() {
+        registerPolicyResourceResolver("projects/*/serviceAccounts/*", resource -> {
+            String[] parts = resource.split("/", 4);
+            getServiceAccount(parts[1], parts[3]);
+        });
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -135,21 +145,27 @@ public class IamService {
             String displayName, String description) {
         String email = accountId + "@" + project + ".iam.gserviceaccount.com";
         String key = saKey(project, email);
-        if (saStore.get(key).isPresent()) {
-            throw GcpException.alreadyExists("Service account already exists: " + email);
-        }
-        String uniqueId = newUniqueId();
-        String etag = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        StoredServiceAccount sa = new StoredServiceAccount(
-                "projects/" + project + "/serviceAccounts/" + email,
-                project, uniqueId, email,
-                displayName != null ? displayName : accountId,
-                description,
-                Instant.now().toString(),
-                etag);
-        saStore.put(key, sa);
-        LOG.debugf("createServiceAccount project=%s email=%s", project, email);
-        return sa;
+        return withPolicyLocks(accountPolicyResources(project, email), () -> {
+            if (saStore.get(key).isPresent()) {
+                throw GcpException.alreadyExists("Service account already exists: " + email);
+            }
+            String uniqueId = newUniqueId();
+            String etag = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+            StoredServiceAccount sa = new StoredServiceAccount(
+                    "projects/" + project + "/serviceAccounts/" + email,
+                    project, uniqueId, email,
+                    displayName != null ? displayName : accountId,
+                    description,
+                    Instant.now().toString(),
+                    etag);
+            for (String resource : accountPolicyResources(project, email)) {
+                policyStore.delete(policyKey(resource));
+            }
+            policyStore.checkpoint();
+            saStore.put(key, sa);
+            LOG.debugf("createServiceAccount project=%s email=%s", project, email);
+            return sa;
+        });
     }
 
     public StoredServiceAccount getServiceAccount(String project, String emailOrId) {
@@ -166,12 +182,20 @@ public class IamService {
     public String serviceAccountResource(String project, String emailOrId) {
         ServiceAccountRef ref = resolve(project, emailOrId);
         String canonical = "projects/" + ref.project() + "/serviceAccounts/" + ref.email();
-        String accountId = ref.email().substring(0, ref.email().indexOf('@'));
-        adoptLegacyPolicy(canonical, "projects/" + ref.project() + "/serviceAccounts/" + accountId);
-        if (!WILDCARD_PROJECT.equals(project)) {
-            adoptLegacyPolicy(canonical, "projects/" + project + "/serviceAccounts/" + emailOrId);
-        }
-        return canonical;
+        List<String> resources = accountPolicyResources(ref.project(), ref.email());
+        return withPolicyLocks(resources, () -> {
+            getServiceAccount(ref.project(), ref.email());
+            for (String legacy : resources) {
+                adoptLegacyPolicy(canonical, legacy);
+            }
+            return canonical;
+        });
+    }
+
+    /** Resolves a service-account address without reading or migrating its IAM policy. */
+    public String canonicalServiceAccountName(String project, String emailOrId) {
+        ServiceAccountRef ref = resolve(project, emailOrId);
+        return "projects/" + ref.project() + "/serviceAccounts/" + ref.email();
     }
 
     // Policies used to be keyed by the address in the request path, usually the account ID.
@@ -196,16 +220,18 @@ public class IamService {
         LOG.debugf("updateServiceAccount project=%s id=%s", project, emailOrId);
         ServiceAccountRef ref = resolve(project, emailOrId);
         String key = saKey(ref.project(), ref.email());
-        StoredServiceAccount sa = saStore.get(key)
-                .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
-        if (displayName != null) {
-            sa.setDisplayName(displayName);
-        }
-        if (description != null) {
-            sa.setDescription(description);
-        }
-        saStore.put(key, sa);
-        return sa;
+        return withPolicyLocks(accountPolicyResources(ref.project(), ref.email()), () -> {
+            StoredServiceAccount sa = saStore.get(key)
+                    .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
+            if (displayName != null) {
+                sa.setDisplayName(displayName);
+            }
+            if (description != null) {
+                sa.setDescription(description);
+            }
+            saStore.put(key, sa);
+            return sa;
+        });
     }
 
     public List<StoredServiceAccount> listServiceAccounts(String project) {
@@ -216,13 +242,20 @@ public class IamService {
     public void deleteServiceAccount(String project, String emailOrId) {
         ServiceAccountRef ref = resolve(project, emailOrId);
         String key = saKey(ref.project(), ref.email());
-        // Under the signing-key lock, so a first signing call cannot write the key back after it is removed.
-        synchronized (signingKeyLock) {
-            saStore.get(key).orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
-            saStore.delete(key);
-            signingKeyStore.delete(signingKeyStorageKey(ref.project(), ref.email()));
-        }
-        LOG.debugf("deleteServiceAccount project=%s email=%s", ref.project(), ref.email());
+        List<String> resources = accountPolicyResources(ref.project(), ref.email());
+        withPolicyLocks(resources, () -> {
+            synchronized (signingKeyLock) {
+                saStore.get(key).orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
+                saStore.delete(key);
+                signingKeyStore.delete(signingKeyStorageKey(ref.project(), ref.email()));
+            }
+            for (String resource : resources) {
+                policyStore.delete(policyKey(resource));
+            }
+            policyStore.checkpoint();
+            LOG.debugf("deleteServiceAccount project=%s email=%s", ref.project(), ref.email());
+            return null;
+        });
     }
 
     // ── IAM Policies ───────────────────────────────────────────────────────────
@@ -410,10 +443,31 @@ public class IamService {
 
     /** Reads an allow policy without authorizing the policy read itself or requiring resource existence. */
     public StoredPolicy policyForEvaluation(String resource) {
+        if (resource.matches("projects/[^/:]+/serviceAccounts/[^/:]+@[^/:]+")) {
+            String[] parts = resource.split("/", 4);
+            List<String> resources = accountPolicyResources(parts[1], parts[3]);
+            return withPolicyLocks(resources, () -> resources.stream()
+                    .map(name -> policyStore.get(policyKey(name)))
+                    .flatMap(Optional::stream)
+                    .findFirst().orElseGet(IamService::emptyPolicy));
+        }
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
             return policyStore.get(key).orElseGet(IamService::emptyPolicy);
         }
+    }
+
+    private List<String> accountPolicyResources(String project, String email) {
+        String prefix = "projects/" + project + "/serviceAccounts/";
+        String wildcard = "projects/-/serviceAccounts/";
+        List<String> resources = new ArrayList<>();
+        resources.add(prefix + email);
+        resources.add(prefix + email.substring(0, email.indexOf('@')));
+        Optional<StoredServiceAccount> account = saStore.get(saKey(project, email));
+        account.ifPresent(sa -> resources.add(prefix + sa.getUniqueId()));
+        resources.add(wildcard + email);
+        account.ifPresent(sa -> resources.add(wildcard + sa.getUniqueId()));
+        return resources;
     }
 
     private void requireResourceExists(String resource) {

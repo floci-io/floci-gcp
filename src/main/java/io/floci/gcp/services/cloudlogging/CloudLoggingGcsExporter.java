@@ -130,11 +130,10 @@ public class CloudLoggingGcsExporter {
                 || parent.equals("projects/" + project.getProjectNumber())) {
             return true;
         }
-        if (!includeChildren) {
+        if (!includeChildren || (!parent.startsWith("folders/") && !parent.startsWith("organizations/"))) {
             return false;
         }
-        return (project.hasParent() && parent.equals(project.getParentType() + "s/" + project.getParentId()))
-                || (!project.getBillingAccountName().isEmpty() && parent.equals(project.getBillingAccountName()));
+        return project.hasParent() && parent.equals(project.getParentType() + "s/" + project.getParentId());
     }
 
     private static String objectPrefix(StoredLogEntry entry) {

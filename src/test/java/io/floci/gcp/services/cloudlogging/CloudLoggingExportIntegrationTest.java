@@ -7,6 +7,7 @@ import com.google.logging.type.LogSeverity;
 import com.google.logging.v2.ConfigServiceV2Grpc;
 import com.google.logging.v2.CreateSinkRequest;
 import com.google.logging.v2.LogEntry;
+import com.google.logging.v2.ListLogEntriesRequest;
 import com.google.logging.v2.LogExclusion;
 import com.google.protobuf.FieldMask;
 import com.google.logging.v2.LogSink;
@@ -196,6 +197,66 @@ class CloudLoggingExportIntegrationTest {
         try {
             write(parent + "/logs/aliases");
             assertEquals(1, storage.listObjects(id).size());
+        } finally {
+            sinks.deleteSink(parent + "/sinks/" + id);
+        }
+    }
+
+    @Test
+    void mixedScalarTypesAndNumericSeverityPreserveMatchingBatchEntries() throws Exception {
+        String bucket = bucket();
+        String parent = "projects/test-project";
+        String id = "conversion-" + UUID.randomUUID();
+        String log = parent + "/logs/" + id;
+        sinks.createSink(parent, LogSink.newBuilder().setName(id).setDestination("storage.googleapis.com/" + bucket)
+                .setFilter("logName=\"" + log + "\" AND jsonPayload.kind=match")
+                .addExclusions(LogExclusion.newBuilder().setName("noise").setFilter("jsonPayload.noise=skip")).build(), true);
+        try {
+            given().urlEncodingEnabled(false).contentType("application/json").body(Map.of("logName", log,
+                    "entries", List.of(
+                            Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", 1)),
+                            Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", true)),
+                            Map.of("severity", 500, "jsonPayload", Map.of("kind", "match", "noise", true)),
+                            Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", "match", "noise", 1)))))
+                    .post("/v2/entries:write").then().statusCode(200);
+            List<GcsObjectMeta> objects = storage.listObjects(bucket);
+            assertEquals(1, objects.size());
+            JsonNode exported = json.readTree(storage.getObjectData(bucket, objects.getFirst().getName()));
+            assertEquals(2, exported.size());
+            for (JsonNode entry : exported) {
+                assertEquals("ERROR", entry.path("severity").asText());
+            }
+            ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()).usePlaintext().build();
+            try {
+                assertEquals(4, LoggingServiceV2Grpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                        .listLogEntries(ListLogEntriesRequest.newBuilder().addResourceNames(parent)
+                                .setFilter("logName=\"" + log + "\"").build()).getEntriesList().stream()
+                        .filter(entry -> entry.getSeverity() == LogSeverity.ERROR).count());
+            } finally {
+                channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } finally {
+            sinks.deleteSink(parent + "/sinks/" + id);
+        }
+    }
+
+    @Test
+    void billingAccountSinksReceiveOwnedLogsWithoutTreatingBillingLinksAsAncestry() {
+        String bucket = bucket();
+        String project = "billing-export-" + UUID.randomUUID();
+        String parent = "billingAccounts/abcdef";
+        ProjectRecord record = new ProjectRecord();
+        record.setProjectId(project);
+        record.setBillingAccountName(parent);
+        projects.createOrAdopt(record);
+        String id = "billing-" + UUID.randomUUID();
+        sinks.createSink(parent, LogSink.newBuilder().setName(id).setDestination("storage.googleapis.com/" + bucket)
+                .setIncludeChildren(true).build(), true);
+        try {
+            write("projects/" + project + "/logs/test");
+            assertTrue(storage.listObjects(bucket).isEmpty());
+            write(parent + "/logs/test");
+            assertEquals(1, storage.listObjects(bucket).size());
         } finally {
             sinks.deleteSink(parent + "/sinks/" + id);
         }

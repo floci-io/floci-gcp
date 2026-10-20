@@ -44,13 +44,18 @@ class LoggingExportTest {
             config.createSink(CreateSinkRequest.newBuilder().setParent(parent).setUniqueWriterIdentity(true)
                     .setSink(LogSink.newBuilder().setName(id).setDestination("storage.googleapis.com/" + id)
                             .setFilter("logName=\"" + log + "\" AND severity>=WARNING")
-                            .addExclusions(LogExclusion.newBuilder().setName("noise").setFilter("textPayload:noisy"))
-                            .addExclusions(LogExclusion.newBuilder().setName("null-field").setFilter("jsonPayload.secret:*"))).build());
+                            .addExclusions(LogExclusion.newBuilder().setName("noise").setFilter("textPayload:noisy OR textPayload=STRASSE OR jsonPayload.count=skip OR jsonPayload.message=skip"))
+                            .addExclusions(LogExclusion.newBuilder().setName("null-field").setFilter("jsonPayload.secret:* OR jsonPayload.message=1 OR jsonPayload.message=true"))).build());
             try {
                 logging.writeLogEntries(WriteLogEntriesRequest.newBuilder().setLogName(log)
                         .setResource(MonitoredResource.newBuilder().setType("global"))
+                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                                .putFields("message", Value.newBuilder().setNumberValue(1).build())))
+                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                                .putFields("message", Value.newBuilder().setBoolValue(true).build())))
                         .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.INFO).setTextPayload("filtered"))
                         .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("noisy"))
+                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("Straße"))
                         .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("exported"))
                         .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.WARNING).setJsonPayload(Struct.newBuilder()
                                 .putFields("message", Value.newBuilder().setStringValue("structured-export").build())

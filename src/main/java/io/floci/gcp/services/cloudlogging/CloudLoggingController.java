@@ -147,10 +147,20 @@ public class CloudLoggingController extends LoggingServiceV2Grpc.LoggingServiceV
         return stored;
     }
 
+    private static int severityValue(String severity) {
+        if (severity == null) {
+            return LogSeverity.DEFAULT.getNumber();
+        }
+        if (severity.matches("-?[0-9]+")) {
+            return Integer.parseInt(severity);
+        }
+        return LogSeverity.valueOf(severity).getNumber();
+    }
+
     static LogEntry toProto(StoredLogEntry stored) {
         LogEntry.Builder builder = LogEntry.newBuilder()
                 .setLogName(stored.getLogName())
-                .setSeverity(LogSeverity.valueOf(stored.getSeverity() == null ? "DEFAULT" : stored.getSeverity()));
+                .setSeverityValue(severityValue(stored.getSeverity()));
         if (stored.getInsertId() != null) {
             builder.setInsertId(stored.getInsertId());
         }

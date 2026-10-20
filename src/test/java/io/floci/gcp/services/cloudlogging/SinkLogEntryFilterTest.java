@@ -65,6 +65,32 @@ class SinkLogEntryFilterTest {
         assertThrows(RuntimeException.class, () -> SinkLogEntryFilter.parse("severity:*"));
     }
 
+    @Test
+    void failedScalarConversionsAreFalseWithinBooleanExpressionsAndArrays() {
+        StoredLogEntry entry = entry();
+        for (Object value : List.of(1, true)) {
+            entry.setJsonPayload(Map.of("kind", value));
+            assertFalse(SinkLogEntryFilter.parse("jsonPayload.kind=match").test(entry));
+            assertFalse(SinkLogEntryFilter.parse("jsonPayload.kind!=match").test(entry));
+            assertTrue(SinkLogEntryFilter.parse("jsonPayload.kind=match OR severity=ERROR").test(entry));
+            assertTrue(SinkLogEntryFilter.parse("NOT jsonPayload.kind=match").test(entry));
+        }
+        entry.setJsonPayload(Map.of("kind", List.of(1, true, "match")));
+        assertTrue(SinkLogEntryFilter.parse("jsonPayload.kind=match").test(entry));
+    }
+
+    @Test
+    void stringsUseUnicodeNfkcCaseFoldingForEveryComparison() {
+        StoredLogEntry entry = entry();
+        entry.setTextPayload("Straße");
+        assertTrue(SinkLogEntryFilter.parse("textPayload=STRASSE").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("textPayload:STRASSE").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("textPayload>=STRASSE AND textPayload<=STRASSE").test(entry));
+        assertFalse(SinkLogEntryFilter.parse("textPayload!=STRASSE").test(entry));
+        entry.setTextPayload("ＦＯＯ\u00adΣς");
+        assertTrue(SinkLogEntryFilter.parse("textPayload=\"fooσσ\"").test(entry));
+    }
+
     private static StoredLogEntry entry() {
         StoredLogEntry entry = new StoredLogEntry();
         entry.setSeverity("ERROR");

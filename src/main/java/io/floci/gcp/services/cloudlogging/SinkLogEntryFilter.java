@@ -3,6 +3,7 @@ package io.floci.gcp.services.cloudlogging;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.ibm.icu.text.Normalizer2;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 
@@ -17,6 +18,7 @@ import java.util.function.Predicate;
 
 /** Strict routing subset: unsupported syntax rejects the whole sink evaluation, including exclusions. */
 final class SinkLogEntryFilter {
+    private static final Normalizer2 STRING_NORMALIZER = Normalizer2.getNFKCCasefoldInstance();
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private static final List<String> SEVERITIES = List.of(
@@ -211,15 +213,20 @@ final class SinkLogEntryFilter {
         }
         if (value instanceof Boolean actual) {
             if (!expected.equalsIgnoreCase("true") && !expected.equalsIgnoreCase("false")) {
-                throw unsupported();
+                return false;
             }
             return compare(Boolean.compare(actual, Boolean.parseBoolean(expected)), operator);
         }
         if (value instanceof Number number) {
-            return compare(new BigDecimal(number.toString()).compareTo(new BigDecimal(expected)), operator);
+            try {
+                return compare(new BigDecimal(number.toString()).compareTo(new BigDecimal(expected)), operator);
+            } catch (NumberFormatException expectedFailure) {
+                // Logging treats failed scalar conversions as nonmatching comparisons.
+                return false;
+            }
         }
-        String actual = value.toString().toLowerCase(Locale.ROOT);
-        String target = expected.toLowerCase(Locale.ROOT);
+        String actual = STRING_NORMALIZER.normalize(value.toString());
+        String target = STRING_NORMALIZER.normalize(expected);
         return operator.equals(":") ? actual.contains(target) : compare(actual.compareTo(target), operator);
     }
 

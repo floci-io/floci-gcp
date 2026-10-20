@@ -230,7 +230,8 @@ Routing uses a strict subset independent of the lenient `ListLogEntries` parser:
 - `logName`, `severity`, `resource.type`, `resource.labels.<key>`, `labels.<key>`, `textPayload`,
   `jsonPayload.<path>`, `timestamp`, `receiveTimestamp`, `insertId`, `trace`, and `spanId`.
 - Equality/inequality and ordering comparisons, string containment (`:`), and field presence
-  (`:*`). JSON numeric fields compare numerically; strings compare without case sensitivity.
+  (`:*`). JSON numeric fields compare numerically; failed scalar conversions do not match. Strings use
+  Unicode NFKC case folding for equality, ordering, and containment.
   Quoted label keys and JSON path components are supported, as are JSON arrays. JSON presence
   distinguishes explicit nulls from missing keys. Missing scalar strings use `LogEntry` defaults;
   missing map/JSON fields fail comparisons. Severity presence (`severity:*`) is unsupported because
@@ -242,8 +243,9 @@ exclusions: an unsupported exclusion cannot accidentally allow the entry to esca
 CRUD still retains these expressions for future support.
 
 A sink receives logs owned by its parent. Project ID/number aliases resolve through the project
-registry. `includeChildren` additionally routes projects with the matching direct folder or
-organization parent recorded by Resource Manager, or an explicitly recorded billing account.
+registry. For folder and organization sinks, `includeChildren` additionally routes projects with
+the matching direct parent recorded by Resource Manager. Billing account relationships do not
+establish Logging ancestry.
 Nested folder ancestry is not modeled; unrelated or unknown hierarchies never match implicitly.
 
 ### Destination IAM

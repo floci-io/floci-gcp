@@ -15,7 +15,7 @@ floci-gcp acts as an open-source alternative to the GCP-provided emulators, unif
 - Port: 4588
 - Stack:
   - Java 25
-  - Quarkus 3.38.3
+  - Quarkus 3.39.5
   - JUnit 5
   - RestAssured
   - Jackson

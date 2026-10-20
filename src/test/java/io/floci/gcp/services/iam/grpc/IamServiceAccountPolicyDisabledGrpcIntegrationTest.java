@@ -59,6 +59,9 @@ class IamServiceAccountPolicyDisabledGrpcIntegrationTest {
             List<String> permissions = List.of("iam.serviceAccounts.update", "iam.serviceAccounts.signBlob");
             assertEquals(permissions, stub.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(resource)
                     .addAllPermissions(permissions).build()).getPermissionsList());
+            iam.deleteServiceAccount(project, "target");
+            assertEquals(List.of(), stub.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(resource)
+                    .addAllPermissions(permissions).build()).getPermissionsList());
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }

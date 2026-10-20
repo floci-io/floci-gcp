@@ -170,8 +170,11 @@ legacy policy keys using the existing migration path.
 Creation and deletion clear the account's direct policies, including legacy aliases.
 Account updates, policy writes, migration, and these lifecycle transitions use
 ordered policy locks, so an update cannot republish a deleted account and a
-replacement cannot inherit its previous direct policy. Policy methods require
-an existing account. This implements the local resource boundary;
+replacement cannot inherit its previous direct policy. Policy reads and writes require
+an existing account. Permission tests on missing accounts addressed by project ID return
+an empty permission list, following the shared
+[IAM policy contract](https://github.com/googleapis/googleapis/blob/master/google/iam/v1/iam_policy.proto).
+This implements the local resource boundary;
 [Google treats a recreated service account as a separate identity](https://docs.cloud.google.com/iam/docs/service-accounts-delete-undelete).
 Floci's email-based principal matching does not reproduce Google's deleted-principal
 and undelete lifecycle.

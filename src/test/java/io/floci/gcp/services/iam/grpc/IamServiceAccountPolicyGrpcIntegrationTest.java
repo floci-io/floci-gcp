@@ -81,6 +81,25 @@ class IamServiceAccountPolicyGrpcIntegrationTest {
     }
 
     @Test
+    void permissionTestsReturnEmptyAfterAccountDeletionEvenWithProjectGrants() {
+        String id = iam.getServiceAccount(project, "target").getUniqueId();
+        iam.deleteServiceAccount(project, "target");
+        for (String resource : List.of(target, "projects/" + project + "/serviceAccounts/target",
+                "projects/" + project + "/serviceAccounts/" + id)) {
+            assertTrue(stub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(resource)
+                            .addPermissions("iam.serviceAccounts.get").build()).getPermissionsList().isEmpty());
+        }
+        StatusRuntimeException missing = assertThrows(StatusRuntimeException.class,
+                () -> stub.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(target).build()));
+        assertEquals(Status.Code.NOT_FOUND, missing.getStatus().getCode());
+        StatusRuntimeException missingWrite = assertThrows(StatusRuntimeException.class,
+                () -> stub.setIamPolicy(SetIamPolicyRequest.newBuilder().setResource(target)
+                        .setPolicy(Policy.getDefaultInstance()).build()));
+        assertEquals(Status.Code.NOT_FOUND, missingWrite.getStatus().getCode());
+    }
+
+    @Test
     void serviceAccountPolicyGrpcUsesProjectConditionAndFiltersTestPermissions() {
         assertEquals(0, stub.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(target).build())
                 .getBindingsCount());

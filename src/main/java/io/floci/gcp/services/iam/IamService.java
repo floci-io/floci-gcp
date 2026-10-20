@@ -431,6 +431,10 @@ public class IamService {
     /** Evaluates supported resources in enforce mode; missing resources always return an empty set. */
     public List<String> testPermissions(String resource, List<String> permissions) {
         try {
+            if (resource.matches("projects/[^/:]+/serviceAccounts/[^/:]+")) {
+                String[] parts = resource.split("/", 4);
+                resource = canonicalServiceAccountName(parts[1], parts[3]);
+            }
             requireResourceExists(resource);
         } catch (GcpException e) {
             if (e.getHttpStatus() == 404) {

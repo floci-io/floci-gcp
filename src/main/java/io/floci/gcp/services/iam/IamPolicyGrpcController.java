@@ -81,7 +81,7 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
                     .addAllPermissions(isSecret(request.getResource())
                             ? secretManager.get().testIamPermissions(
                                     request.getResource(), request.getPermissionsList())
-                            : iamService.testPermissions(policyResource(request.getResource()), request.getPermissionsList()))
+                            : iamService.testPermissions(request.getResource(), request.getPermissionsList()))
                     .build());
             responseObserver.onCompleted();
         } catch (Exception e) {

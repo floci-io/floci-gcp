@@ -1,6 +1,7 @@
 package io.floci.gcp.services.iam;
 
 import io.floci.gcp.services.credentials.CredentialTokenService;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -13,6 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
@@ -21,6 +23,8 @@ class IamServiceAccountDisabledEnforcementIntegrationTest {
 
     @Inject
     CredentialTokenService tokens;
+    @Inject
+    IamService iam;
 
     @Test
     void disabledModeKeepsServiceAccountAndCredentialOperationsPermissive() {
@@ -38,6 +42,29 @@ class IamServiceAccountDisabledEnforcementIntegrationTest {
                 .body(Map.of("scope", List.of("https://www.googleapis.com/auth/cloud-platform")))
                 .when().post("/v1/projects/-/serviceAccounts/" + email + ":generateAccessToken")
                 .then().statusCode(200).body("accessToken", startsWith("floci-gcp-impersonated-"));
+    }
+
+    @Test
+    void permissionTestsReturnEmptyForDeletedAccountsWhenDisabled() {
+        String project = "iam-disabled-missing-" + UUID.randomUUID().toString().substring(0, 8);
+        StoredServiceAccount account = iam.createServiceAccount(project, "target", "target", "");
+        iam.deleteServiceAccount(project, account.getEmail());
+        String authorization = "Bearer " + tokens.mintImpersonatedToken("caller@" + project + ".iam.gserviceaccount.com",
+                Instant.now().plusSeconds(300)).getTokenValue();
+        for (String identifier : List.of(account.getEmail(), "target", account.getUniqueId())) {
+            String resource = "projects/" + project + "/serviceAccounts/" + identifier;
+            given().header("Authorization", authorization).contentType("application/json")
+                    .body(Map.of("permissions", List.of("iam.serviceAccounts.get")))
+                    .when().post("/v1/" + resource + ":testIamPermissions")
+                    .then().statusCode(200).body("permissions", empty());
+        }
+        given().header("Authorization", authorization).contentType("application/json").body(Map.of())
+                .when().post("/v1/" + account.getName() + ":getIamPolicy")
+                .then().statusCode(404);
+        given().header("Authorization", authorization).contentType("application/json")
+                .body(Map.of("policy", Map.of()))
+                .when().post("/v1/" + account.getName() + ":setIamPolicy")
+                .then().statusCode(404);
     }
 
     public static class DisabledProfile implements QuarkusTestProfile {

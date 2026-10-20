@@ -256,6 +256,35 @@ class IamServiceAccountIamEnforcementTest {
     }
 
     @Test
+    void deletedAccountPermissionTestsReturnEmptyOverRestAndGrpc() throws Exception {
+        String target = "projects/" + project + "/serviceAccounts/" + targetEmail;
+        String uniqueId = admin.projects().serviceAccounts().get(target).execute().getUniqueId();
+        setProjectPolicy("roles/iam.serviceAccountAdmin", null);
+        admin.projects().serviceAccounts().delete(target).execute();
+        URI endpoint = URI.create(TestFixtures.endpoint());
+        Metadata headers = new Metadata();
+        headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer " + token);
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext().intercept(MetadataUtils.newAttachHeadersInterceptor(headers)).build();
+        try {
+            IAMPolicyGrpc.IAMPolicyBlockingStub grpc = IAMPolicyGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(5, TimeUnit.SECONDS);
+            for (String identifier : List.of(targetEmail, "target", uniqueId)) {
+                String resource = "projects/" + project + "/serviceAccounts/" + identifier;
+                List<String> permissions = List.of("iam.serviceAccounts.get", "iam.serviceAccounts.update");
+                assertThat(management.projects().serviceAccounts().testIamPermissions(resource,
+                        new TestIamPermissionsRequest().setPermissions(permissions)).execute().getPermissions())
+                        .isNullOrEmpty();
+                // The protobuf request type collides with the REST SDK request type imported above.
+                assertThat(grpc.testIamPermissions(com.google.iam.v1.TestIamPermissionsRequest.newBuilder()
+                        .setResource(resource).addAllPermissions(permissions).build()).getPermissionsList()).isEmpty();
+            }
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void replacementAccountStartsWithoutThePreviousAccountsDirectPolicy() throws Exception {
         String target = "projects/" + project + "/serviceAccounts/" + targetEmail;
         admin.projects().serviceAccounts().setIamPolicy(target, new SetIamPolicyRequest()

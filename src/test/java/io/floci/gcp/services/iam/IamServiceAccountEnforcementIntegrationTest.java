@@ -20,6 +20,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.Matchers.notNullValue;
@@ -56,6 +57,15 @@ class IamServiceAccountEnforcementIntegrationTest {
         targetEmail = "target@" + project + ".iam.gserviceaccount.com";
         callerAuthorization = "Bearer " + tokens.mintImpersonatedToken(callerEmail,
                 Instant.now().plusSeconds(300)).getTokenValue();
+    }
+
+    @Test
+    void permissionTestsReturnEmptyForMissingAccountsWithoutProjectGrants() {
+        String resource = "projects/" + project + "/serviceAccounts/" + targetEmail;
+        given().header("Authorization", callerAuthorization).contentType("application/json")
+                .body(Map.of("permissions", List.of("iam.serviceAccounts.get", "iam.serviceAccounts.update")))
+                .when().post("/v1/" + resource + ":testIamPermissions")
+                .then().statusCode(200).body("permissions", empty());
     }
 
     @Test

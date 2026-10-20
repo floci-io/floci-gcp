@@ -14,7 +14,9 @@ lists exact methods, permission targets, role slices, and local condition limits
 service-policy methods use REST and the shared IAM gRPC API. Secret Manager secret
 policy methods work over REST and gRPC. GCS invokes the shared evaluator from its
 service-level authorization path so JSON filtering does not bypass its
-lock-sensitive lifecycle coordination.
+lock-sensitive lifecycle coordination. Cloud Logging GCS export uses the same GCS service path
+with the persisted sink writer as a trusted internal principal. It uses no request credential
+bypass; sink management caller authorization is a separate integration.
 
 ## Service extension contract
 
@@ -100,6 +102,8 @@ policy lock in the same global order before entering the storage mutation lock. 
 shared REST filter and gRPC interceptor do not hold a lock
 across authorization and the subsequent service mutation. Other service integrations
 must use the service-level ordered-lock entry point when that consistency is required.
+Cloud Logging holds its sink lock before acquiring the ordered destination policy locks
+and GCS bucket/object locks, serializing delivery with sink configuration changes.
 Secret Manager holds the secret lock before the ordered project and secret policy
 locks across authorization and the secret or version operation.
 

@@ -132,6 +132,11 @@ resource service/type/name, string comparisons and prefixes, logical operators,
 and request-time comparison. The CEL standard library is not enabled.
 The catalog and condition profile are subsets of Google Cloud IAM.
 
+Cloud Logging GCS sinks authorize fresh object creation as their persisted writer principal,
+including bucket/project policy grants and supported conditions. They do not use the logging
+caller's credentials. See [GCS export](logging.md#gcs-export). Sink management authorization
+is not implemented.
+
 ### Service-account enforcement
 
 The following inventory covers the implemented IAM v1 REST methods. Links point
@@ -251,11 +256,12 @@ not a Google-managed production credential.
   resource names are evaluated as requested. Project ID/number aliases are not
   canonicalized to equivalent numeric resource names.
 - Only declared operation permissions are checked. Dependent service-agent,
-  `actAs`, push-authentication, BigQuery/Storage export, CMEK, and other cross-service
+  `actAs`, push-authentication, BigQuery export, CMEK, and other cross-service
   grants are not validated. This emulator cannot prove those configurations work
   in GCP.
-- Policy reads and business mutations are separate operations. There is no atomic
-  policy-change/resource-mutation transaction; this is not a revocation-timing test.
+- Shared REST/gRPC interceptors do not hold policy locks through business mutations.
+  GCS object operations and Logging GCS export use service-level locks through
+  publication; other integrations must provide their own consistency boundary.
 - The emulator does not validate that a role is grantable on the policy resource.
   Unsupported permissions in a known role are absent from the catalog.
 

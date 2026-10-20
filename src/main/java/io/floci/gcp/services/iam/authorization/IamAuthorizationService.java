@@ -103,6 +103,17 @@ public class IamAuthorizationService {
         authorize(authorization, adapter, List.of(check));
     }
 
+    /** For trusted in-process service agents, never identities supplied by an HTTP or gRPC caller. */
+    public void authorizeServicePrincipal(IamPrincipal principal, IamPermissionCheck check) {
+        if (!principal.isAuthenticated() || !principal.member().startsWith("serviceAccount:")) {
+            throw GcpException.permissionDenied("An internal service account principal is required");
+        }
+        if (enabled() && !allowed(principal, check.permission(), check.resource())) {
+            throw GcpException.permissionDenied("Permission " + check.permission()
+                    + " denied on " + check.resource().name());
+        }
+    }
+
     /** Holds each target and ancestor policy lock while a service authorizes and mutates state. */
     public <T> T withPolicyLocks(List<IamResource> resources, Supplier<T> action) {
         List<String> policyResources = resources.stream()

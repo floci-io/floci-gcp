@@ -6,7 +6,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * Registers Cloud Run, Cloud Functions, and Logging sink protobuf message classes (and the shared
  * common-protos / LRO / IAM types in their JSON request/response graphs) for
  * native-image reflection. Cloud Run and Cloud Functions use REST/httpjson with proto-only stubs;
- * Logging sink configuration also uses protobuf JSON for REST and durable storage. Without this,
+ * Logging uses protobuf JSON for sink REST/storage and GCS log-entry export. Without this,
  * protobuf JsonFormat fails at runtime (e.g. NoSuchMethodException on getServicesList,
  * or request parsing errors for types like com.google.api.LaunchStage).
  */
@@ -1646,6 +1646,14 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
         "com.google.logging.v2.BigQueryOptions$Builder",
         "com.google.logging.v2.ListSinksResponse",
         "com.google.logging.v2.ListSinksResponse$Builder",
+        "com.google.logging.v2.LogEntry",
+        "com.google.logging.v2.LogEntry$Builder",
+        "com.google.logging.v2.LogEntryOperation",
+        "com.google.logging.v2.LogEntryOperation$Builder",
+        "com.google.logging.v2.LogEntrySourceLocation",
+        "com.google.logging.v2.LogEntrySourceLocation$Builder",
+        "com.google.logging.v2.LogSplit",
+        "com.google.logging.v2.LogSplit$Builder",
         "com.google.logging.v2.LogExclusion",
         "com.google.logging.v2.LogExclusion$Builder",
         "com.google.logging.v2.LogSink",

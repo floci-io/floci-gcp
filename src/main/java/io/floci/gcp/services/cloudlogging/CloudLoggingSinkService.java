@@ -10,23 +10,26 @@ import com.google.protobuf.util.FieldMaskUtil;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 import io.floci.gcp.services.cloudlogging.model.StoredLogSink;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 @ApplicationScoped
 public class CloudLoggingSinkService {
+
+    private static final Logger LOG = Logger.getLogger(CloudLoggingSinkService.class);
 
     private static final Set<String> MUTABLE_FIELDS = Set.of("destination", "filter", "description",
             "disabled", "include_children", "exclusions", "bigquery_options");
@@ -34,17 +37,27 @@ public class CloudLoggingSinkService {
             .addPaths("destination").addPaths("filter").addPaths("include_children").build();
 
     private final StorageBackend<String, StoredLogSink> sinks;
+    private final CloudLoggingGcsExporter exporter;
     // All sink checks and mutations share this lock; no mutable protobuf or store value escapes it.
     private final Object sinkLock = new Object();
 
     @Inject
-    public CloudLoggingSinkService(StorageFactory storageFactory) {
+    public CloudLoggingSinkService(StorageFactory storageFactory, CloudLoggingGcsExporter exporter) {
         this(storageFactory.createGlobal("logging", "cloudlogging-sinks.json",
-                new TypeReference<Map<String, StoredLogSink>>() {}));
+                new TypeReference<Map<String, StoredLogSink>>() {}), exporter);
+    }
+
+    CloudLoggingSinkService(StorageFactory storageFactory) {
+        this(storageFactory, null);
     }
 
     CloudLoggingSinkService(StorageBackend<String, StoredLogSink> sinks) {
+        this(sinks, null);
+    }
+
+    CloudLoggingSinkService(StorageBackend<String, StoredLogSink> sinks, CloudLoggingGcsExporter exporter) {
         this.sinks = sinks;
+        this.exporter = exporter;
     }
 
     public LogSink createSink(String parent, LogSink requested, boolean uniqueWriterIdentity) {
@@ -61,7 +74,7 @@ public class CloudLoggingSinkService {
             validateLegacyDestination(parent, configuration, unique);
             Timestamp now = timestamp();
             LogSink created = configuration.toBuilder()
-                    .setWriterIdentity(writerIdentity(unique))
+                    .setWriterIdentity(writerIdentity(parent, unique))
                     .setCreateTime(now).setUpdateTime(now).build();
             sinks.put(name, stored(created, unique));
             return created;
@@ -78,11 +91,14 @@ public class CloudLoggingSinkService {
     public ListSinksResponse listSinks(String parent, int pageSize, String pageToken) {
         validateParent(parent);
         synchronized (sinkLock) {
-            List<LogSink> all = sinks.scan(key -> key.startsWith(parent + "/sinks/")).stream()
-                    .map(CloudLoggingSinkService::read).sorted(Comparator.comparing(LogSink::getName)).toList();
-            int boundedPageSize = pageSize > 0 ? Math.min(pageSize, all.size()) : all.size();
-            PageToken.Page<LogSink> page = PageToken.paginate(all, boundedPageSize, pageToken);
-            ListSinksResponse.Builder response = ListSinksResponse.newBuilder().addAllSinks(page.items());
+            List<String> keys = sinks.keys().stream().filter(key -> key.startsWith(parent + "/sinks/"))
+                    .sorted().toList();
+            int boundedPageSize = pageSize > 0 ? Math.min(pageSize, keys.size()) : keys.size();
+            PageToken.Page<String> page = PageToken.paginate(keys, boundedPageSize, pageToken);
+            ListSinksResponse.Builder response = ListSinksResponse.newBuilder();
+            for (String key : page.items()) {
+                response.addSinks(read(requireSink(key)));
+            }
             if (page.nextPageToken() != null) {
                 response.setNextPageToken(page.nextPageToken());
             }
@@ -115,7 +131,7 @@ public class CloudLoggingSinkService {
             FieldMaskUtil.merge(mask, requested, updated, new FieldMaskUtil.MergeOptions()
                     .setReplaceRepeatedFields(true).setReplaceMessageFields(true));
             if (unique && !stored.uniqueWriterIdentity()) {
-                updated.setWriterIdentity(writerIdentity(true));
+                updated.setWriterIdentity(writerIdentity(parent, true));
             }
             updated.setUpdateTime(timestamp());
             LogSink result = normalizeConfiguration(updated.build());
@@ -146,9 +162,42 @@ public class CloudLoggingSinkService {
         return ProtoJson.merge(sink.json(), LogSink.newBuilder()).build();
     }
 
-    private static String writerIdentity(boolean unique) {
-        return unique ? "serviceAccount:sink-" + UUID.randomUUID() + "@gcp-sa-logging.iam.gserviceaccount.com"
-                : "serviceAccount:cloud-logs@system.gserviceaccount.com";
+    private String writerIdentity(String parent, boolean unique) {
+        if (!unique) {
+            return "serviceAccount:cloud-logs@system.gserviceaccount.com";
+        }
+        // Preserve accounts already granted destination access by earlier emulator versions.
+        for (String key : sinks.keys().stream().filter(key -> key.startsWith(parent + "/sinks/")).sorted().toList()) {
+            StoredLogSink stored = requireSink(key);
+            if (stored.uniqueWriterIdentity()) {
+                return read(stored).getWriterIdentity();
+            }
+        }
+        String[] owner = parent.split("/", 2);
+        String account = switch (owner[0]) {
+            case "projects" -> owner[1].matches("[0-9]+") ? owner[1] : ProjectNumbers.of(owner[1]);
+            case "folders" -> "folder-" + owner[1];
+            case "organizations" -> "org-" + owner[1];
+            case "billingAccounts" -> "billing-" + owner[1];
+            default -> throw new IllegalStateException("Invalid sink owner");
+        };
+        return "serviceAccount:service-" + account + "@gcp-sa-logging.iam.gserviceaccount.com";
+    }
+
+    public void exportEntries(List<StoredLogEntry> entries) {
+        synchronized (sinkLock) {
+            for (String key : sinks.keys().stream().sorted().toList()) {
+                try {
+                    LogSink sink = read(requireSink(key));
+                    if (!sink.getDisabled() && sink.getDestination().startsWith("storage.googleapis.com/")) {
+                        exporter.export(key.substring(0, key.lastIndexOf("/sinks/")), sink, entries);
+                    }
+                } catch (RuntimeException exception) {
+                    // Destination failures must not reject entries already accepted by Logging.
+                    LOG.warnf(exception, "Cloud Logging export failed for sink %s", key);
+                }
+            }
+        }
     }
 
     private static Timestamp timestamp() {

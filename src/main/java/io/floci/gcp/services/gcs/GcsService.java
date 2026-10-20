@@ -807,6 +807,12 @@ public class GcsService {
         return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), baseUrl);
     }
 
+    public GcsObjectMeta putObject(String bucket, String objectName, String contentType, byte[] data,
+            GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
+        return putObject(bucket, objectName, contentType, data, GcsCustomerEncryption.none(), null,
+                null, preconditions, baseUrl, requireOverwritePermission);
+    }
+
     public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
             byte[] data, Map<String, String> metadata, String baseUrl, Runnable requireOverwritePermission) {
         synchronized (bucketLock(bucket)) {

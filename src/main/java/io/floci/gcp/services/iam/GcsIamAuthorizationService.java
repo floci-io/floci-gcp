@@ -87,6 +87,19 @@ public class GcsIamAuthorizationService {
         });
     }
 
+    /** Uses a trusted service agent rather than inheriting the triggering request's credentials. */
+    public <T> T authorizeServiceObjectCreate(IamPrincipal principal, String bucket, String object,
+            Function<OverwriteAuthorization, T> mutation) {
+        return withObjectPolicyLocks(List.of(bucket), () -> {
+            IamResource resource = adapter.objectResource(bucket, object);
+            authorization.authorizeServicePrincipal(principal,
+                    new IamPermissionCheck("storage.objects.create", resource));
+            boolean overwrite = isAllowed(() -> authorization.authorizeServicePrincipal(principal,
+                    new IamPermissionCheck("storage.objects.delete", resource)));
+            return mutation.apply(new OverwriteAuthorization(overwrite));
+        });
+    }
+
     public <T> T authorizeMultipartWrite(String authorizationHeader, String bucket, String object,
             Supplier<T> mutation) {
         return withObjectPolicyLocks(List.of(bucket), () -> {

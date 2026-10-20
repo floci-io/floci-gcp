@@ -147,7 +147,7 @@ public class CloudLoggingController extends LoggingServiceV2Grpc.LoggingServiceV
         return stored;
     }
 
-    private static LogEntry toProto(StoredLogEntry stored) {
+    static LogEntry toProto(StoredLogEntry stored) {
         LogEntry.Builder builder = LogEntry.newBuilder()
                 .setLogName(stored.getLogName())
                 .setSeverity(LogSeverity.valueOf(stored.getSeverity() == null ? "DEFAULT" : stored.getSeverity()));

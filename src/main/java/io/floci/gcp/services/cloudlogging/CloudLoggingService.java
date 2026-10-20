@@ -116,6 +116,9 @@ public class CloudLoggingService {
         for (StoredLogEntry entry : entries) {
             entryStore.put(key(entry), entry);
         }
+        if (sinkService != null) {
+            sinkService.exportEntries(entries);
+        }
         LOG.debugf("writeLogEntries stored %d entries", entries.size());
     }
 

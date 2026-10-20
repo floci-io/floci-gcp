@@ -164,8 +164,8 @@ Non-positive page sizes are ignored, including when continuing from a page token
 The stored configuration includes the destination, opaque filter text, description, disabled flag,
 `includeChildren`, exclusions, and BigQuery options. Destination names can reference Cloud Storage,
 Pub/Sub, or BigQuery. Logging project and log-bucket destinations are unsupported. Destination
-existence and writer access are not checked. Sink filter text is stored without evaluation, including filters outside the
-`ListLogEntries` subset above.
+existence and writer access are checked at delivery time, not when configuring a sink. Filter text
+is retained verbatim, including expressions outside the routing subset below.
 
 Updates accept `destination`, `filter`, `description`, `disabled`, `include_children`, `exclusions`,
 and `bigquery_options` in the gRPC field mask, including valid nested BigQuery-option paths. REST
@@ -174,37 +174,106 @@ uses the API's compatibility default: `destination,filter,includeChildren`. Fiel
 are preserved, and masked scalar fields can be cleared. Invalid, immutable, and output-only mask
 paths fail with `INVALID_ARGUMENT`; a failed update leaves the stored sink unchanged.
 
-Writer identities are emulator stubs. Organization, folder, and billing-account sinks receive a
-generated service-account identity; project sinks use a legacy identity unless
-`uniqueWriterIdentity=true` is supplied. The identity remains stable across reads, updates, and
-restarts. A legacy project identity can be upgraded to a generated identity, but a generated project
-identity cannot be downgraded. These strings do not provision IAM service accounts or credentials,
-and do not reproduce Google's service-agent allocation. `customWriterIdentity` is unsupported.
-Updating a project sink with a generated identity requires `uniqueWriterIdentity=true`.
-Non-project sinks retain their generated identity regardless of this flag. Live Cloud Logging v2
-folder-sink checks on 2026-10-20 UTC confirmed this behavior over REST and gRPC: creation with
-either flag value and updates with `false`, `true`, then `false` all retained the writer identity.
-Legacy project identities require Pub/Sub and BigQuery destinations in the
-same project as the sink. Cloud Storage destinations do not encode their owning project; bucket
-ownership is not checked.
+Writer identities are stable service-account principals. New unique writers are shared by sinks
+under the same parent, following Cloud Logging's resource-shared service-agent model. Project
+writers use an emulated project number; folder writers use the `service-folder-{id}` form observed
+against live GCP. Organization and billing-account allocation is deterministic emulator behavior,
+not a reproduction of Google's account provisioning. Existing persisted writer identities remain
+unchanged, preserving destination grants. New sinks reuse an existing unique writer for their
+parent. Deleting a sink does not revoke its writer's IAM grants.
+
+Project sinks use the legacy `serviceAccount:cloud-logs@system.gserviceaccount.com` unless
+`uniqueWriterIdentity=true` is supplied. A legacy identity can be upgraded, but a unique project
+identity cannot be downgraded; updating it requires `uniqueWriterIdentity=true`. Non-project sinks
+always use a unique writer regardless of this flag. Live Cloud Logging v2 folder-sink checks on
+2026-10-20 UTC confirmed creation with either flag and updates with `false`, `true`, then `false`
+retain the identity over REST and gRPC.
+
+Writers are used directly by the internal IAM evaluator for destination writes. They do not mint
+OAuth tokens, inherit the ingestion caller's credentials, or call SignBlob. Sink creation does not
+create a user-managed IAM service account or signing key. `customWriterIdentity` is unsupported.
+Legacy project identities require Pub/Sub and BigQuery destinations in the same project as the
+sink. Legacy Cloud Storage delivery also requires a bucket owned by the sink's project; that
+check runs inside the destination policy locks at delivery time.
 
 Sink state uses `cloudlogging-sinks.json` through `StorageFactory` and the configured global storage
 mode. Persistent, hybrid, and WAL storage retain configuration, writer identity, and deletion across
 restarts. Memory storage retains state only for the process lifetime.
 
-Sink management does not deliver logs to any destination. `WriteLogEntries` does not export to
-Cloud Storage, Pub/Sub, BigQuery, or Logging buckets, and `includeChildren`, exclusions, and
-BigQuery options have no routing effect. Cloud Logging IAM enforcement is also unsupported,
-including when IAM enforcement is enabled for other services.
+## GCS export
+
+After accepting a non-dry-run `WriteLogEntries` request, both REST and gRPC ingestion select
+active Cloud Storage sinks and route matching entries. Request defaults, timestamps, insert IDs,
+and labels are applied before routing. Enabled exclusions remove matching entries. Disabled sinks
+and disabled exclusions are respected. Deleting a log does not delete objects already exported.
+Pub/Sub and BigQuery destinations can be configured but do not receive deliveries.
+
+Each local write produces immutable JSON-array batches of protobuf-JSON `LogEntry` objects,
+grouped by log ID and UTC timestamp hour. URL-encoded log IDs are decoded in object paths:
+`{logId}/YYYY/MM/DD/HH:00:00_HH:59:59_S{shard}.json`. Entries received in a different hour use
+`_A{shard}:{unixTime}.json`. Shards use random numeric identifiers and a create-only generation
+precondition, so batches never replace an existing object. Content type is `application/json`;
+internal storage fields are excluded.
+
+This emulator delivers promptly instead of waiting for GCP's hourly batches and initial 2-3 hour
+latency. Failed deliveries are logged and do not fail accepted Logging writes or block other
+sinks. Outage buffering, automatic retries, export metrics, production shard allocation, and
+exactly-once delivery are not implemented. A failed batch is not replayed automatically after
+permissions are granted; later writes can export normally.
+
+### Routing filters and hierarchy
+
+Routing uses a strict subset independent of the lenient `ListLogEntries` parser:
+
+- `AND`, implicit conjunction (including newlines), `OR`, `NOT`, and parentheses. As in Logging,
+  `OR` binds more tightly than `AND`.
+- `logName`, `severity`, `resource.type`, `resource.labels.<key>`, `labels.<key>`, `textPayload`,
+  `jsonPayload.<path>`, `timestamp`, `receiveTimestamp`, `insertId`, `trace`, and `spanId`.
+- Equality/inequality and ordering comparisons, string containment (`:`), and field presence
+  (`:*`). JSON numeric fields compare numerically; strings compare without case sensitivity.
+  Quoted label keys and JSON path components are supported, as are JSON arrays. JSON presence
+  distinguishes explicit nulls from missing keys. Missing scalar strings use `LogEntry` defaults;
+  missing map/JSON fields fail comparisons. Severity presence (`severity:*`) is unsupported because
+  the ingestion model does not preserve explicit default-enum presence.
+
+Unsupported expressions, functions, regular expressions, global searches, and unavailable payload
+fields stop delivery for the affected sink and produce a diagnostic. This also applies to enabled
+exclusions: an unsupported exclusion cannot accidentally allow the entry to escape. Configuration
+CRUD still retains these expressions for future support.
+
+A sink receives logs owned by its parent. Project ID/number aliases resolve through the project
+registry. `includeChildren` additionally routes projects with the matching direct folder or
+organization parent recorded by Resource Manager, or an explicitly recorded billing account.
+Nested folder ancestry is not modeled; unrelated or unknown hierarchies never match implicitly.
+
+### Destination IAM
+
+With `iam.authorization-mode=enforce`, grant the returned `writerIdentity`
+`roles/storage.objectCreator` on the destination bucket or its owning project. Export checks
+`storage.objects.create` against that principal, including supported IAM Conditions and project
+policy inheritance. A grant to the logging caller or source project does not grant access to a
+bucket owned by another project. Fresh shards need no delete permission. With enforcement disabled,
+export follows the emulator's usual IAM bypass.
+
+Sink configuration, selection, and delivery share one lock. Delete, disable, filter, exclusion,
+and destination updates wait for any in-flight local delivery; subsequent writes see the changed
+configuration. Destination policy locks are held through authorization and object publication in
+the existing order: sink lock, IAM policy locks, bucket lock, object lock. A policy revocation is
+ordered before or after the publication, never between its permission check and mutation.
+
+Sink management caller authorization remains unsupported and is tracked separately in #404.
 
 The wire contracts follow the [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto),
 the [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks),
 and the [Logging v2 discovery document](https://logging.googleapis.com/$discovery/rest?version=v2).
-Exact live-GCP validation messages and identity allocation have not been verified.
+Export semantics follow [Cloud Storage routing](https://docs.cloud.google.com/logging/docs/export/storage),
+[shared writer identities and destination permissions](https://docs.cloud.google.com/logging/docs/export/configure_export_v2),
+and the [Logging query language](https://docs.cloud.google.com/logging/docs/view/logging-query-language).
+Live verification covered folder identity behavior only, not export file bytes or exact validation messages.
 
 ## Not Yet Supported
 
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
-fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), sink export,
+fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), non-GCS sink export,
 log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
 semantics.

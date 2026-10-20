@@ -1,6 +1,7 @@
 package io.floci.gcp.services.iam;
 
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.credentials.GcsAuthorizationService;
 import io.floci.gcp.services.gcs.GcsIamAuthorizationAdapter;
@@ -210,6 +211,66 @@ class GcsIamAuthorizationServiceTest {
         } finally {
             executor.shutdown();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void serviceWriterCannotUseAnAnonymousBypassAndNeedsItsOwnCreateGrant() {
+        IamService iam = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        GcsIamAuthorizationService service = authorizationService(iam, new IamRoleCatalog());
+        IamPrincipal writer = IamPrincipal.serviceAccount("logging-agent@example.test");
+        assertThrows(GcpException.class, () -> service.authorizeServiceObjectCreate(writer, "bucket", "shard.json", overwrite -> "created"));
+        StoredPolicy grant = new StoredPolicy();
+        grant.setBindings(List.of(Map.of("role", "roles/storage.objectCreator", "members", List.of(writer.member()))));
+        iam.setPolicy("buckets/bucket", grant);
+        assertEquals("created", service.authorizeServiceObjectCreate(writer, "bucket", "shard.json", overwrite -> {
+            assertThrows(GcpException.class, overwrite::require);
+            return "created";
+        }));
+        assertThrows(GcpException.class, () -> service.authorizeServiceObjectCreate(
+                IamPrincipal.serviceAccount("different@example.test"), "bucket", "shard.json", overwrite -> "created"));
+        iam.setPolicy("buckets/bucket", new StoredPolicy());
+        assertThrows(GcpException.class, () -> service.authorizeServiceObjectCreate(writer, "bucket", "shard.json", overwrite -> "created"));
+    }
+
+    @Test
+    void serviceExportHoldsPolicyLocksUntilPublicationAndThenHonorsRevocation() throws Exception {
+        IamService iam = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        GcsIamAuthorizationService service = authorizationService(iam, new IamRoleCatalog());
+        IamPrincipal writer = IamPrincipal.serviceAccount("logging-agent@example.test");
+        StoredPolicy grant = new StoredPolicy();
+        grant.setBindings(List.of(Map.of("role", "roles/storage.objectCreator", "members", List.of(writer.member()))));
+        iam.setPolicy("projects/test-project", grant);
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<String> export = executor.submit(() -> service.authorizeServiceObjectCreate(writer, "bucket", "shard.json", overwrite -> {
+                publishing.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(exception);
+                }
+                return "published";
+            }));
+            assertTrue(publishing.await(5, TimeUnit.SECONDS));
+            CountDownLatch revoking = new CountDownLatch(1);
+            Future<?> revoke = executor.submit(() -> {
+                revoking.countDown();
+                iam.setPolicy("projects/test-project", new StoredPolicy());
+            });
+            try {
+                assertTrue(revoking.await(5, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> revoke.get(100, TimeUnit.MILLISECONDS));
+            } finally {
+                release.countDown();
+            }
+            assertEquals("published", export.get(5, TimeUnit.SECONDS));
+            revoke.get(5, TimeUnit.SECONDS);
+            assertThrows(GcpException.class, () -> service.authorizeServiceObjectCreate(writer, "bucket", "next.json", overwrite -> "created"));
+        } finally {
+            release.countDown();
         }
     }
 

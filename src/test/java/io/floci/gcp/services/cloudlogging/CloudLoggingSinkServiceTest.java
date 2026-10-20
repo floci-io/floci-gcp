@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -320,6 +321,83 @@ class CloudLoggingSinkServiceTest {
             assertTrue(backend.get(NAME).isEmpty());
         } finally {
             releaseMutation.countDown();
+        }
+    }
+
+    @Test
+    void listingDecodesOnlyTheRequestedPage() {
+        StorageBackend<String, StoredLogSink> backend = spy(new InMemoryStorage<>());
+        CloudLoggingSinkService service = new CloudLoggingSinkService(backend);
+        service.createSink(PARENT, REQUEST.toBuilder().setName("a").build(), true);
+        backend.put(PARENT + "/sinks/z", new StoredLogSink("not JSON", true));
+        clearInvocations(backend);
+
+        ListSinksResponse first = service.listSinks(PARENT, 1, null);
+        assertEquals("a", first.getSinks(0).getName());
+        verify(backend, never()).get(PARENT + "/sinks/z");
+        verify(backend, never()).scan(any());
+        assertThrows(GcpException.class, () -> service.listSinks(PARENT, 1, first.getNextPageToken()));
+    }
+
+    @Test
+    void resourceWritersAreSharedAndSurviveDeletingEverySink() {
+        CloudLoggingSinkService service = new CloudLoggingSinkService(new InMemoryStorage<>());
+        for (String parent : List.of("projects/core", PARENT, "folders/123", "billingAccounts/abc")) {
+            LogSink first = service.createSink(parent, REQUEST, true);
+            LogSink second = service.createSink(parent, REQUEST.toBuilder().setName("second").build(), true);
+            assertEquals(first.getWriterIdentity(), second.getWriterIdentity());
+            service.deleteSink(parent + "/sinks/" + REQUEST.getName());
+            service.deleteSink(parent + "/sinks/second");
+            assertEquals(first.getWriterIdentity(), service.createSink(parent, REQUEST, true).getWriterIdentity());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "disable", "destination", "filter", "exclusions"})
+    void deliveryAndSinkMutationsShareOneBoundary(String mutation) throws Exception {
+        CloudLoggingGcsExporter exporter = mock(CloudLoggingGcsExporter.class);
+        CloudLoggingSinkService service = new CloudLoggingSinkService(new InMemoryStorage<>(), exporter);
+        LogSink request = REQUEST.toBuilder().setDestination("storage.googleapis.com/logs").build();
+        service.createSink(PARENT, request, true);
+        CountDownLatch delivering = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            delivering.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(exporter).export(eq(PARENT), any(), any());
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> delivery = executor.submit(() -> service.exportEntries(List.of()));
+            assertTrue(delivering.await(5, TimeUnit.SECONDS));
+            CountDownLatch started = new CountDownLatch(1);
+            Future<?> change = executor.submit(() -> {
+                started.countDown();
+                switch (mutation) {
+                    case "delete" -> service.deleteSink(NAME);
+                    case "disable" -> service.updateSink(NAME, request.toBuilder().setDisabled(true).build(), mask("disabled"), true);
+                    case "destination" -> service.updateSink(NAME, request.toBuilder().setDestination("storage.googleapis.com/other").build(), mask("destination"), true);
+                    case "filter" -> service.updateSink(NAME, request.toBuilder().setFilter("severity=ERROR").build(), mask("filter"), true);
+                    case "exclusions" -> service.updateSink(NAME, request.toBuilder().addExclusions(LogExclusion.newBuilder().setName("all").setFilter("severity>=DEFAULT")).build(), mask("exclusions"), true);
+                    default -> fail(mutation);
+                }
+            });
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> change.get(100, TimeUnit.MILLISECONDS));
+            } finally {
+                release.countDown();
+            }
+            delivery.get(5, TimeUnit.SECONDS);
+            change.get(5, TimeUnit.SECONDS);
+            clearInvocations(exporter);
+            service.exportEntries(List.of());
+            if (mutation.equals("delete") || mutation.equals("disable")) {
+                verifyNoInteractions(exporter);
+            } else {
+                verify(exporter).export(eq(PARENT), eq(service.getSink(NAME)), any());
+            }
+        } finally {
+            release.countDown();
         }
     }
 

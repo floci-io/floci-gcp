@@ -16,8 +16,13 @@ import com.google.firestore.v1.CommitRequest;
 import com.google.firestore.v1.Document;
 import com.google.firestore.v1.FirestoreGrpc;
 import com.google.firestore.v1.Write;
+import com.google.logging.v2.ConfigServiceV2Grpc;
+import com.google.logging.v2.CreateSinkRequest;
+import com.google.logging.v2.DeleteSinkRequest;
+import com.google.logging.v2.GetSinkRequest;
 import com.google.logging.v2.ListLogEntriesRequest;
 import com.google.logging.v2.LogEntry;
+import com.google.logging.v2.LogSink;
 import com.google.logging.v2.LoggingServiceV2Grpc;
 import com.google.logging.v2.WriteLogEntriesRequest;
 import com.google.protobuf.Any;
@@ -356,6 +361,35 @@ class ServiceUsageEnforcementIntegrationTest {
         assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
         assertEquals("logging.googleapis.com", errorInfo(error).getMetadataOrThrow("service"));
         assertEquals("projects/" + disabled, errorInfo(error).getMetadataOrThrow("consumer"));
+    }
+
+    @Test
+    void sinkManagementUsesTheOwningProjectsLoggingServiceUsageStateAcrossTransports() {
+        String project = "su-enforce-logging-sinks";
+        String parent = "projects/" + project;
+        String name = parent + "/sinks/usage-test";
+        enable(project, "logging.googleapis.com");
+        ConfigServiceV2Grpc.ConfigServiceV2BlockingStub logging = ConfigServiceV2Grpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        logging.createSink(CreateSinkRequest.newBuilder().setParent(parent).setUniqueWriterIdentity(true)
+                .setSink(LogSink.newBuilder().setName("usage-test").setFilter("original")
+                        .setDestination("pubsub.googleapis.com/projects/destination/topics/logs")).build());
+        given().when().get("/v2/" + name).then().statusCode(200).body("filter", equalTo("original"));
+        disable(project, "logging.googleapis.com");
+        try {
+            StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
+                    () -> logging.getSink(GetSinkRequest.newBuilder().setSinkName(name).build()));
+            assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
+            assertEquals("projects/" + project, errorInfo(error).getMetadataOrThrow("consumer"));
+            given().contentType("application/json").queryParam("updateMask", "filter")
+                    .queryParam("uniqueWriterIdentity", true).body(Map.of("name", "usage-test", "filter", "denied"))
+                    .when().put("/v2/" + name).then().statusCode(403)
+                    .body("error.details[0].metadata.service", equalTo("logging.googleapis.com"));
+        } finally {
+            enable(project, "logging.googleapis.com");
+        }
+        assertEquals("original", logging.getSink(GetSinkRequest.newBuilder().setSinkName(name).build()).getFilter());
+        logging.deleteSink(DeleteSinkRequest.newBuilder().setSinkName(name).build());
     }
 
     @Test

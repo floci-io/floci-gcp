@@ -1,7 +1,8 @@
 # Cloud Logging
 
 floci-gcp emulates Google Cloud Logging over gRPC and REST using the real
-`google.logging.v2.LoggingServiceV2` protocol. The primary use case is **asserting what the app
+`google.logging.v2.LoggingServiceV2` and sink-management methods of
+`google.logging.v2.ConfigServiceV2`. The primary use case is **asserting what the app
 under test logged**: write structured entries, then `ListLogEntries` back with a filter and verify
 the payload, severity, and resource.
 
@@ -138,9 +139,72 @@ regex, and nested parentheses are not supported; unrecognized clauses are ignore
 - `ListLogEntries`
 - `ListLogs`
 - `DeleteLog`
+- `CreateSink`, `GetSink`, `ListSinks`, `UpdateSink`, `DeleteSink` over gRPC and REST JSON
+
+## Sink configuration
+
+Sink management accepts `projects/{id}`, `organizations/{id}`, `folders/{id}`, and
+`billingAccounts/{id}` parents. Each parent has its own namespace. Parent names are validated
+syntactically; an organization, folder, or billing account does not have to be provisioned in a
+separate resource catalog.
+
+| Operation | REST method and path |
+|---|---|
+| Create | `POST /v2/{parent}/sinks` |
+| Get | `GET /v2/{parent}/sinks/{sinkId}` |
+| List | `GET /v2/{parent}/sinks` |
+| Update | `PUT` or `PATCH /v2/{parent}/sinks/{sinkId}` |
+| Delete | `DELETE /v2/{parent}/sinks/{sinkId}` |
+
+The `LogSink.name` field is the short sink identifier, such as `workspace-events`. Get, update,
+and delete requests identify the sink with the full path, such as
+`organizations/123456789/sinks/workspace-events`. List supports `pageSize` and `pageToken`.
+Non-positive page sizes are ignored, including when continuing from a page token.
+
+The stored configuration includes the destination, opaque filter text, description, disabled flag,
+`includeChildren`, exclusions, and BigQuery options. Destination names can reference Cloud Storage,
+Pub/Sub, or BigQuery. Logging project and log-bucket destinations are unsupported. Destination
+existence and writer access are not checked. Sink filter text is stored without evaluation, including filters outside the
+`ListLogEntries` subset above.
+
+Updates accept `destination`, `filter`, `description`, `disabled`, `include_children`, `exclusions`,
+and `bigquery_options` in the gRPC field mask, including valid nested BigQuery-option paths. REST
+uses the corresponding lowerCamelCase mask names, such as `includeChildren`. Omitting the mask
+uses the API's compatibility default: `destination,filter,includeChildren`. Fields outside the mask
+are preserved, and masked scalar fields can be cleared. Invalid, immutable, and output-only mask
+paths fail with `INVALID_ARGUMENT`; a failed update leaves the stored sink unchanged.
+
+Writer identities are emulator stubs. Organization, folder, and billing-account sinks receive a
+generated service-account identity; project sinks use a legacy identity unless
+`uniqueWriterIdentity=true` is supplied. The identity remains stable across reads, updates, and
+restarts. A legacy project identity can be upgraded to a generated identity, but a generated project
+identity cannot be downgraded. These strings do not provision IAM service accounts or credentials,
+and do not reproduce Google's service-agent allocation. `customWriterIdentity` is unsupported.
+Updating a project sink with a generated identity requires `uniqueWriterIdentity=true`.
+Non-project sinks retain their generated identity regardless of this flag. Live Cloud Logging v2
+folder-sink checks on 2026-10-20 UTC confirmed this behavior over REST and gRPC: creation with
+either flag value and updates with `false`, `true`, then `false` all retained the writer identity.
+Legacy project identities require Pub/Sub and BigQuery destinations in the
+same project as the sink. Cloud Storage destinations do not encode their owning project; bucket
+ownership is not checked.
+
+Sink state uses `cloudlogging-sinks.json` through `StorageFactory` and the configured global storage
+mode. Persistent, hybrid, and WAL storage retain configuration, writer identity, and deletion across
+restarts. Memory storage retains state only for the process lifetime.
+
+Sink management does not deliver logs to any destination. `WriteLogEntries` does not export to
+Cloud Storage, Pub/Sub, BigQuery, or Logging buckets, and `includeChildren`, exclusions, and
+BigQuery options have no routing effect. Cloud Logging IAM enforcement is also unsupported,
+including when IAM enforcement is enabled for other services.
+
+The wire contracts follow the [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto),
+the [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks),
+and the [Logging v2 discovery document](https://logging.googleapis.com/$discovery/rest?version=v2).
+Exact live-GCP validation messages and identity allocation have not been verified.
 
 ## Not Yet Supported
 
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
-fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), sinks and
-buckets (`ConfigServiceV2`), advanced filter operators, and retention/dedup semantics.
+fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), sink export,
+log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
+semantics.

@@ -12,7 +12,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 | [Firestore](firestore.md) | gRPC | `google.firestore.v1.Firestore` |
 | [Datastore](datastore.md) | gRPC + HTTP/protobuf | `google.datastore.v1.Datastore`, `/v1/projects/{project}:{method}` |
 | [Secret Manager](secret-manager.md) | gRPC + REST JSON | `google.cloud.secretmanager.v1.SecretManagerService`, `/v1/projects/{project}/secrets` |
-| [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, `/v2/entries:write`, `/v2/entries:list` |
+| [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, sink methods of `ConfigServiceV2`, `/v2/entries:write`, `/v2/entries:list`, `/v2/{parent}/sinks` |
 | [Cloud KMS](kms.md) | gRPC + REST JSON | `google.cloud.kms.v1.KeyManagementService`, `/v1/projects/{project}/locations/{location}/keyRings` |
 | [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts` |
 | [IAM Credentials](iam-credentials.md) | REST JSON | `/v1/projects/-/serviceAccounts/{sa}:generateAccessToken`, `:signBlob`, `:signJwt` |

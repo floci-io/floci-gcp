@@ -3,10 +3,10 @@ package io.floci.gcp.core.common;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * Registers Cloud Run and Cloud Functions protobuf message classes (and the shared
+ * Registers Cloud Run, Cloud Functions, and Logging sink protobuf message classes (and the shared
  * common-protos / LRO / IAM types in their JSON request/response graphs) for
- * native-image reflection. These services use REST/httpjson with proto-only stubs, so
- * unlike the gRPC services they are not auto-registered by quarkus-grpc; without this,
+ * native-image reflection. Cloud Run and Cloud Functions use REST/httpjson with proto-only stubs;
+ * Logging sink configuration also uses protobuf JSON for REST and durable storage. Without this,
  * protobuf JsonFormat fails at runtime (e.g. NoSuchMethodException on getServicesList,
  * or request parsing errors for types like com.google.api.LaunchStage).
  */
@@ -1642,6 +1642,15 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
         "com.google.logging.type.LogSeverity",
         "com.google.logging.type.LogSeverity$1",
         "com.google.logging.type.LogSeverityProto",
+        "com.google.logging.v2.BigQueryOptions",
+        "com.google.logging.v2.BigQueryOptions$Builder",
+        "com.google.logging.v2.ListSinksResponse",
+        "com.google.logging.v2.ListSinksResponse$Builder",
+        "com.google.logging.v2.LogExclusion",
+        "com.google.logging.v2.LogExclusion$Builder",
+        "com.google.logging.v2.LogSink",
+        "com.google.logging.v2.LogSink$Builder",
+        "com.google.logging.v2.LogSink$VersionFormat",
         "com.google.longrunning.CancelOperationRequest",
         "com.google.longrunning.CancelOperationRequest$1",
         "com.google.longrunning.CancelOperationRequest$Builder",
@@ -1677,6 +1686,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
         "com.google.longrunning.WaitOperationRequest$1",
         "com.google.longrunning.WaitOperationRequest$Builder",
         "com.google.longrunning.WaitOperationRequestOrBuilder",
+        "com.google.protobuf.Timestamp",
+        "com.google.protobuf.Timestamp$Builder",
         "com.google.rpc.BadRequest",
         "com.google.rpc.BadRequest$1",
         "com.google.rpc.BadRequest$Builder",

@@ -38,13 +38,15 @@ public class CloudLoggingService {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
+    private final CloudLoggingSinkService sinkService;
 
     @Inject
     public CloudLoggingService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, CloudLoggingSinkService sinkService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
+        this.sinkService = sinkService;
         this.entryStore = storageFactory.createGlobal("cloudlogging-entries", "cloudlogging-entries.json",
                 new TypeReference<Map<String, StoredLogEntry>>() {});
     }
@@ -54,6 +56,7 @@ public class CloudLoggingService {
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.sinkService = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -61,11 +64,13 @@ public class CloudLoggingService {
                 .enabled(config.services().logging().enabled())
                 .storageKey("logging")
                 .protocol(ServiceProtocol.GRPC)
-                .resourceClasses(CloudLoggingController.class)
+                .resourceClasses(CloudLoggingController.class, CloudLoggingConfigController.class,
+                        CloudLoggingConfigHttpController.class)
                 .api("logging.googleapis.com", "Cloud Logging API", CloudLoggingHttpController.class)
                 .usageAdapter(new CloudLoggingServiceUsageAdapter())
                 .build());
         grpcServerManager.bind(new CloudLoggingController(this));
+        grpcServerManager.bind(new CloudLoggingConfigController(sinkService));
     }
 
     // ── Write ────────────────────────────────────────────────────────────────

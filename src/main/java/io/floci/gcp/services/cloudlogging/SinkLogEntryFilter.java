@@ -9,6 +9,8 @@ import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -102,7 +104,7 @@ final class SinkLogEntryFilter {
             return entry -> compare(Integer.compare(severity(entry.getSeverity()), target), operator);
         }
         if (field.equals("timestamp") || field.equals("receiveTimestamp")) {
-            Instant target = Instant.parse(expected);
+            Instant target = timestamp(expected);
             return entry -> accessor.apply(entry) instanceof String actual
                     && compare(Instant.parse(actual).compareTo(target), operator);
         }
@@ -205,7 +207,8 @@ final class SinkLogEntryFilter {
         if (value instanceof List<?> list) {
             return list.stream().anyMatch(item -> matches(item, operator, expected));
         }
-        if (value == null || value instanceof Map<?, ?>) {
+        if (value == null || value instanceof Map<?, ?>
+                || (operator.equals(":") && !(value instanceof String))) {
             return false;
         }
         if (value instanceof Boolean actual) {
@@ -225,6 +228,13 @@ final class SinkLogEntryFilter {
         String actual = STRING_NORMALIZER.normalize(value.toString());
         String target = STRING_NORMALIZER.normalize(expected);
         return operator.equals(":") ? actual.contains(target) : compare(actual.compareTo(target), operator);
+    }
+
+    private static Instant timestamp(String value) {
+        if (value.matches("[0-9]{4}-[0-9]{2}-[0-9]{2}")) {
+            return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant();
+        }
+        return Instant.parse(value);
     }
 
     private static int severity(String value) {

@@ -14,14 +14,16 @@ import com.google.logging.v2.LogEntry;
 import com.google.logging.v2.LogExclusion;
 import com.google.logging.v2.LogSink;
 import com.google.logging.v2.WriteLogEntriesRequest;
-import com.google.protobuf.util.JsonFormat;
 import com.google.protobuf.ListValue;
-import com.google.protobuf.Struct;
 import com.google.protobuf.NullValue;
+import com.google.protobuf.Struct;
+import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import com.google.protobuf.util.JsonFormat;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,28 +45,31 @@ class LoggingExportTest {
         try (ConfigClient config = ConfigClient.create(settings); LoggingClient logging = TestFixtures.loggingClient()) {
             config.createSink(CreateSinkRequest.newBuilder().setParent(parent).setUniqueWriterIdentity(true)
                     .setSink(LogSink.newBuilder().setName(id).setDestination("storage.googleapis.com/" + id)
-                            .setFilter("logName=\"" + log + "\" AND severity>=WARNING")
-                            .addExclusions(LogExclusion.newBuilder().setName("noise").setFilter("textPayload:noisy OR textPayload=STRASSE OR jsonPayload.count=skip OR jsonPayload.message=skip"))
+                            .setFilter("logName=\"" + log + "\" AND severity>=WARNING"
+                                    + " AND timestamp>=\"2026-10-20\" AND timestamp<\"2026-10-21\"")
+                            .addExclusions(LogExclusion.newBuilder().setName("noise").setFilter("textPayload:noisy OR textPayload=STRASSE"
+                                    + " OR jsonPayload.count=skip OR jsonPayload.message=skip"
+                                    + " OR jsonPayload.message:true OR jsonPayload.count:7"))
                             .addExclusions(LogExclusion.newBuilder().setName("null-field").setFilter("jsonPayload.secret:* OR jsonPayload.message=1 OR jsonPayload.message=true"))).build());
             try {
                 logging.writeLogEntries(WriteLogEntriesRequest.newBuilder().setLogName(log)
                         .setResource(MonitoredResource.newBuilder().setType("global"))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
                                 .putFields("message", Value.newBuilder().setNumberValue(1).build())))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
                                 .putFields("message", Value.newBuilder().setBoolValue(true).build())))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
                                 .putFields("message", Value.newBuilder().setStructValue(Struct.newBuilder()
                                         .putFields("nested", Value.newBuilder().setStringValue("skip").build())).build())
                                 .putFields("secret", Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build())))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.INFO).setTextPayload("filtered"))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("noisy"))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("Straße"))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setTextPayload("exported"))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.WARNING).setJsonPayload(Struct.newBuilder()
+                        .addEntries(entry().setSeverity(LogSeverity.INFO).setTextPayload("filtered"))
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setTextPayload("noisy"))
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setTextPayload("Straße"))
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setTextPayload("exported"))
+                        .addEntries(entry().setSeverity(LogSeverity.WARNING).setJsonPayload(Struct.newBuilder()
                                 .putFields("message", Value.newBuilder().setStringValue("structured-export").build())
                                 .putFields("count", Value.newBuilder().setNumberValue(7).build())))
-                        .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
+                        .addEntries(entry().setSeverity(LogSeverity.ERROR).setJsonPayload(Struct.newBuilder()
                                 .putFields("secret", Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build()))).build());
                 List<Blob> objects = new ArrayList<>();
                 storage.list(id).iterateAll().forEach(objects::add);
@@ -95,7 +100,7 @@ class LoggingExportTest {
                     assertThat(entry.getJsonPayload().getFieldsOrThrow("count").getNumberValue()).isEqualTo(7);
                 });
                 logging.writeLogEntries(WriteLogEntriesRequest.newBuilder().setLogName(log).setDryRun(true)
-                        .addEntries(LogEntry.newBuilder().setTextPayload("dry-run").setSeverity(LogSeverity.ERROR)).build());
+                        .addEntries(entry().setTextPayload("dry-run").setSeverity(LogSeverity.ERROR)).build());
                 List<Blob> after = new ArrayList<>();
                 storage.list(id).iterateAll().forEach(after::add);
                 assertThat(after).hasSize(1);
@@ -111,4 +116,9 @@ class LoggingExportTest {
             }
         }
     }
+    private static LogEntry.Builder entry() {
+        return LogEntry.newBuilder().setTimestamp(Timestamp.newBuilder()
+                .setSeconds(Instant.parse("2026-10-20T01:00:00Z").getEpochSecond()));
+    }
+
 }

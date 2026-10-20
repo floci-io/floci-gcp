@@ -166,13 +166,6 @@ public class CloudLoggingSinkService {
         if (!unique) {
             return "serviceAccount:cloud-logs@system.gserviceaccount.com";
         }
-        // Preserve accounts already granted destination access by earlier emulator versions.
-        for (String key : sinks.keys().stream().filter(key -> key.startsWith(parent + "/sinks/")).sorted().toList()) {
-            StoredLogSink stored = requireSink(key);
-            if (stored.uniqueWriterIdentity()) {
-                return read(stored).getWriterIdentity();
-            }
-        }
         String[] owner = parent.split("/", 2);
         String account = switch (owner[0]) {
             case "projects" -> owner[1].matches("[0-9]+") ? owner[1] : ProjectNumbers.of(owner[1]);

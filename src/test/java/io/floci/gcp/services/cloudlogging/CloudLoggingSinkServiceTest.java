@@ -7,6 +7,7 @@ import com.google.logging.v2.LogSink;
 import com.google.protobuf.FieldMask;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
@@ -399,6 +400,27 @@ class CloudLoggingSinkServiceTest {
         } finally {
             release.countDown();
         }
+    }
+
+    @Test
+    void storedIdentitiesDoNotDetermineTheWriterForNewSinksOrLegacyUpgrades() {
+        InMemoryStorage<String, StoredLogSink> backend = new InMemoryStorage<>();
+        CloudLoggingSinkService service = new CloudLoggingSinkService(backend);
+        String parent = "projects/123456789";
+        LogSink existing = REQUEST.toBuilder().setName("existing")
+                .setWriterIdentity("serviceAccount:persisted@example.test").build();
+        backend.put(parent + "/sinks/existing", new StoredLogSink(ProtoJson.print(existing), true));
+        String expected = "serviceAccount:service-123456789@gcp-sa-logging.iam.gserviceaccount.com";
+        LogSink created = service.createSink(parent, REQUEST, true);
+        assertEquals(expected, created.getWriterIdentity());
+        assertEquals(expected, service.createSink(parent, REQUEST.toBuilder().setName("second").build(), true).getWriterIdentity());
+        assertEquals(existing, service.getSink(parent + "/sinks/existing"));
+        assertEquals(existing.getWriterIdentity(), service.updateSink(parent + "/sinks/existing",
+                LogSink.newBuilder().setDescription("updated").build(), mask("description"), true).getWriterIdentity());
+        service.createSink(parent, REQUEST.toBuilder().setName("legacy")
+                .setDestination("pubsub.googleapis.com/" + parent + "/topics/events").build(), false);
+        assertEquals(expected, service.updateSink(parent + "/sinks/legacy", LogSink.newBuilder().build(),
+                mask("description"), true).getWriterIdentity());
     }
 
     private StorageFactory factory(String mode) {

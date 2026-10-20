@@ -23,6 +23,8 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -260,6 +262,43 @@ class CloudLoggingExportIntegrationTest {
             assertEquals(1, storage.listObjects(bucket).size());
         } finally {
             sinks.deleteSink(parent + "/sinks/" + id);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true"})
+    void containmentKeepsMatchingStringsWhenTheBatchAlsoContainsNumbersAndBooleans(String expected) throws Exception {
+        String bucket = bucket();
+        String exclusionBucket = bucket();
+        String parent = "projects/test-project";
+        String id = "containment-" + UUID.randomUUID();
+        String log = parent + "/logs/" + id;
+        String scope = "logName=\"" + log + "\"";
+        LogSink sink = LogSink.newBuilder().setName(id).setDestination("storage.googleapis.com/" + bucket)
+                .setFilter(scope + " AND jsonPayload.kind:" + expected).build();
+        sinks.createSink(parent, sink, true);
+        sinks.createSink(parent, sink.toBuilder().setName(id + "-exclusion")
+                .setDestination("storage.googleapis.com/" + exclusionBucket).setFilter(scope)
+                .addExclusions(LogExclusion.newBuilder().setName("matching-string").setFilter("jsonPayload.kind:" + expected)).build(), true);
+        try {
+            given().urlEncodingEnabled(false).contentType("application/json").body(Map.of("logName", log,
+                    "entries", List.of(Map.of("jsonPayload", Map.of("kind", "a" + expected)),
+                            Map.of("jsonPayload", Map.of("kind", 1)), Map.of("jsonPayload", Map.of("kind", true)))))
+                    .post("/v2/entries:write").then().statusCode(200);
+            List<GcsObjectMeta> included = storage.listObjects(bucket);
+            assertEquals(1, included.size());
+            JsonNode exported = json.readTree(storage.getObjectData(bucket, included.getFirst().getName()));
+            assertEquals(1, exported.size());
+            assertEquals("a" + expected, exported.get(0).path("jsonPayload").path("kind").asText());
+            List<GcsObjectMeta> excluded = storage.listObjects(exclusionBucket);
+            assertEquals(1, excluded.size());
+            JsonNode remainder = json.readTree(storage.getObjectData(exclusionBucket, excluded.getFirst().getName()));
+            assertEquals(2, remainder.size());
+            assertTrue(remainder.get(0).path("jsonPayload").path("kind").isNumber());
+            assertTrue(remainder.get(1).path("jsonPayload").path("kind").isBoolean());
+        } finally {
+            sinks.deleteSink(parent + "/sinks/" + id);
+            sinks.deleteSink(parent + "/sinks/" + id + "-exclusion");
         }
     }
 

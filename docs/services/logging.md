@@ -179,7 +179,7 @@ under the same parent, following Cloud Logging's resource-shared service-agent m
 writers use an emulated project number; folder writers use the `service-folder-{id}` form observed
 against live GCP. Organization and billing-account allocation is deterministic emulator behavior,
 not a reproduction of Google's account provisioning. Existing persisted writer identities remain
-unchanged, preserving destination grants. New sinks reuse an existing unique writer for their
+unchanged on reads and ordinary updates. New unique identities are computed directly from the
 parent. Deleting a sink does not revoke its writer's IAM grants.
 
 Project sinks use the legacy `serviceAccount:cloud-logs@system.gserviceaccount.com` unless
@@ -232,7 +232,8 @@ Routing uses a strict subset independent of the lenient `ListLogEntries` parser:
 - Equality/inequality and ordering comparisons, string containment (`:`), and field presence
   (`:*`). JSON numeric fields compare numerically; incompatible object/scalar comparisons and failed
   scalar conversions do not match. Strings use Unicode NFKC case folding for equality, ordering,
-  and containment.
+  and containment. Containment against numeric, Boolean, and object values does not match.
+  Timestamp operands accept RFC 3339 timestamps or ISO 8601 dates (`YYYY-MM-DD`); dates use midnight UTC.
   Quoted label keys and JSON path components are supported, as are JSON arrays. JSON presence
   distinguishes explicit nulls from missing keys. Missing scalar strings use `LogEntry` defaults;
   missing map/JSON fields fail comparisons. Severity presence (`severity:*`) is unsupported because
@@ -272,7 +273,8 @@ and the [Logging v2 discovery document](https://logging.googleapis.com/$discover
 Export semantics follow [Cloud Storage routing](https://docs.cloud.google.com/logging/docs/export/storage),
 [shared writer identities and destination permissions](https://docs.cloud.google.com/logging/docs/export/configure_export_v2),
 and the [Logging query language](https://docs.cloud.google.com/logging/docs/view/logging-query-language).
-Live verification covered folder identity behavior only, not export file bytes or exact validation messages.
+Live verification covered folder identity behavior and date-only timestamp comparisons at midnight UTC.
+Export file bytes and exact validation messages were not verified live.
 
 ## Not Yet Supported
 

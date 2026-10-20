@@ -99,7 +99,9 @@ public class GcsXmlDownloadController {
         authorize(() -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath));
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
-        return GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding);
+        return GcsMediaResponses.withResponseOverrides(
+                GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding),
+                uriInfo.getQueryParameters());
     }
 
     @PUT

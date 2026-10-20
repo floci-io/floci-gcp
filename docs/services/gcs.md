@@ -28,6 +28,7 @@ ACLs and GCS v2 data methods are not IAM-enforced. See
 | `FLOCI_GCP_SERVICES_GCS_ENABLED` | `true` | Enable/disable Cloud Storage |
 | `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable or streaming upload session is dropped, matching the real GCS seven-day session window. Lower it on long-lived instances to reclaim buffered bytes sooner |
 | `FLOCI_GCP_SERVICES_GCS_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | How often abandoned upload sessions are swept; `0` disables the sweeper |
+| `FLOCI_GCP_SERVICES_GCS_SOFT_DELETE_SWEEP_INTERVAL_SECONDS` | `3600` | How often soft-deleted objects past their `hardDeleteTime` are deleted for good; `0` disables the sweeper |
 | `FLOCI_GCP_BASE_URL` | `http://localhost:4588` | Base URL embedded in object URLs and pre-signed URLs |
 
 ## Emulator Variable
@@ -379,7 +380,13 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   same-class, same-location copy finishes in one call whatever limit is sent, as in GCS)
 - `hmacKeys` are stored through the emulator's storage backend, so they survive restarts in
   persistent mode and are cleared by the reset endpoint
-- Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`)
+- Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`).
+  A bucket created without a policy gets the GCS default of `retentionDurationSeconds: "604800"`
+  (7 days), REST and gRPC alike. `0` turns soft delete off, and any other value must fall between
+  7 and 90 days, otherwise the request fails with `400` and `reason: invalid`. `effectiveTime` is
+  set by the server and moves forward when the retention grows. Buckets saved by older emulator
+  versions keep the policy they had. Once its `hardDeleteTime` passes, a soft-deleted object
+  leaves the listing and can no longer be restored, and a background sweep frees its bytes
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`), including when the container's published port
   differs from its internal one (`docker run -p 9000:4588`)

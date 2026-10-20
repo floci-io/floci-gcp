@@ -289,9 +289,6 @@ public class GcsService {
                     bucket.setRetentionPolicy(
                             withEffectiveTime((Map<String, Object>) body.get("retentionPolicy")));
                 }
-                if (body.containsKey("softDeletePolicy")) {
-                    bucket.setSoftDeletePolicy((Map<String, Object>) body.get("softDeletePolicy"));
-                }
                 if (body.containsKey("iamConfiguration")) {
                     bucket.setIamConfiguration(updateIamConfiguration(
                             null, (Map<String, Object>) body.get("iamConfiguration"), true));
@@ -300,6 +297,10 @@ public class GcsService {
                     bucket.setDefaultEventBasedHold((Boolean) body.get("defaultEventBasedHold"));
                 }
             }
+            bucket.setSoftDeletePolicy(softDeletePolicy(
+                    body != null && body.get("softDeletePolicy") instanceof Map<?, ?> requested
+                            ? (Map<String, Object>) requested : Map.of(),
+                    null));
             bucketStore.put(name, bucket);
             return bucket;
         }
@@ -419,7 +420,9 @@ public class GcsService {
                         withEffectiveTime((Map<String, Object>) patch.get("retentionPolicy")));
             }
             if (patch.containsKey("softDeletePolicy")) {
-                bucket.setSoftDeletePolicy((Map<String, Object>) patch.get("softDeletePolicy"));
+                bucket.setSoftDeletePolicy(patch.get("softDeletePolicy") instanceof Map<?, ?> requested
+                        ? softDeletePolicy((Map<String, Object>) requested, bucket.getSoftDeletePolicy())
+                        : null);
             }
             if (patch.containsKey("iamConfiguration")) {
                 bucket.setIamConfiguration(updatedIamConfiguration);
@@ -975,10 +978,12 @@ public class GcsService {
     //
     // With a softDeletePolicy on the bucket, a deleted object is retained under a separate key
     // namespace instead of vanishing: it disappears from live listings, shows up under
-    // ?softDeleted=true, and can be restored by generation. Real GCS has had this on by default
-    // since 2024, so code written against production may rely on being able to undo a delete.
+    // ?softDeleted=true, and can be restored by generation until its hardDeleteTime. New buckets
+    // get the seven-day policy real GCS applies, and GcsSoftDeleteReaper purges expired objects.
 
     private static final String SOFT_DELETE_MARKER = "\0softDeleted\0";
+    private static final long DEFAULT_SOFT_DELETE_RETENTION_SECONDS = 604_800L;
+    private static final long MAX_SOFT_DELETE_RETENTION_SECONDS = 7_776_000L;
 
     private void migrateLegacyObjectKeys() {
         List<String> pending = new ArrayList<>();
@@ -1100,18 +1105,96 @@ public class GcsService {
     }
 
     private long softDeleteRetentionSeconds(String bucket) {
-        Map<String, Object> policy = bucketStore.get(bucket)
-                .map(GcsBucket::getSoftDeletePolicy)
-                .orElse(null);
-        if (policy == null) {
-            return 0L;
-        }
-        Object duration = policy.get("retentionDurationSeconds");
+        return retentionSeconds(bucketStore.get(bucket).map(GcsBucket::getSoftDeletePolicy).orElse(null));
+    }
+
+    private static long retentionSeconds(Map<String, Object> policy) {
+        Object duration = policy == null ? null : policy.get("retentionDurationSeconds");
         try {
             return duration == null ? 0L : Long.parseLong(String.valueOf(duration));
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    /**
+     * The stored form of a requested soft delete policy. A bucket created without one gets the
+     * seven-day default, {@code 0} disables soft delete, and other values must fall between 7 and
+     * 90 days. {@code effectiveTime} is server-determined and moves forward when the retention
+     * grows, per the storage/v1 Bucket resource.
+     */
+    private static Map<String, Object> softDeletePolicy(Map<String, Object> requested, Map<String, Object> current) {
+        Object duration = requested.get("retentionDurationSeconds");
+        long retention;
+        if (duration == null) {
+            retention = current != null ? retentionSeconds(current) : DEFAULT_SOFT_DELETE_RETENTION_SECONDS;
+        } else {
+            try {
+                retention = Long.parseLong(String.valueOf(duration));
+            } catch (NumberFormatException e) {
+                throw invalidSoftDeleteRetention(duration);
+            }
+        }
+        if (retention != 0
+                && (retention < DEFAULT_SOFT_DELETE_RETENTION_SECONDS || retention > MAX_SOFT_DELETE_RETENTION_SECONDS)) {
+            throw invalidSoftDeleteRetention(duration);
+        }
+        Map<String, Object> policy = new LinkedHashMap<>();
+        policy.put("retentionDurationSeconds", Long.toString(retention));
+        if (retention > 0) {
+            Object effectiveTime = current == null ? null : current.get("effectiveTime");
+            policy.put("effectiveTime", effectiveTime == null || retention > retentionSeconds(current)
+                    ? nowTimestamp() : effectiveTime);
+        }
+        return policy;
+    }
+
+    private static GcpException invalidSoftDeleteRetention(Object duration) {
+        return GcpException.invalidArgument("Invalid softDeletePolicy.retentionDurationSeconds: " + duration
+                + ". It must be 0, which disables soft delete, or between 604800 (7 days) and 7776000 (90 days).")
+                .withReason("invalid");
+    }
+
+    private static boolean isPastHardDeleteTime(GcsObjectMeta meta, Instant now) {
+        if (meta.getHardDeleteTime() == null) {
+            return false;
+        }
+        try {
+            return !Instant.parse(meta.getHardDeleteTime()).isAfter(now);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Permanently deletes soft-deleted objects whose {@code hardDeleteTime} has passed. Each one is
+     * rechecked under the bucket then object locks that restore and bucket deletion also take, so
+     * a generation restored or purged meanwhile is left alone.
+     */
+    int purgeExpiredSoftDeletedObjects(Instant now) {
+        int purged = 0;
+        for (String storeKey : List.copyOf(objectMetaStore.keys())) {
+            GcsObjectMeta candidate = objectMetaStore.get(storeKey).orElse(null);
+            if (candidate == null || !isPastHardDeleteTime(candidate, now) || !isSoftDeletedObject(storeKey)) {
+                continue;
+            }
+            synchronized (bucketLock(candidate.getBucket())) {
+                synchronized (objectLock(candidate.getBucket(), candidate.getName())) {
+                    GcsObjectMeta meta = objectMetaStore.get(storeKey).orElse(null);
+                    if (meta != null && isPastHardDeleteTime(meta, now) && isSoftDeletedObject(storeKey)) {
+                        objectMetaStore.delete(storeKey);
+                        objectDataStore.delete(storeKey);
+                        purged++;
+                    }
+                }
+            }
+        }
+        if (purged > 0) {
+            objectDataStore.checkpoint();
+            objectMetaStore.checkpoint();
+            LOG.debugf("Purged %d soft-deleted object(s) past their hardDeleteTime", purged);
+        }
+        return purged;
     }
 
     private void softDelete(String bucket, String objectName, GcsObjectMeta live) {
@@ -1156,7 +1239,8 @@ public class GcsService {
             if (!storeKey.startsWith(bucketPrefix) || !isSoftDeletedObject(storeKey)) {
                 continue;
             }
-            objectMetaStore.get(storeKey).ifPresent(meta -> {
+            Instant now = Instant.now();
+            objectMetaStore.get(storeKey).filter(meta -> !isPastHardDeleteTime(meta, now)).ifPresent(meta -> {
                 if (prefix == null || prefix.isEmpty() || meta.getName().startsWith(prefix)) {
                     out.add(meta);
                 }
@@ -1180,7 +1264,9 @@ public class GcsService {
                     throw GcpException.invalidArgument("generation is required to restore an object");
                 }
                 String archiveKey = softDeleteKey(bucket, objectName, generation);
+                Instant now = Instant.now();
                 GcsObjectMeta archived = objectMetaStore.get(archiveKey)
+                        .filter(meta -> !isPastHardDeleteTime(meta, now))
                         .orElseThrow(() -> GcpException.notFound(
                                 "Soft-deleted object not found: " + objectName + " generation " + generation));
 

@@ -17,8 +17,8 @@ import java.util.stream.StreamSupport;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Soft delete has been on by default in real GCS since 2024, so code written against production
- * may rely on being able to undo a delete. A deleted object leaves the live listing, appears
+ * Soft delete is on by default in real GCS, with a seven-day policy on every new bucket, so code
+ * written against production may rely on being able to undo a delete. A deleted object leaves the live listing, appears
  * under {@code softDeleted=true} with soft/hard delete timestamps, and can be restored by
  * generation through {@code objects.restore}.
  */
@@ -81,6 +81,33 @@ class GcsSoftDeleteTest {
         // Back in the live view, with its bytes intact.
         assertThat(liveNames()).contains(name);
         assertThat(storage.readAllBytes(BlobId.of(BUCKET, name))).isEqualTo(PAYLOAD);
+    }
+
+    @Test
+    void bucketWithoutAPolicyGetsTheSevenDayDefaultAndRestores() {
+        String bucket = TestFixtures.uniqueName("default-soft-delete");
+        storage.create(BucketInfo.of(bucket));
+        assertThat(storage.get(bucket).getSoftDeletePolicy().getRetentionDuration()).isEqualTo(Duration.ofDays(7));
+
+        Blob created = storage.create(BlobInfo.newBuilder(BlobId.of(bucket, "kept.txt")).build(), PAYLOAD);
+        assertThat(storage.delete(BlobId.of(bucket, "kept.txt"))).isTrue();
+        Blob restored = storage.restore(BlobId.of(bucket, "kept.txt", created.getGeneration()));
+        assertThat(restored.getName()).isEqualTo("kept.txt");
+        assertThat(storage.readAllBytes(BlobId.of(bucket, "kept.txt"))).isEqualTo(PAYLOAD);
+    }
+
+    @Test
+    void zeroRetentionDeletesPermanently() {
+        String bucket = TestFixtures.uniqueName("no-soft-delete");
+        storage.create(BucketInfo.newBuilder(bucket)
+                .setSoftDeletePolicy(BucketInfo.SoftDeletePolicy.newBuilder()
+                        .setRetentionDuration(Duration.ZERO)
+                        .build())
+                .build());
+        storage.create(BlobInfo.newBuilder(BlobId.of(bucket, "gone.txt")).build(), PAYLOAD);
+        assertThat(storage.delete(BlobId.of(bucket, "gone.txt"))).isTrue();
+
+        assertThat(storage.list(bucket, Storage.BlobListOption.softDeleted(true)).iterateAll()).isEmpty();
     }
 
     private static List<String> liveNames() {

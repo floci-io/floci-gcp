@@ -1,5 +1,6 @@
 package io.floci.gcp.test;
 
+import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.Identity;
@@ -10,7 +11,6 @@ import com.google.cloud.iam.credentials.v1.IamCredentialsClient;
 import com.google.cloud.logging.v2.ConfigClient;
 import com.google.cloud.logging.v2.ConfigSettings;
 import com.google.cloud.logging.v2.LoggingClient;
-import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.cloud.logging.v2.LoggingSettings;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BucketInfo;

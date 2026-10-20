@@ -205,11 +205,8 @@ final class SinkLogEntryFilter {
         if (value instanceof List<?> list) {
             return list.stream().anyMatch(item -> matches(item, operator, expected));
         }
-        if (value == null) {
+        if (value == null || value instanceof Map<?, ?>) {
             return false;
-        }
-        if (value instanceof Map<?, ?>) {
-            throw unsupported();
         }
         if (value instanceof Boolean actual) {
             if (!expected.equalsIgnoreCase("true") && !expected.equalsIgnoreCase("false")) {

@@ -66,16 +66,16 @@ class SinkLogEntryFilterTest {
     }
 
     @Test
-    void failedScalarConversionsAreFalseWithinBooleanExpressionsAndArrays() {
+    void incompatibleValuesAreFalseWithinBooleanExpressionsAndArrays() {
         StoredLogEntry entry = entry();
-        for (Object value : List.of(1, true)) {
+        for (Object value : List.of(1, true, Map.of("nested", "match"))) {
             entry.setJsonPayload(Map.of("kind", value));
             assertFalse(SinkLogEntryFilter.parse("jsonPayload.kind=match").test(entry));
             assertFalse(SinkLogEntryFilter.parse("jsonPayload.kind!=match").test(entry));
             assertTrue(SinkLogEntryFilter.parse("jsonPayload.kind=match OR severity=ERROR").test(entry));
             assertTrue(SinkLogEntryFilter.parse("NOT jsonPayload.kind=match").test(entry));
         }
-        entry.setJsonPayload(Map.of("kind", List.of(1, true, "match")));
+        entry.setJsonPayload(Map.of("kind", List.of(Map.of("nested", "match"), 1, true, "match")));
         assertTrue(SinkLogEntryFilter.parse("jsonPayload.kind=match").test(entry));
     }
 

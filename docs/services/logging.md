@@ -230,8 +230,9 @@ Routing uses a strict subset independent of the lenient `ListLogEntries` parser:
 - `logName`, `severity`, `resource.type`, `resource.labels.<key>`, `labels.<key>`, `textPayload`,
   `jsonPayload.<path>`, `timestamp`, `receiveTimestamp`, `insertId`, `trace`, and `spanId`.
 - Equality/inequality and ordering comparisons, string containment (`:`), and field presence
-  (`:*`). JSON numeric fields compare numerically; failed scalar conversions do not match. Strings use
-  Unicode NFKC case folding for equality, ordering, and containment.
+  (`:*`). JSON numeric fields compare numerically; incompatible object/scalar comparisons and failed
+  scalar conversions do not match. Strings use Unicode NFKC case folding for equality, ordering,
+  and containment.
   Quoted label keys and JSON path components are supported, as are JSON arrays. JSON presence
   distinguishes explicit nulls from missing keys. Missing scalar strings use `LogEntry` defaults;
   missing map/JSON fields fail comparisons. Severity presence (`severity:*`) is unsupported because

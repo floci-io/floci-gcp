@@ -203,7 +203,7 @@ class CloudLoggingExportIntegrationTest {
     }
 
     @Test
-    void mixedScalarTypesAndNumericSeverityPreserveMatchingBatchEntries() throws Exception {
+    void mixedJsonTypesAndNumericSeverityPreserveMatchingBatchEntries() throws Exception {
         String bucket = bucket();
         String parent = "projects/test-project";
         String id = "conversion-" + UUID.randomUUID();
@@ -216,7 +216,8 @@ class CloudLoggingExportIntegrationTest {
                     "entries", List.of(
                             Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", 1)),
                             Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", true)),
-                            Map.of("severity", 500, "jsonPayload", Map.of("kind", "match", "noise", true)),
+                            Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", Map.of("nested", "match"))),
+                            Map.of("severity", 500, "jsonPayload", Map.of("kind", "match", "noise", Map.of("nested", "skip"))),
                             Map.of("severity", "ERROR", "jsonPayload", Map.of("kind", "match", "noise", 1)))))
                     .post("/v2/entries:write").then().statusCode(200);
             List<GcsObjectMeta> objects = storage.listObjects(bucket);
@@ -228,7 +229,7 @@ class CloudLoggingExportIntegrationTest {
             }
             ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()).usePlaintext().build();
             try {
-                assertEquals(4, LoggingServiceV2Grpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                assertEquals(5, LoggingServiceV2Grpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
                         .listLogEntries(ListLogEntriesRequest.newBuilder().addResourceNames(parent)
                                 .setFilter("logName=\"" + log + "\"").build()).getEntriesList().stream()
                         .filter(entry -> entry.getSeverity() == LogSeverity.ERROR).count());

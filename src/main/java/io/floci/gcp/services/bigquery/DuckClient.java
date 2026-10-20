@@ -6,7 +6,10 @@ import io.floci.gcp.core.common.GcpException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -95,7 +98,7 @@ public class DuckClient {
         String response;
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/query"))
+                    .uri(requestUri(baseUrl, "/query", InetAddress::getByName))
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofMinutes(5))
                     .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
@@ -104,10 +107,40 @@ public class DuckClient {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw GcpException.internal("Interrupted while calling the BigQuery SQL engine");
+        } catch (GcpException e) {
+            throw e;
         } catch (Exception e) {
             throw GcpException.internal("The BigQuery SQL engine (floci-duck) is unreachable: " + e.getMessage());
         }
         return parse(response);
+    }
+
+    /** Resolves a host name to an address; {@link InetAddress#getByName} outside tests. */
+    interface HostResolver {
+        InetAddress resolve(String host) throws UnknownHostException;
+    }
+
+    /**
+     * The URI for {@code path} on floci-duck. {@link URI} leaves the host empty for a name with an
+     * underscore, such as Docker Compose's {@code <service>.<project>_default}, and {@link HttpClient}
+     * refuses such a URI, so that name is resolved here and the request goes to its address.
+     */
+    static URI requestUri(String baseUrl, String path, HostResolver resolver) {
+        URI uri = URI.create(baseUrl + path);
+        if (uri.getHost() != null || uri.getRawAuthority() == null) {
+            return uri;
+        }
+        String authority = uri.getRawAuthority();
+        int colon = authority.lastIndexOf(':');
+        String host = colon < 0 ? authority : authority.substring(0, colon);
+        try {
+            int port = colon < 0 ? -1 : Integer.parseInt(authority.substring(colon + 1));
+            InetAddress address = resolver.resolve(host);
+            return new URI(uri.getScheme(), null, address.getHostAddress(), port, uri.getPath(), uri.getQuery(), null);
+        } catch (UnknownHostException | URISyntaxException | NumberFormatException e) {
+            throw GcpException.internal("The BigQuery SQL engine (floci-duck) is unreachable: cannot resolve "
+                    + authority + ": " + e.getMessage());
+        }
     }
 
     @SuppressWarnings("unchecked")

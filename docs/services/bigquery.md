@@ -12,7 +12,7 @@ the Discovery document define): datasets, tables with schemas, `tabledata.insert
 | `FLOCI_GCP_SERVICES_BIGQUERY_ENABLED` | `true` | Enable/disable BigQuery |
 | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` | `false` | When `true`, queries run on a small built-in SQL subset and no Docker container is started |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | Image of the SQL engine sidecar |
-| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck instead of starting one |
+| `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_URL` | _(none)_ | Use an already running floci-duck instead of starting one. The host may contain an underscore, as in Docker Compose's `floci-duck.<project>_default` |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_CALLBACK_URL` | _(derived)_ | Base URL the sidecar reads staged rows from. Only needed when `DUCK_URL` points somewhere the resolved docker host cannot reach, such as another machine |
 | `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_IDLE_TIMEOUT_SECONDS` | `604800` | Idle time before an unfinished resumable load-job upload is dropped with its buffered bytes. Lower it on long-lived instances |
 | `FLOCI_GCP_SERVICES_BIGQUERY_UPLOAD_SESSION_SWEEP_INTERVAL_SECONDS` | `3600` | Interval between sweeps for expired upload sessions; `0` disables the sweeper |

@@ -34,6 +34,19 @@ class ComputeWorkloadIntegrationTest extends ComputeTestSupport {
         done(root, given().delete(root + zone + "/disks/vm"));
         done(root, given().delete(root + zone + "/disks/data"));
     }
+    @Test void instanceReturnsConfidentialInstanceConfig() throws Exception {
+        String root = root(), zone = "/zones/us-central1-a";
+        done(root, post(root + "/global/networks", Map.of("name", "net", "autoCreateSubnetworks", false)));
+        done(root, post(root + "/regions/us-central1/subnetworks", Map.of("name", "subnet", "network", "global/networks/net", "ipCidrRange", "10.10.0.0/24")));
+        List<Map<String,Object>> nics = List.of(Map.of("subnetwork", "regions/us-central1/subnetworks/subnet"));
+        done(root, post(root + zone + "/instances", Map.of("name", "plain", "machineType", "zones/us-central1-a/machineTypes/e2-standard-2",
+                "networkInterfaces", nics, "disks", List.of(Map.of("boot", true, "initializeParams", Map.of())))));
+        assertFalse(given().get(root + zone + "/instances/plain").jsonPath().getBoolean("confidentialInstanceConfig.enableConfidentialCompute"));
+        done(root, post(root + zone + "/instances", Map.of("name", "confidential", "machineType", "zones/us-central1-a/machineTypes/n2-standard-4",
+                "networkInterfaces", nics, "disks", List.of(Map.of("boot", true, "initializeParams", Map.of())),
+                "confidentialInstanceConfig", Map.of("enableConfidentialCompute", true), "scheduling", Map.of("onHostMaintenance", "TERMINATE"))));
+        assertTrue(given().get(root + zone + "/instances/confidential").jsonPath().getBoolean("confidentialInstanceConfig.enableConfidentialCompute"));
+    }
     @Test void g2WorkstationWithVirtualWorkstationGpu() throws Exception {
         String root = root(), zone = "/zones/us-central1-a";
         JsonPath machineTypes = given().get(root + zone + "/machineTypes").jsonPath();

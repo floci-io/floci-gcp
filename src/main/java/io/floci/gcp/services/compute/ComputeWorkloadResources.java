@@ -75,6 +75,8 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
             }
             integer(accelerator.path("acceleratorCount").asText(), 1, 4, "acceleratorCount");
         }
+        ObjectNode confidential = objectField(r, "confidentialInstanceConfig");
+        if (!confidential.has("enableConfidentialCompute")) { confidential.put("enableConfidentialCompute", false); }
         if (r.has("scheduling")) { requireObject(r.get("scheduling"), "scheduling"); }
         if (!r.path("guestAccelerators").isEmpty() && !r.path("scheduling").path("onHostMaintenance").asText().equals("TERMINATE")) {
             throw GcpException.invalidArgument("GPU instances require onHostMaintenance=TERMINATE");

@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -1413,6 +1414,23 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void createOrReplaceCopyCannotChangePartitioning() {
+        service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
+        service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".source (ts TIMESTAMP, value INT64)"
+                        + " PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null);
+        service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".destination (d DATE, value INT64) PARTITION BY d", null);
+
+        GcpException changed = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE OR REPLACE TABLE " + DATASET + ".destination COPY " + DATASET + ".source", null));
+
+        assertEquals("invalidQuery", changed.getReason());
+        assertEquals("d", ((Map<?, ?>) service.getTable(PROJECT, DATASET, "destination")
+                .getExtra().get("timePartitioning")).get("field"));
+    }
+
+    @Test
     void createTablePartitionExpressionsMustMatchTheFieldType() {
         service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
 
@@ -1463,6 +1481,409 @@ class BigQueryServiceTest {
                 "INSERT INTO " + DATASET + "." + TABLE + " (name) VALUES ('x')", null));
         assertEquals("invalidQuery", e.getReason());
         assertTrue(e.getMessage().contains("DuckDB"));
+    }
+
+    // ── Copy jobs ──
+
+    private static Map<String, Object> copyConfig(String source, String destination, Object... extra) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("sourceTable", Map.of("datasetId", DATASET, "tableId", source));
+        config.put("destinationTable", Map.of("datasetId", DATASET, "tableId", destination));
+        for (int i = 0; i < extra.length; i += 2) {
+            config.put((String) extra[i], extra[i + 1]);
+        }
+        return config;
+    }
+
+    @Test
+    void copyJobHonorsWriteAndCreateDispositions() {
+        seedTwoRows();
+
+        StoredJob created = service.copy(PROJECT, null, "copy-create", copyConfig(TABLE, "copied"));
+        assertFalse(created.failed(), created.getErrorMessage());
+        assertEquals("COPY", created.getJobType());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "copied").rows().size());
+
+        StoredJob occupied = service.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
+        assertEquals("duplicate", occupied.getErrorReason());
+
+        StoredJob appended = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "copied", "writeDisposition", "WRITE_APPEND"));
+        assertFalse(appended.failed(), appended.getErrorMessage());
+        assertEquals(4, service.listTableData(PROJECT, DATASET, "copied").rows().size());
+
+        StoredJob truncated = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "copied", "writeDisposition", "WRITE_TRUNCATE"));
+        assertFalse(truncated.failed(), truncated.getErrorMessage());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "copied").rows().size());
+
+        StoredJob missing = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "missing", "createDisposition", "CREATE_NEVER"));
+        assertEquals("notFound", missing.getErrorReason());
+    }
+
+    @Test
+    void copyRecreatesExpiredDestinationBeforeDispositionChecks() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, source);
+        service.appendRows(PROJECT, DATASET, "source", List.of(Map.of("name", "copied", "age", 1)));
+        Table destination = newTable(DATASET, "destination");
+        destination.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        destination.getExtra().put("expirationTime", String.valueOf(System.currentTimeMillis() - 1));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("source", "destination", "writeDisposition", "WRITE_TRUNCATE"));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "destination").rows().size());
+        assertFalse(service.getTable(PROJECT, DATASET, "destination").getExtra().containsKey("expirationTime"));
+    }
+
+    @Test
+    void copyAppendRejectsDifferentDestinationSchema() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "source");
+        service.createTable(PROJECT, DATASET, source);
+        Table destination = newTable(DATASET, "destination");
+        TableFieldSchema name = new TableFieldSchema();
+        name.setName("name");
+        name.setType("INTEGER");
+        TableFieldSchema age = new TableFieldSchema();
+        age.setName("age");
+        age.setType("INTEGER");
+        destination.setSchema(new TableSchema(List.of(name, age)));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("source", "destination", "writeDisposition", "WRITE_APPEND"));
+
+        assertTrue(copied.failed());
+        assertEquals(0, service.listTableData(PROJECT, DATASET, "destination").rows().size());
+    }
+
+    @Test
+    void copyAppendAllowsNullableDestinationOnlyFields() {
+        seedTwoRows();
+        Table source = service.getTable(PROJECT, DATASET, TABLE);
+        Table destination = newTable(DATASET, "destination_with_optional_field");
+        List<TableFieldSchema> destinationFields = new ArrayList<>(source.getSchema().getFields());
+        TableFieldSchema optional = new TableFieldSchema();
+        optional.setName("optional");
+        optional.setType("STRING");
+        destinationFields.add(optional);
+        destination.setSchema(new TableSchema(destinationFields));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "destination_with_optional_field", "writeDisposition", "WRITE_APPEND"));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "destination_with_optional_field").rows().size());
+        assertNull(service.listTableData(PROJECT, DATASET, "destination_with_optional_field").rows().getFirst()
+                .getF().getLast().getV());
+    }
+
+    @Test
+    void copyWaitsForAnInFlightSourceMutationAndIncludesIt() throws Exception {
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch allowWrite = new CountDownLatch(1);
+        CountDownLatch copyStarted = new CountDownLatch(1);
+        CountDownLatch copyFinished = new CountDownLatch(1);
+        ArmableBlockingPutStorage<String, StoredTableData> blockingData =
+                new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                blockingData, new InMemoryStorage<>());
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        blockingData.blockNextPut();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "in-flight", "age", 1))));
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            Future<StoredJob> copy = executor.submit(() -> {
+                copyStarted.countDown();
+                StoredJob job = concurrentService.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
+                copyFinished.countDown();
+                return job;
+            });
+            assertTrue(copyStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(copyFinished.await(100, TimeUnit.MILLISECONDS),
+                    "copy must wait for the source mutation that already holds writeLock");
+
+            allowWrite.countDown();
+            append.get(5, TimeUnit.SECONDS);
+            StoredJob copied = copy.get(5, TimeUnit.SECONDS);
+            assertFalse(copied.failed(), copied.getErrorMessage());
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "copied").rows().size());
+    }
+
+    @Test
+    void copyJobsResolveAndValidateTheirProcessingLocation() {
+        Dataset euSource = newDataset("eu_source");
+        euSource.setLocation("EU");
+        service.createDataset(PROJECT, euSource);
+        service.createTable(PROJECT, "eu_source", newTable("eu_source", "source"));
+        service.appendRows(PROJECT, "eu_source", "source", List.of(Map.of("name", "row", "age", 1)));
+
+        Dataset euDestination = newDataset("eu_destination");
+        euDestination.setLocation("EU");
+        service.createDataset(PROJECT, euDestination);
+        service.createDataset(PROJECT, newDataset("us_destination"));
+
+        Map<String, Object> sameRegion = Map.of(
+                "sourceTable", Map.of("datasetId", "eu_source", "tableId", "source"),
+                "destinationTable", Map.of("datasetId", "eu_destination", "tableId", "copied"));
+        StoredJob inferred = service.copy(PROJECT, null, null, sameRegion);
+        assertFalse(inferred.failed(), inferred.getErrorMessage());
+        assertEquals("EU", inferred.getLocation());
+
+        Map<String, Object> wrongExplicitDestination = Map.of(
+                "sourceTable", Map.of("datasetId", "eu_source", "tableId", "source"),
+                "destinationTable", Map.of("datasetId", "eu_destination", "tableId", "wrong_location"));
+        StoredJob wrongExplicit = service.copy(PROJECT, "US", null, wrongExplicitDestination);
+        assertEquals("notFound", wrongExplicit.getErrorReason());
+        assertEquals("US", wrongExplicit.getLocation());
+
+        Map<String, Object> crossRegion = Map.of(
+                "sourceTable", Map.of("datasetId", "eu_source", "tableId", "source"),
+                "destinationTable", Map.of("datasetId", "us_destination", "tableId", "copied"));
+        StoredJob previewCopy = service.copy(PROJECT, null, null, crossRegion);
+        assertFalse(previewCopy.failed(), previewCopy.getErrorMessage());
+        assertEquals("EU", previewCopy.getLocation());
+        Table copied = service.getTable(PROJECT, "us_destination", "copied");
+        assertEquals("US", copied.getLocation());
+        assertTrue(copied.getSelfLink().endsWith("/datasets/us_destination/tables/copied"));
+
+        service.createTable(PROJECT, "us_destination", newTable("us_destination", "already_exists"));
+        Map<String, Object> crossRegionWriteEmpty = Map.of(
+                "sourceTable", Map.of("datasetId", "eu_source", "tableId", "source"),
+                "destinationTable", Map.of("datasetId", "us_destination", "tableId", "already_exists"));
+        StoredJob occupied = service.copy(PROJECT, null, null, crossRegionWriteEmpty);
+        assertEquals("duplicate", occupied.getErrorReason());
+
+        Map<String, Object> crossRegionAppend = new LinkedHashMap<>(crossRegion);
+        crossRegionAppend.put("writeDisposition", "WRITE_APPEND");
+        StoredJob unsupportedAppend = service.copy(PROJECT, null, null, crossRegionAppend);
+        assertEquals("invalid", unsupportedAppend.getErrorReason());
+    }
+
+    @Test
+    void sqlCopyJobStoresItsInferredLocation() {
+        Dataset eu = newDataset("eu");
+        eu.setLocation("EU");
+        service.createDataset(PROJECT, eu);
+        Table source = newTable("eu", "source");
+        source.setDescription("source description");
+        source.setFriendlyName("source friendly name");
+        source.setLabels(Map.of("team", "analytics"));
+        service.createTable(PROJECT, "eu", source);
+
+        StoredJob copied = service.query(PROJECT, null, null, "CREATE TABLE eu.destination COPY eu.source", null);
+
+        assertEquals("EU", copied.getLocation());
+        assertEquals("EU", service.getJob(PROJECT, copied.getJobId(), "EU").getLocation());
+        Table destination = service.getTable(PROJECT, "eu", "destination");
+        assertEquals("source description", destination.getDescription());
+        assertEquals("source friendly name", destination.getFriendlyName());
+        assertEquals(Map.of("team", "analytics"), destination.getLabels());
+    }
+
+    @Test
+    void copyJobCopiesOnlyDecoratedPartition() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, source);
+        Table destination = newTable(DATASET, "destination");
+        destination.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+
+        service.load(PROJECT, null, null,
+                loadConfig("source$20261014", "schema", PEOPLE_SCHEMA, "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"old\", \"age\": 1}"));
+        service.load(PROJECT, null, null,
+                loadConfig("source$20261015", "schema", PEOPLE_SCHEMA, "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"new\", \"age\": 2}"));
+
+        StoredJob first = service.copy(PROJECT, "US", null,
+                copyConfig("source$20261014", "destination$20261014", "writeDisposition", "WRITE_TRUNCATE"));
+        assertFalse(first.failed(), first.getErrorMessage());
+        assertEquals("US", first.getLocation());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "destination$20261014").rows().size());
+        assertTrue(service.listTableData(PROJECT, DATASET, "destination$20261015").rows().isEmpty());
+
+        StoredJob second = service.copy(PROJECT, null, null,
+                copyConfig("source$20261015", "destination$20261015", "writeDisposition", "WRITE_APPEND"));
+        assertFalse(second.failed(), second.getErrorMessage());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "destination").rows().size());
+    }
+
+    @Test
+    void failedDecoratedCopyDoesNotPublishANewDestination() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "partitioned_source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, source);
+
+        StoredJob failed = service.copy(PROJECT, null, null,
+                copyConfig("partitioned_source", "new_destination$20261015"));
+
+        assertEquals("invalid", failed.getErrorReason());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, "new_destination")).getGcpStatus());
+    }
+
+    @Test
+    void partitionedAppendCopyPreservesDestinationStreamProgress() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "copy_source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, source);
+        service.appendRows(PROJECT, DATASET, "copy_source", List.of(Map.of("name", "source", "age", 1)));
+        Table destination = newTable(DATASET, "copy_destination");
+        destination.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+        String stream = "projects/" + PROJECT + "/datasets/" + DATASET
+                + "/tables/copy_destination/streams/s1";
+        service.appendRows(PROJECT, DATASET, "copy_destination", List.of(Map.of("name", "existing", "age", 2)),
+                Map.of(stream, 1L));
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("copy_source", "copy_destination", "writeDisposition", "WRITE_APPEND"));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(OptionalLong.of(1L),
+                service.streamRowsApplied(PROJECT, DATASET, "copy_destination", stream));
+    }
+
+    @Test
+    void copyJobSupportsEveryTimePartitionDecoratorGranularity() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        List<List<String>> partitions = List.of(
+                List.of("HOUR", "2026101513"),
+                List.of("DAY", "20261015"),
+                List.of("MONTH", "202610"),
+                List.of("YEAR", "2026"));
+
+        for (List<String> partition : partitions) {
+            String type = partition.get(0);
+            String id = partition.get(1);
+            String suffix = type.toLowerCase();
+            Table source = newTable(DATASET, "source_" + suffix);
+            source.getExtra().put("timePartitioning", Map.of("type", type));
+            service.createTable(PROJECT, DATASET, source);
+            service.load(PROJECT, null, null,
+                    loadConfig("source_" + suffix + "$" + id, "schema", PEOPLE_SCHEMA,
+                            "writeDisposition", "WRITE_TRUNCATE"),
+                    ndjson("{\"name\": \"" + suffix + "\", \"age\": 1}"));
+
+            StoredJob copied = service.copy(PROJECT, null, null,
+                    copyConfig("source_" + suffix + "$" + id, "destination_" + suffix + "$" + id,
+                            "writeDisposition", "WRITE_TRUNCATE"));
+
+            assertFalse(copied.failed(), copied.getErrorMessage());
+            Table destination = service.getTable(PROJECT, DATASET, "destination_" + suffix);
+            assertEquals(type, ((Map<?, ?>) destination.getExtra().get("timePartitioning")).get("type"));
+            assertEquals(1, service.listTableData(
+                    PROJECT, DATASET, "destination_" + suffix + "$" + id).rows().size());
+        }
+
+        Map<String, Object> hourly = service.stagingRows(PROJECT, DATASET, "source_hour").getFirst();
+        assertFalse(hourly.containsKey(BigQueryService.PARTITION_DATE));
+        assertEquals("2026-10-15T13:00:00Z", hourly.get(BigQueryService.PARTITION_TIME));
+        StoredJob wrongGranularity = service.copy(PROJECT, null, null,
+                copyConfig("source_hour$20261015", "bad"));
+        assertEquals("invalid", wrongGranularity.getErrorReason());
+        StoredJob invalidCalendarDate = service.copy(PROJECT, null, null,
+                copyConfig("source_day$20260230", "bad_date"));
+        assertEquals("invalid", invalidCalendarDate.getErrorReason());
+    }
+
+    @Test
+    void copyJobAllowsOnlyContainingCoarserIngestionTimePartitions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "daily_source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, source);
+        service.load(PROJECT, null, null,
+                loadConfig("daily_source$20261015", "schema", PEOPLE_SCHEMA,
+                        "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"row\", \"age\": 1}"));
+        Table monthly = newTable(DATASET, "monthly_destination");
+        monthly.getExtra().put("timePartitioning", Map.of("type", "MONTH"));
+        service.createTable(PROJECT, DATASET, monthly);
+
+        StoredJob valid = service.copy(PROJECT, null, null,
+                copyConfig("daily_source$20261015", "monthly_destination$202610",
+                        "writeDisposition", "WRITE_TRUNCATE"));
+        StoredJob wrongMonth = service.copy(PROJECT, null, null,
+                copyConfig("daily_source$20261015", "monthly_destination$202611",
+                        "writeDisposition", "WRITE_TRUNCATE"));
+
+        assertFalse(valid.failed(), valid.getErrorMessage());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "monthly_destination$202610").rows().size());
+        assertEquals("invalid", wrongMonth.getErrorReason());
+        assertTrue(wrongMonth.getErrorMessage().contains("contain"), wrongMonth.getErrorMessage());
+    }
+
+    @Test
+    void copyJobSupportsIntegerRangePartitionDecorators() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Map<String, Object> rangePartitioning = Map.of(
+                "field", "age",
+                "range", Map.of("start", "-20", "end", "20", "interval", "10"));
+        Table source = newTable(DATASET, "range_source");
+        source.getExtra().put("rangePartitioning", rangePartitioning);
+        service.createTable(PROJECT, DATASET, source);
+        Table destination = newTable(DATASET, "range_destination");
+        destination.getExtra().put("rangePartitioning", rangePartitioning);
+        service.createTable(PROJECT, DATASET, destination);
+        service.appendRows(PROJECT, DATASET, "range_source", List.of(
+                Map.of("name", "negative", "age", -15),
+                Map.of("name", "positive", "age", 5)));
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("range_source$-20", "range_destination$-20", "writeDisposition", "WRITE_TRUNCATE"));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "range_destination$-20").rows().size());
+        assertEquals("negative", service.listTableData(PROJECT, DATASET, "range_destination$-20")
+                .rows().getFirst().getF().getFirst().getV());
+        StoredJob invalidBoundary = service.copy(PROJECT, null, null,
+                copyConfig("range_source$-15", "invalid_range"));
+        assertEquals("invalid", invalidBoundary.getErrorReason());
+    }
+
+    @Test
+    void copyJobSupportsMultipleSourcesAndRejectsMismatchedSchemas() {
+        seedTwoRows();
+        service.createTable(PROJECT, DATASET, newTable(DATASET, "second"));
+        service.appendRows(PROJECT, DATASET, "second", List.of(Map.of("name", "cy", "age", 41)));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("sourceTables", List.of(
+                Map.of("datasetId", DATASET, "tableId", TABLE),
+                Map.of("datasetId", DATASET, "tableId", "second")));
+        config.put("destinationTable", Map.of("datasetId", DATASET, "tableId", "combined"));
+
+        StoredJob combined = service.copy(PROJECT, null, null, config);
+        assertFalse(combined.failed(), combined.getErrorMessage());
+        assertEquals(3, service.listTableData(PROJECT, DATASET, "combined").rows().size());
+
+        Table incompatible = newTable(DATASET, "incompatible");
+        incompatible.setSchema(new TableSchema(List.of(field("other", "STRING", null))));
+        service.createTable(PROJECT, DATASET, incompatible);
+        config.put("sourceTables", List.of(
+                Map.of("datasetId", DATASET, "tableId", TABLE),
+                Map.of("datasetId", DATASET, "tableId", "incompatible")));
+        config.put("destinationTable", Map.of("datasetId", DATASET, "tableId", "bad"));
+        StoredJob bad = service.copy(PROJECT, null, null, config);
+        assertEquals("invalid", bad.getErrorReason());
     }
 
     // ── Load jobs (newline-delimited JSON with a schema runs without the SQL engine) ──

@@ -764,13 +764,14 @@ public class BigQueryService {
             if (options.dryRun()) {
                 // "an invalid query will return the same error it would if it wasn't a dry run", so
                 // a dry run has to resolve what the statement touches rather than only classify it.
-                validateStatement(projectId, statement, options);
+                validateStatement(projectId, statement, options, jobLocation);
                 job.setDryRun(true);
                 return job;
             }
             synchronized (writeLock) {
-                executeStatement(projectId, statement, options, job);
+                executeStatement(projectId, statement, options, job, jobLocation);
             }
+            job.setLocation(jobLocation.resolved());
             jobStore.put(job.getJobId(), job);
             return job;
         }
@@ -836,12 +837,12 @@ public class BigQueryService {
      * source table, or a CREATE VIEW over a missing one, fails here instead of reporting success.
      */
     private void validateStatement(String projectId, SqlDialectTranslator.Statement statement,
-                                   QueryOptions options) {
+                                   QueryOptions options, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
                 getTable(projectId, target.datasetId(), target.tableId());
-                engine.executeDml(request(projectId, options.sql(), options, true), tables(projectId));
+                engine.executeDml(request(projectId, options.sql(), options, true), tables(projectId, jobLocation));
             }
             case TRUNCATE -> getTable(projectId, target.datasetId(), target.tableId());
             case DROP_TABLE, DROP_VIEW -> {
@@ -857,13 +858,28 @@ public class BigQueryService {
                     throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
                             .withReason("duplicate");
                 }
-                getDataset(projectId, target.datasetId());
+                Dataset destinationDataset = getDataset(projectId, target.datasetId());
                 BigQuerySqlEngine.Result described = null;
-                if (statement.querySql() != null) {
+                if (statement.copySource() != null) {
+                    jobLocation.admit(destinationDataset);
+                    jobLocation.admit(getDataset(projectId, statement.copySource().datasetId()));
+                    Table source = getTable(projectId, statement.copySource().datasetId(),
+                            statement.copySource().tableId());
+                    if (source.viewQuery() != null) {
+                        throw QueryEngine.invalidQuery("CREATE TABLE COPY source must be a table, clone, or snapshot");
+                    }
+                    Table candidate = copiedTableCandidate(statement, source);
+                    if (existing.isPresent() && statement.orReplace()
+                            && !samePartitioning(existing.get(), candidate)) {
+                        throw QueryEngine.invalidQuery(
+                                "CREATE OR REPLACE TABLE cannot change the partitioning specification");
+                    }
+                } else if (statement.querySql() != null) {
                     described = engine.execute(request(projectId, statement.querySql(), options, true),
-                            tables(projectId));
+                            tables(projectId, jobLocation));
                 }
-                if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE) {
+                if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
+                        && statement.copySource() == null) {
                     Table candidate = createStatementTable(statement,
                             described != null ? described.schema() : null);
                     if (existing.isPresent() && statement.orReplace()
@@ -954,12 +970,12 @@ public class BigQueryService {
     }
 
     private void executeStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
-                                  StoredJob job) {
+                                  StoredJob job, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
                 BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, options.sql(), options,
-                        false), tables(projectId));
+                        false), tables(projectId, jobLocation));
                 replaceRows(projectId, target, result.tableRows());
                 job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
                 job.setNumDmlAffectedRows(String.valueOf(result.affectedRows()));
@@ -987,7 +1003,7 @@ public class BigQueryService {
                 replaceRows(projectId, target, List.of());
                 job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
             }
-            case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, statement, options, job);
+            case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, statement, options, job, jobLocation);
             case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, statement, job);
             case DROP_TABLE, DROP_VIEW -> {
                 job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
@@ -1042,9 +1058,13 @@ public class BigQueryService {
     }
 
     private void createFromStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
-                                     StoredJob job) {
+                                     StoredJob job, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
-        getDataset(projectId, target.datasetId());
+        Dataset destinationDataset = getDataset(projectId, target.datasetId());
+        if (statement.copySource() != null) {
+            jobLocation.admit(destinationDataset);
+            jobLocation.admit(getDataset(projectId, statement.copySource().datasetId()));
+        }
         job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
         Optional<Table> existingTable = tableStore.get(tableKey(target.datasetId(), target.tableId()));
         boolean exists = existingTable.isPresent();
@@ -1059,9 +1079,10 @@ public class BigQueryService {
 
         Table table = new Table();
         List<Map<String, Object>> rows = List.of();
+        StoredTableData copiedData = null;
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
             BigQuerySqlEngine.Result described = engine.execute(request(projectId, statement.querySql(), options, true),
-                    tables(projectId));
+                    tables(projectId, jobLocation));
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
             if (statement.materialized()) {
@@ -1073,9 +1094,23 @@ public class BigQueryService {
                 table.setViewDefinition(definition);
             }
             table.setSchema(described.schema());
+        } else if (statement.copySource() != null) {
+            Table source = getTable(projectId, statement.copySource().datasetId(), statement.copySource().tableId());
+            if (source.viewQuery() != null) {
+                throw QueryEngine.invalidQuery("CREATE TABLE COPY source must be a table, clone, or snapshot");
+            }
+            table.setSchema(deepCopy(source.getSchema(), TableSchema.class));
+            table.setDescription(source.getDescription());
+            table.setFriendlyName(source.getFriendlyName());
+            table.setLabels(source.getLabels() != null ? new LinkedHashMap<>(source.getLabels()) : null);
+            table.getExtra().putAll(deepCopyMap(source.getExtra()));
+            StoredTableData sourceData = dataStore.get(tableKey(statement.copySource().datasetId(),
+                    statement.copySource().tableId())).orElseGet(StoredTableData::new);
+            copiedData = copyTableData(sourceData);
+            rows = allRows(copiedData);
         } else if (statement.querySql() != null) {
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, statement.querySql(), options, false),
-                    tables(projectId));
+                    tables(projectId, jobLocation));
             table.setSchema(result.schema());
             rows = result.rows();
             job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
@@ -1090,14 +1125,19 @@ public class BigQueryService {
         }
         BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
         validateCreateTablePartitioning(statement, table);
-        if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE && existingTable.isPresent()
-                && !samePartitioning(existingTable.get(), table)) {
+        if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
+                && existingTable.isPresent() && !samePartitioning(existingTable.get(), table)) {
             throw QueryEngine.invalidQuery("CREATE OR REPLACE TABLE cannot change the partitioning specification");
         }
         if (exists) {
             deleteTable(projectId, target.datasetId(), target.tableId());
         }
         putTable(projectId, target, table, rows);
+        if (copiedData != null) {
+            dataStore.put(tableKey(target.datasetId(), target.tableId()), copiedData);
+            table.setNumRows(String.valueOf(allRows(copiedData).size()));
+            tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+        }
         job.setDdlOperationPerformed(exists ? "REPLACE" : "CREATE");
     }
 
@@ -1395,8 +1435,11 @@ public class BigQueryService {
     private void putTable(String projectId, SqlDialectTranslator.TableRef target, Table table,
                           List<Map<String, Object>> rows) {
         String now = nowMillis();
+        Dataset dataset = getDataset(projectId, target.datasetId());
         table.setTableReference(new TableReference(projectId, target.datasetId(), target.tableId()));
         table.setId(projectId + ":" + target.datasetId() + "." + target.tableId());
+        table.setLocation(dataset.getLocation());
+        table.setSelfLink(selfLink(projectId, target.datasetId(), target.tableId()));
         if (table.getType() == null) {
             table.setType("TABLE");
         }
@@ -1874,6 +1917,469 @@ public class BigQueryService {
         return new LinkedHashMap<>((Map<String, Object>) map);
     }
 
+    // ── Copy jobs ────────────────────────────────────────────────────────────────
+
+    /** Runs a BigQuery table copy job synchronously, including partition-decorated copies. */
+    @SuppressWarnings("unchecked")
+    public StoredJob copy(String projectId, String location, String jobId, Map<String, Object> copyConfig) {
+        Map<String, Object> config = copyConfig != null ? deepCopyMap(copyConfig) : new LinkedHashMap<>();
+        if (!(config.get("destinationTable") instanceof Map<?, ?> destinationMap)) {
+            throw GcpException.invalidArgument("Required parameter is missing: destinationTable")
+                    .withReason("invalid");
+        }
+        Map<String, Object> destination = new LinkedHashMap<>((Map<String, Object>) destinationMap);
+        destination.putIfAbsent("projectId", projectId);
+        config.put("destinationTable", destination);
+
+        boolean hasSourceTable = config.get("sourceTable") instanceof Map<?, ?>;
+        boolean hasSourceTables = config.get("sourceTables") instanceof List<?>;
+        if (hasSourceTable == hasSourceTables) {
+            throw GcpException.invalidArgument("Exactly one of sourceTable or sourceTables is required")
+                    .withReason("invalid");
+        }
+        List<Map<String, Object>> sourceMaps;
+        if (hasSourceTable) {
+            sourceMaps = List.of(new LinkedHashMap<>((Map<String, Object>) config.get("sourceTable")));
+        } else {
+            List<?> rawSources = (List<?>) config.get("sourceTables");
+            if (rawSources.isEmpty() || rawSources.stream().anyMatch(source -> !(source instanceof Map<?, ?>))) {
+                throw GcpException.invalidArgument("sourceTables must contain at least one table reference")
+                        .withReason("invalid");
+            }
+            sourceMaps = rawSources.stream()
+                    .map(source -> (Map<String, Object>) new LinkedHashMap<>((Map<String, Object>) source)).toList();
+        }
+        sourceMaps.forEach(source -> source.putIfAbsent("projectId", projectId));
+        if (hasSourceTable) {
+            config.put("sourceTable", sourceMaps.getFirst());
+        } else {
+            config.put("sourceTables", sourceMaps);
+        }
+
+        String write = copyDisposition(config.get("writeDisposition"), "writeDisposition",
+                Set.of("WRITE_TRUNCATE", "WRITE_APPEND", "WRITE_EMPTY"), "WRITE_EMPTY");
+        String create = copyDisposition(config.get("createDisposition"), "createDisposition",
+                Set.of("CREATE_IF_NEEDED", "CREATE_NEVER"), "CREATE_IF_NEEDED");
+
+        JobLocation jobLocation = new JobLocation(projectId, location);
+        StoredJob job = new StoredJob();
+        job.setJobId(reserveJobId(projectId, jobId));
+        job.setProjectId(projectId);
+        job.setLocation(jobLocation.resolved());
+        job.setJobType("COPY");
+        job.setCopyConfiguration(config);
+        job.setState("DONE");
+        job.setCreationTime(nowMillis());
+        try {
+            synchronized (writeLock) {
+                runCopy(projectId, sourceMaps, destination, write, create, jobLocation);
+            }
+        } catch (GcpException e) {
+            job.setErrorReason(loadErrorReason(e));
+            job.setErrorMessage(e.getMessage());
+        } catch (RuntimeException e) {
+            // The job id is already reserved, so persist the completed job even for unexpected failures.
+            LOG.warnf(e, "copy job %s failed", job.getJobId());
+            job.setErrorReason("invalid");
+            job.setErrorMessage(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+        job.setLocation(jobLocation.resolved());
+        jobStore.put(job.getJobId(), job);
+        return job;
+    }
+
+    private static String copyDisposition(Object raw, String field, Set<String> allowed, String defaultValue) {
+        if (raw == null) {
+            return defaultValue;
+        }
+        if (!(raw instanceof String value) || !allowed.contains(value)) {
+            throw GcpException.invalidArgument("Invalid value for " + field + ": " + raw).withReason("invalid");
+        }
+        return value;
+    }
+
+    private record CopySource(Table table, StoredTableData data, String partitionId) {}
+
+    private void runCopy(String projectId, List<Map<String, Object>> sourceMaps,
+                         Map<String, Object> destinationMap, String write, String create,
+                         JobLocation jobLocation) {
+        TableReference destination = tableReference(destinationMap, projectId, "destinationTable");
+        validateCopyProject(projectId, destination, "destinationTable");
+        Dataset destinationDataset = getDataset(projectId, destination.getDatasetId());
+
+        List<CopySource> sources = new ArrayList<>();
+        for (Map<String, Object> sourceMap : sourceMaps) {
+            TableReference source = tableReference(sourceMap, projectId, "sourceTable");
+            validateCopyProject(projectId, source, "sourceTable");
+            jobLocation.admit(getDataset(projectId, source.getDatasetId()));
+            DecoratedDestination decorated = decoratedDestination(source);
+            String tableId = decorated != null ? decorated.target().tableId() : source.getTableId();
+            Table table = getTable(projectId, source.getDatasetId(), tableId);
+            if (table.viewQuery() != null) {
+                throw GcpException.invalidArgument("Cannot copy view " + source.getDatasetId() + "." + tableId)
+                        .withReason("invalid");
+            }
+            StoredTableData data = dataStore.get(tableKey(source.getDatasetId(), tableId))
+                    .map(BigQueryService::copyTableData).orElseGet(StoredTableData::new);
+            if (decorated != null) {
+                validatePartitionDecorator(table, decorated.partitionId());
+            }
+            sources.add(new CopySource(deepCopy(table, Table.class), data,
+                    decorated != null ? decorated.partitionId() : null));
+        }
+        requireCompatibleCopySources(sources);
+
+        boolean crossRegion = !jobLocation.contains(destinationDataset);
+        if (crossRegion) {
+            if (sources.size() != 1) {
+                throw GcpException.invalidArgument("A cross-region copy supports exactly one source table")
+                        .withReason("invalid");
+            }
+            if ("WRITE_APPEND".equals(write)) {
+                throw GcpException.invalidArgument("A cross-region copy does not support WRITE_APPEND")
+                        .withReason("invalid");
+            }
+        }
+
+        DecoratedDestination decoratedDestination = decoratedDestination(destination);
+        SqlDialectTranslator.TableRef target = decoratedDestination != null ? decoratedDestination.target()
+                : new SqlDialectTranslator.TableRef(destination.getDatasetId(), destination.getTableId());
+        Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+        existing.ifPresent(table -> expire(target.datasetId(), target.tableId(), table));
+        existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+        if (existing.isEmpty() && "CREATE_NEVER".equals(create)) {
+            throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
+        }
+        if (crossRegion && "WRITE_EMPTY".equals(write) && existing.isPresent()) {
+            throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
+                    .withReason("duplicate");
+        }
+
+        if (decoratedDestination != null) {
+            if (existing.isEmpty()) {
+                Table table = deepCopy(sources.getFirst().table(), Table.class);
+                validatePartitionDecorator(table, decoratedDestination.partitionId());
+                validateDecoratedCopy(projectId, target, table, decoratedDestination.partitionId(), sources);
+                putTable(projectId, target, table, List.of());
+                existing = Optional.of(table);
+            } else {
+                validateDecoratedCopy(projectId, target, existing.orElseThrow(),
+                        decoratedDestination.partitionId(), sources);
+            }
+            List<Map<String, Object>> rows = copyRows(sources);
+            BigQuerySqlEngine.Result result = new BigQuerySqlEngine.Result(
+                    deepCopy(sources.getFirst().table().getSchema(), TableSchema.class), rows, "COPY", 0);
+            writeRows(projectId, destination, write, create, List.of(), result);
+            return;
+        }
+
+        if (existing.isEmpty()) {
+            createCopiedTable(projectId, target, sources);
+            return;
+        }
+
+        Table destinationTable = existing.get();
+        if (isPartitioned(destinationTable) && sources.stream().noneMatch(BigQueryService::partitionedCopySource)
+                && !isIngestionTimePartitioned(destinationTable)) {
+            throw GcpException.invalidArgument("A non-partitioned table can only be copied into an"
+                    + " ingestion-time partitioned destination").withReason("invalid");
+        }
+        if (isPartitioned(destinationTable) && sources.stream().allMatch(BigQueryService::partitionedCopySource)) {
+            writePartitionedCopy(projectId, target, destinationTable, sources, write);
+            return;
+        }
+
+        if ("WRITE_APPEND".equals(write)) {
+            requireCompatibleCopyAppendSchema(projectId, target, destinationTable, sources.getFirst().table());
+        }
+        BigQuerySqlEngine.Result result = new BigQuerySqlEngine.Result(
+                deepCopy(sources.getFirst().table().getSchema(), TableSchema.class), copyRows(sources), "COPY", 0);
+        writeRows(projectId, destination, write, create, List.of(), result);
+    }
+
+    private static TableReference tableReference(Map<String, Object> map, String defaultProject, String field) {
+        Object dataset = map.get("datasetId");
+        Object table = map.get("tableId");
+        if (!(dataset instanceof String datasetId) || datasetId.isBlank()) {
+            throw GcpException.invalidArgument(field + ".datasetId is required").withReason("invalid");
+        }
+        if (!(table instanceof String tableId) || tableId.isBlank()) {
+            throw GcpException.invalidArgument(field + ".tableId is required").withReason("invalid");
+        }
+        Object project = map.get("projectId");
+        if (project != null && !(project instanceof String)) {
+            throw GcpException.invalidArgument(field + ".projectId must be a string").withReason("invalid");
+        }
+        return new TableReference(project != null ? (String) project : defaultProject, datasetId, tableId);
+    }
+
+    private static void validateCopyProject(String projectId, TableReference reference, String field) {
+        if (!projectId.equals(reference.getProjectId())) {
+            throw GcpException.invalidArgument("Cross-project " + field + " references are not supported by the"
+                    + " floci BigQuery emulator").withReason("invalid");
+        }
+    }
+
+    private static void requireCompatibleCopySources(List<CopySource> sources) {
+        Object schema = JSON.valueToTree(sources.getFirst().table().getSchema());
+        Object timePartitioning = JSON.valueToTree(sources.getFirst().table().getExtra().get("timePartitioning"));
+        Object rangePartitioning = JSON.valueToTree(sources.getFirst().table().getExtra().get("rangePartitioning"));
+        Object clustering = JSON.valueToTree(sources.getFirst().table().getExtra().get("clustering"));
+        for (CopySource source : sources.subList(1, sources.size())) {
+            if (!schema.equals(JSON.valueToTree(source.table().getSchema()))
+                    || !timePartitioning.equals(JSON.valueToTree(source.table().getExtra().get("timePartitioning")))
+                    || !rangePartitioning.equals(JSON.valueToTree(
+                            source.table().getExtra().get("rangePartitioning")))
+                    || !clustering.equals(JSON.valueToTree(source.table().getExtra().get("clustering")))) {
+                throw GcpException.invalidArgument("All source tables in a copy job must have identical schemas,"
+                        + " partitioning, and clustering").withReason("invalid");
+            }
+        }
+    }
+
+    private static void validateDecoratedCopy(String projectId, SqlDialectTranslator.TableRef target,
+                                              Table destination, String destinationPartition,
+                                              List<CopySource> sources) {
+        for (CopySource source : sources) {
+            if (source.partitionId() == null) {
+                throw GcpException.invalidArgument("A decorated copy destination requires decorated source"
+                        + " partitions").withReason("invalid");
+            }
+            if (!JSON.valueToTree(destination.getSchema()).equals(JSON.valueToTree(source.table().getSchema()))
+                    || !JSON.valueToTree(destination.getExtra().get("clustering"))
+                            .equals(JSON.valueToTree(source.table().getExtra().get("clustering")))) {
+                throw QueryEngine.invalidQuery("Provided Schema does not match Table "
+                        + qualified(projectId, target));
+            }
+            Map<String, Object> sourceRange = rangePartitioning(source.table());
+            Map<String, Object> destinationRange = rangePartitioning(destination);
+            if (sourceRange != null || destinationRange != null) {
+                if (!JSON.valueToTree(sourceRange).equals(JSON.valueToTree(destinationRange))
+                        || !source.partitionId().equals(destinationPartition)) {
+                    throw GcpException.invalidArgument("Integer-range partition copies require identical source"
+                            + " and destination partitioning and decorators").withReason("invalid");
+                }
+                continue;
+            }
+
+            Map<String, Object> sourceTime = timePartitioning(source.table());
+            Map<String, Object> destinationTime = timePartitioning(destination);
+            if (sourceTime == null || destinationTime == null) {
+                throw GcpException.invalidArgument("Partition decorators require partitioned source and"
+                        + " destination tables").withReason("invalid");
+            }
+            boolean sourceIngestion = isIngestionTimePartitioned(source.table());
+            boolean destinationIngestion = isIngestionTimePartitioned(destination);
+            if (!sourceIngestion || !destinationIngestion) {
+                if (!JSON.valueToTree(sourceTime).equals(JSON.valueToTree(destinationTime))
+                        || !source.partitionId().equals(destinationPartition)) {
+                    throw GcpException.invalidArgument("Column-partitioned copies require identical source and"
+                            + " destination partitioning and decorators").withReason("invalid");
+                }
+                continue;
+            }
+
+            String sourceType = String.valueOf(sourceTime.get("type")).toUpperCase(Locale.ROOT);
+            String destinationType = String.valueOf(destinationTime.get("type")).toUpperCase(Locale.ROOT);
+            if (partitionGranularity(destinationType) < partitionGranularity(sourceType)) {
+                throw GcpException.invalidArgument("An ingestion-time copy destination cannot use a finer"
+                        + " partition granularity than its source").withReason("invalid");
+            }
+            LocalDateTime sourceBoundary = timePartitionBoundary(source.table(), source.partitionId());
+            String containingDestination = switch (destinationType) {
+                case "HOUR" -> sourceBoundary.format(HOUR_PARTITION);
+                case "DAY" -> sourceBoundary.format(DAY_PARTITION);
+                case "MONTH" -> sourceBoundary.format(MONTH_PARTITION);
+                case "YEAR" -> sourceBoundary.format(YEAR_PARTITION);
+                default -> throw GcpException.invalidArgument("Unsupported time partitioning type: "
+                        + destinationType).withReason("invalid");
+            };
+            if (!destinationPartition.equals(containingDestination)) {
+                throw GcpException.invalidArgument("The destination partition must contain the source partition")
+                        .withReason("invalid");
+            }
+        }
+    }
+
+    private static int partitionGranularity(String type) {
+        return switch (type) {
+            case "HOUR" -> 0;
+            case "DAY" -> 1;
+            case "MONTH" -> 2;
+            case "YEAR" -> 3;
+            default -> throw GcpException.invalidArgument("Unsupported time partitioning type: " + type)
+                    .withReason("invalid");
+        };
+    }
+
+    private static boolean partitionedCopySource(CopySource source) {
+        return source.partitionId() != null || isPartitioned(source.table());
+    }
+
+    private static boolean isPartitioned(Table table) {
+        return timePartitioning(table) != null || rangePartitioning(table) != null;
+    }
+
+    private static List<Map<String, Object>> copyRows(List<CopySource> sources) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (CopySource source : sources) {
+            List<Map<String, Object>> selected = source.partitionId() != null
+                    ? selectedPartitionRows(source.table(), source.data(), source.partitionId())
+                    : allRows(source.data());
+            selected.forEach(row -> rows.add(new LinkedHashMap<>(row)));
+        }
+        return rows;
+    }
+
+    private void createCopiedTable(String projectId, SqlDialectTranslator.TableRef target,
+                                   List<CopySource> sources) {
+        Table table = deepCopy(sources.getFirst().table(), Table.class);
+        StoredTableData merged = mergeCopyData(sources);
+        putTable(projectId, target, table, List.of());
+        dataStore.put(tableKey(target.datasetId(), target.tableId()), merged);
+        table.setNumRows(String.valueOf(allRows(merged).size()));
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+    }
+
+    private static StoredTableData mergeCopyData(List<CopySource> sources) {
+        StoredTableData merged = new StoredTableData();
+        for (CopySource source : sources) {
+            if (source.partitionId() != null) {
+                List<Map<String, Object>> rows = selectedPartitionRows(
+                        source.table(), source.data(), source.partitionId());
+                if (isIngestionTimePartitioned(source.table())) {
+                    merged.getPartitionRows().computeIfAbsent(source.partitionId(), ignored -> new ArrayList<>())
+                            .addAll(rows.stream().map(LinkedHashMap::new).toList());
+                } else {
+                    merged.getRows().addAll(rows.stream().map(LinkedHashMap::new).toList());
+                }
+            } else {
+                merged.getRows().addAll(source.data().getRows().stream().map(LinkedHashMap::new).toList());
+                source.data().getPartitionRows().forEach((partition, rows) ->
+                        merged.getPartitionRows().computeIfAbsent(partition, ignored -> new ArrayList<>())
+                                .addAll(rows.stream().map(LinkedHashMap::new).toList()));
+            }
+        }
+        return merged;
+    }
+
+    private void writePartitionedCopy(String projectId, SqlDialectTranslator.TableRef target, Table destination,
+                                      List<CopySource> sources, String write) {
+        requireCompatibleDestination(projectId, target, destination, sources.getFirst().table());
+        StoredTableData incoming = mergeCopyData(sources);
+        StoredTableData current = dataStore.get(tableKey(target.datasetId(), target.tableId()))
+                .map(BigQueryService::copyDestinationData).orElseGet(StoredTableData::new);
+        if ("WRITE_EMPTY".equals(write) && !allRows(current).isEmpty()) {
+            throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
+                    .withReason("duplicate");
+        }
+        if ("WRITE_APPEND".equals(write)) {
+            incoming.getRows().addAll(0, current.getRows());
+            current.getPartitionRows().forEach((partition, rows) ->
+                    incoming.getPartitionRows().computeIfAbsent(partition, ignored -> new ArrayList<>())
+                            .addAll(0, rows.stream().map(LinkedHashMap::new).toList()));
+        }
+        incoming.setStreamRows(new LinkedHashMap<>(current.getStreamRows()));
+        dataStore.put(tableKey(target.datasetId(), target.tableId()), incoming);
+        destination.setNumRows(String.valueOf(allRows(incoming).size()));
+        destination.setLastModifiedTime(nowMillis());
+        destination.setEtag(etag());
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), destination);
+    }
+
+    /**
+     * BigQuery permits nullable destination-only fields for WRITE_APPEND, but rejects incompatible source fields.
+     * Its copy limitations also disallow extra destination columns with defaults, but TableFieldSchema does not
+     * currently model defaultValueExpression, so that distinction cannot be checked here:
+     * https://cloud.google.com/bigquery/docs/managing-tables#copy_tables
+     */
+    private static void requireCompatibleCopyAppendSchema(String projectId, SqlDialectTranslator.TableRef target,
+                                                           Table destination, Table source) {
+        if (!compatibleCopyFields(schemaFields(source), schemaFields(destination))) {
+            throw QueryEngine.invalidQuery("Provided Schema does not match Table " + qualified(projectId, target));
+        }
+    }
+
+    private static boolean compatibleCopyFields(List<TableFieldSchema> sourceFields,
+                                                List<TableFieldSchema> destinationFields) {
+        Map<String, TableFieldSchema> destinationByName = new LinkedHashMap<>();
+        destinationFields.forEach(field -> destinationByName.put(field.getName().toLowerCase(Locale.ROOT), field));
+        for (TableFieldSchema sourceField : sourceFields) {
+            TableFieldSchema destinationField = destinationByName.get(sourceField.getName().toLowerCase(Locale.ROOT));
+            if (destinationField == null || !compatibleCopyField(sourceField, destinationField)) {
+                return false;
+            }
+        }
+        for (TableFieldSchema destinationField : destinationFields) {
+            boolean presentInSource = sourceFields.stream().anyMatch(sourceField ->
+                    sourceField.getName().equalsIgnoreCase(destinationField.getName()));
+            if (!presentInSource && "REQUIRED".equalsIgnoreCase(destinationField.getMode())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean compatibleCopyField(TableFieldSchema source, TableFieldSchema destination) {
+        String sourceMode = source.getMode() != null ? source.getMode() : "NULLABLE";
+        String destinationMode = destination.getMode() != null ? destination.getMode() : "NULLABLE";
+        return source.getType().equalsIgnoreCase(destination.getType()) && sourceMode.equalsIgnoreCase(destinationMode)
+                && compatibleCopyFields(source.getFields() != null ? source.getFields() : List.of(),
+                        destination.getFields() != null ? destination.getFields() : List.of());
+    }
+
+    private static Table copiedTableCandidate(SqlDialectTranslator.Statement statement, Table source) {
+        Table candidate = deepCopy(source, Table.class);
+        if (statement.timePartitioning() != null) {
+            candidate.getExtra().put("timePartitioning", new LinkedHashMap<>(statement.timePartitioning()));
+        }
+        if (statement.rangePartitioning() != null) {
+            candidate.getExtra().put("rangePartitioning", new LinkedHashMap<>(statement.rangePartitioning()));
+        }
+        return candidate;
+    }
+
+    private static void requireCompatibleDestination(String projectId, SqlDialectTranslator.TableRef target,
+                                                     Table destination, Table source) {
+        if (!JSON.valueToTree(destination.getSchema()).equals(JSON.valueToTree(source.getSchema()))
+                || !JSON.valueToTree(destination.getExtra().get("timePartitioning"))
+                        .equals(JSON.valueToTree(source.getExtra().get("timePartitioning")))
+                || !JSON.valueToTree(destination.getExtra().get("rangePartitioning"))
+                        .equals(JSON.valueToTree(source.getExtra().get("rangePartitioning")))
+                || !JSON.valueToTree(destination.getExtra().get("clustering"))
+                        .equals(JSON.valueToTree(source.getExtra().get("clustering")))) {
+            throw QueryEngine.invalidQuery("Provided Schema does not match Table " + qualified(projectId, target));
+        }
+    }
+
+    private static StoredTableData copyTableData(StoredTableData source) {
+        StoredTableData copy = new StoredTableData();
+        synchronized (source) {
+            copy.setRows(new ArrayList<>(source.getRows().stream().map(LinkedHashMap::new).toList()));
+            Map<String, List<Map<String, Object>>> partitions = new LinkedHashMap<>();
+            source.getPartitionRows().forEach((id, rows) ->
+                    partitions.put(id, new ArrayList<>(rows.stream().map(LinkedHashMap::new).toList())));
+            copy.setPartitionRows(partitions);
+        }
+        return copy;
+    }
+
+    private static StoredTableData copyDestinationData(StoredTableData source) {
+        StoredTableData copy = copyTableData(source);
+        synchronized (source) {
+            copy.setStreamRows(new LinkedHashMap<>(source.getStreamRows()));
+        }
+        return copy;
+    }
+
+    private static <T> T deepCopy(T value, Class<T> type) {
+        return value == null ? null : JSON.convertValue(value, type);
+    }
+
+    private static Map<String, Object> deepCopyMap(Map<String, Object> value) {
+        return JSON.convertValue(value, new TypeReference<LinkedHashMap<String, Object>>() {});
+    }
+
     /**
      * Runs a load job synchronously. Data comes from {@code sourceUris} in floci's GCS or, for
      * media uploads, from {@code uploadedData}. Configuration errors are HTTP 400s; data and
@@ -2153,6 +2659,11 @@ public class BigQueryService {
             if (location == null) {
                 location = region.indexOf('-') < 0 ? region.toUpperCase(Locale.ROOT) : region;
             }
+        }
+
+        boolean contains(Dataset dataset) {
+            String datasetLocation = dataset.getLocation() != null ? dataset.getLocation() : "US";
+            return location == null || location.equalsIgnoreCase(datasetLocation);
         }
 
         String resolved() {

@@ -338,14 +338,15 @@ final class SqlDialectTranslator {
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                      boolean materialized, String querySql, List<TableFieldSchema> columns,
-                     Map<String, Object> options, Map<String, Object> timePartitioning,
-                     Map<String, Object> rangePartitioning, PartitionExpression partitionExpression) {
+                     Map<String, Object> options, TableRef copySource,
+                     Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
+                     PartitionExpression partitionExpression) {
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                   boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                   boolean materialized, String querySql, List<TableFieldSchema> columns) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null, null, null, null);
+                    materialized, querySql, columns, null, null, null, null, null);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -353,7 +354,7 @@ final class SqlDialectTranslator {
                   boolean materialized, String querySql, List<TableFieldSchema> columns,
                   Map<String, Object> options) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, options, null, null, null);
+                    materialized, querySql, columns, options, null, null, null, null);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -362,7 +363,18 @@ final class SqlDialectTranslator {
                   Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null, timePartitioning, rangePartitioning,
+                    materialized, querySql, columns, null, null, timePartitioning, rangePartitioning,
+                    partitionExpression);
+        }
+
+        Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
+                  boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
+                  boolean materialized, String querySql, List<TableFieldSchema> columns,
+                  TableRef copySource,
+                  Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
+                  PartitionExpression partitionExpression) {
+            this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
+                    materialized, querySql, columns, null, copySource, timePartitioning, rangePartitioning,
                     partitionExpression);
         }
 
@@ -729,6 +741,17 @@ final class SqlDialectTranslator {
             }
             case "TABLE" -> {
                 TableRef target = resolveTable(path.segments());
+                int copy = nextSignificant(path.end(), tokens.size());
+                if (copy >= 0 && tokens.get(copy).isKeyword("COPY")) {
+                    int sourceAt = sig.indexOf(copy) + 1;
+                    Path source = pathAt(sig, sourceAt);
+                    if (nextSignificant(source.end(), tokens.size()) >= 0) {
+                        throw invalidQuery("Syntax error: Unexpected tokens after COPY source table.");
+                    }
+                    return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_COPY", target, null,
+                            orReplace, ifNotExists, false, false, false, null, null,
+                            resolveTable(source.segments()), null, null, null);
+                }
                 int asIndex = topLevelAsSelect(path.end());
                 if (asIndex >= 0) {
                     PartitionSpec partitioning = createTablePartitioning(path.end(), asIndex);
@@ -744,8 +767,7 @@ final class SqlDialectTranslator {
                 }
                 int open = nextSignificant(path.end(), tokens.size());
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
-                    throw invalidQuery("CREATE TABLE needs a column list or AS SELECT"
-                            + " (LIKE and COPY are not supported by the floci BigQuery emulator)");
+                    throw invalidQuery("CREATE TABLE needs a column list, AS SELECT, or COPY source_table");
                 }
                 List<TableFieldSchema> columns = columnDefinitions(open, matchingParen(open));
                 PartitionSpec partitioning = createTablePartitioning(matchingParen(open) + 1, tokens.size());

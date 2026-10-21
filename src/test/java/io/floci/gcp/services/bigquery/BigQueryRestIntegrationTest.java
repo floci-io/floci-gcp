@@ -427,6 +427,35 @@ class BigQueryRestIntegrationTest {
 
     @Test
     @Order(6)
+    void copyJobRoundTripsConfigurationAndCopiesRows() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"jobReference": {"jobId": "copy-rest", "location": "US"},
+                         "configuration": {"copy": {
+                           "sourceTable": {"projectId": "bq-rest-it", "datasetId": "ds1", "tableId": "t1"},
+                           "destinationTable": {"projectId": "bq-rest-it", "datasetId": "ds1", "tableId": "t1_copy"},
+                           "createDisposition": "CREATE_IF_NEEDED",
+                           "writeDisposition": "WRITE_EMPTY"}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then()
+                .statusCode(200)
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult", nullValue())
+                .body("configuration.jobType", equalTo("COPY"))
+                .body("configuration.copy.sourceTable.tableId", equalTo("t1"))
+                .body("configuration.copy.destinationTable.tableId", equalTo("t1_copy"));
+
+        given().when().get(BASE + "/jobs/copy-rest").then().statusCode(200)
+                .body("jobReference.location", equalTo("US"))
+                .body("configuration.copy.writeDisposition", equalTo("WRITE_EMPTY"));
+        given().when().get(BASE + "/datasets/ds1/tables/t1_copy/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(6)
     void invalidSqlPathsDiffer() {
         // jobs.query → HTTP 400 invalidQuery
         given()

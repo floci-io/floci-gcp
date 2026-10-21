@@ -62,6 +62,16 @@ class SqlDialectTranslatorTest {
         return e;
     }
 
+    @Test
+    void createTableCopyCapturesItsSource() {
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(
+                "CREATE OR REPLACE TABLE ds.destination COPY ds.source", "test-project", null);
+
+        assertEquals("CREATE_TABLE_COPY", statement.statementType());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "destination"), statement.target());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "source"), statement.copySource());
+    }
+
     // ── Table references ─────────────────────────────────────────────────────
 
     @Test

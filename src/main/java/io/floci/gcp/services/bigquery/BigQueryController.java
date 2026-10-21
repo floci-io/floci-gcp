@@ -297,10 +297,14 @@ public class BigQueryController {
         if (loadConfig != null) {
             return Response.ok(buildJob(service.load(projectId, location, jobId, loadConfig, null))).build();
         }
+        Map<String, Object> copyConfig = configuration != null ? asMap(configuration.get("copy")) : null;
+        if (copyConfig != null) {
+            return Response.ok(buildJob(service.copy(projectId, location, jobId, copyConfig))).build();
+        }
         Map<String, Object> queryConfig = configuration != null ? asMap(configuration.get("query")) : null;
         if (queryConfig == null || queryConfig.get("query") == null) {
             throw GcpException.invalidArgument(
-                    "Only QUERY and LOAD jobs are supported by the floci BigQuery emulator");
+                    "Only QUERY, LOAD, and COPY jobs are supported by the floci BigQuery emulator");
         }
         boolean dryRun = Boolean.TRUE.equals(configuration.get("dryRun"));
         BigQueryService.QueryOptions options = queryOptions(queryConfig, dryRun);
@@ -495,6 +499,9 @@ public class BigQueryController {
         if ("LOAD".equals(sj.getJobType())) {
             return buildLoadJob(sj, job);
         }
+        if ("COPY".equals(sj.getJobType())) {
+            return buildCopyJob(sj, job);
+        }
 
         Map<String, Object> queryConfig = new LinkedHashMap<>();
         queryConfig.put("query", sj.getQuery());
@@ -573,6 +580,20 @@ public class BigQueryController {
         if (sj.getLoadStatistics() != null) {
             statistics.put("load", sj.getLoadStatistics());
         }
+        job.setStatistics(statistics);
+        return job;
+    }
+
+    private static Job buildCopyJob(StoredJob sj, Job job) {
+        Map<String, Object> configuration = new LinkedHashMap<>();
+        configuration.put("jobType", "COPY");
+        configuration.put("copy", sj.getCopyConfiguration());
+        job.setConfiguration(configuration);
+        job.setStatus(status(sj, null));
+        Map<String, Object> statistics = new LinkedHashMap<>();
+        statistics.put("creationTime", sj.getCreationTime());
+        statistics.put("startTime", sj.getCreationTime());
+        statistics.put("endTime", sj.getCreationTime());
         job.setStatistics(statistics);
         return job;
     }

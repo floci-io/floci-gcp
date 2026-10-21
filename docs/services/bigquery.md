@@ -64,11 +64,22 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `{v}`, `RECORD` as nested `{f:[...]}`), `maxResults`/`pageToken`/`startIndex` paging.
   `maxResults=0` returns zero rows (the SDK's `Job.waitFor()` contract); a `pageToken` wins over
   `startIndex` (the SDK sends both when auto-paging).
-- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY and LOAD), `jobs.get`, `jobs.list`,
+- **Jobs / queries**: `jobs.query`, `jobs.insert` (QUERY, LOAD and COPY), `jobs.get`, `jobs.list`,
   `jobs.cancel`, `jobs.delete`, `getQueryResults`. Query results are materialized into a hidden
   anonymous table (`_floci_anon.anon_<jobId>`) referenced as the job's
   `configuration.query.destinationTable`, which is how the SDK's `Job.getQueryResults()` reads
   rows.
+- **Copy jobs**: `configuration.copy` accepts either `sourceTable` or non-empty `sourceTables`,
+  plus `destinationTable`. It supports `CREATE_IF_NEEDED`/`CREATE_NEVER` and
+  `WRITE_EMPTY`/`WRITE_TRUNCATE`/`WRITE_APPEND`, validates that multiple sources have identical
+  schemas, partitioning and clustering, and copies table metadata when creating a destination.
+  Partition-decorated source and destination references copy only the named partition. Supported
+  decorators follow the table definition: `$YYYYMMDDHH` (hour), `$YYYYMMDD` (day), `$YYYYMM`
+  (month), `$YYYY` (year), and `$range_start` for integer-range partitions. Copying a decorated
+  source to an undecorated partitioned destination retains the source partition. Column- and
+  range-partitioned decorated copies require identical partition specifications and IDs;
+  ingestion-time copies may target the same granularity or a containing coarser partition.
+  Copy references are currently limited to the project that owns the job.
 - **Query parameters**: `parameterMode` `NAMED` (`@name`) and `POSITIONAL` (`?`), with scalar,
   `ARRAY` and `STRUCT` parameter types.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
@@ -403,6 +414,7 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions populate table metadata, while ingestion-time partitioning is rejected |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source` | Copies a table, clone, or snapshot in the same job location; views are rejected |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
 | `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`; only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |

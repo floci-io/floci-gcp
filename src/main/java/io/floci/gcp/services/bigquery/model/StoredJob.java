@@ -39,12 +39,14 @@ public class StoredJob {
     private String ddlOperationPerformed;
     private TableReference ddlTargetTable;
     private DatasetReference ddlTargetDataset;
-    /** QUERY (default) or LOAD. */
+    /** QUERY (default), LOAD, or COPY. */
     private String jobType;
     /** The job's {@code configuration.load}, echoed back on reads. */
     private Map<String, Object> loadConfiguration;
     /** {@code JobStatistics3}: inputFiles, inputFileBytes, outputRows, outputBytes, badRecords. */
     private Map<String, String> loadStatistics;
+    /** The job's {@code configuration.copy}, echoed back on reads. */
+    private Map<String, Object> copyConfiguration;
 
     public String getJobId() { return jobId; }
     public void setJobId(String jobId) { this.jobId = jobId; }
@@ -114,6 +116,9 @@ public class StoredJob {
 
     public Map<String, String> getLoadStatistics() { return loadStatistics; }
     public void setLoadStatistics(Map<String, String> loadStatistics) { this.loadStatistics = loadStatistics; }
+
+    public Map<String, Object> getCopyConfiguration() { return copyConfiguration; }
+    public void setCopyConfiguration(Map<String, Object> copyConfiguration) { this.copyConfiguration = copyConfiguration; }
 
     public boolean failed() {
         return errorReason != null;

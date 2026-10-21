@@ -4,6 +4,7 @@ import com.google.cloud.NoCredentials;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryException;
 import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.CopyJobConfiguration;
 import com.google.cloud.bigquery.DatasetId;
 import com.google.cloud.bigquery.DatasetInfo;
 import com.google.cloud.bigquery.Field;
@@ -730,6 +731,38 @@ class BigQueryTest {
             List<Long> items = result.iterateAll().iterator().next().get("items").getRepeatedValue()
                     .stream().map(FieldValue::getLongValue).toList();
             assertThat(items).containsExactlyElementsOf(emptyArray ? List.of(2L) : List.of(1L, 2L));
+        }
+    }
+
+    @Test
+    @Order(22)
+    void copyJobRoundTripsThroughTheSdk() throws InterruptedException {
+        String dataset = TestFixtures.uniqueName("copy_ds").replace("-", "_");
+        TableId source = TableId.of(dataset, "source");
+        TableId destination = TableId.of(dataset, "destination");
+        try {
+            bigquery.create(DatasetInfo.newBuilder(dataset).setLocation("US").build());
+            bigquery.create(TableInfo.of(source, StandardTableDefinition.of(
+                    Schema.of(Field.of("name", StandardSQLTypeName.STRING)))));
+            bigquery.insertAll(InsertAllRequest.newBuilder(source)
+                    .addRow(Map.of("name", "first"))
+                    .addRow(Map.of("name", "second"))
+                    .build());
+            CopyJobConfiguration configuration = CopyJobConfiguration.newBuilder(destination, source)
+                    .setCreateDisposition(JobInfo.CreateDisposition.CREATE_IF_NEEDED)
+                    .setWriteDisposition(JobInfo.WriteDisposition.WRITE_EMPTY)
+                    .build();
+
+            Job job = bigquery.create(JobInfo.of(configuration)).waitFor();
+            CopyJobConfiguration echoed = job.getConfiguration();
+
+            assertThat(job.getStatus().getError()).isNull();
+            assertThat(echoed.getDestinationTable().getProject()).isEqualTo(PROJECT_ID);
+            assertThat(echoed.getDestinationTable().getDataset()).isEqualTo(dataset);
+            assertThat(echoed.getDestinationTable().getTable()).isEqualTo("destination");
+            assertThat(bigquery.listTableData(destination).getTotalRows()).isEqualTo(2);
+        } finally {
+            bigquery.delete(DatasetId.of(PROJECT_ID, dataset), BigQuery.DatasetDeleteOption.deleteContents());
         }
     }
 

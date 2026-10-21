@@ -749,4 +749,24 @@ class BigQueryDuckDmlIntegrationTest {
         assertEquals(List.of(List.of("1")),
                 rows("SELECT COUNT(*) FROM partitions.hourly_ingestion WHERE _PARTITIONTIME IS NOT NULL"));
     }
+
+    @Test
+    @Order(106)
+    void createTableCopyCopiesAStandaloneTableAndRejectsViews() {
+        query("CREATE SCHEMA ddl_copy").then().statusCode(200);
+        query("CREATE TABLE ddl_copy.copy_source AS SELECT 7 AS id").then().statusCode(200);
+        query("CREATE VIEW ddl_copy.copy_source_view AS SELECT 8 AS id").then().statusCode(200);
+
+        String jobId = query("CREATE TABLE ddl_copy.copy_destination COPY ddl_copy.copy_source")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("jobReference.jobId");
+        given().when().get(BASE + "/jobs/" + jobId).then().statusCode(200)
+                .body("statistics.query.statementType", equalTo("CREATE_TABLE_COPY"))
+                .body("statistics.query.ddlOperationPerformed", equalTo("CREATE"));
+        assertEquals(List.of(List.of("7")), rows("SELECT id FROM ddl_copy.copy_destination"));
+
+        query("CREATE OR REPLACE TABLE ddl_copy.copy_destination COPY ddl_copy.copy_source_view")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        assertEquals(List.of(List.of("7")), rows("SELECT id FROM ddl_copy.copy_destination"));
+    }
 }

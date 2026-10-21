@@ -2,6 +2,7 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
@@ -65,8 +66,13 @@ final class GcsMediaResponses {
      * how a signed URL sets the download's file name or serves it inline.
      */
     static Response withResponseOverrides(Response response, MultivaluedMap<String, String> query) {
+        // A value the HTTP layer would refuse is ignored, as before overrides were supported,
+        // so it cannot turn a working read into a 500 or a dropped connection.
         String disposition = query.getFirst("response-content-disposition");
-        String contentType = query.getFirst("response-content-type");
+        if (!isValidHeaderValue(disposition)) {
+            disposition = null;
+        }
+        MediaType contentType = parseMediaType(query.getFirst("response-content-type"));
         if (disposition == null && contentType == null) {
             return response;
         }
@@ -78,6 +84,17 @@ final class GcsMediaResponses {
             builder.type(contentType);
         }
         return builder.build();
+    }
+
+    private static MediaType parseMediaType(String value) {
+        if (!isValidHeaderValue(value) || value.isBlank()) {
+            return null;
+        }
+        try {
+            return MediaType.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static boolean isGzipStored(GcsObjectMeta meta) {

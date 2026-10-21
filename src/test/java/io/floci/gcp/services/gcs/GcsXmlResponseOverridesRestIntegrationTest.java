@@ -96,6 +96,34 @@ class GcsXmlResponseOverridesRestIntegrationTest {
     }
 
     @Test
+    void invalidContentTypeIsIgnored() {
+        uploadPdf("bad-type.pdf");
+
+        for (String type : new String[] {"notatype", "", "text/plain\r\nX-Evil: 1"}) {
+            given()
+                    .queryParam("response-content-type", type)
+                    .when().get("/" + BUCKET + "/bad-type.pdf")
+                    .then().statusCode(200)
+                    .header("Content-Type", startsWith("application/pdf"))
+                    .header("X-Evil", nullValue())
+                    .body(equalTo("%PDF"));
+        }
+    }
+
+    @Test
+    void contentDispositionWithLineBreakIsIgnored() {
+        uploadPdf("bad-disposition.pdf");
+
+        given()
+                .queryParam("response-content-disposition", "a\r\nX-Evil: 1")
+                .when().get("/" + BUCKET + "/bad-disposition.pdf")
+                .then().statusCode(200)
+                .header("Content-Disposition", nullValue())
+                .header("X-Evil", nullValue())
+                .body(equalTo("%PDF"));
+    }
+
+    @Test
     void withoutOverridesTheStoredHeadersAreKept() {
         uploadPdf("plain.pdf");
 

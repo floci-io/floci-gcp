@@ -335,6 +335,56 @@ class BigQueryRestIntegrationTest {
     }
 
     @Test
+    @Order(3)
+    void tableDataPageTokenRetainsRequestedPageSize() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"tableReference": {"tableId": "t_paging"},
+                         "schema": {"fields": [{"name": "name", "type": "STRING"}]}}
+                        """)
+                .when().post(BASE + "/datasets/ds1/tables")
+                .then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"rows": [
+                            {"json": {"name": "first"}},
+                            {"json": {"name": "second"}},
+                            {"json": {"name": "third"}}]}
+                        """)
+                .when().post(BASE + "/datasets/ds1/tables/t_paging/insertAll")
+                .then().statusCode(200);
+
+        String firstToken = given()
+                .queryParam("maxResults", 1)
+                .when().get(BASE + "/datasets/ds1/tables/t_paging/data")
+                .then()
+                .statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("first"))
+                .extract().path("pageToken");
+
+        String secondToken = given()
+                .queryParam("pageToken", firstToken)
+                .when().get(BASE + "/datasets/ds1/tables/t_paging/data")
+                .then()
+                .statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("second"))
+                .extract().path("pageToken");
+
+        given()
+                .queryParam("pageToken", secondToken)
+                .when().get(BASE + "/datasets/ds1/tables/t_paging/data")
+                .then()
+                .statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("third"))
+                .body("pageToken", nullValue());
+    }
+
+    @Test
     @Order(4)
     void queryFastPathReturnsCompleteResponse() {
         queryJobId = given()

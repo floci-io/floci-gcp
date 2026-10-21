@@ -13,17 +13,33 @@ public final class PageToken {
                 Integer.toString(offset).getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Encodes paging state for APIs whose clients omit the page size after the first request. */
+    public static String encode(int offset, int pageSize) {
+        return Base64.getEncoder().encodeToString(
+                (offset + ":" + pageSize).getBytes(StandardCharsets.UTF_8));
+    }
+
     public static int decode(String token) {
+        return decodeCursor(token).offset();
+    }
+
+    /** Offset plus an optional page size; offset-only tokens remain valid. */
+    public static Cursor decodeCursor(String token) {
         if (token == null || token.isBlank()) {
-            return 0;
+            return new Cursor(0, null);
         }
         try {
-            return Integer.parseInt(
-                    new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8));
+            String decoded = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
+            String[] parts = decoded.split(":", -1);
+            int offset = Integer.parseInt(parts[0]);
+            Integer pageSize = parts.length == 2 ? Integer.parseInt(parts[1]) : null;
+            return new Cursor(offset, pageSize);
         } catch (Exception e) {
-            return 0;
+            return new Cursor(0, null);
         }
     }
+
+    public record Cursor(int offset, Integer pageSize) {}
 
     public record Page<T>(List<T> items, String nextPageToken) {}
 

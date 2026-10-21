@@ -585,17 +585,19 @@ public class BigQueryController {
         if (maxResults != null && maxResults == 0) {
             return new PageToken.Page<>(List.of(), null);
         }
+        PageToken.Cursor cursor = PageToken.decodeCursor(pageToken);
         int offset = pageToken != null && !pageToken.isBlank()
-                ? PageToken.decode(pageToken)
+                ? cursor.offset()
                 : startIndex != null ? (int) Math.min(startIndex, Integer.MAX_VALUE) : 0;
         if (offset < 0 || offset >= all.size()) {
             return new PageToken.Page<>(List.of(), null);
         }
         int size = maxResults != null && maxResults > 0
-                ? (int) Math.min(maxResults, Integer.MAX_VALUE) : all.size();
+                ? (int) Math.min(maxResults, Integer.MAX_VALUE)
+                : cursor.pageSize() != null && cursor.pageSize() > 0 ? cursor.pageSize() : all.size();
         int end = Math.min(offset + size, all.size());
         List<TableRow> items = List.copyOf(all.subList(offset, end));
-        String next = end < all.size() ? PageToken.encode(end) : null;
+        String next = end < all.size() ? PageToken.encode(end, size) : null;
         return new PageToken.Page<>(items, next);
     }
 

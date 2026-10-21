@@ -123,6 +123,33 @@ class DuckSqlEngineServiceTest {
     }
 
     @Test
+    void ingestionDmlMarksRowsThatWereOriginallyUnpartitioned() {
+        DuckClient client = mock(DuckClient.class);
+        DuckClient.DuckResult followup = new DuckClient.DuckResult(List.of(
+                new DuckClient.DuckColumn("a", "BIGINT"),
+                new DuckClient.DuckColumn(BigQueryService.DML_ORIGINAL_UNPARTITIONED, "BOOLEAN")),
+                List.of(Map.of("a", 2, BigQueryService.DML_ORIGINAL_UNPARTITIONED, true)), null);
+        when(client.query(anyString(), anyString(), anyString(), anyString())).thenReturn(
+                new DuckClient.DuckResult(List.of(new DuckClient.DuckColumn("Count", "BIGINT")),
+                        List.of(Map.of("Count", 1)), followup));
+        DuckSqlEngine engine = engine(client);
+        BigQuerySqlEngine.Tables tables = mock(BigQuerySqlEngine.Tables.class);
+        Table table = tableWithColumnA();
+        table.setExtra("timePartitioning", Map.of("type", "DAY"));
+        when(tables.table("ds", "t")).thenReturn(table);
+        when(tables.rows("ds", "t")).thenReturn(List.of(Map.of("a", 1)));
+
+        engine.executeDml(new BigQuerySqlEngine.Request("proj", "UPDATE ds.t SET a = 2 WHERE TRUE", "ds",
+                List.of(), "NAMED", false), tables);
+
+        ArgumentCaptor<String> setupCaptor = ArgumentCaptor.forClass(String.class);
+        verify(client).query(anyString(), setupCaptor.capture(), anyString(), anyString());
+        String setup = setupCaptor.getValue();
+        assertTrue(setup.contains("ADD COLUMN \"$floci_original_unpartitioned\" BOOLEAN"), setup);
+        assertTrue(setup.contains("\"$floci_original_unpartitioned\" = \"_PARTITIONTIME\" IS NULL"), setup);
+    }
+
+    @Test
     void aResultArrayWithANullElementFailsTheQuery() {
         assertEquals("Array cannot have a null element; error in writing field a",
                 nullElementError("INTEGER[]", Arrays.asList(1, null, 3)));

@@ -4,9 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -525,6 +529,31 @@ final class DuckTypes {
     /** Epoch microseconds → BigQuery's float-seconds text, e.g. {@code 1704164645.123456}. */
     static String microsToSeconds(long micros) {
         return BigDecimal.valueOf(micros, 6).stripTrailingZeros().toPlainString();
+    }
+
+    /** Parses stored BigQuery date, datetime, timestamp text, including epoch-second timestamps. */
+    static LocalDateTime storedDateTime(Object value) {
+        String text = String.valueOf(value).trim();
+        try {
+            BigDecimal epoch = new BigDecimal(text);
+            long seconds = epoch.setScale(0, RoundingMode.FLOOR).longValueExact();
+            int nanos = epoch.subtract(BigDecimal.valueOf(seconds)).movePointRight(9).intValueExact();
+            return LocalDateTime.ofInstant(Instant.ofEpochSecond(seconds, nanos), ZoneOffset.UTC);
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // Continue with the calendar forms accepted by BigQuery row encodings.
+        }
+        try {
+            return OffsetDateTime.parse(text.replace(' ', 'T')).withOffsetSameInstant(ZoneOffset.UTC)
+                    .toLocalDateTime();
+        } catch (DateTimeParseException ignored) {
+            // An absent offset is valid for stored DATETIME and DATE values, so try those forms next.
+            try {
+                return LocalDateTime.parse(text.replace(' ', 'T'));
+            } catch (DateTimeParseException alsoIgnored) {
+                // A date-only value cannot parse as a datetime but safely maps to the start of that day.
+                return LocalDate.parse(text).atStartOfDay();
+            }
+        }
     }
 
     static String quoteIdentifier(String name) {

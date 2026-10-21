@@ -673,6 +673,46 @@ class BigQueryRestIntegrationTest {
 
     @Test
     @Order(13)
+    void schemaLessResumableJsonUploadUsesThePartitionedBaseTableSchema() {
+        String dataset = "load_partition_schema";
+        String table = "precreated";
+        String partition = "20261006";
+        given().contentType("application/json")
+                .body("{\"datasetReference\": {\"datasetId\": \"" + dataset + "\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "precreated"}, "schema": {"fields": [
+                  {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+                  {"name": "count", "type": "INT64"}
+                ]}, "timePartitioning": {"type": "DAY"}}
+                """).when().post(BASE + "/datasets/" + dataset + "/tables").then().statusCode(200);
+
+        String job = """
+                {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+                  "destinationTable": {"datasetId": "%s", "tableId": "%s$%s"}}}}
+                """.formatted(dataset, table, partition);
+        String location = given().contentType("application/json").body(job)
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200).extract().header("Location");
+        String path = location.substring(location.indexOf("/upload/"));
+        byte[] data = "{\"name\": \"ana\", \"count\": \"2\"}\n".getBytes();
+
+        given().header("Content-Range", "bytes 0-" + (data.length - 1) + "/" + data.length)
+                .contentType("application/octet-stream").body(data).when().put(path)
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.load.outputRows", equalTo("1"));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table + "$" + partition + "/data")
+                .then().statusCode(200)
+                .body("totalRows", equalTo("1"))
+                .body("rows[0].f.v", equalTo(List.of("ana", "2")));
+        given().when().get(BASE + "/datasets/" + dataset + "/tables/" + table + "$20261007/data")
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"));
+    }
+
+    @Test
+    @Order(13)
     void resumableUploadAnswers308UntilTheLastChunk() {
         String location = given().contentType("application/json").body(LOAD_JOB.formatted("resumable"))
                 .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")

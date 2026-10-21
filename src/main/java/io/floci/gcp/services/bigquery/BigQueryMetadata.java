@@ -5,8 +5,10 @@ import io.floci.gcp.services.bigquery.model.Dataset;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,6 +46,8 @@ final class BigQueryMetadata {
             "expirationTime", "defaultTableExpirationMs", "defaultPartitionExpirationMs", "maxTimeTravelHours");
 
     private static final Set<String> PARTITION_TYPES = Set.of("DAY", "HOUR", "MONTH", "YEAR");
+    private static final Set<String> TIME_PARTITION_FIELD_TYPES = Set.of("DATE", "DATETIME", "TIMESTAMP");
+    private static final String RESERVED_PARTITION_PREFIX = "_PARTITION";
 
     static final long MIN_TABLE_EXPIRATION_MS = 3_600_000L;
     static final String DEFAULT_MAX_TIME_TRAVEL_HOURS = "168";
@@ -116,12 +120,12 @@ final class BigQueryMetadata {
     @SuppressWarnings("unchecked")
     private static Object normalizeInt64(String key, Object value) {
         if (INT64_FIELDS.contains(key) && value instanceof Number n) {
-            return String.valueOf(n.longValue());
+            return normalizedLong(key, n);
         }
         if (key.equals("timePartitioning") && value instanceof Map<?, ?> map) {
             Map<String, Object> copy = new LinkedHashMap<>((Map<String, Object>) map);
             if (copy.get("expirationMs") instanceof Number n) {
-                copy.put("expirationMs", String.valueOf(n.longValue()));
+                copy.put("expirationMs", normalizedLong("expirationMs", n));
             }
             return copy;
         }
@@ -129,11 +133,19 @@ final class BigQueryMetadata {
                 && ((Map<String, Object>) map).get("range") instanceof Map<?, ?> range) {
             Map<String, Object> copy = new LinkedHashMap<>((Map<String, Object>) map);
             Map<String, Object> rangeCopy = new LinkedHashMap<>((Map<String, Object>) range);
-            rangeCopy.replaceAll((k, v) -> v instanceof Number n ? String.valueOf(n.longValue()) : v);
+            rangeCopy.replaceAll((k, v) -> v instanceof Number n ? normalizedLong(k, n) : v);
             copy.put("range", rangeCopy);
             return copy;
         }
         return value;
+    }
+
+    private static String normalizedLong(String key, Number value) {
+        try {
+            return String.valueOf(new BigDecimal(value.toString()).longValueExact());
+        } catch (ArithmeticException | NumberFormatException e) {
+            throw invalid(key + " must be an integer, got " + value);
+        }
     }
 
     // ── Validation ───────────────────────────────────────────────────────────
@@ -158,17 +170,23 @@ final class BigQueryMetadata {
         }
     }
 
-    /**
-     * {@code expirationTime} must parse as an int64; {@code timePartitioning.type} is required and one
-     * of DAY/HOUR/MONTH/YEAR; its field must exist.
-     */
+    /** Validates table expiration, partition configuration and reserved pseudocolumn names. */
     @SuppressWarnings("unchecked")
     static void validateTable(Map<String, Object> extra, List<TableFieldSchema> fields) {
         // expirationTime is an int64 on the wire, and every later read parses it to decide whether
         // the table has expired. Rejecting an unparseable value here keeps a bad write from turning
         // every subsequent get and list of that table into an error.
         longValue(extra, "expirationTime");
-        if (extra.get("timePartitioning") instanceof Map<?, ?> tp) {
+        List<TableFieldSchema> schemaFields = fields != null ? fields : List.of();
+        validateFieldNames(schemaFields);
+        if (extra.containsKey("timePartitioning") && extra.containsKey("rangePartitioning")) {
+            throw invalid("Cannot specify both time partitioning and range partitioning");
+        }
+        Object rawTimePartitioning = extra.get("timePartitioning");
+        if (rawTimePartitioning != null && !(rawTimePartitioning instanceof Map<?, ?>)) {
+            throw invalid("timePartitioning must be an object");
+        }
+        if (rawTimePartitioning instanceof Map<?, ?> tp) {
             Map<String, Object> partitioning = (Map<String, Object>) tp;
             Object type = partitioning.get("type");
             if (!(type instanceof String s) || !PARTITION_TYPES.contains(s)) {
@@ -178,14 +196,99 @@ final class BigQueryMetadata {
             if (expirationMs != null && expirationMs <= 0) {
                 throw invalid("timePartitioning.expirationMs must be positive");
             }
-            if (partitioning.get("field") instanceof String field && fields != null && !fields.isEmpty()
-                    && fields.stream().noneMatch(f -> f.getName().equalsIgnoreCase(field))) {
-                throw invalid("The field specified for time partitioning (" + field + ") is not in the table schema");
+            if (partitioning.containsKey("field")) {
+                Object rawField = partitioning.get("field");
+                if (!(rawField instanceof String field) || field.isBlank()) {
+                    throw invalid("timePartitioning.field must be a non-empty string");
+                }
+                TableFieldSchema schemaField = findField(schemaFields, field);
+                if (schemaField == null) {
+                    throw invalid("The field specified for time partitioning (" + field
+                            + ") is not in the table schema");
+                }
+                if (!TIME_PARTITION_FIELD_TYPES.contains(schemaField.getType())) {
+                    throw invalid("The field specified for time partitioning (" + field
+                            + ") must be DATE, DATETIME or TIMESTAMP");
+                }
+                if ("REPEATED".equals(schemaField.getMode())) {
+                    throw invalid("The field specified for time partitioning (" + field + ") cannot be repeated");
+                }
+                if ("DATE".equals(schemaField.getType()) && "HOUR".equals(type)) {
+                    throw invalid("DATE fields do not support HOUR partitioning");
+                }
             }
         }
-        if (extra.containsKey("timePartitioning") && extra.containsKey("rangePartitioning")) {
-            throw invalid("Cannot specify both time partitioning and range partitioning");
+        Object rawRangePartitioning = extra.get("rangePartitioning");
+        if (rawRangePartitioning != null && !(rawRangePartitioning instanceof Map<?, ?>)) {
+            throw invalid("rangePartitioning must be an object");
         }
+        if (rawRangePartitioning instanceof Map<?, ?> rp) {
+            Map<String, Object> partitioning = (Map<String, Object>) rp;
+            Object rawField = partitioning.get("field");
+            if (!(rawField instanceof String field) || field.isBlank()) {
+                throw invalid("rangePartitioning.field must be a non-empty string");
+            }
+            TableFieldSchema schemaField = findField(schemaFields, field);
+            if (schemaField == null) {
+                throw invalid("The field specified for range partitioning (" + field
+                        + ") is not in the table schema");
+            }
+            if (!"INTEGER".equals(schemaField.getType()) || "REPEATED".equals(schemaField.getMode())) {
+                throw invalid("The field specified for range partitioning (" + field
+                        + ") must be a non-repeated INTEGER");
+            }
+            if (!(partitioning.get("range") instanceof Map<?, ?> rawRange)) {
+                throw invalid("rangePartitioning.range is required");
+            }
+            Map<String, Object> range = (Map<String, Object>) rawRange;
+            Long start = requiredLongValue(range, "start", "rangePartitioning.range.start");
+            Long end = requiredLongValue(range, "end", "rangePartitioning.range.end");
+            Long interval = requiredLongValue(range, "interval", "rangePartitioning.range.interval");
+            if (end <= start) {
+                throw invalid("rangePartitioning.range.end must be greater than start");
+            }
+            if (interval <= 0) {
+                throw invalid("rangePartitioning.range.interval must be positive");
+            }
+        }
+    }
+
+    private static void validateFieldNames(List<TableFieldSchema> fields) {
+        for (TableFieldSchema field : fields) {
+            if (field.getName() != null
+                    && field.getName().toUpperCase(Locale.ROOT).startsWith(RESERVED_PARTITION_PREFIX)) {
+                throw invalid(field.getName() + " uses the reserved _PARTITION prefix");
+            }
+            if (field.getFields() != null) {
+                validateFieldNames(field.getFields());
+            }
+        }
+    }
+
+    private static TableFieldSchema findField(List<TableFieldSchema> fields, String name) {
+        return fields.stream()
+                .filter(field -> field.getName() != null && field.getName().equalsIgnoreCase(name))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static Long requiredLongValue(Map<String, Object> map, String key, String name) {
+        Long value = longValue(map, key);
+        if (value == null) {
+            throw invalid(name + " is required and must be an integer");
+        }
+        return value;
+    }
+
+    static String actualFieldName(Table table, String configuredName) {
+        if (table.getSchema() == null || table.getSchema().getFields() == null) {
+            return configuredName;
+        }
+        return table.getSchema().getFields().stream()
+                .map(TableFieldSchema::getName)
+                .filter(name -> name.equalsIgnoreCase(configuredName))
+                .findFirst()
+                .orElse(configuredName);
     }
 
     // ── Server-side behavior ─────────────────────────────────────────────────
@@ -241,7 +344,11 @@ final class BigQueryMetadata {
     private static Long longValue(Map<String, Object> map, String key) {
         Object value = map.get(key);
         if (value instanceof Number n) {
-            return n.longValue();
+            try {
+                return new BigDecimal(n.toString()).longValueExact();
+            } catch (ArithmeticException | NumberFormatException e) {
+                throw invalid(key + " must be an integer, got " + n);
+            }
         }
         if (value instanceof String s && !s.isBlank()) {
             try {

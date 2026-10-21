@@ -48,6 +48,8 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
 import java.math.BigDecimal;
 import java.net.URI;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -59,6 +61,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -418,6 +421,32 @@ class BigQueryWriteGrpcIntegrationTest {
             }
         });
         assertEquals(Status.Code.INVALID_ARGUMENT, noStream.getStatus().getCode());
+    }
+
+    @Test
+    @Order(18)
+    void timePartitionedStreamRejectsRowsOutsideTheStreamingWindow() throws Exception {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "stream_events"},
+                 "schema": {"fields": [{"name": "event_date", "type": "DATE"}]},
+                 "timePartitioning": {"type": "DAY", "field": "event_date"}}
+                """).when().post(BASE + "/datasets/writes/tables").then().statusCode(200);
+        DescriptorProto partitionRow = DescriptorProto.newBuilder().setName("PartitionRow")
+                .addField(field("event_date", 1, FieldDescriptorProto.Type.TYPE_INT32)).build();
+        Descriptor partitionDescriptor = descriptor(partitionRow);
+        int days = Math.toIntExact(LocalDate.now(ZoneOffset.UTC).minusYears(10).minusDays(1).toEpochDay());
+        ByteString oldRow = DynamicMessage.newBuilder(partitionDescriptor)
+                .setField(partitionDescriptor.findFieldByName("event_date"), days).build().toByteString();
+        String table = "projects/" + PROJECT + "/datasets/writes/tables/stream_events";
+
+        try (Connection connection = new Connection()) {
+            AppendRowsResponse rejected = connection.send(request(table + "/_default", partitionRow, oldRow));
+            assertEquals(Status.Code.INVALID_ARGUMENT.value(), rejected.getError().getCode());
+            assertEquals(1, rejected.getRowErrorsCount());
+            assertEquals(0, rejected.getRowErrors(0).getIndex());
+        }
+        given().when().get(BASE + "/datasets/writes/tables/stream_events/data")
+                .then().statusCode(200).body("totalRows", equalTo("0"));
     }
 
     private static ByteString arrowFixture(String name) throws Exception {

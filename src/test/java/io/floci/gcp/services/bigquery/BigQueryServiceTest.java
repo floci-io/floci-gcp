@@ -7,6 +7,7 @@ import io.floci.gcp.services.bigquery.model.DatasetAccessEntry;
 import io.floci.gcp.services.bigquery.model.DatasetReference;
 import io.floci.gcp.services.bigquery.model.ErrorProto;
 import io.floci.gcp.services.bigquery.model.StoredJob;
+import io.floci.gcp.services.bigquery.model.StoredTableData;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableReference;
@@ -16,11 +17,24 @@ import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class BigQueryServiceTest {
 
@@ -29,11 +43,13 @@ class BigQueryServiceTest {
     private static final String TABLE = "t1";
 
     private BigQueryService service;
+    private InMemoryStorage<String, StoredTableData> dataStore;
 
     @BeforeEach
     void setUp() {
-        service = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+        dataStore = new InMemoryStorage<>();
+        service = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(), dataStore,
+                new InMemoryStorage<>());
     }
 
     // ── Datasets ──
@@ -416,6 +432,487 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void decoratedDestinationWritesOnlyItsSelectedPartition() {
+        seedTwoRows();
+        Table destination = newTable(DATASET, "events");
+        destination.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob first = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261006"), "WRITE_TRUNCATE", null));
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261007"), "WRITE_TRUNCATE", null));
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1 WHERE name = 'alice'", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261006"), "WRITE_TRUNCATE", null));
+
+        assertEquals("events$20261006", first.getDestinationTableId());
+        assertEquals(3, service.storedRows(PROJECT, DATASET, "events").size());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$20261006").rows().size());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "events$20261007").rows().size());
+        GcpException duplicate = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                        new TableReference(PROJECT, DATASET, "events$20261006"), "WRITE_EMPTY", null)));
+        assertEquals("duplicate", duplicate.getReason());
+    }
+
+    @Test
+    void decoratedDestinationHonorsFieldRelaxation() {
+        seedTwoRows();
+        Table destination = newTable(DATASET, "events");
+        destination.setSchema(new TableSchema(List.of(
+                field("name", "STRING", "REQUIRED"), field("age", "INTEGER", "REQUIRED"))));
+        destination.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob job = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT name FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261006"), "WRITE_TRUNCATE",
+                null, List.of("ALLOW_FIELD_RELAXATION")));
+
+        assertFalse(job.failed(), job.getErrorMessage());
+        assertEquals(List.of("NULLABLE", "NULLABLE"), service.getTable(PROJECT, DATASET, "events")
+                .getSchema().getFields().stream().map(TableFieldSchema::getMode).toList());
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "events$20261006").rows().size());
+    }
+
+    @Test
+    void writeEmptyPreservesAnExistingPartitionedTableSchema() {
+        seedTwoRows();
+        Table destination = new Table();
+        destination.setTableReference(new TableReference(null, DATASET, "partitioned_events"));
+        destination.setSchema(new TableSchema(List.of(
+                field("event_date", "DATE", null), field("name", "STRING", null))));
+        destination.setExtra("timePartitioning", Map.of("type", "DAY", "field", "event_date"));
+        service.createTable(PROJECT, DATASET, destination);
+
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT name FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "partitioned_events"), "WRITE_EMPTY", null));
+
+        Table written = service.getTable(PROJECT, DATASET, "partitioned_events");
+        assertEquals(List.of("event_date", "name"),
+                written.getSchema().getFields().stream().map(TableFieldSchema::getName).toList());
+        assertEquals(Map.of("type", "DAY", "field", "event_date"), written.getExtra().get("timePartitioning"));
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "partitioned_events").rows().size());
+    }
+
+    @Test
+    void decoratedDestinationCreatesAPartitionedTableWhenAllowed() {
+        seedTwoRows();
+
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "created_events$20261006"), "WRITE_TRUNCATE",
+                "CREATE_IF_NEEDED", List.of(), Map.of("type", "DAY"), null));
+
+        Table created = service.getTable(PROJECT, DATASET, "created_events");
+        assertEquals("DAY", ((Map<?, ?>) created.getExtra().get("timePartitioning")).get("type"));
+        assertEquals(2, service.storedRows(PROJECT, DATASET, "created_events").size());
+    }
+
+    @Test
+    void queryDestinationNormalizesIntegralRangeNumbers() {
+        seedTwoRows();
+
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT age FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "created_ranges"), "WRITE_TRUNCATE",
+                "CREATE_IF_NEEDED", List.of(), null,
+                Map.of("field", "age", "range", Map.of("start", 0.0, "end", 100.0, "interval", 10.0))));
+
+        assertEquals(Map.of("field", "age", "range",
+                        Map.of("start", "0", "end", "100", "interval", "10")),
+                service.getTable(PROJECT, DATASET, "created_ranges").getExtra().get("rangePartitioning"));
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "created_ranges$20").rows().size());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "created_ranges$30").rows().size());
+    }
+
+    @Test
+    void invalidQueryDestinationPartitioningDoesNotCreateTable() {
+        seedTwoRows();
+
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                        new TableReference(PROJECT, DATASET, "bad_events"), "WRITE_TRUNCATE",
+                        "CREATE_IF_NEEDED", List.of(),
+                        Map.of("type", "DAY", "field", "age"), null)));
+
+        assertEquals("invalid", error.getReason());
+        assertThrows(GcpException.class, () -> service.getTable(PROJECT, DATASET, "bad_events"));
+    }
+
+    @Test
+    void truncateCannotReplacePartitionSchemaOrMutateTheExistingTableOnFailure() {
+        seedTwoRows();
+        Table destination = new Table();
+        destination.setTableReference(new TableReference(null, DATASET, "partitioned_events"));
+        destination.setSchema(new TableSchema(List.of(
+                field("event_date", "DATE", null), field("name", "STRING", null))));
+        destination.setExtra("timePartitioning", Map.of("type", "DAY", "field", "event_date"));
+        service.createTable(PROJECT, DATASET, destination);
+        service.appendRows(PROJECT, DATASET, "partitioned_events",
+                List.of(Map.of("event_date", "2026-10-20", "name", "kept")));
+
+        GcpException incompatible = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("SELECT name FROM ds1.t1", null, List.of(), null, false, false,
+                        new TableReference(PROJECT, DATASET, "partitioned_events"), "WRITE_TRUNCATE", null)));
+
+        assertEquals("invalid", incompatible.getReason());
+        assertEquals(List.of("event_date", "name"), service.getTable(PROJECT, DATASET, "partitioned_events")
+                .getSchema().getFields().stream().map(TableFieldSchema::getName).toList());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "partitioned_events").rows().size());
+
+        GcpException changedSpec = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions("SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                        new TableReference(PROJECT, DATASET, "partitioned_events"), "WRITE_APPEND",
+                        "CREATE_IF_NEEDED", List.of(), Map.of("type", "HOUR", "field", "event_date"), null)));
+        assertEquals("invalid", changedSpec.getReason());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "partitioned_events").rows().size());
+    }
+
+    @Test
+    void appendToIngestionTimeTablePreservesExistingPartitionMembership() {
+        seedTwoRows();
+        Table destination = newTable(DATASET, "events");
+        destination.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+        service.load(PROJECT, null, null,
+                loadConfig("events$20010101", "schema", PEOPLE_SCHEMA, "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"old\", \"age\": 1}"));
+
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events"), "WRITE_APPEND", null));
+
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$20010101").rows().size());
+        String today = LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE);
+        assertEquals(2, service.listTableData(PROJECT, DATASET, "events$" + today).rows().size());
+        assertEquals(3, service.listTableData(PROJECT, DATASET, "events").rows().size());
+    }
+
+    @Test
+    void decoratedDestinationCreationRequiresExplicitPartitioning() {
+        seedTwoRows();
+
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(
+                        "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                        new TableReference(PROJECT, DATASET, "created_events$20261006"), "WRITE_TRUNCATE",
+                        "CREATE_IF_NEEDED")));
+
+        assertTrue(error.getMessage().contains("requires timePartitioning or rangePartitioning"));
+        assertThrows(GcpException.class, () -> service.getTable(PROJECT, DATASET, "created_events"));
+    }
+
+    @Test
+    void deletePartitionDecoratorRemovesOnlyThatPartition() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table table = newTable(DATASET, "events");
+        table.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, table);
+        service.load(PROJECT, null, null,
+                loadConfig("events$20261014", "schema", PEOPLE_SCHEMA, "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"old\", \"age\": 1}"));
+        service.load(PROJECT, null, null,
+                loadConfig("events$20261015", "schema", PEOPLE_SCHEMA, "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"new\", \"age\": 2}"));
+
+        service.deleteTable(PROJECT, DATASET, "events$20261014");
+
+        assertNotNull(service.getTable(PROJECT, DATASET, "events"));
+        assertTrue(service.listTableData(PROJECT, DATASET, "events$20261014").rows().isEmpty());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$20261015").rows().size());
+    }
+
+    @Test
+    void wholeTableDeleteWaitsForAnInFlightAppendAndWins() throws Exception {
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch allowWrite = new CountDownLatch(1);
+        CountDownLatch deleteStarted = new CountDownLatch(1);
+        CountDownLatch deleteFinished = new CountDownLatch(1);
+        ArmableBlockingPutStorage<String, StoredTableData> blockingData =
+                new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                blockingData, new InMemoryStorage<>());
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        blockingData.blockNextPut();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "in-flight", "age", 1))));
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            Future<?> delete = executor.submit(() -> {
+                deleteStarted.countDown();
+                concurrentService.deleteTable(PROJECT, DATASET, TABLE);
+                deleteFinished.countDown();
+            });
+            assertTrue(deleteStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(deleteFinished.await(100, TimeUnit.MILLISECONDS),
+                    "delete must wait for the mutation that already holds writeLock");
+
+            allowWrite.countDown();
+            append.get(5, TimeUnit.SECONDS);
+            delete.get(5, TimeUnit.SECONDS);
+        }
+
+        assertThrows(GcpException.class, () -> concurrentService.getTable(PROJECT, DATASET, TABLE));
+        assertTrue(blockingData.get(DATASET + "/" + TABLE).isEmpty());
+    }
+
+    @Test
+    void insertAllSupportsOnlyRecentDailyIngestionPartitionDecorators() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table table = newTable(DATASET, "events");
+        table.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, table);
+        String today = LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE);
+
+        assertTrue(service.insertAll(PROJECT, DATASET, "events$" + today,
+                List.of(new BigQueryService.InsertRow(0, Map.of("name", "today", "age", 1))),
+                false, false).isEmpty());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$" + today).rows().size());
+
+        String tooOld = LocalDate.now(ZoneOffset.UTC).minusDays(32).format(DateTimeFormatter.BASIC_ISO_DATE);
+        assertThrows(GcpException.class, () -> service.insertAll(PROJECT, DATASET, "events$" + tooOld,
+                List.of(new BigQueryService.InsertRow(0, Map.of("name", "old", "age", 2))), false, false));
+
+        Table hourly = newTable(DATASET, "hourly");
+        hourly.getExtra().put("timePartitioning", Map.of("type", "HOUR"));
+        service.createTable(PROJECT, DATASET, hourly);
+        assertThrows(GcpException.class, () -> service.insertAll(PROJECT, DATASET, "hourly$" + today + "12",
+                List.of(new BigQueryService.InsertRow(0, Map.of("name", "bad", "age", 3))), false, false));
+    }
+
+    @Test
+    void streamingRejectsTimePartitionValuesOutsideItsRelativeWindow() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table table = new Table();
+        table.setTableReference(new TableReference(null, DATASET, "events"));
+        table.setSchema(new TableSchema(List.of(field("event_date", "DATE", null))));
+        table.setExtra("timePartitioning", Map.of("type", "DAY", "field", "event_date"));
+        service.createTable(PROJECT, DATASET, table);
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+
+        List<Map<String, Object>> errors = service.insertAll(PROJECT, DATASET, "events", List.of(
+                new BigQueryService.InsertRow(0, Map.of("event_date", today.minusYears(10).minusDays(1).toString())),
+                new BigQueryService.InsertRow(1, Map.of("event_date", today.toString())),
+                new BigQueryService.InsertRow(2, Map.of("event_date", today.plusYears(1).plusDays(1).toString()))),
+                true, false);
+
+        assertEquals(List.of(0, 2), errors.stream().map(error -> error.get("index")).toList());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events").rows().size());
+    }
+
+    @Test
+    void rangePartitionDdlCreatesRangeMetadata() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+
+        service.query(PROJECT, "US", null,
+                "CREATE TABLE ds1.ranged (id INT64) "
+                        + "PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(-10, 100, 5))", null);
+
+        assertEquals(Map.of("field", "id", "range",
+                        Map.of("start", "-10", "end", "100", "interval", "5")),
+                service.getTable(PROJECT, DATASET, "ranged").getExtra().get("rangePartitioning"));
+    }
+
+    @Test
+    void ordinaryIngestionTimeWritesReceiveCurrentPartitionPseudocolumns() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table table = newTable(DATASET, "events");
+        table.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, table);
+
+        service.insertAll(PROJECT, DATASET, "events",
+                List.of(new BigQueryService.InsertRow(0, Map.of("name", "now", "age", 1))), false, false);
+
+        Map<String, Object> staged = service.stagingRows(PROJECT, DATASET, "events").getFirst();
+        assertEquals(LocalDate.now(ZoneOffset.UTC).toString(), staged.get(BigQueryService.PARTITION_DATE));
+        assertNotNull(staged.get(BigQueryService.PARTITION_TIME));
+    }
+
+    @Test
+    void stagingAddsOnlyThePseudocolumnsAvailableForThePartitionType() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table fieldPartitioned = newTable(DATASET, "field_events");
+        fieldPartitioned.setSchema(new TableSchema(List.of(
+                field("name", "STRING", null), field("occurred_at", "TIMESTAMP", null))));
+        fieldPartitioned.getExtra().put("timePartitioning", Map.of("type", "DAY", "field", "occurred_at"));
+        service.createTable(PROJECT, DATASET, fieldPartitioned);
+        service.insertAll(PROJECT, DATASET, "field_events",
+                List.of(new BigQueryService.InsertRow(0, Map.of(
+                        "name", "event", "occurred_at", "2026-10-01T00:00:00Z"))), false, false);
+
+        Map<String, Object> fieldStaged = service.stagingRows(PROJECT, DATASET, "field_events").getFirst();
+        assertFalse(fieldStaged.containsKey(BigQueryService.PARTITION_DATE));
+        assertFalse(fieldStaged.containsKey(BigQueryService.PARTITION_TIME));
+
+        Table hourly = newTable(DATASET, "hourly_events");
+        hourly.getExtra().put("timePartitioning", Map.of("type", "HOUR"));
+        service.createTable(PROJECT, DATASET, hourly);
+        service.insertAll(PROJECT, DATASET, "hourly_events",
+                List.of(new BigQueryService.InsertRow(0, Map.of("name", "now", "age", 1))), false, false);
+
+        Map<String, Object> hourlyStaged = service.stagingRows(PROJECT, DATASET, "hourly_events").getFirst();
+        assertFalse(hourlyStaged.containsKey(BigQueryService.PARTITION_DATE));
+        assertNotNull(hourlyStaged.get(BigQueryService.PARTITION_TIME));
+    }
+
+    @Test
+    void partitionsInformationSchemaReportsStoredDecoratedPartitions() {
+        seedTwoRows();
+        Table destination = newTable(DATASET, "events");
+        destination.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, destination);
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261006"), "WRITE_TRUNCATE", null));
+        service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1 WHERE name = 'alice'", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "events$20261007"), "WRITE_TRUNCATE", null));
+
+        List<Map<String, Object>> partitions = service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null);
+        List<Map<String, Object>> eventPartitions = partitions.stream()
+                .filter(row -> "events".equals(row.get("table_name"))).toList();
+
+        assertEquals(2, eventPartitions.size());
+        assertEquals(List.of("20261006", "20261007"),
+                eventPartitions.stream().map(row -> row.get("partition_id")).sorted().toList());
+        Map<String, Object> first = eventPartitions.stream()
+                .filter(row -> row.get("partition_id").equals("20261006")).findFirst().orElseThrow();
+        assertEquals(2L, first.get("total_rows"));
+        assertTrue((long) first.get("total_logical_bytes") > 0L);
+        assertEquals(first.get("total_logical_bytes"), first.get("total_billable_bytes"));
+        assertEquals("ACTIVE", first.get("storage_tier"));
+    }
+
+    @Test
+    void partitionsInformationSchemaReportsLegacyIngestionRowsAsUnpartitioned() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table table = newTable(DATASET, "legacy_events");
+        table.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, table);
+        StoredTableData legacy = new StoredTableData();
+        legacy.setRows(new ArrayList<>(List.of(Map.of("name", "before-partitions", "age", 1))));
+        dataStore.put(DATASET + "/legacy_events", legacy);
+
+        Map<String, Object> partition = service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null).stream()
+                .filter(row -> "legacy_events".equals(row.get("table_name"))).findFirst().orElseThrow();
+        assertEquals("__UNPARTITIONED__", partition.get("partition_id"));
+        assertEquals(1L, partition.get("total_rows"));
+    }
+
+    @Test
+    void dmlKeepsUpdatedLegacyIngestionRowsUnpartitioned() {
+        InMemoryStorage<String, Dataset> datasets = new InMemoryStorage<>();
+        InMemoryStorage<String, Table> tables = new InMemoryStorage<>();
+        InMemoryStorage<String, StoredTableData> tableData = new InMemoryStorage<>();
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        BigQueryService legacyService = new BigQueryService(datasets, tables, tableData,
+                new InMemoryStorage<>(), engine);
+        legacyService.createDataset(PROJECT, newDataset(DATASET));
+        Table table = newTable(DATASET, "legacy_events");
+        table.setExtra("timePartitioning", Map.of("type", "DAY"));
+        legacyService.createTable(PROJECT, DATASET, table);
+        StoredTableData legacy = new StoredTableData();
+        legacy.setRows(new ArrayList<>(List.of(Map.of("name", "before-partitions", "age", 1))));
+        tableData.put(DATASET + "/legacy_events", legacy);
+        when(engine.executeDml(any(), any())).thenReturn(new BigQuerySqlEngine.DmlResult(
+                1, 0, 1, 0, List.of(Map.of("name", "updated", "age", 1,
+                        BigQueryService.DML_ORIGINAL_UNPARTITIONED, true)), 0));
+
+        StoredJob updated = legacyService.query(PROJECT, "US", null,
+                "UPDATE ds1.legacy_events SET name = 'updated' WHERE TRUE", null);
+
+        assertFalse(updated.failed(), updated.getErrorMessage());
+        StoredTableData stored = tableData.get(DATASET + "/legacy_events").orElseThrow();
+        assertEquals(List.of(Map.of("name", "updated", "age", 1)), stored.getRows());
+        assertTrue(stored.getPartitionRows().isEmpty());
+        Map<String, Object> staged = legacyService.stagingRows(PROJECT, DATASET, "legacy_events").getFirst();
+        assertFalse(staged.containsKey(BigQueryService.PARTITION_TIME));
+        assertFalse(staged.containsKey(BigQueryService.PARTITION_DATE));
+    }
+
+    @Test
+    void partitionsInformationSchemaIncludesUnpartitionedTables() {
+        seedTwoRows();
+
+        Map<String, Object> partition = service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null).stream()
+                .filter(row -> TABLE.equals(row.get("table_name")))
+                .findFirst().orElseThrow();
+
+        assertNull(partition.get("partition_id"));
+        assertEquals(2L, partition.get("total_rows"));
+    }
+
+    @Test
+    void partitionsInformationSchemaDerivesFieldAndRangePartitions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table events = newTable(DATASET, "events");
+        events.setSchema(new TableSchema(List.of(
+                field("name", "STRING", null), field("occurred_at", "TIMESTAMP", null))));
+        events.setExtra("timePartitioning", Map.of("type", "HOUR", "field", "OCCURRED_AT"));
+        service.createTable(PROJECT, DATASET, events);
+        service.insertAll(PROJECT, DATASET, "events", List.of(
+                new BigQueryService.InsertRow(0, Map.of(
+                        "name", "one", "occurred_at", "2026-10-15T08:12:00+02:00")),
+                new BigQueryService.InsertRow(1, Map.of("name", "two"))), false, false);
+
+        Table people = newTable(DATASET, "people");
+        people.getExtra().put("rangePartitioning", Map.of("field", "age",
+                "range", Map.of("start", "0", "end", "20", "interval", "10")));
+        service.createTable(PROJECT, DATASET, people);
+        service.appendRows(PROJECT, DATASET, "people", List.of(
+                Map.of("name", "in", "age", 15), Map.of("name", "out", "age", 25)));
+
+        List<Map<String, Object>> partitions = service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null);
+        assertEquals(List.of("2026101506", "__NULL__"), partitions.stream()
+                .filter(row -> row.get("table_name").equals("events"))
+                .map(row -> (String) row.get("partition_id")).sorted().toList());
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$2026101506").rows().size());
+        assertEquals(List.of("10", "__UNPARTITIONED__"), partitions.stream()
+                .filter(row -> row.get("table_name").equals("people"))
+                .map(row -> (String) row.get("partition_id")).sorted().toList());
+    }
+
+    @Test
+    void epochSecondTimestampsRouteToFieldPartitions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table events = newTable(DATASET, "epoch_events");
+        events.setSchema(new TableSchema(List.of(field("occurred_at", "TIMESTAMP", null))));
+        events.setExtra("timePartitioning", Map.of("type", "DAY", "field", "occurred_at"));
+        service.createTable(PROJECT, DATASET, events);
+        service.appendRows(PROJECT, DATASET, "epoch_events", List.of(Map.of("occurred_at", "1790812800")));
+
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "epoch_events$20261001").rows().size());
+        assertEquals("20261001", service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null).stream()
+                .filter(row -> row.get("table_name").equals("epoch_events"))
+                .findFirst().orElseThrow().get("partition_id"));
+    }
+
+    @Test
+    void outOfRangeTimeColumnValuesRouteToUnpartitioned() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table events = newTable(DATASET, "wide_events");
+        events.setSchema(new TableSchema(List.of(field("occurred_at", "TIMESTAMP", null))));
+        events.setExtra("timePartitioning", Map.of("type", "DAY", "field", "occurred_at"));
+        service.createTable(PROJECT, DATASET, events);
+        service.appendRows(PROJECT, DATASET, "wide_events", List.of(
+                Map.of("occurred_at", "1959-12-31T23:59:59Z"),
+                Map.of("occurred_at", "2160-01-01T00:00:00Z")));
+
+        Map<String, Object> partition = service.informationSchemaRows(PROJECT, "PARTITIONS", DATASET, null).stream()
+                .filter(row -> "wide_events".equals(row.get("table_name")))
+                .findFirst().orElseThrow();
+        assertEquals("__UNPARTITIONED__", partition.get("partition_id"));
+        assertEquals(2L, partition.get("total_rows"));
+    }
+
+    @Test
     void dryRunDmlAndDdlReportTheErrorARealRunWould() {
         seedTwoRows();
         assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
@@ -426,6 +923,20 @@ class BigQueryServiceTest {
                         null, true, false))).getGcpStatus());
         assertEquals("duplicate", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
                 new BigQueryService.QueryOptions("CREATE TABLE ds1.t1 (id INT64)", null, List.of(),
+                        null, true, false))).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(
+                        "CREATE TABLE ds1.bad_partition (ts TIMESTAMP) PARTITION BY ts", null, List.of(),
+                        null, true, false))).getReason());
+
+        Table partitioned = newTable(DATASET, "partitioned");
+        partitioned.setSchema(new TableSchema(List.of(field("d", "DATE", null))));
+        partitioned.setExtra("timePartitioning", Map.of("type", "DAY", "field", "d"));
+        service.createTable(PROJECT, DATASET, partitioned);
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(
+                        "CREATE OR REPLACE TABLE ds1.partitioned (ts TIMESTAMP) "
+                                + "PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null, List.of(),
                         null, true, false))).getReason());
 
         // A dry run that is valid still reports success and writes nothing.
@@ -511,7 +1022,7 @@ class BigQueryServiceTest {
 
     @SafeVarargs
     private List<Map<String, Object>> insertRows(Map<String, Object>... jsons) {
-        List<BigQueryService.InsertRow> rows = new java.util.ArrayList<>();
+        List<BigQueryService.InsertRow> rows = new ArrayList<>();
         for (int i = 0; i < jsons.length; i++) {
             rows.add(new BigQueryService.InsertRow(i, jsons[i]));
         }
@@ -590,12 +1101,18 @@ class BigQueryServiceTest {
         seedTable();
         Table patch = new Table();
         patch.setExtra("clustering", Map.of("fields", List.of("name")));
-        patch.setExtra("timePartitioning", Map.of("type", "DAY", "expirationMs", 3600000));
         patch.setExtra("requirePartitionFilter", true);
         Table patched = service.patchTable(PROJECT, DATASET, TABLE, patch);
         assertEquals(Map.of("fields", List.of("name")), patched.getExtra().get("clustering"));
-        assertEquals("3600000", ((Map<?, ?>) patched.getExtra().get("timePartitioning")).get("expirationMs"));
         assertEquals("US", patched.getLocation());
+
+        Table partitioned = newTable(DATASET, "partitioned");
+        partitioned.setExtra("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, DATASET, partitioned);
+        Table partitionPatch = new Table();
+        partitionPatch.setExtra("timePartitioning", Map.of("type", "DAY", "expirationMs", 3600000));
+        assertEquals("3600000", ((Map<?, ?>) service.patchTable(PROJECT, DATASET, "partitioned", partitionPatch)
+                .getExtra().get("timePartitioning")).get("expirationMs"));
 
         Table clear = new Table();
         clear.setExtra("clustering", null);
@@ -618,6 +1135,90 @@ class BigQueryServiceTest {
         Table unknownField = newTable(DATASET, "p2");
         unknownField.setExtra("timePartitioning", Map.of("type", "DAY", "field", "missing"));
         assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, unknownField));
+
+        Table wrongTimeType = newTable(DATASET, "p3");
+        wrongTimeType.setExtra("timePartitioning", Map.of("type", "DAY", "field", "name"));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, wrongTimeType));
+
+        Table hourlyDate = newTable(DATASET, "p4");
+        hourlyDate.setSchema(new TableSchema(List.of(field("event_date", "DATE", null))));
+        hourlyDate.setExtra("timePartitioning", Map.of("type", "HOUR", "field", "event_date"));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, hourlyDate));
+
+        Table repeatedTime = newTable(DATASET, "p5");
+        repeatedTime.setSchema(new TableSchema(List.of(field("event_time", "TIMESTAMP", "REPEATED"))));
+        repeatedTime.setExtra("timePartitioning", Map.of("type", "DAY", "field", "event_time"));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, repeatedTime));
+
+        Table missingRange = newTable(DATASET, "p6");
+        missingRange.setExtra("rangePartitioning", Map.of("field", "age"));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, missingRange));
+
+        Table badRange = newTable(DATASET, "p7");
+        badRange.setExtra("rangePartitioning", Map.of("field", "age",
+                "range", Map.of("start", "0", "end", "100", "interval", "0")));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, badRange));
+
+        Table fractionalRange = newTable(DATASET, "p8");
+        fractionalRange.setExtra("rangePartitioning", Map.of("field", "age",
+                "range", Map.of("start", 0, "end", 100, "interval", 2.5)));
+        assertThrows(GcpException.class, () -> service.createTable(PROJECT, DATASET, fractionalRange));
+    }
+
+    @Test
+    void tableUpdatesCannotChangePartitioningIdentity() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table partitioned = newTable(DATASET, TABLE);
+        partitioned.setSchema(new TableSchema(List.of(field("event_date", "DATE", null))));
+        partitioned.setExtra("timePartitioning", Map.of("type", "DAY", "field", "event_date"));
+        service.createTable(PROJECT, DATASET, partitioned);
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("event_date", "2026-10-21")));
+
+        Table remove = new Table();
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchTable(PROJECT, DATASET, TABLE, removeWithNullPartitioning(remove))).getReason());
+
+        Table change = new Table();
+        change.setExtra("timePartitioning", Map.of("type", "HOUR", "field", "event_date"));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.patchTable(PROJECT, DATASET, TABLE, change)).getReason());
+
+        Table replacement = new Table();
+        replacement.setSchema(new TableSchema(List.of(field("event_date", "DATE", null))));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.updateTable(PROJECT, DATASET, TABLE, replacement)).getReason());
+        assertEquals("DAY", ((Map<?, ?>) service.getTable(PROJECT, DATASET, TABLE)
+                .getExtra().get("timePartitioning")).get("type"));
+        assertEquals(1, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    private static Table removeWithNullPartitioning(Table table) {
+        table.setExtra("timePartitioning", null);
+        return table;
+    }
+
+    @Test
+    void reservedPartitionPseudocolumnNamesAreRejected() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        for (String name : List.of("_PARTITIONTIME", "_partitiondate")) {
+            Table table = newTable(DATASET, "reserved_" + name.toLowerCase());
+            table.setSchema(new TableSchema(List.of(field(name, "TIMESTAMP", null))));
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.createTable(PROJECT, DATASET, table));
+            assertEquals("invalid", error.getReason());
+        }
+
+        Table prefixed = newTable(DATASET, "reserved_prefix");
+        prefixed.setSchema(new TableSchema(List.of(field("_partitionfoo", "STRING", null))));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.createTable(PROJECT, DATASET, prefixed)).getReason());
+
+        Table nested = newTable(DATASET, "reserved_nested");
+        TableFieldSchema record = field("payload", "RECORD", null);
+        record.setFields(List.of(field("_PARTITION_SECRET", "STRING", null)));
+        nested.setSchema(new TableSchema(List.of(record)));
+        assertEquals("invalid", assertThrows(GcpException.class,
+                () -> service.createTable(PROJECT, DATASET, nested)).getReason());
     }
 
     @Test
@@ -795,6 +1396,47 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void createOrReplaceTableCannotChangePartitioning() {
+        service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
+        service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".events (d DATE, value INT64) PARTITION BY d", null);
+        service.appendRows(PROJECT, DATASET, "events", List.of(Map.of("d", "2026-10-21", "value", 7)));
+
+        GcpException changed = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE OR REPLACE TABLE " + DATASET
+                        + ".events (ts TIMESTAMP, value INT64) PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null));
+
+        assertEquals("invalidQuery", changed.getReason());
+        assertEquals("d", ((Map<?, ?>) service.getTable(PROJECT, DATASET, "events")
+                .getExtra().get("timePartitioning")).get("field"));
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events").rows().size());
+    }
+
+    @Test
+    void createTablePartitionExpressionsMustMatchTheFieldType() {
+        service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
+
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".bare_timestamp (ts TIMESTAMP) PARTITION BY ts", null)).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET
+                        + ".wrong_timestamp (dt DATETIME) PARTITION BY TIMESTAMP_TRUNC(dt, DAY)", null)).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET
+                        + ".wrong_datetime (ts TIMESTAMP) PARTITION BY DATETIME_TRUNC(ts, DAY)", null)).getReason());
+        assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".daily_date (d DATE) PARTITION BY DATE_TRUNC(d, DAY)", null))
+                .getReason());
+
+        assertEquals("CREATE", service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".by_date (d DATE) PARTITION BY d", null).getDdlOperationPerformed());
+        assertEquals("CREATE", service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET
+                        + ".by_datetime (dt DATETIME) PARTITION BY DATETIME_TRUNC(dt, MONTH)", null)
+                .getDdlOperationPerformed());
+    }
+
+    @Test
     void truncateAndDropStatements() {
         seedTwoRows();
 
@@ -866,6 +1508,92 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void loadCreatesDecoratedDestinationOnlyWithExplicitPartitioning() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+
+        StoredJob missing = service.load(PROJECT, null, null,
+                loadConfig("events$20261015", "schema", PEOPLE_SCHEMA),
+                ndjson("{\"name\": \"bad\", \"age\": 1}"));
+        StoredJob created = service.load(PROJECT, null, null,
+                loadConfig("events$20261015", "schema", PEOPLE_SCHEMA,
+                        "timePartitioning", Map.of("type", "DAY")),
+                ndjson("{\"name\": \"good\", \"age\": 2}"));
+
+        assertEquals("invalid", missing.getErrorReason());
+        assertFalse(created.failed(), created.getErrorMessage());
+        assertEquals("DAY", ((Map<?, ?>) service.getTable(PROJECT, DATASET, "events")
+                .getExtra().get("timePartitioning")).get("type"));
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$20261015").rows().size());
+    }
+
+    @Test
+    void failedDecoratedLoadDoesNotPublishANewTable() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Map<String, Object> schema = Map.of("fields", List.of(
+                Map.of("name", "event_date", "type", "DATE")));
+
+        StoredJob failed = service.load(PROJECT, null, null,
+                loadConfig("events$20261001", "schema", schema,
+                        "timePartitioning", Map.of("type", "DAY", "field", "event_date")),
+                ndjson("{\"event_date\": \"2026-10-02\"}"));
+
+        assertEquals("invalid", failed.getErrorReason());
+        assertThrows(GcpException.class, () -> service.getTable(PROJECT, DATASET, "events"));
+    }
+
+    @Test
+    void loadAppliesPartitioningToAnUndecoratedNewDestination() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+
+        StoredJob created = service.load(PROJECT, null, null,
+                loadConfig("events", "schema", PEOPLE_SCHEMA,
+                        "rangePartitioning", Map.of("field", "age",
+                                "range", Map.of("start", 0.0, "end", 100.0, "interval", 10.0))),
+                ndjson("{\"name\": \"good\", \"age\": 22}"));
+
+        assertFalse(created.failed(), created.getErrorMessage());
+        assertEquals(Map.of("field", "age", "range",
+                        Map.of("start", "0", "end", "100", "interval", "10")),
+                service.getTable(PROJECT, DATASET, "events").getExtra().get("rangePartitioning"));
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$20").rows().size());
+    }
+
+    @Test
+    void invalidLoadPartitioningDoesNotCreateTable() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+
+        StoredJob malformed = service.load(PROJECT, null, null,
+                loadConfig("bad_shape", "schema", PEOPLE_SCHEMA, "timePartitioning", "DAY"),
+                ndjson("{\"name\": \"bad\", \"age\": 1}"));
+        StoredJob incompleteRange = service.load(PROJECT, null, null,
+                loadConfig("bad_range", "schema", PEOPLE_SCHEMA,
+                        "rangePartitioning", Map.of("field", "age")),
+                ndjson("{\"name\": \"bad\", \"age\": 1}"));
+
+        assertEquals("invalid", malformed.getErrorReason());
+        assertEquals("invalid", incompleteRange.getErrorReason());
+        assertThrows(GcpException.class, () -> service.getTable(PROJECT, DATASET, "bad_shape"));
+        assertThrows(GcpException.class, () -> service.getTable(PROJECT, DATASET, "bad_range"));
+    }
+
+    @Test
+    void loadAssignsInitialIngestionTimeRowsToTheCurrentPartition() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+
+        StoredJob created = service.load(PROJECT, null, null,
+                loadConfig("events", "schema", PEOPLE_SCHEMA,
+                        "timePartitioning", Map.of("type", "DAY")),
+                ndjson("{\"name\": \"current\", \"age\": 4}"));
+
+        assertFalse(created.failed(), created.getErrorMessage());
+        String today = LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.BASIC_ISO_DATE);
+        assertEquals(1, service.listTableData(PROJECT, DATASET, "events$" + today).rows().size());
+        Map<String, Object> staged = service.stagingRows(PROJECT, DATASET, "events").getFirst();
+        assertEquals(LocalDate.now(ZoneOffset.UTC).toString(), staged.get(BigQueryService.PARTITION_DATE));
+        assertNotNull(staged.get(BigQueryService.PARTITION_TIME));
+    }
+
+    @Test
     void loadJobCountsBadRecordsAgainstMaxBadRecords() {
         service.createDataset(PROJECT, newDataset(DATASET));
         byte[] data = ndjson("{\"name\": \"ana\", \"age\": 30}", "{\"name\": \"x\", \"age\": \"old\"}", "not json");
@@ -921,5 +1649,36 @@ class BigQueryServiceTest {
         service.appendRows(PROJECT, DATASET, TABLE, List.of(), Map.of(stream + "empty", 0L));
         assertEquals(OptionalLong.of(0L), service.streamRowsApplied(PROJECT, DATASET, TABLE, stream + "empty"));
         assertEquals(4, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    private static final class ArmableBlockingPutStorage<K, V> extends InMemoryStorage<K, V> {
+        private final CountDownLatch putStarted;
+        private final CountDownLatch allowPut;
+        private final AtomicBoolean blockNextPut = new AtomicBoolean();
+
+        private ArmableBlockingPutStorage(CountDownLatch putStarted, CountDownLatch allowPut) {
+            this.putStarted = putStarted;
+            this.allowPut = allowPut;
+        }
+
+        private void blockNextPut() {
+            blockNextPut.set(true);
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if (blockNextPut.compareAndSet(true, false)) {
+                putStarted.countDown();
+                try {
+                    if (!allowPut.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to publish BigQuery table data");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("interrupted while publishing BigQuery table data", e);
+                }
+            }
+            super.put(key, value);
+        }
     }
 }

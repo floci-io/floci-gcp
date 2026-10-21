@@ -419,6 +419,16 @@ class BigQueryDuckDmlIntegrationTest {
                 .body("schema.fields.name", equalTo(List.of("id", "d", "ten")));
         org.junit.jupiter.api.Assertions.assertEquals(List.of(List.of("1", "10"), List.of("3", "30"),
                 List.of("4", "40")), rows("SELECT id, ten FROM shop.wrapped ORDER BY id"));
+
+        query("CREATE OR REPLACE TABLE shop.wrapped AS SELECT 99 AS id")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        given().when().get(BASE + "/datasets/shop/tables/wrapped").then().statusCode(200)
+                .body("timePartitioning.field", equalTo("d"))
+                .body("numRows", equalTo("3"));
+
+        query("CREATE TABLE shop.invalid_ingestion PARTITION BY DATE(_PARTITIONTIME) AS SELECT 1 AS id")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        given().when().get(BASE + "/datasets/shop/tables/invalid_ingestion").then().statusCode(404);
     }
 
     @Test
@@ -561,5 +571,182 @@ class BigQueryDuckDmlIntegrationTest {
         insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false,
                 "destinationTable", Map.of("tableId", "orphan"))).then().statusCode(200)
                 .body("status.errorResult.reason", equalTo("invalid"));
+    }
+
+    @Test
+    @Order(100)
+    void destinationPartitionDecoratorsWriteOnePartition() {
+        query("CREATE SCHEMA partitions").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference":{"tableId":"events"},
+                 "schema":{"fields":[{"name":"id","type":"INT64"}]},
+                 "timePartitioning":{"type":"DAY"}}
+                """).when().post(BASE + "/datasets/partitions/tables").then().statusCode(200);
+
+        Map<String, Object> first = Map.of("datasetId", "partitions", "tableId", "events$20261006");
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable", first,
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("configuration.query.destinationTable.tableId", equalTo("events$20261006"));
+        insertJob(Map.of("query", "SELECT 2 AS id", "useLegacySql", false, "destinationTable", first,
+                "writeDisposition", "WRITE_APPEND")).then().statusCode(200);
+        insertJob(Map.of("query", "SELECT 3 AS id", "useLegacySql", false, "destinationTable",
+                Map.of("datasetId", "partitions", "tableId", "events$20261007"),
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200);
+        insertJob(Map.of("query", "SELECT 4 AS id", "useLegacySql", false,
+                "destinationTable", first, "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200);
+
+        assertEquals(List.of(List.of("3"), List.of("4")),
+                rows("SELECT id FROM partitions.events ORDER BY id"));
+        query("SELECT * FROM partitions.events ORDER BY id").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id")))
+                .body("rows.f.v", equalTo(List.of(List.of("3"), List.of("4"))));
+        // GoogleSQL reads a partition by filtering its partitioning column or the ingestion-time
+        // pseudocolumns. Partition decorators are for load, copy, export, and table-data operations.
+        query("SELECT * REPLACE (id + 100 AS id), id AS original_id FROM partitions.events"
+                + " WHERE _PARTITIONDATE = DATE '2026-10-06'").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "original_id")))
+                .body("rows.f.v", equalTo(List.of(List.of("104", "4"))));
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM partitions.events"
+                + " WHERE _PARTITIONTIME = TIMESTAMP '2026-10-07 00:00:00+00'"));
+
+        query("UPDATE partitions.events SET id = id + 10"
+                + " WHERE _PARTITIONDATE = DATE '2026-10-06'").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
+        assertEquals(List.of(List.of("3"), List.of("14")),
+                rows("SELECT id FROM partitions.events ORDER BY id"));
+        assertEquals(List.of(List.of("20261006"), List.of("20261007")),
+                rows("SELECT partition_id FROM partitions.INFORMATION_SCHEMA.PARTITIONS"
+                        + " WHERE table_name = 'events' ORDER BY partition_id"));
+
+        Map<String, Object> old = Map.of("datasetId", "partitions", "tableId", "events$19690101");
+        insertJob(Map.of("query", "SELECT 20 AS id", "useLegacySql", false, "destinationTable", old,
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+        query("UPDATE partitions.events SET id = id + 1"
+                + " WHERE _PARTITIONDATE = DATE '1969-01-01'").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
+        assertEquals(List.of(List.of("21")), rows("SELECT id FROM partitions.events"
+                + " WHERE _PARTITIONDATE = DATE '1969-01-01'"));
+
+        query("UPDATE partitions.events SET _PARTITIONTIME = CASE"
+                + " WHEN id = 21 THEN TIMESTAMP '2026-10-06 00:00:00+00'"
+                + " WHEN id = 14 THEN TIMESTAMP '1969-01-01 00:00:00+00'"
+                + " ELSE _PARTITIONTIME END WHERE id IN (14, 21)")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        assertEquals(List.of(List.of("21")), rows("SELECT id FROM partitions.events"
+                + " WHERE _PARTITIONDATE = DATE '1969-01-01'"));
+        assertEquals(List.of(List.of("14")), rows("SELECT id FROM partitions.events"
+                + " WHERE _PARTITIONDATE = DATE '2026-10-06'"));
+
+        query("INSERT INTO partitions.events(id) SELECT * FROM partitions.events WHERE id = 3")
+                .then().statusCode(200).body("numDmlAffectedRows", equalTo("1"));
+        assertEquals(List.of(List.of("2")), rows("SELECT COUNT(*) FROM partitions.events WHERE id = 3"));
+    }
+
+    @Test
+    @Order(101)
+    void insertPartitionTimeDerivesPartitionDate() {
+        query("CREATE TABLE partitions.metrics (id INT64) PARTITION BY DATE(_PARTITIONTIME)")
+                .then().statusCode(200);
+        query("INSERT INTO partitions.metrics (id, _PARTITIONTIME) "
+                + "SELECT 1, TIMESTAMP '2026-10-08 00:00:00+00'")
+                .then().statusCode(200).body("errors", nullValue());
+
+        assertEquals(List.of(List.of("1")),
+                rows("SELECT id FROM partitions.metrics WHERE _PARTITIONDATE = DATE '2026-10-08'"));
+        query("INSERT INTO partitions.metrics (id, _PARTITIONTIME) "
+                + "SELECT 2, TIMESTAMP '2026-10-08 12:30:00+00'")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        query("INSERT INTO partitions.metrics (id, _PARTITIONTIME) "
+                + "SELECT 3, TIMESTAMP '1969-12-31 00:00:00+00'")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM partitions.metrics"));
+        query("INSERT INTO partitions.metrics VALUES (2)")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        assertEquals(List.of(List.of("0")), rows("SELECT COUNT(*) FROM partitions.metrics WHERE id = 2"));
+    }
+
+    @Test
+    @Order(102)
+    void hourlyPartitionTimeSurvivesInternalStaging() {
+        given().contentType("application/json").body("""
+                {"tableReference":{"tableId":"hourly_events"},
+                 "schema":{"fields":[{"name":"id","type":"INT64"}]},
+                 "timePartitioning":{"type":"HOUR"}}
+                """).when().post(BASE + "/datasets/partitions/tables").then().statusCode(200);
+        insertJob(Map.of("query", "SELECT 1 AS id", "useLegacySql", false, "destinationTable",
+                Map.of("datasetId", "partitions", "tableId", "hourly_events$2026100812"),
+                "writeDisposition", "WRITE_TRUNCATE")).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM partitions.hourly_events"
+                + " WHERE _PARTITIONTIME = TIMESTAMP '2026-10-08 12:00:00+00'"));
+        query("SELECT _PARTITIONDATE FROM partitions.hourly_events").then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(103)
+    void queryTimestampValuesRouteToPartitions() {
+        query("CREATE TABLE partitions.by_timestamp PARTITION BY DATE(ts) AS "
+                + "SELECT TIMESTAMP '2026-10-01 00:00:00+00' AS ts").then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/partitions/tables/by_timestamp$20261001/data")
+                .then().statusCode(200).body("totalRows", equalTo("1"));
+        assertEquals(List.of(List.of("20261001")),
+                rows("SELECT partition_id FROM partitions.INFORMATION_SCHEMA.PARTITIONS"
+                        + " WHERE table_name = 'by_timestamp'"));
+        query("SELECT _PARTITIONTIME FROM partitions.by_timestamp").then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        query("MERGE partitions.by_timestamp t "
+                + "USING (SELECT TIMESTAMP '2026-10-02 00:00:00+00' AS ts) s ON FALSE "
+                + "WHEN NOT MATCHED THEN INSERT VALUES (s.ts)").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"));
+        assertEquals(List.of(List.of("2")), rows("SELECT COUNT(*) FROM partitions.by_timestamp"));
+        assertEquals(List.of(List.of("20261001"), List.of("20261002")),
+                rows("SELECT partition_id FROM partitions.INFORMATION_SCHEMA.PARTITIONS"
+                        + " WHERE table_name = 'by_timestamp' ORDER BY partition_id"));
+    }
+
+    @Test
+    @Order(104)
+    void updatingPartitionTimeMovesAnIngestionTimeRow() {
+        query("CREATE TABLE partitions.movable_events (id INT64) PARTITION BY DATE(_PARTITIONTIME)")
+                .then().statusCode(200);
+        query("INSERT INTO partitions.movable_events (id, _PARTITIONTIME) "
+                + "SELECT 1, TIMESTAMP '2026-10-08 00:00:00+00'").then().statusCode(200);
+
+        query("UPDATE partitions.movable_events "
+                + "SET _PARTITIONTIME = TIMESTAMP '2026-10-09 00:00:01+00' WHERE id = 1")
+                .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM partitions.movable_events "
+                + "WHERE _PARTITIONDATE = DATE '2026-10-08'"));
+
+        query("UPDATE partitions.movable_events "
+                + "SET _PARTITIONTIME = TIMESTAMP '2026-10-09 00:00:00+00' WHERE id = 1")
+                .then().statusCode(200).body("numDmlAffectedRows", equalTo("1"));
+
+        assertEquals(List.of(List.of("0")), rows("SELECT COUNT(*) FROM partitions.movable_events "
+                + "WHERE _PARTITIONDATE = DATE '2026-10-08'"));
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM partitions.movable_events "
+                + "WHERE _PARTITIONDATE = DATE '2026-10-09'"));
+    }
+
+    @Test
+    @Order(105)
+    void truncatedPartitionTimeCreatesAnIngestionTimePartitionedTable() {
+        query("CREATE TABLE partitions.hourly_ingestion (id INT64) "
+                + "PARTITION BY TIMESTAMP_TRUNC(_PARTITIONTIME, HOUR)").then().statusCode(200);
+        given().when().get(BASE + "/datasets/partitions/tables/hourly_ingestion")
+                .then().statusCode(200)
+                .body("timePartitioning.type", equalTo("HOUR"))
+                .body("timePartitioning.field", nullValue());
+
+        query("INSERT INTO partitions.hourly_ingestion (id) VALUES (1)")
+                .then().statusCode(200).body("numDmlAffectedRows", equalTo("1"));
+        assertEquals(List.of(List.of("1")),
+                rows("SELECT COUNT(*) FROM partitions.hourly_ingestion WHERE _PARTITIONTIME IS NOT NULL"));
     }
 }

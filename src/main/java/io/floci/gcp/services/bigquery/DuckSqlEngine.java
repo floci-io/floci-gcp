@@ -177,20 +177,22 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
                 request.projectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref));
-
+                ref -> dmlColumnNames(tables, ref, target, targetTable));
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
+        String stagedTarget = DuckTypes.quoteIdentifier(target.datasetId()) + "."
+                + DuckTypes.quoteIdentifier(target.tableId());
+        String setup = dmlSetup(staging.setup(), stagedTarget, targetTable);
         if (request.dryRun()) {
             // EXPLAIN binds the statement against the staged tables without running it, so a missing
             // column or a malformed clause fails the dry run just as it would fail the real one.
-            run("EXPLAIN " + translation.sql(), staging.emptySetup(), flociEndpoint, null);
+            run("EXPLAIN " + translation.sql(), dmlSetup(staging.emptySetup(), stagedTarget, targetTable),
+                    flociEndpoint, null);
             return new DmlResult(0, 0, 0, 0, List.of(), staging.bytesProcessed());
         }
-        String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(target.datasetId()) + "."
-                + DuckTypes.quoteIdentifier(target.tableId());
-        DuckClient.DuckResult result = run(translation.sql(), staging.setup(), flociEndpoint, followup);
+        String followup = "SELECT * FROM " + stagedTarget;
+        DuckClient.DuckResult result = run(translation.sql(), setup, flociEndpoint, followup);
         if (result.followup() == null || result.followup().columns() == null) {
             throw GcpException.failedPrecondition("DML needs a floci-duck image that supports follow-up"
                     + " statements; update " + config.services().bigquery().duck().defaultImage());
@@ -721,10 +723,35 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             return null;
         }
         Set<String> names = new HashSet<>();
-        for (TableFieldSchema field : table.getSchema().getFields()) {
+        for (TableFieldSchema field : stagingFields(table)) {
             names.add(field.getName().toLowerCase(Locale.ROOT));
         }
         return names;
+    }
+
+    private static Set<String> dmlColumnNames(Tables tables, SqlDialectTranslator.TableRef ref,
+                                               SqlDialectTranslator.TableRef target, Table targetTable) {
+        Set<String> names = columnNames(tables, ref);
+        if (names == null || !ref.equals(target) || !BigQueryService.isIngestionTimePartitioned(targetTable)) {
+            return names;
+        }
+        Set<String> dmlNames = new HashSet<>(names);
+        dmlNames.add(BigQueryService.DML_ORIGINAL_PARTITION_TIME.toLowerCase(Locale.ROOT));
+        dmlNames.add(BigQueryService.DML_ORIGINAL_UNPARTITIONED.toLowerCase(Locale.ROOT));
+        return dmlNames;
+    }
+
+    private static String dmlSetup(String setup, String stagedTarget, Table targetTable) {
+        if (!BigQueryService.isIngestionTimePartitioned(targetTable)) {
+            return setup;
+        }
+        String originalPartition = DuckTypes.quoteIdentifier(BigQueryService.DML_ORIGINAL_PARTITION_TIME);
+        String originalUnpartitioned = DuckTypes.quoteIdentifier(BigQueryService.DML_ORIGINAL_UNPARTITIONED);
+        String partitionTime = DuckTypes.quoteIdentifier(BigQueryService.PARTITION_TIME);
+        return setup + "\nALTER TABLE " + stagedTarget + " ADD COLUMN " + originalPartition + " TIMESTAMP;\n"
+                + "ALTER TABLE " + stagedTarget + " ADD COLUMN " + originalUnpartitioned + " BOOLEAN;\n"
+                + "UPDATE " + stagedTarget + " SET " + originalPartition + " = " + partitionTime + ", "
+                + originalUnpartitioned + " = " + partitionTime + " IS NULL;";
     }
 
     private static TableSchema schemaOf(List<Column> columns) {
@@ -863,8 +890,22 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     }
 
     private static List<TableFieldSchema> stagingFields(Table table) {
-        return table.getSchema() != null && table.getSchema().getFields() != null
-                ? table.getSchema().getFields() : List.of();
+        List<TableFieldSchema> fields = new ArrayList<>(table.getSchema() != null && table.getSchema().getFields() != null
+                ? table.getSchema().getFields() : List.of());
+        if (BigQueryService.isIngestionTimePartitioned(table)) {
+            if (BigQueryService.hasPartitionDatePseudocolumn(table)) {
+                fields.add(field(BigQueryService.PARTITION_DATE, "DATE"));
+            }
+            fields.add(field(BigQueryService.PARTITION_TIME, "TIMESTAMP"));
+        }
+        return fields;
+    }
+
+    private static TableFieldSchema field(String name, String type) {
+        TableFieldSchema field = new TableFieldSchema();
+        field.setName(name);
+        field.setType(type);
+        return field;
     }
 
     /** {@code CREATE TABLE target} from NDJSON rows at {@code url}, or empty with the given columns. */

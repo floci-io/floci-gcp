@@ -29,8 +29,19 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.Year;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,6 +51,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -195,6 +207,59 @@ public class BigQueryService {
         if (value != null && "0".equals(String.valueOf(value).trim())) {
             extra.remove("defaultTableExpirationMs");
         }
+    }
+
+    private static List<Map<String, Object>> alignedPartitionRows(String projectId,
+                                                                  SqlDialectTranslator.TableRef target,
+                                                                  Table table, String partitionId,
+                                                                  BigQuerySqlEngine.Result result,
+                                                                  boolean relaxed) {
+        List<Map<String, Object>> rows = alignRows(projectId, target, table, result, relaxed);
+        validateRowsBelongToPartition(table, partitionId, rows);
+        return rows;
+    }
+
+    private void writePartition(String projectId, SqlDialectTranslator.TableRef target, Table table,
+                                String partitionId, String write, List<Map<String, Object>> rows) {
+        StoredTableData data = dataStore.get(tableKey(target.datasetId(), target.tableId()))
+                .orElseGet(StoredTableData::new);
+        synchronized (data) {
+            List<Map<String, Object>> selected = selectedPartitionRows(table, data, partitionId);
+            switch (write) {
+                case "WRITE_TRUNCATE", "WRITE_TRUNCATE_DATA" -> {
+                    data.getRows().removeIf(row -> partitionId.equals(partitionIdForRow(table, row)));
+                    data.getPartitionRows().put(partitionId, new ArrayList<>(rows));
+                }
+                case "WRITE_APPEND" -> data.getPartitionRows()
+                        .computeIfAbsent(partitionId, ignored -> new ArrayList<>()).addAll(rows);
+                default -> {
+                    if (!selected.isEmpty()) {
+                        throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
+                                .withReason("duplicate");
+                    }
+                    data.getPartitionRows().put(partitionId, new ArrayList<>(rows));
+                }
+            }
+            dataStore.put(tableKey(target.datasetId(), target.tableId()), data);
+            table.setNumRows(String.valueOf(allRows(data).size()));
+        }
+        table.setLastModifiedTime(nowMillis());
+        table.setEtag(etag());
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+    }
+
+    private DecoratedDestination decoratedDestination(TableReference destination) {
+        String tableId = destination.getTableId();
+        if (tableId == null || !tableId.contains("$")) {
+            return null;
+        }
+        Matcher matcher = PARTITION_DECORATOR.matcher(tableId);
+        if (!matcher.matches()) {
+            throw GcpException.invalidArgument("Invalid partition decorator: " + tableId).withReason("invalid");
+        }
+        SqlDialectTranslator.TableRef target = new SqlDialectTranslator.TableRef(destination.getDatasetId(),
+                matcher.group(1));
+        return new DecoratedDestination(target, matcher.group(2));
     }
 
     /**
@@ -359,6 +424,7 @@ public class BigQueryService {
                 ? RowCodec.normalizeSchema(patch.getSchema()) : existing.getSchema();
         Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
         BigQueryMetadata.patch(candidate, patch.getExtra(), BigQueryMetadata.TABLE_FIELDS);
+        validateUnchangedPartitioning(existing.getExtra(), candidate);
         BigQueryMetadata.validateTable(candidate, schemaFields(schema));
         if (patch.getFriendlyName() != null) {
             existing.setFriendlyName(patch.getFriendlyName());
@@ -385,6 +451,7 @@ public class BigQueryService {
         TableSchema schema = update.getSchema() != null ? RowCodec.normalizeSchema(update.getSchema()) : null;
         Map<String, Object> candidate = new LinkedHashMap<>(existing.getExtra());
         BigQueryMetadata.replace(candidate, update.getExtra(), BigQueryMetadata.TABLE_FIELDS);
+        validateUnchangedPartitioning(existing.getExtra(), candidate);
         BigQueryMetadata.validateTable(candidate, schemaFields(schema));
         existing.setFriendlyName(update.getFriendlyName());
         existing.setDescription(update.getDescription());
@@ -398,9 +465,34 @@ public class BigQueryService {
     }
 
     public void deleteTable(String projectId, String datasetId, String tableId) {
-        getTable(projectId, datasetId, tableId);
-        tableStore.delete(tableKey(datasetId, tableId));
-        dataStore.delete(tableKey(datasetId, tableId));
+        DecoratedDestination decorated = decoratedDestination(new TableReference(projectId, datasetId, tableId));
+        if (decorated != null) {
+            String key = tableKey(datasetId, decorated.target().tableId());
+            synchronized (writeLock) {
+                Table table = getTable(projectId, datasetId, decorated.target().tableId());
+                validatePartitionDecorator(table, decorated.partitionId());
+                StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
+                synchronized (data) {
+                    data.getPartitionRows().remove(decorated.partitionId());
+                    synchronized (data.getRows()) {
+                        data.getRows().removeIf(row -> decorated.partitionId().equals(partitionIdForRow(table, row)));
+                    }
+                }
+                dataStore.put(key, data);
+                table.setNumRows(String.valueOf(allRows(data).size()));
+                table.setLastModifiedTime(nowMillis());
+                table.setEtag(etag());
+                tableStore.put(key, table);
+            }
+            LOG.debugf("deleteTable partition project=%s dataset=%s table=%s partition=%s",
+                    projectId, datasetId, decorated.target().tableId(), decorated.partitionId());
+            return;
+        }
+        synchronized (writeLock) {
+            getTable(projectId, datasetId, tableId);
+            tableStore.delete(tableKey(datasetId, tableId));
+            dataStore.delete(tableKey(datasetId, tableId));
+        }
         LOG.debugf("deleteTable project=%s dataset=%s table=%s", projectId, datasetId, tableId);
     }
 
@@ -415,7 +507,12 @@ public class BigQueryService {
      */
     public List<Map<String, Object>> insertAll(String projectId, String datasetId, String tableId,
             List<InsertRow> rows, boolean skipInvalidRows, boolean ignoreUnknownValues) {
-        Table table = getTable(projectId, datasetId, tableId);
+        DecoratedDestination decorated = decoratedDestination(new TableReference(projectId, datasetId, tableId));
+        String baseTableId = decorated != null ? decorated.target().tableId() : tableId;
+        Table table = getTable(projectId, datasetId, baseTableId);
+        if (decorated != null) {
+            validateStreamingPartitionDecorator(table, decorated.partitionId());
+        }
 
         List<Map<String, Object>> insertErrors = new ArrayList<>();
         List<Map<String, Object>> accepted = new ArrayList<>();
@@ -424,6 +521,13 @@ public class BigQueryService {
             Map<String, Object> normalized = new LinkedHashMap<>();
             List<ErrorProto> rowErrors = RowCodec.normalizeRow(
                     table.getSchema(), row.json(), ignoreUnknownValues, normalized);
+            if (rowErrors.isEmpty()) {
+                try {
+                    validateStreamingPartitionValue(table, normalized);
+                } catch (GcpException e) {
+                    rowErrors = List.of(new ErrorProto("invalid", null, e.getMessage()));
+                }
+            }
             if (rowErrors.isEmpty()) {
                 accepted.add(normalized);
                 acceptedIndexes.add(row.index());
@@ -441,7 +545,11 @@ public class BigQueryService {
             return insertErrors;
         }
 
-        appendRows(projectId, datasetId, tableId, accepted);
+        if (decorated != null) {
+            appendPartitionRows(projectId, datasetId, baseTableId, decorated.partitionId(), accepted);
+        } else {
+            appendRows(projectId, datasetId, baseTableId, accepted);
+        }
         LOG.debugf("insertAll project=%s dataset=%s table=%s accepted=%d rejected=%d",
                 projectId, datasetId, tableId, accepted.size(), insertErrors.size());
         return insertErrors;
@@ -465,13 +573,18 @@ public class BigQueryService {
         synchronized (writeLock) {
             Table table = getTable(projectId, datasetId, tableId);
             StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
-            List<Map<String, Object>> stored = data.getRows();
-            synchronized (stored) {
-                stored.addAll(rows);
+            synchronized (data) {
+                if (!rows.isEmpty()) {
+                    List<Map<String, Object>> stored = isIngestionTimePartitioned(table)
+                            ? data.getPartitionRows().computeIfAbsent(currentIngestionPartitionId(table),
+                                    ignored -> new ArrayList<>())
+                            : data.getRows();
+                    stored.addAll(rows);
+                }
+                data.getStreamRows().putAll(streamRows);
             }
-            data.getStreamRows().putAll(streamRows);
             dataStore.put(key, data);
-            table.setNumRows(String.valueOf(data.getRows().size()));
+            table.setNumRows(String.valueOf(allRows(data).size()));
             table.setLastModifiedTime(nowMillis());
             tableStore.put(key, table);
         }
@@ -497,9 +610,21 @@ public class BigQueryService {
 
     public TableData listTableData(String projectId, String datasetId, String tableId,
             RowCodec.TimestampFormat format) {
+        DecoratedDestination decorated = decoratedDestination(new TableReference(projectId, datasetId, tableId));
+        if (decorated != null) {
+            Table table = getTable(projectId, decorated.target().datasetId(), decorated.target().tableId());
+            validatePartitionDecorator(table, decorated.partitionId());
+            StoredTableData data = dataStore.get(tableKey(decorated.target().datasetId(), decorated.target().tableId()))
+                    .orElseGet(StoredTableData::new);
+            List<Map<String, Object>> rows;
+            synchronized (data) {
+                rows = selectedPartitionRows(table, data, decorated.partitionId());
+            }
+            return new TableData(table.getSchema(), RowCodec.encodeRows(table.getSchema(), rows, format));
+        }
         Table table = getTable(projectId, datasetId, tableId);
         StoredTableData data = dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new);
-        return new TableData(table.getSchema(), RowCodec.encodeRows(table.getSchema(), data.getRows(), format));
+        return new TableData(table.getSchema(), RowCodec.encodeRows(table.getSchema(), allRows(data), format));
     }
 
     /** Stored (normalized) rows of a table, as the SQL engine stages them. */
@@ -510,26 +635,42 @@ public class BigQueryService {
         // returned, while insertAll appends to that same list.
         // Deliberately not under writeLock: DML holds that lock across the sidecar round trip,
         // and the sidecar fetches this route over HTTP to stage the table, so taking it here
-        // deadlocks until the read times out. The row list has its own monitor instead, which
-        // insertAll also takes to append, so copying cannot see a half-written ArrayList. Nothing
-        // holds that monitor across the sidecar call, so it cannot deadlock the way writeLock does.
-        List<Map<String, Object>> stored = dataStore.get(tableKey(datasetId, tableId))
-                .orElseGet(StoredTableData::new).getRows();
-        synchronized (stored) {
-            return List.copyOf(stored);
-        }
+        // deadlocks until the read times out. The table-data object has its own monitor instead,
+        // which append paths also take, so a snapshot cannot observe a partial row or partition
+        // mutation. Nothing holds that monitor across the sidecar call, so it cannot deadlock the
+        // way writeLock does.
+        StoredTableData data = dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new);
+        return allRows(data);
     }
 
     // ── Query ────────────────────────────────────────────────────────────────────
 
     /** Hidden dataset holding materialized query results; never listed, has no dataset record. */
     static final String ANON_DATASET = "_floci_anon";
+    private static final Pattern PARTITION_DECORATOR = Pattern.compile("^(.+)\\$(-?\\d+)$");
+    private static final DateTimeFormatter HOUR_PARTITION = DateTimeFormatter.ofPattern("uuuuMMddHH")
+            .withResolverStyle(ResolverStyle.STRICT);
+    private static final DateTimeFormatter DAY_PARTITION = DateTimeFormatter.ofPattern("uuuuMMdd")
+            .withResolverStyle(ResolverStyle.STRICT);
+    private static final DateTimeFormatter MONTH_PARTITION = DateTimeFormatter.ofPattern("uuuuMM")
+            .withResolverStyle(ResolverStyle.STRICT);
+    private static final DateTimeFormatter YEAR_PARTITION = DateTimeFormatter.ofPattern("uuuu")
+            .withResolverStyle(ResolverStyle.STRICT);
+    private static final LocalDate MIN_COLUMN_PARTITION_DATE = LocalDate.of(1960, 1, 1);
+    private static final LocalDate MAX_COLUMN_PARTITION_DATE = LocalDate.of(2159, 12, 31);
+    private static final LocalDate MIN_DML_PARTITION_DATE = LocalDate.of(1970, 1, 1);
+    private static final LocalDate MAX_DML_PARTITION_DATE = LocalDate.of(2159, 12, 31);
+    static final String PARTITION_DATE = "_PARTITIONDATE";
+    static final String PARTITION_TIME = "_PARTITIONTIME";
+    static final String DML_ORIGINAL_PARTITION_TIME = "$floci_original_partition_time";
+    static final String DML_ORIGINAL_UNPARTITIONED = "$floci_original_unpartitioned";
 
     /** Request-level options of {@code jobs.query} / {@code jobs.insert} that shape execution. */
     public record QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                                String parameterMode, boolean dryRun, Boolean useLegacySql,
                                TableReference destinationTable, String writeDisposition,
-                               String createDisposition, List<String> schemaUpdateOptions) {
+                               String createDisposition, List<String> schemaUpdateOptions,
+                               Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning) {
 
         public QueryOptions {
             schemaUpdateOptions = schemaUpdateOptions != null ? schemaUpdateOptions : List.of();
@@ -537,9 +678,17 @@ public class BigQueryService {
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql,
+                            TableReference destinationTable, String writeDisposition, String createDisposition,
+                            List<String> schemaUpdateOptions) {
+            this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
+                    writeDisposition, createDisposition, schemaUpdateOptions, null, null);
+        }
+
+        public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
+                            String parameterMode, boolean dryRun, Boolean useLegacySql,
                             TableReference destinationTable, String writeDisposition, String createDisposition) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
-                    writeDisposition, createDisposition, List.of());
+                    writeDisposition, createDisposition, List.of(), null, null);
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
@@ -702,14 +851,26 @@ public class BigQueryService {
                 }
             }
             case CREATE_TABLE, CREATE_VIEW -> {
-                boolean exists = tableStore.get(tableKey(target.datasetId(), target.tableId())).isPresent();
+                Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+                boolean exists = existing.isPresent();
                 if (exists && !statement.orReplace() && !statement.ifNotExists()) {
                     throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
                             .withReason("duplicate");
                 }
                 getDataset(projectId, target.datasetId());
+                BigQuerySqlEngine.Result described = null;
                 if (statement.querySql() != null) {
-                    engine.execute(request(projectId, statement.querySql(), options, true), tables(projectId));
+                    described = engine.execute(request(projectId, statement.querySql(), options, true),
+                            tables(projectId));
+                }
+                if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE) {
+                    Table candidate = createStatementTable(statement,
+                            described != null ? described.schema() : null);
+                    if (existing.isPresent() && statement.orReplace()
+                            && !samePartitioning(existing.get(), candidate)) {
+                        throw QueryEngine.invalidQuery(
+                                "CREATE OR REPLACE TABLE cannot change the partitioning specification");
+                    }
                 }
             }
             case CREATE_SCHEMA -> {
@@ -885,7 +1046,8 @@ public class BigQueryService {
         SqlDialectTranslator.TableRef target = statement.target();
         getDataset(projectId, target.datasetId());
         job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
-        boolean exists = tableStore.get(tableKey(target.datasetId(), target.tableId())).isPresent();
+        Optional<Table> existingTable = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+        boolean exists = existingTable.isPresent();
         if (exists && statement.ifNotExists()) {
             job.setDdlOperationPerformed("SKIP");
             return;
@@ -920,11 +1082,108 @@ public class BigQueryService {
         } else {
             table.setSchema(RowCodec.normalizeSchema(new TableSchema(statement.columns())));
         }
+        if (statement.timePartitioning() != null) {
+            table.getExtra().put("timePartitioning", new LinkedHashMap<>(statement.timePartitioning()));
+        }
+        if (statement.rangePartitioning() != null) {
+            table.getExtra().put("rangePartitioning", new LinkedHashMap<>(statement.rangePartitioning()));
+        }
+        BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
+        validateCreateTablePartitioning(statement, table);
+        if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE && existingTable.isPresent()
+                && !samePartitioning(existingTable.get(), table)) {
+            throw QueryEngine.invalidQuery("CREATE OR REPLACE TABLE cannot change the partitioning specification");
+        }
         if (exists) {
             deleteTable(projectId, target.datasetId(), target.tableId());
         }
         putTable(projectId, target, table, rows);
         job.setDdlOperationPerformed(exists ? "REPLACE" : "CREATE");
+    }
+
+    private static Table createStatementTable(SqlDialectTranslator.Statement statement, TableSchema describedSchema) {
+        Table table = new Table();
+        table.setSchema(describedSchema != null ? describedSchema
+                : RowCodec.normalizeSchema(new TableSchema(statement.columns())));
+        if (statement.timePartitioning() != null) {
+            table.getExtra().put("timePartitioning", new LinkedHashMap<>(statement.timePartitioning()));
+        }
+        if (statement.rangePartitioning() != null) {
+            table.getExtra().put("rangePartitioning", new LinkedHashMap<>(statement.rangePartitioning()));
+        }
+        BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
+        validateCreateTablePartitioning(statement, table);
+        return table;
+    }
+
+    private static void validateCreateTablePartitioning(SqlDialectTranslator.Statement statement, Table table) {
+        if (statement.partitionExpression() == null
+                || statement.partitionExpression() == SqlDialectTranslator.PartitionExpression.INGESTION_TIME
+                || statement.partitionExpression() == SqlDialectTranslator.PartitionExpression.RANGE_BUCKET) {
+            return;
+        }
+        Map<String, Object> partitioning = timePartitioning(table);
+        String fieldName = partitioning != null && partitioning.get("field") instanceof String field ? field : null;
+        TableFieldSchema field = schemaFields(table).stream()
+                .filter(candidate -> candidate.getName() != null
+                        && candidate.getName().equalsIgnoreCase(fieldName != null ? fieldName : ""))
+                .findFirst()
+                .orElseThrow(() -> QueryEngine.invalidQuery("Partition field " + fieldName
+                        + " is not present in the table schema"));
+        String actualType = field.getType();
+        boolean valid = switch (statement.partitionExpression()) {
+            case BARE_DATE, DATE_TRUNC -> "DATE".equals(actualType);
+            case DATE -> "TIMESTAMP".equals(actualType) || "DATETIME".equals(actualType);
+            case TIMESTAMP_TRUNC -> "TIMESTAMP".equals(actualType);
+            case DATETIME_TRUNC -> "DATETIME".equals(actualType);
+            case INGESTION_TIME, RANGE_BUCKET -> true;
+        };
+        if (!valid) {
+            throw QueryEngine.invalidQuery("PARTITION BY " + statement.partitionExpression()
+                    + " is not valid for field " + fieldName + " of type " + actualType);
+        }
+    }
+
+    private static boolean samePartitioning(Table existing, Table replacement) {
+        return samePartitioning(existing.getExtra(), replacement.getExtra());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean samePartitioning(Map<String, Object> existing, Map<String, Object> replacement) {
+        Object rawExistingTime = existing.get("timePartitioning");
+        Object rawReplacementTime = replacement.get("timePartitioning");
+        Map<String, Object> existingTime = rawExistingTime instanceof Map<?, ?> map
+                ? (Map<String, Object>) map : null;
+        Map<String, Object> replacementTime = rawReplacementTime instanceof Map<?, ?> map
+                ? (Map<String, Object>) map : null;
+        if (existingTime != null || replacementTime != null) {
+            return existingTime != null && replacementTime != null
+                    && String.valueOf(existingTime.get("type"))
+                            .equalsIgnoreCase(String.valueOf(replacementTime.get("type")))
+                    && equalPartitionFields(existingTime.get("field"), replacementTime.get("field"));
+        }
+        Object rawExistingRange = existing.get("rangePartitioning");
+        Object rawReplacementRange = replacement.get("rangePartitioning");
+        Map<String, Object> existingRange = rawExistingRange instanceof Map<?, ?> map
+                ? (Map<String, Object>) map : null;
+        Map<String, Object> replacementRange = rawReplacementRange instanceof Map<?, ?> map
+                ? (Map<String, Object>) map : null;
+        return existingRange == null && replacementRange == null
+                || existingRange != null && replacementRange != null
+                && equalPartitionFields(existingRange.get("field"), replacementRange.get("field"))
+                && rangeSpec(existingRange).equals(rangeSpec(replacementRange));
+    }
+
+    private static boolean equalPartitionFields(Object left, Object right) {
+        return left == null && right == null || left != null && right != null
+                && String.valueOf(left).equalsIgnoreCase(String.valueOf(right));
+    }
+
+    private static void validateUnchangedPartitioning(Map<String, Object> existing, Map<String, Object> candidate) {
+        if (!samePartitioning(existing, candidate)) {
+            throw GcpException.invalidArgument("The table partitioning specification cannot be changed")
+                    .withReason("invalid");
+        }
     }
 
     /**
@@ -935,12 +1194,19 @@ public class BigQueryService {
     private void writeDestination(String projectId, QueryOptions options, BigQuerySqlEngine.Result result) {
         writeRows(projectId, options.destinationTable(),
                 options.writeDisposition() != null ? options.writeDisposition() : "WRITE_EMPTY",
-                options.createDisposition(), options.schemaUpdateOptions(), result);
+                options.createDisposition(), options.schemaUpdateOptions(), options.timePartitioning(),
+                options.rangePartitioning(), result);
     }
 
     /** Writes rows into a destination table following BigQuery's create and write dispositions. */
     private void writeRows(String projectId, TableReference destination, String write, String createDisposition,
                            List<String> schemaUpdateOptions, BigQuerySqlEngine.Result result) {
+        writeRows(projectId, destination, write, createDisposition, schemaUpdateOptions, null, null, result);
+    }
+
+    private void writeRows(String projectId, TableReference destination, String write, String createDisposition,
+                           List<String> schemaUpdateOptions, Map<String, Object> requestedTimePartitioning,
+                           Map<String, Object> requestedRangePartitioning, BigQuerySqlEngine.Result result) {
         if (destination.getProjectId() != null && !destination.getProjectId().equals(projectId)) {
             throw QueryEngine.invalidQuery("Cross-project destination tables are not supported by the floci"
                     + " BigQuery emulator");
@@ -951,8 +1217,9 @@ public class BigQueryService {
         if (destination.getTableId() == null || destination.getTableId().isBlank()) {
             throw GcpException.invalidArgument("destinationTable.tableId is required").withReason("invalid");
         }
-        SqlDialectTranslator.TableRef target = new SqlDialectTranslator.TableRef(destination.getDatasetId(),
-                destination.getTableId());
+        DecoratedDestination decorated = decoratedDestination(destination);
+        SqlDialectTranslator.TableRef target = decorated != null ? decorated.target()
+                : new SqlDialectTranslator.TableRef(destination.getDatasetId(), destination.getTableId());
         getDataset(projectId, target.datasetId());
         Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
         String create = createDisposition != null ? createDisposition : "CREATE_IF_NEEDED";
@@ -961,8 +1228,34 @@ public class BigQueryService {
             if ("CREATE_NEVER".equals(create)) {
                 throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
             }
+            if (requestedTimePartitioning != null && requestedRangePartitioning != null) {
+                throw GcpException.invalidArgument("timePartitioning and rangePartitioning are mutually"
+                        + " exclusive").withReason("invalid");
+            }
             Table table = new Table();
             table.setSchema(result.schema());
+            Map<String, Object> requestedPartitioning = new LinkedHashMap<>();
+            if (requestedTimePartitioning != null) {
+                requestedPartitioning.put("timePartitioning", requestedTimePartitioning);
+            }
+            if (requestedRangePartitioning != null) {
+                requestedPartitioning.put("rangePartitioning", requestedRangePartitioning);
+            }
+            table.getExtra().putAll(BigQueryMetadata.writable(requestedPartitioning,
+                    BigQueryMetadata.TABLE_FIELDS));
+            BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table.getSchema()));
+            if (decorated != null) {
+                if (requestedTimePartitioning == null && requestedRangePartitioning == null) {
+                    throw GcpException.invalidArgument("Creating a decorated destination table requires"
+                            + " timePartitioning or rangePartitioning").withReason("invalid");
+                }
+                validatePartitionDecorator(table, decorated.partitionId());
+                List<Map<String, Object>> rows = alignedPartitionRows(projectId, target, table,
+                        decorated.partitionId(), result, false);
+                putTable(projectId, target, table, List.of());
+                writePartition(projectId, target, table, decorated.partitionId(), write, rows);
+                return;
+            }
             putTable(projectId, target, table, result.rows());
             return;
         }
@@ -970,14 +1263,36 @@ public class BigQueryService {
         if (table.viewQuery() != null) {
             throw QueryEngine.invalidQuery("Cannot write query results to view " + qualified(projectId, target));
         }
+        if (requestedTimePartitioning != null || requestedRangePartitioning != null) {
+            Map<String, Object> requested = new LinkedHashMap<>();
+            if (requestedTimePartitioning != null) {
+                requested.put("timePartitioning", requestedTimePartitioning);
+            }
+            if (requestedRangePartitioning != null) {
+                requested.put("rangePartitioning", requestedRangePartitioning);
+            }
+            validateUnchangedPartitioning(table.getExtra(),
+                    BigQueryMetadata.writable(requested, BigQueryMetadata.TABLE_FIELDS));
+        }
+        if (decorated != null) {
+            validatePartitionDecorator(table, decorated.partitionId());
+            boolean relaxed = schemaUpdateOptions.stream()
+                    .anyMatch(option -> "ALLOW_FIELD_RELAXATION".equalsIgnoreCase(option));
+            boolean relaxPartitionSchema = relaxed && ("WRITE_APPEND".equals(write)
+                    || "WRITE_TRUNCATE".equals(write) || "WRITE_TRUNCATE_DATA".equals(write));
+            List<Map<String, Object>> rows = alignedPartitionRows(projectId, target, table,
+                    decorated.partitionId(), result, relaxPartitionSchema);
+            writePartition(projectId, target, table, decorated.partitionId(), write, rows);
+            relaxSchemaIfRequested(projectId, target, table, relaxPartitionSchema);
+            return;
+        }
         List<Map<String, Object>> current = storedRows(projectId, target.datasetId(), target.tableId());
         boolean relaxed = schemaUpdateOptions.stream()
                 .anyMatch(option -> "ALLOW_FIELD_RELAXATION".equalsIgnoreCase(option));
         switch (write) {
             case "WRITE_TRUNCATE" -> {
-                table.setSchema(result.schema());
-                tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
-                replaceRows(projectId, target, result.rows());
+                BigQueryMetadata.validateTable(table.getExtra(), schemaFields(result.schema()));
+                replaceRowsAndSchema(target, table, result.schema(), result.rows());
             }
             case "WRITE_TRUNCATE_DATA" -> {
                 List<Map<String, Object>> rows = alignRows(projectId, target, table, result, relaxed);
@@ -985,19 +1300,17 @@ public class BigQueryService {
                 replaceRows(projectId, target, rows);
             }
             case "WRITE_APPEND" -> {
-                List<Map<String, Object>> rows = new ArrayList<>(current);
-                rows.addAll(alignRows(projectId, target, table, result, relaxed));
+                List<Map<String, Object>> rows = alignRows(projectId, target, table, result, relaxed);
                 relaxSchemaIfRequested(projectId, target, table, relaxed);
-                replaceRows(projectId, target, rows);
+                appendRows(projectId, target.datasetId(), target.tableId(), rows);
             }
             default -> {
                 if (!current.isEmpty()) {
                     throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
                             .withReason("duplicate");
                 }
-                table.setSchema(result.schema());
-                tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
-                replaceRows(projectId, target, result.rows());
+                List<Map<String, Object>> rows = alignRows(projectId, target, table, result, false);
+                replaceRows(projectId, target, rows);
             }
         }
     }
@@ -1093,23 +1406,384 @@ public class BigQueryService {
         table.setNumRows(String.valueOf(rows.size()));
         tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
         StoredTableData data = new StoredTableData();
-        data.setRows(new ArrayList<>(rows));
+        if (isIngestionTimePartitioned(table) && !rows.isEmpty()) {
+            data.getPartitionRows().put(currentIngestionPartitionId(table), new ArrayList<>(rows));
+        } else {
+            data.setRows(new ArrayList<>(rows));
+        }
         dataStore.put(tableKey(target.datasetId(), target.tableId()), data);
     }
 
     private void replaceRows(String projectId, SqlDialectTranslator.TableRef target, List<Map<String, Object>> rows) {
         String key = tableKey(target.datasetId(), target.tableId());
         Table table = getTable(projectId, target.datasetId(), target.tableId());
-        StoredTableData data = new StoredTableData();
-        data.setRows(new ArrayList<>(rows));
-        // DML rewrites the rows but not what Storage Write streams already delivered.
-        dataStore.get(key).ifPresent(previous -> data.setStreamRows(previous.getStreamRows()));
+        StoredTableData previous = dataStore.get(key).orElse(null);
+        StoredTableData data = replacementData(table, rows, previous);
         dataStore.put(key, data);
         table.setNumRows(String.valueOf(rows.size()));
         table.setLastModifiedTime(nowMillis());
         table.setEtag(etag());
         tableStore.put(key, table);
     }
+
+    private void replaceRowsAndSchema(SqlDialectTranslator.TableRef target, Table table, TableSchema schema,
+                                      List<Map<String, Object>> rows) {
+        String key = tableKey(target.datasetId(), target.tableId());
+        StoredTableData previous = dataStore.get(key).orElse(null);
+        StoredTableData data = replacementData(table, rows, previous);
+        table.setSchema(schema);
+        table.setNumRows(String.valueOf(rows.size()));
+        table.setLastModifiedTime(nowMillis());
+        table.setEtag(etag());
+        dataStore.put(key, data);
+        tableStore.put(key, table);
+    }
+
+    private static StoredTableData replacementData(Table table, List<Map<String, Object>> rows,
+                                                    StoredTableData previous) {
+        StoredTableData data = new StoredTableData();
+        if (isIngestionTimePartitioned(table)) {
+            for (Map<String, Object> row : rows) {
+                Map<String, Object> stored = new LinkedHashMap<>(row);
+                Object partitionDate = stored.remove(PARTITION_DATE);
+                Object partitionTime = stored.remove(PARTITION_TIME);
+                Object originalPartitionTime = stored.remove(DML_ORIGINAL_PARTITION_TIME);
+                Object originalUnpartitioned = stored.remove(DML_ORIGINAL_UNPARTITIONED);
+                Object partitionValue = partitionTime != null ? partitionTime : partitionDate;
+                DmlPartition partition = partitionValue != null
+                        ? dmlPartition(table, partitionValue) : null;
+                String partitionId = partition != null ? partition.id() : null;
+                DmlPartition original = originalPartitionTime != null
+                        ? dmlPartition(table, originalPartitionTime) : null;
+                if (partition != null && (original == null || !partition.id().equals(original.id()))) {
+                    validateDmlPartitionRange(partition.date());
+                }
+                if (partitionId == null && Boolean.TRUE.equals(originalUnpartitioned)) {
+                    data.getRows().add(stored);
+                } else {
+                    data.getPartitionRows().computeIfAbsent(
+                            partitionId != null ? partitionId : currentIngestionPartitionId(table),
+                            ignored -> new ArrayList<>()).add(stored);
+                }
+            }
+        } else {
+            data.setRows(new ArrayList<>(rows));
+        }
+        // DML rewrites the rows but not what Storage Write streams already delivered.
+        if (previous != null) {
+            data.setStreamRows(previous.getStreamRows());
+        }
+        return data;
+    }
+
+    static boolean isIngestionTimePartitioned(Table table) {
+        Object raw = table.getExtra().get("timePartitioning");
+        return raw instanceof Map<?, ?> partitioning && !partitioning.containsKey("field");
+    }
+
+    static boolean hasPartitionDatePseudocolumn(Table table) {
+        Map<String, Object> partitioning = timePartitioning(table);
+        return isIngestionTimePartitioned(table) && partitioning != null
+                && "DAY".equalsIgnoreCase(String.valueOf(partitioning.get("type")));
+    }
+
+    private record DmlPartition(String id, LocalDate date) {}
+
+    private static DmlPartition dmlPartition(Table table, Object value) {
+        Map<String, Object> partitioning = timePartitioning(table);
+        if (partitioning == null) {
+            return null;
+        }
+        String type = String.valueOf(partitioning.get("type"));
+        LocalDateTime dateTime = partitionDateTime(String.valueOf(value));
+        String partitionId = timePartitionId(value, type);
+        if (!dateTime.equals(timePartitionBoundary(table, partitionId))) {
+            throw QueryEngine.invalidQuery("DML partition values must match the exact partition boundary");
+        }
+        return new DmlPartition(partitionId, dateTime.toLocalDate());
+    }
+
+    private static void validateDmlPartitionRange(LocalDate date) {
+        if (date.isBefore(MIN_DML_PARTITION_DATE) || date.isAfter(MAX_DML_PARTITION_DATE)) {
+            throw QueryEngine.invalidQuery("DML partition values must be between 1970-01-01 and 2159-12-31");
+        }
+    }
+
+    private static String partitionIdForRow(Table table, Map<String, Object> row) {
+        Map<String, Object> time = timePartitioning(table);
+        if (time != null && time.get("field") instanceof String field) {
+            Object value = row.get(BigQueryMetadata.actualFieldName(table, field));
+            return value != null ? timeFieldPartitionId(value, String.valueOf(time.get("type"))) : "__NULL__";
+        }
+        Map<String, Object> range = rangePartitioning(table);
+        if (range != null && range.get("field") instanceof String field) {
+            Object value = row.get(BigQueryMetadata.actualFieldName(table, field));
+            if (value == null) {
+                return "__NULL__";
+            }
+            BigInteger number;
+            try {
+                number = new BigInteger(String.valueOf(value));
+            } catch (NumberFormatException expected) {
+                // Legacy rows with malformed range values remain readable in __UNPARTITIONED__.
+                return "__UNPARTITIONED__";
+            }
+            RangeSpec spec = rangeSpec(range);
+            if (number.compareTo(spec.start()) < 0 || number.compareTo(spec.end()) >= 0) {
+                return "__UNPARTITIONED__";
+            }
+            return spec.start().add(number.subtract(spec.start()).divide(spec.interval()).multiply(spec.interval()))
+                    .toString();
+        }
+        return null;
+    }
+
+    static String timeFieldPartitionId(Object value, String type) {
+        LocalDateTime dateTime = partitionDateTime(String.valueOf(value));
+        LocalDate date = dateTime.toLocalDate();
+        if (date.isBefore(MIN_COLUMN_PARTITION_DATE) || date.isAfter(MAX_COLUMN_PARTITION_DATE)) {
+            return "__UNPARTITIONED__";
+        }
+        return timePartitionId(value, type);
+    }
+
+    static void validateStreamingPartitionValue(Table table, Map<String, Object> row) {
+        Map<String, Object> partitioning = timePartitioning(table);
+        if (partitioning == null || !(partitioning.get("field") instanceof String field)) {
+            return;
+        }
+        Object value = row.get(BigQueryMetadata.actualFieldName(table, field));
+        if (value == null) {
+            return;
+        }
+        LocalDate partitionDate = partitionDateTime(String.valueOf(value)).toLocalDate();
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        if (partitionDate.isBefore(today.minusYears(10)) || partitionDate.isAfter(today.plusYears(1))) {
+            throw GcpException.invalidArgument("Streaming time partition value must be between 10 years in the past"
+                    + " and 1 year in the future").withReason("invalid");
+        }
+    }
+
+    private static List<Map<String, Object>> selectedPartitionRows(Table table, StoredTableData data,
+                                                                   String partitionId) {
+        List<Map<String, Object>> selected = new ArrayList<>(
+                data.getPartitionRows().getOrDefault(partitionId, List.of()));
+        synchronized (data.getRows()) {
+            data.getRows().stream().filter(row -> partitionId.equals(partitionIdForRow(table, row)))
+                    .forEach(selected::add);
+        }
+        return List.copyOf(selected);
+    }
+
+    private static void validateRowsBelongToPartition(Table table, String partitionId,
+                                                       List<Map<String, Object>> rows) {
+        if (isIngestionTimePartitioned(table)) {
+            return;
+        }
+        if (rows.stream().anyMatch(row -> !partitionId.equals(partitionIdForRow(table, row)))) {
+            throw GcpException.invalidArgument("Rows do not belong to destination partition " + partitionId)
+                    .withReason("invalid");
+        }
+    }
+
+    private static List<Map<String, Object>> allRows(StoredTableData data) {
+        synchronized (data) {
+            List<Map<String, Object>> rows;
+            synchronized (data.getRows()) {
+                rows = new ArrayList<>(data.getRows());
+            }
+            data.getPartitionRows().values().forEach(rows::addAll);
+            return List.copyOf(rows);
+        }
+    }
+
+    /** Rows for DuckDB staging, including ingestion-time partition pseudocolumns. */
+    List<Map<String, Object>> stagingRows(String projectId, String datasetId, String tableId) {
+        Table table = getTable(projectId, datasetId, tableId);
+        StoredTableData data = dataStore.get(tableKey(datasetId, tableId)).orElseGet(StoredTableData::new);
+        if (!isIngestionTimePartitioned(table)) {
+            return allRows(data);
+        }
+        synchronized (data) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            synchronized (data.getRows()) {
+                data.getRows().forEach(row -> rows.add(new LinkedHashMap<>(row)));
+            }
+            data.getPartitionRows().forEach((partitionId, partitionRows) -> {
+                LocalDateTime boundary = timePartitionBoundary(table, partitionId);
+                String time = DateTimeFormatter.ISO_INSTANT.format(boundary.toInstant(ZoneOffset.UTC));
+                partitionRows.forEach(row -> {
+                    Map<String, Object> staged = new LinkedHashMap<>(row);
+                    if ("DAY".equalsIgnoreCase(String.valueOf(timePartitioning(table).get("type")))) {
+                        staged.put(PARTITION_DATE, boundary.toLocalDate().toString());
+                    }
+                    staged.put(PARTITION_TIME, time);
+                    rows.add(staged);
+                });
+            });
+            return List.copyOf(rows);
+        }
+    }
+
+    private void appendPartitionRows(String projectId, String datasetId, String tableId, String partitionId,
+                                     List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        String key = tableKey(datasetId, tableId);
+        synchronized (writeLock) {
+            Table table = getTable(projectId, datasetId, tableId);
+            StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
+            synchronized (data) {
+                data.getPartitionRows().computeIfAbsent(partitionId, ignored -> new ArrayList<>()).addAll(rows);
+            }
+            dataStore.put(key, data);
+            table.setNumRows(String.valueOf(allRows(data).size()));
+            table.setLastModifiedTime(nowMillis());
+            table.setEtag(etag());
+            tableStore.put(key, table);
+        }
+    }
+
+    private static void validateStreamingPartitionDecorator(Table table, String partitionId) {
+        Map<String, Object> partitioning = timePartitioning(table);
+        if (!isIngestionTimePartitioned(table) || partitioning == null
+                || !"DAY".equalsIgnoreCase(String.valueOf(partitioning.get("type")))) {
+            throw GcpException.invalidArgument("tabledata.insertAll partition decorators require a daily"
+                    + " ingestion-time partitioned table").withReason("invalid");
+        }
+        validateTimePartitionId(partitionId, "DAY");
+        LocalDate partition = LocalDate.parse(partitionId, DAY_PARTITION);
+        long days = ChronoUnit.DAYS.between(LocalDate.now(ZoneOffset.UTC), partition);
+        if (days < -31 || days > 16) {
+            throw GcpException.invalidArgument("Streaming partition decorator is outside the supported range: "
+                    + "31 days in the past through 16 days in the future").withReason("invalid");
+        }
+    }
+
+    private static String currentIngestionPartitionId(Table table) {
+        return timePartitionId(Instant.now().toString(), String.valueOf(timePartitioning(table).get("type")));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> timePartitioning(Table table) {
+        Object raw = table.getExtra().get("timePartitioning");
+        return raw instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> rangePartitioning(Table table) {
+        Object raw = table.getExtra().get("rangePartitioning");
+        return raw instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+    }
+
+    private static void validatePartitionDecorator(Table table, String partitionId) {
+        Map<String, Object> time = timePartitioning(table);
+        if (time != null) {
+            validateTimePartitionId(partitionId, String.valueOf(time.get("type")));
+            return;
+        }
+        Map<String, Object> range = rangePartitioning(table);
+        if (range != null) {
+            BigInteger id;
+            try {
+                id = new BigInteger(partitionId);
+            } catch (NumberFormatException e) {
+                throw invalidPartitionDecorator(partitionId, "an integer range boundary");
+            }
+            RangeSpec spec = rangeSpec(range);
+            if (id.compareTo(spec.start()) < 0 || id.compareTo(spec.end()) >= 0
+                    || !id.subtract(spec.start()).mod(spec.interval()).equals(BigInteger.ZERO)) {
+                throw invalidPartitionDecorator(partitionId, "a configured integer range boundary");
+            }
+            return;
+        }
+        throw GcpException.invalidArgument("Partition decorator requires a partitioned table").withReason("invalid");
+    }
+
+    private static void validateTimePartitionId(String partitionId, String type) {
+        try {
+            switch (type.toUpperCase(Locale.ROOT)) {
+                case "HOUR" -> LocalDateTime.parse(partitionId, HOUR_PARTITION);
+                case "DAY" -> LocalDate.parse(partitionId, DAY_PARTITION);
+                case "MONTH" -> YearMonth.parse(partitionId, MONTH_PARTITION);
+                case "YEAR" -> Year.parse(partitionId, YEAR_PARTITION);
+                default -> throw GcpException.invalidArgument("Unsupported time partitioning type: " + type)
+                        .withReason("invalid");
+            }
+        } catch (DateTimeParseException e) {
+            String expected = switch (type.toUpperCase(Locale.ROOT)) {
+                case "HOUR" -> "YYYYMMDDHH";
+                case "DAY" -> "YYYYMMDD";
+                case "MONTH" -> "YYYYMM";
+                case "YEAR" -> "YYYY";
+                default -> type;
+            };
+            throw invalidPartitionDecorator(partitionId, expected);
+        }
+    }
+
+    private static GcpException invalidPartitionDecorator(String partitionId, String expected) {
+        return GcpException.invalidArgument("Invalid partition decorator " + partitionId + "; expected " + expected)
+                .withReason("invalid");
+    }
+
+    private static String timePartitionId(Object value, String type) {
+        LocalDateTime dateTime = partitionDateTime(String.valueOf(value));
+        return switch (type.toUpperCase(Locale.ROOT)) {
+            case "HOUR" -> dateTime.format(HOUR_PARTITION);
+            case "DAY" -> dateTime.format(DAY_PARTITION);
+            case "MONTH" -> dateTime.format(MONTH_PARTITION);
+            case "YEAR" -> dateTime.format(YEAR_PARTITION);
+            default -> throw GcpException.invalidArgument("Unsupported time partitioning type: " + type)
+                    .withReason("invalid");
+        };
+    }
+
+    private static LocalDateTime partitionDateTime(String value) {
+        try {
+            return DuckTypes.storedDateTime(value);
+        } catch (DateTimeException | ArithmeticException invalid) {
+            throw GcpException.invalidArgument("Invalid partitioning value: " + value).withReason("invalid");
+        }
+    }
+
+    private static LocalDateTime timePartitionBoundary(Table table, String partitionId) {
+        Map<String, Object> partitioning = timePartitioning(table);
+        String type = String.valueOf(partitioning.get("type"));
+        validateTimePartitionId(partitionId, type);
+        return switch (type.toUpperCase(Locale.ROOT)) {
+            case "HOUR" -> LocalDateTime.parse(partitionId, HOUR_PARTITION);
+            case "DAY" -> LocalDate.parse(partitionId, DAY_PARTITION).atStartOfDay();
+            case "MONTH" -> YearMonth.parse(partitionId, MONTH_PARTITION).atDay(1).atStartOfDay();
+            case "YEAR" -> Year.parse(partitionId, YEAR_PARTITION).atDay(1).atStartOfDay();
+            default -> throw new IllegalStateException("validated partition type " + type);
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static RangeSpec rangeSpec(Map<?, ?> partitioning) {
+        if (!(partitioning.get("range") instanceof Map<?, ?> rawRange)) {
+            throw GcpException.invalidArgument("rangePartitioning.range is required").withReason("invalid");
+        }
+        Map<String, Object> range = (Map<String, Object>) rawRange;
+        try {
+            BigInteger start = new BigInteger(String.valueOf(range.get("start")));
+            BigInteger end = new BigInteger(String.valueOf(range.get("end")));
+            BigInteger interval = new BigInteger(String.valueOf(range.get("interval")));
+            if (interval.signum() <= 0 || end.compareTo(start) <= 0) {
+                throw new NumberFormatException("invalid range");
+            }
+            return new RangeSpec(start, end, interval);
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("rangePartitioning requires integer start, end, and positive interval")
+                    .withReason("invalid");
+        }
+    }
+
+    private record DecoratedDestination(SqlDialectTranslator.TableRef target, String partitionId) {}
+
+    private record RangeSpec(BigInteger start, BigInteger end, BigInteger interval) {}
 
     private static String qualified(String projectId, SqlDialectTranslator.TableRef ref) {
         return projectId + ":" + ref.datasetId() + "." + ref.tableId();
@@ -1169,19 +1843,36 @@ public class BigQueryService {
                 ? List.of(getDataset(projectId, datasetId))
                 : listDatasets(projectId).stream().filter(d -> InformationSchema.inRegion(d, region)).toList();
         Map<String, List<Table>> tables = new LinkedHashMap<>();
+        Map<String, StoredTableData> tableData = new LinkedHashMap<>();
         if (!InformationSchema.regionOnly(view)) {
             for (Dataset dataset : datasets) {
                 String id = dataset.getDatasetReference().getDatasetId();
-                tables.put(id, listTables(projectId, id));
+                List<Table> datasetTables = listTables(projectId, id);
+                tables.put(id, datasetTables);
+                for (Table table : datasetTables) {
+                    String tableId = table.getTableReference().getTableId();
+                    dataStore.get(tableKey(id, tableId)).ifPresent(data -> tableData.put(tableKey(id, tableId), data));
+                }
             }
         }
-        return InformationSchema.rows(view, projectId, datasets, tables);
+        return InformationSchema.rows(view, projectId, datasets, tables, tableData);
     }
 
     // ── Load jobs ────────────────────────────────────────────────────────────────
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> LOAD_FORMATS = Set.of("CSV", "NEWLINE_DELIMITED_JSON", "PARQUET");
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mapValue(Object value, String field) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?> map)) {
+            throw GcpException.invalidArgument(field + " must be an object").withReason("invalid");
+        }
+        return new LinkedHashMap<>((Map<String, Object>) map);
+    }
 
     /**
      * Runs a load job synchronously. Data comes from {@code sourceUris} in floci's GCS or, for
@@ -1283,7 +1974,10 @@ public class BigQueryService {
             fileIds.add(loadFiles.register(file));
         }
 
-        Optional<Table> existing = tableStore.get(tableKey(destinationRef.getDatasetId(), destinationRef.getTableId()));
+        DecoratedDestination decorated = decoratedDestination(destinationRef);
+        SqlDialectTranslator.TableRef schemaTarget = decorated != null ? decorated.target()
+                : new SqlDialectTranslator.TableRef(destinationRef.getDatasetId(), destinationRef.getTableId());
+        Optional<Table> existing = tableStore.get(tableKey(schemaTarget.datasetId(), schemaTarget.tableId()));
         boolean autodetect = Boolean.TRUE.equals(config.get("autodetect"));
         List<TableFieldSchema> schema = null;
         if (config.get("schema") instanceof Map<?, ?> schemaMap) {
@@ -1342,7 +2036,8 @@ public class BigQueryService {
                 ? list.stream().filter(String.class::isInstance).map(String.class::cast).toList()
                 : List.of();
         writeRows(projectId, destinationRef, write, (String) config.get("createDisposition"), schemaUpdateOptions,
-                result);
+                mapValue(config.get("timePartitioning"), "timePartitioning"),
+                mapValue(config.get("rangePartitioning"), "rangePartitioning"), result);
 
         long outputBytes = 0;
         for (Map<String, Object> row : result.rows()) {

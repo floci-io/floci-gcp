@@ -132,7 +132,7 @@ public class BigQueryInternalController {
                          @PathParam("tableId") String tableId) {
         Table table = service.getTable(projectId, datasetId, tableId);
         TableSchema schema = table.getSchema();
-        List<Map<String, Object>> rows = service.storedRows(projectId, datasetId, tableId);
+        List<Map<String, Object>> rows = service.stagingRows(projectId, datasetId, tableId);
         StreamingOutput body = out -> {
             for (Map<String, Object> row : rows) {
                 out.write(mapper.writeValueAsBytes(RowCodec.stagingRow(schema, row)));

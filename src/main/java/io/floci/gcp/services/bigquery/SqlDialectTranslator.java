@@ -19,6 +19,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -317,6 +319,13 @@ final class SqlDialectTranslator {
         CREATE_SCHEMA, DROP_SCHEMA, ALTER_TABLE, ALTER_VIEW
     }
 
+    enum PartitionExpression {
+        INGESTION_TIME, BARE_DATE, DATE, TIMESTAMP_TRUNC, DATETIME_TRUNC, DATE_TRUNC, RANGE_BUCKET
+    }
+
+    private record PartitionSpec(Map<String, Object> timeMetadata, Map<String, Object> rangeMetadata,
+                                 PartitionExpression expression) {}
+
     /**
      * A classified statement. {@code querySql} is the GoogleSQL text of the {@code SELECT} part
      * of {@code CREATE TABLE ... AS} and {@code CREATE VIEW}; {@code columns} is the column list
@@ -327,13 +336,32 @@ final class SqlDialectTranslator {
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                      boolean materialized, String querySql, List<TableFieldSchema> columns,
-                     Map<String, Object> options) {
+                     Map<String, Object> options, Map<String, Object> timePartitioning,
+                     Map<String, Object> rangePartitioning, PartitionExpression partitionExpression) {
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                   boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                   boolean materialized, String querySql, List<TableFieldSchema> columns) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null);
+                    materialized, querySql, columns, null, null, null, null);
+        }
+
+        Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
+                  boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
+                  boolean materialized, String querySql, List<TableFieldSchema> columns,
+                  Map<String, Object> options) {
+            this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
+                    materialized, querySql, columns, options, null, null, null);
+        }
+
+        Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
+                  boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
+                  boolean materialized, String querySql, List<TableFieldSchema> columns,
+                  Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
+                  PartitionExpression partitionExpression) {
+            this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
+                    materialized, querySql, columns, null, timePartitioning, rangePartitioning,
+                    partitionExpression);
         }
 
         boolean isDml() {
@@ -695,14 +723,22 @@ final class SqlDialectTranslator {
         switch (object) {
             case "SCHEMA" -> {
                 return new Statement(StatementKind.CREATE_SCHEMA, "CREATE_SCHEMA", null, datasetOf(path.segments()),
-                        orReplace, ifNotExists, false, false, false, null, null);
+                        orReplace, ifNotExists, false, false, false, null, null, null, null, null);
             }
             case "TABLE" -> {
                 TableRef target = resolveTable(path.segments());
                 int asIndex = topLevelAsSelect(path.end());
                 if (asIndex >= 0) {
+                    PartitionSpec partitioning = createTablePartitioning(path.end(), asIndex);
+                    if (partitioning != null && partitioning.timeMetadata() != null
+                            && !partitioning.timeMetadata().containsKey("field")) {
+                        throw invalidQuery("CREATE TABLE AS SELECT does not support ingestion-time partitioning");
+                    }
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_AS_SELECT", target, null,
-                            orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null);
+                            orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null,
+                            partitioning != null ? partitioning.timeMetadata() : null,
+                            partitioning != null ? partitioning.rangeMetadata() : null,
+                            partitioning != null ? partitioning.expression() : null);
                 }
                 int open = nextSignificant(path.end(), tokens.size());
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
@@ -710,8 +746,12 @@ final class SqlDialectTranslator {
                             + " (LIKE and COPY are not supported by the floci BigQuery emulator)");
                 }
                 List<TableFieldSchema> columns = columnDefinitions(open, matchingParen(open));
+                PartitionSpec partitioning = createTablePartitioning(matchingParen(open) + 1, tokens.size());
                 return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE", target, null, orReplace,
-                        ifNotExists, false, false, false, null, columns);
+                        ifNotExists, false, false, false, null, columns,
+                        partitioning != null ? partitioning.timeMetadata() : null,
+                        partitioning != null ? partitioning.rangeMetadata() : null,
+                        partitioning != null ? partitioning.expression() : null);
             }
             case "VIEW" -> {
                 TableRef target = resolveTable(path.segments());
@@ -721,7 +761,8 @@ final class SqlDialectTranslator {
                 }
                 return new Statement(StatementKind.CREATE_VIEW,
                         materialized ? "CREATE_MATERIALIZED_VIEW" : "CREATE_VIEW", target, null, orReplace,
-                        ifNotExists, false, false, materialized, text(asIndex + 1, tokens.size()).trim(), null);
+                        ifNotExists, false, false, materialized, text(asIndex + 1, tokens.size()).trim(), null, null,
+                        null, null);
             }
             default -> throw invalidQuery("CREATE " + object + " is not supported by the floci BigQuery emulator yet.");
         }
@@ -756,12 +797,12 @@ final class SqlDialectTranslator {
         }
         return switch (object) {
             case "SCHEMA" -> new Statement(StatementKind.DROP_SCHEMA, "DROP_SCHEMA", null, datasetOf(path.segments()),
-                    false, false, ifExists, cascade, false, null, null);
+                    false, false, ifExists, cascade, false, null, null, null, null, null);
             case "TABLE" -> new Statement(StatementKind.DROP_TABLE, "DROP_TABLE", resolveTable(path.segments()), null,
-                    false, false, ifExists, false, false, null, null);
+                    false, false, ifExists, false, false, null, null, null, null, null);
             case "VIEW" -> new Statement(StatementKind.DROP_VIEW,
                     materialized ? "DROP_MATERIALIZED_VIEW" : "DROP_VIEW", resolveTable(path.segments()), null,
-                    false, false, ifExists, false, materialized, null, null);
+                    false, false, ifExists, false, materialized, null, null, null, null, null);
             default -> throw invalidQuery("DROP " + object + " is not supported by the floci BigQuery emulator yet.");
         };
     }
@@ -951,7 +992,102 @@ final class SqlDialectTranslator {
     }
 
     private Statement statement(StatementKind kind, String statementType, TableRef target) {
-        return new Statement(kind, statementType, target, null, false, false, false, false, false, null, null);
+        return new Statement(kind, statementType, target, null, false, false, false, false, false, null, null, null,
+                null, null);
+    }
+
+    /** Extracts BigQuery time or integer-range partitioning metadata from a CREATE TABLE suffix. */
+    private PartitionSpec createTablePartitioning(int from, int to) {
+        int depth = 0;
+        int partition = -1;
+        for (int i = from; i < to; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && token.isKeyword("PARTITION")) {
+                int by = nextSignificant(i + 1, to);
+                if (by >= 0 && tokens.get(by).isKeyword("BY")) {
+                    partition = nextSignificant(by + 1, to);
+                    break;
+                }
+            }
+        }
+        if (partition < 0) {
+            return null;
+        }
+
+        depth = 0;
+        int end = to;
+        for (int i = partition; i < to; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && (token.isKeyword("CLUSTER") || token.isKeyword("OPTIONS")
+                    || token.isKeyword("AS"))) {
+                end = i;
+                break;
+            }
+        }
+        String expression = tokens.subList(partition, end).stream()
+                .filter(token -> token.kind != Kind.SPACE).map(token -> token.text).collect(Collectors.joining());
+        if (expression.equalsIgnoreCase("_PARTITIONDATE")
+                || expression.equalsIgnoreCase("DATE(_PARTITIONTIME)")) {
+            return new PartitionSpec(Map.of("type", "DAY"), null, PartitionExpression.INGESTION_TIME);
+        }
+
+        String identifier = "(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)";
+        Matcher range = Pattern.compile(
+                "(?i)RANGE_BUCKET\\(" + identifier + ","
+                        + "GENERATE_ARRAY\\((-?[0-9]+),(-?[0-9]+)(?:,(-?[0-9]+))?\\)\\)")
+                .matcher(expression);
+        if (range.matches()) {
+            String interval = range.group(4) != null ? range.group(4) : "1";
+            Map<String, Object> bounds = Map.of(
+                    "start", range.group(2), "end", range.group(3), "interval", interval);
+            return new PartitionSpec(null, Map.of(
+                    "field", unquoteIdentifier(range.group(1)), "range", bounds), PartitionExpression.RANGE_BUCKET);
+        }
+
+        Matcher truncated = Pattern.compile(
+                "(?i)(TIMESTAMP|DATETIME|DATE)_TRUNC\\(" + identifier + ",(HOUR|DAY|MONTH|YEAR)\\)")
+                .matcher(expression);
+        if (truncated.matches()) {
+            String function = truncated.group(1).toUpperCase(Locale.ROOT);
+            String field = unquoteIdentifier(truncated.group(2));
+            String type = truncated.group(3).toUpperCase(Locale.ROOT);
+            PartitionExpression expressionKind = PartitionExpression.valueOf(function + "_TRUNC");
+            if (expressionKind == PartitionExpression.DATE_TRUNC
+                    && ("HOUR".equals(type) || "DAY".equals(type))) {
+                throw invalidQuery("DATE_TRUNC partitioning supports MONTH or YEAR granularity");
+            }
+            if (field.equalsIgnoreCase(BigQueryService.PARTITION_TIME)) {
+                if (expressionKind != PartitionExpression.TIMESTAMP_TRUNC) {
+                    throw invalidQuery("_PARTITIONTIME must use TIMESTAMP_TRUNC");
+                }
+                return new PartitionSpec(Map.of("type", type), null, PartitionExpression.INGESTION_TIME);
+            }
+            return new PartitionSpec(Map.of("type", type, "field", field), null, expressionKind);
+        }
+        Matcher date = Pattern.compile("(?i)DATE\\(" + identifier + "\\)")
+                .matcher(expression);
+        if (date.matches()) {
+            return new PartitionSpec(Map.of("type", "DAY", "field", unquoteIdentifier(date.group(1))), null,
+                    PartitionExpression.DATE);
+        }
+        if (expression.matches("(?i)" + identifier)) {
+            return new PartitionSpec(Map.of("type", "DAY", "field", unquoteIdentifier(expression)), null,
+                    PartitionExpression.BARE_DATE);
+        }
+        throw invalidQuery("Unsupported PARTITION BY expression in CREATE TABLE: " + expression);
+    }
+
+    private static String unquoteIdentifier(String identifier) {
+        return identifier.startsWith("`") && identifier.endsWith("`")
+                ? identifier.substring(1, identifier.length() - 1).replace("``", "`") : identifier;
     }
 
     private String datasetOf(List<String> segments) {
@@ -2005,7 +2141,7 @@ final class SqlDialectTranslator {
         rewritePivotSyntax();
         nameAnonymousColumns();
         expandStructStars();
-        String replacementStarExclusion = soleReplacementStarExclusion();
+        String replacementStarExclusion = replacementStarExclusion();
         String rendered = render(0, tokens.size()).trim();
         if (replacementStarExclusion != null) {
             rendered = "SELECT *" + replacementStarExclusion + " FROM (" + rendered
@@ -3224,7 +3360,7 @@ final class SqlDialectTranslator {
     }
 
     /** DuckDB requires its pattern-filtered star and REPLACE modifiers to live in separate SELECTs. */
-    private String soleReplacementStarExclusion() {
+    private String replacementStarExclusion() {
         int select = firstTopLevelSelect();
         if (select < 0) {
             return null;
@@ -3239,11 +3375,29 @@ final class SqlDialectTranslator {
                 continue;
             }
             int next = nextSignificant(i + 1, item[1]);
+            if (next >= 0 && tokens.get(next).isKeyword("EXCEPT")) {
+                int open = nextSignificant(next + 1, item[1]);
+                next = open >= 0 && tokens.get(open).isPunct("(")
+                        ? nextSignificant(matchingParen(open) + 1, item[1]) : -1;
+            }
             if (next >= 0 && tokens.get(next).isKeyword("REPLACE")) {
-                return projectionStarExclusion(i);
+                return replacementStarIsLocallyFiltered(i) ? null : projectionStarExclusion(i);
             }
         }
         return null;
+    }
+
+    private boolean replacementStarIsLocallyFiltered(int star) {
+        for (ProjectionSource source : projectionSourcesForStar(star)) {
+            if (!source.directTable()) {
+                continue;
+            }
+            TableRef ref = projectionSourceTable(source.startToken());
+            if (source.wildcardTable() || ref == null || columnsOf.apply(ref) == null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isName(Token t) {
@@ -3439,8 +3593,15 @@ final class SqlDialectTranslator {
                     continue;
                 }
                 if (t.text.equals("*")) {
-                    out.append('*');
                     int next = nextSignificant(i + 1, end);
+                    String mixedSources = next >= 0 && (tokens.get(next).isKeyword("EXCEPT")
+                            || tokens.get(next).isKeyword("REPLACE")) ? null : mixedSourceProjectionStar(i);
+                    if (mixedSources != null) {
+                        out.append(mixedSources);
+                        i++;
+                        continue;
+                    }
+                    out.append('*');
                     if (next >= 0 && tokens.get(next).isKeyword("EXCEPT")
                             && nextSignificantIs(next + 1, end, "(")) {
                         int open = nextSignificant(next + 1, end);
@@ -3456,7 +3617,7 @@ final class SqlDialectTranslator {
                         continue;
                     }
                     if (isProjectionStar(i) && next >= 0 && tokens.get(next).isKeyword("REPLACE")) {
-                        List<String> hidden = offsetStarHiddenColumns(i);
+                        List<String> hidden = presentStarHiddenColumns(i);
                         if (!hidden.isEmpty()) {
                             out.append(" EXCLUDE (").append(hidden.stream().map(DuckTypes::quoteIdentifier)
                                     .collect(Collectors.joining(", "))).append(')');
@@ -3747,7 +3908,7 @@ final class SqlDialectTranslator {
     /** DuckDB supports EXCLUDE followed by REPLACE, unlike its pattern-filtered star form. */
     private String starExclusionList(int star, int open, int close) {
         ProjectionSource source = projectionSourceForStar(star);
-        List<String> names = projectionStarHiddenColumns(star).stream()
+        List<String> names = presentStarHiddenColumns(star).stream()
                 .filter(name -> !name.equals("_TABLE_SUFFIX") || source != null && source.wildcardTable())
                 .map(DuckTypes::quoteIdentifier).collect(Collectors.toCollection(ArrayList::new));
         for (Token token : significant(open + 1, close)) {
@@ -3756,6 +3917,196 @@ final class SqlDialectTranslator {
             }
         }
         return " EXCLUDE (" + String.join(", ", names) + ")";
+    }
+
+    /** Hidden columns that are known to exist in the staged source and are therefore safe in DuckDB EXCLUDE. */
+    private List<String> presentStarHiddenColumns(int star) {
+        List<String> names = new ArrayList<>(offsetStarHiddenColumns(star));
+        for (ProjectionSource source : projectionSourcesForStar(star)) {
+            names.addAll(presentSourceHiddenColumns(source));
+        }
+        return names.stream().distinct().toList();
+    }
+
+    private List<String> presentSourceHiddenColumns(ProjectionSource source) {
+        if (!source.directTable()) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        TableRef ref = projectionSourceTable(source.startToken());
+        Set<String> columns = ref == null ? null : columnsOf.apply(ref);
+        if (columns != null) {
+            if (columns.contains(BigQueryService.PARTITION_DATE.toLowerCase(Locale.ROOT))) {
+                names.add(BigQueryService.PARTITION_DATE);
+            }
+            if (columns.contains(BigQueryService.PARTITION_TIME.toLowerCase(Locale.ROOT))) {
+                names.add(BigQueryService.PARTITION_TIME);
+            }
+            if (columns.contains(BigQueryService.DML_ORIGINAL_PARTITION_TIME.toLowerCase(Locale.ROOT))) {
+                names.add(BigQueryService.DML_ORIGINAL_PARTITION_TIME);
+            }
+            if (columns.contains(BigQueryService.DML_ORIGINAL_UNPARTITIONED.toLowerCase(Locale.ROOT))) {
+                names.add(BigQueryService.DML_ORIGINAL_UNPARTITIONED);
+            }
+        }
+        if (source.wildcardTable() && !names.contains("_TABLE_SUFFIX")) {
+            names.add("_TABLE_SUFFIX");
+        }
+        return names;
+    }
+
+    /**
+     * DuckDB's filter on an unqualified star applies to every source. When physical and derived
+     * sources are mixed, qualify each source instead so physical-table pseudocolumns stay hidden
+     * without removing same-named columns that the derived source intentionally exposes.
+     */
+    private String mixedSourceProjectionStar(int star) {
+        if (!isProjectionStar(star) || isPrecededByDot(star)) {
+            return null;
+        }
+        List<ProjectionSource> sources = projectionSourcesForStar(star);
+        if (sources.size() < 2 || sources.stream().noneMatch(ProjectionSource::directTable)
+                || sources.stream().allMatch(ProjectionSource::directTable)
+                || sources.stream().anyMatch(source -> source.alias() == null)) {
+            return null;
+        }
+        if (sources.stream().filter(ProjectionSource::directTable)
+                .anyMatch(source -> projectionSourceColumns(source) == null)) {
+            return null;
+        }
+        if (sources.stream().filter(ProjectionSource::directTable)
+                .noneMatch(source -> !presentSourceHiddenColumns(source).isEmpty())) {
+            return null;
+        }
+        List<String> projections = new ArrayList<>();
+        List<UsingProjection> usingProjections = usingProjectionsForStar(star, sources);
+        for (UsingProjection using : usingProjections) {
+            String merged = using.sources().stream()
+                    .map(source -> DuckTypes.quoteIdentifier(source.alias()) + "."
+                            + DuckTypes.quoteIdentifier(using.name()))
+                    .collect(Collectors.joining(", ", "COALESCE(", ")"));
+            projections.add(merged + " AS " + DuckTypes.quoteIdentifier(using.name()));
+        }
+        for (ProjectionSource source : sources) {
+            String projection = DuckTypes.quoteIdentifier(source.alias()) + ".*";
+            List<String> hidden = usingProjections.stream().filter(using -> using.sources().contains(source))
+                    .map(UsingProjection::name).collect(Collectors.toCollection(ArrayList::new));
+            hidden.addAll(presentSourceHiddenColumns(source));
+            if (source.offsetValueColumn() != null) {
+                hidden.add(source.offsetValueColumn());
+            }
+            if (!sourceHasVisibleColumn(source, hidden)) {
+                continue;
+            }
+            if (!hidden.isEmpty()) {
+                projection += " NOT SIMILAR TO " + DuckTypes.quoteLiteral("(?i)^(" + hidden.stream()
+                        .map(SqlDialectTranslator::regexLiteral).collect(Collectors.joining("|")) + ")$");
+            }
+            projections.add(projection);
+        }
+        return String.join(", ", projections);
+    }
+
+    private boolean sourceHasVisibleColumn(ProjectionSource source, List<String> hidden) {
+        Set<String> columns = projectionSourceColumns(source);
+        if (columns == null) {
+            return true;
+        }
+        Set<String> hiddenNames = hidden.stream().map(name -> name.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        return columns.stream().anyMatch(column -> !hiddenNames.contains(column));
+    }
+
+    private Set<String> projectionSourceColumns(ProjectionSource source) {
+        int start = source.startToken();
+        if (tokens.get(start).isPunct("(")) {
+            return parenthesizedQueryColumns(start);
+        }
+        if (source.directTable()) {
+            TableRef ref = projectionSourceTable(start);
+            return ref == null ? null : columnsOf.apply(ref);
+        }
+        return null;
+    }
+
+    private Set<String> parenthesizedQueryColumns(int open) {
+        int close = matchingParen(open);
+        int depth = parenthesisDepth(open) + 1;
+        for (int i = open + 1; i < close; i++) {
+            if (!tokens.get(i).isKeyword("SELECT") || parenthesisDepth(i) != depth) {
+                continue;
+            }
+            List<int[]> items = selectItems(i);
+            if (items == null) {
+                return null;
+            }
+            Set<String> columns = new LinkedHashSet<>();
+            for (int[] item : items) {
+                List<Token> expression = significant(item[0], item[1]);
+                if (expression.isEmpty() || isStarProjection(expression)) {
+                    return null;
+                }
+                Token name = expression.getLast();
+                if (name.kind != Kind.IDENT && name.kind != Kind.QIDENT) {
+                    return null;
+                }
+                columns.add(name.identifierText().toLowerCase(Locale.ROOT));
+            }
+            return columns;
+        }
+        return null;
+    }
+
+    private record UsingProjection(String name, List<ProjectionSource> sources) {}
+
+    /** Columns and sources merged by top-level JOIN ... USING clauses in this SELECT scope. */
+    private List<UsingProjection> usingProjectionsForStar(int star, List<ProjectionSource> sources) {
+        int depth = parenthesisDepth(star);
+        Map<String, UsingProjection> merged = new LinkedHashMap<>();
+        List<String> outputOrder = new ArrayList<>();
+        for (int sourceIndex = 1; sourceIndex < sources.size(); sourceIndex++) {
+            ProjectionSource joined = sources.get(sourceIndex);
+            List<String> joinedColumns = new ArrayList<>();
+            for (String column : usingColumnsAfterSource(joined, depth)) {
+                String key = column.toLowerCase(Locale.ROOT);
+                UsingProjection existing = merged.get(key);
+                List<ProjectionSource> participants = existing == null
+                        ? sources.subList(0, sourceIndex).stream()
+                                .filter(source -> sourceExposesColumn(source, column))
+                                .collect(Collectors.toCollection(ArrayList::new))
+                        : new ArrayList<>(existing.sources());
+                participants.add(joined);
+                merged.put(key, new UsingProjection(existing == null ? column : existing.name(), participants));
+                joinedColumns.add(key);
+            }
+            outputOrder.removeAll(joinedColumns);
+            outputOrder.addAll(0, joinedColumns);
+        }
+        return outputOrder.stream().map(merged::get).toList();
+    }
+
+    private List<String> usingColumnsAfterSource(ProjectionSource source, int depth) {
+        for (int i = source.startToken() + 1; i < tokens.size(); i++) {
+            int currentDepth = parenthesisDepth(i);
+            Token token = tokens.get(i);
+            if (currentDepth < depth || currentDepth == depth && (token.isKeyword("JOIN")
+                    || token.isPunct(",") || token.kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(token.upper()))) {
+                break;
+            }
+            if (currentDepth != depth || !token.isKeyword("USING")) {
+                continue;
+            }
+            int open = nextSignificant(i + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                return List.of();
+            }
+            int close = matchingParen(open);
+            return significant(open + 1, close).stream()
+                    .filter(candidate -> candidate.kind == Kind.IDENT || candidate.kind == Kind.QIDENT)
+                    .map(Token::identifierText).toList();
+        }
+        return List.of();
     }
 
     /**
@@ -3775,11 +4126,30 @@ final class SqlDialectTranslator {
     private List<String> projectionStarHiddenColumns(int star) {
         List<ProjectionSource> sources = projectionSourcesForStar(star);
         List<String> names = new ArrayList<>();
-        if (!sources.isEmpty() && sources.getFirst().directTable()) {
-            names.add("_TABLE_SUFFIX");
+        boolean allDirect = !sources.isEmpty() && sources.stream().allMatch(ProjectionSource::directTable);
+        for (int i = 0; i < sources.size(); i++) {
+            ProjectionSource source = sources.get(i);
+            if (!source.directTable()) {
+                continue;
+            }
+            if (projectionSourceColumns(source) == null) {
+                if (allDirect || i == 0) {
+                    names.add(BigQueryService.PARTITION_DATE);
+                    names.add(BigQueryService.PARTITION_TIME);
+                    if (sourceExposesColumn(source, BigQueryService.DML_ORIGINAL_PARTITION_TIME)) {
+                        names.add(BigQueryService.DML_ORIGINAL_PARTITION_TIME);
+                    }
+                    if (sourceExposesColumn(source, BigQueryService.DML_ORIGINAL_UNPARTITIONED)) {
+                        names.add(BigQueryService.DML_ORIGINAL_UNPARTITIONED);
+                    }
+                    names.add("_TABLE_SUFFIX");
+                }
+            } else {
+                names.addAll(presentSourceHiddenColumns(source));
+            }
         }
         names.addAll(offsetStarHiddenColumns(star));
-        return names;
+        return names.stream().distinct().toList();
     }
 
     private List<String> offsetStarHiddenColumns(int star) {
@@ -3941,7 +4311,12 @@ final class SqlDialectTranslator {
                 }
                 for (int[] item : items) {
                     List<Token> expression = significant(item[0], item[1]);
+                    if (!expression.isEmpty() && isStarProjection(expression)
+                            && starProjectionExposesColumn(item[0], item[1], name)) {
+                        return true;
+                    }
                     if (!expression.isEmpty() && !isStarProjection(expression)
+                            && (expression.getLast().kind == Kind.IDENT || expression.getLast().kind == Kind.QIDENT)
                             && expression.getLast().identifierText().equalsIgnoreCase(name)) {
                         return true;
                     }
@@ -3950,6 +4325,34 @@ final class SqlDialectTranslator {
             }
         }
         return false;
+    }
+
+    /** Follows a derived star to its source columns, while respecting GoogleSQL's EXCEPT modifier. */
+    private boolean starProjectionExposesColumn(int start, int end, String name) {
+        int star = -1;
+        for (int i = start; i < end; i++) {
+            if (tokens.get(i).isPunct("*")) {
+                star = i;
+                break;
+            }
+        }
+        if (star < 0) {
+            return false;
+        }
+        int modifier = nextSignificant(star + 1, end);
+        if (modifier >= 0 && tokens.get(modifier).isKeyword("EXCEPT")) {
+            int open = nextSignificant(modifier + 1, end);
+            if (open >= 0 && tokens.get(open).isPunct("(")) {
+                int close = matchingParen(open);
+                boolean excluded = significant(open + 1, close).stream()
+                        .filter(token -> token.kind == Kind.IDENT || token.kind == Kind.QIDENT)
+                        .anyMatch(token -> token.identifierText().equalsIgnoreCase(name));
+                if (excluded) {
+                    return false;
+                }
+            }
+        }
+        return projectionSourcesForStar(star).stream().anyMatch(source -> sourceExposesColumn(source, name));
     }
 
     /** The "(" opening the body of the nearest CTE called {@code name} declared before {@code before}. */
@@ -4496,7 +4899,7 @@ final class SqlDialectTranslator {
         if (!InformationSchema.isView(view)) {
             throw invalidQuery("INFORMATION_SCHEMA." + view + " is not supported by the floci BigQuery emulator"
                     + " (view names are case-sensitive); supported views: SCHEMATA, TABLES, COLUMNS,"
-                    + " COLUMN_FIELD_PATHS, TABLE_OPTIONS, VIEWS.");
+                    + " COLUMN_FIELD_PATHS, TABLE_OPTIONS, VIEWS, PARTITIONS.");
         }
         List<String> qualifiers = segments.subList(0, marker);
         if (qualifiers.size() > 2) {
@@ -4508,6 +4911,10 @@ final class SqlDialectTranslator {
         }
         String scope = qualifiers.isEmpty() ? null : qualifiers.getLast();
         if (scope != null && scope.toLowerCase(Locale.ROOT).startsWith("region-")) {
+            if (InformationSchema.datasetOnly(view)) {
+                throw invalidQuery("INFORMATION_SCHEMA." + view
+                        + " needs a dataset qualifier; region qualifiers are not supported");
+            }
             return new InformationSchema.Ref(view, null, scope.substring("region-".length()));
         }
         if (InformationSchema.regionOnly(view)) {

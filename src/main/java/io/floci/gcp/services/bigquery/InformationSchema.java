@@ -1,9 +1,13 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.bigquery.model.Dataset;
+import io.floci.gcp.services.bigquery.model.StoredTableData;
 import io.floci.gcp.services.bigquery.model.Table;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
+import java.io.IOException;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -14,8 +18,8 @@ import java.util.stream.Collectors;
 
 /**
  * The {@code INFORMATION_SCHEMA} views floci serves, generated from dataset and table metadata:
- * SCHEMATA, TABLES, COLUMNS, COLUMN_FIELD_PATHS, TABLE_OPTIONS and VIEWS, with the columns and
- * value formats of the BigQuery documentation.
+ * SCHEMATA, TABLES, COLUMNS, COLUMN_FIELD_PATHS, TABLE_OPTIONS, VIEWS and PARTITIONS, with the
+ * columns and value formats of the BigQuery documentation.
  */
 final class InformationSchema {
 
@@ -32,6 +36,7 @@ final class InformationSchema {
     static final String SCHEMA = "_floci_information_schema";
 
     private static final Map<String, List<TableFieldSchema>> VIEWS = new LinkedHashMap<>();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     static {
         VIEWS.put("SCHEMATA", fields("catalog_name STRING", "schema_name STRING", "schema_owner STRING",
@@ -60,6 +65,9 @@ final class InformationSchema {
                 "option_name STRING", "option_type STRING", "option_value STRING"));
         VIEWS.put("VIEWS", fields("table_catalog STRING", "table_schema STRING", "table_name STRING",
                 "view_definition STRING", "check_option STRING", "use_standard_sql STRING"));
+        VIEWS.put("PARTITIONS", fields("table_catalog STRING", "table_schema STRING", "table_name STRING",
+                "partition_id STRING", "total_rows INTEGER", "total_logical_bytes INTEGER",
+                "total_billable_bytes INTEGER", "last_modified_time TIMESTAMP", "storage_tier STRING"));
     }
 
     private InformationSchema() {}
@@ -71,6 +79,10 @@ final class InformationSchema {
     /** SCHEMATA is project/region scoped; every other view needs a dataset or region qualifier. */
     static boolean regionOnly(String view) {
         return view.equals("SCHEMATA");
+    }
+
+    static boolean datasetOnly(String view) {
+        return view.equals("PARTITIONS");
     }
 
     static List<TableFieldSchema> columns(String view) {
@@ -94,7 +106,8 @@ final class InformationSchema {
 
     /** Rows of one view over the given datasets, in the stored row representation. */
     static List<Map<String, Object>> rows(String view, String projectId, List<Dataset> datasets,
-                                          Map<String, List<Table>> tablesByDataset) {
+                                          Map<String, List<Table>> tablesByDataset,
+                                          Map<String, StoredTableData> tableDataByKey) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Dataset dataset : datasets) {
             String datasetId = dataset.getDatasetReference().getDatasetId();
@@ -113,11 +126,138 @@ final class InformationSchema {
                             rows.add(viewsRow(projectId, datasetId, table));
                         }
                     }
+                    case "PARTITIONS" -> rows.addAll(partitionRows(projectId, datasetId, table,
+                            tableDataByKey.get(tableKey(datasetId, table.getTableReference().getTableId()))));
                     default -> throw new IllegalArgumentException(view);
                 }
             }
         }
         return rows;
+    }
+
+    /**
+     * BigQuery storage byte metrics have no local equivalent, so both byte fields use the UTF-8
+     * JSON representation kept by the emulator. Per-partition mutation timestamps are likewise
+     * unavailable, so the table's last modified time is reported for every partition.
+     */
+    private static List<Map<String, Object>> partitionRows(String projectId, String datasetId, Table table,
+                                                           StoredTableData data) {
+        Object rawTimePartitioning = table.getExtra().get("timePartitioning");
+        Object rawRangePartitioning = table.getExtra().get("rangePartitioning");
+        Map<?, ?> timePartitioning = rawTimePartitioning instanceof Map<?, ?> map ? map : null;
+        Map<?, ?> rangePartitioning = rawRangePartitioning instanceof Map<?, ?> map ? map : null;
+        if (table.viewQuery() != null) {
+            return List.of();
+        }
+        if (timePartitioning == null && rangePartitioning == null) {
+            List<Map<String, Object>> values = new ArrayList<>();
+            if (data != null) {
+                synchronized (data) {
+                    synchronized (data.getRows()) {
+                        values.addAll(data.getRows());
+                    }
+                    data.getPartitionRows().values().forEach(values::addAll);
+                }
+            }
+            return List.of(partitionRow(projectId, datasetId, table, null, values));
+        }
+        if (data == null) {
+            return List.of();
+        }
+        Map<String, List<Map<String, Object>>> partitions = new LinkedHashMap<>();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        synchronized (data) {
+            data.getPartitionRows().forEach((id, values) ->
+                    partitions.computeIfAbsent(id, ignored -> new ArrayList<>()).addAll(values));
+            if (timePartitioning != null && timePartitioning.get("field") instanceof String field) {
+                Object rawType = timePartitioning.get("type");
+                String type = rawType != null ? String.valueOf(rawType) : "DAY";
+                String actualField = BigQueryMetadata.actualFieldName(table, field);
+                synchronized (data.getRows()) {
+                    data.getRows().forEach(value -> partitions
+                            .computeIfAbsent(timePartitionId(value.get(actualField), type),
+                                    ignored -> new ArrayList<>())
+                            .add(value));
+                }
+            } else if (rangePartitioning != null && rangePartitioning.get("field") instanceof String field) {
+                String actualField = BigQueryMetadata.actualFieldName(table, field);
+                synchronized (data.getRows()) {
+                    data.getRows().forEach(value -> partitions
+                            .computeIfAbsent(rangePartitionId(value.get(actualField), rangePartitioning),
+                                    ignored -> new ArrayList<>())
+                            .add(value));
+                }
+            } else if (timePartitioning != null) {
+                synchronized (data.getRows()) {
+                    if (!data.getRows().isEmpty()) {
+                        partitions.computeIfAbsent("__UNPARTITIONED__", ignored -> new ArrayList<>())
+                                .addAll(data.getRows());
+                    }
+                }
+            }
+            partitions.forEach((partitionId, partition) -> rows.add(
+                    partitionRow(projectId, datasetId, table, partitionId, partition)));
+        }
+        return rows;
+    }
+
+    private static Map<String, Object> partitionRow(String projectId, String datasetId, Table table,
+                                                     String partitionId, List<Map<String, Object>> partition) {
+        Map<String, Object> row = base(projectId, datasetId, table.getTableReference().getTableId());
+        row.put("partition_id", partitionId);
+        row.put("total_rows", (long) partition.size());
+        long bytes = serializedBytes(partition);
+        row.put("total_logical_bytes", bytes);
+        row.put("total_billable_bytes", bytes);
+        row.put("last_modified_time", seconds(table.getLastModifiedTime()));
+        row.put("storage_tier", "ACTIVE");
+        return row;
+    }
+
+    private static String timePartitionId(Object value, String type) {
+        if (value == null) {
+            return "__NULL__";
+        }
+        return BigQueryService.timeFieldPartitionId(value, type);
+    }
+
+    private static String rangePartitionId(Object value, Map<?, ?> partitioning) {
+        if (value == null) {
+            return "__NULL__";
+        }
+        if (!(partitioning.get("range") instanceof Map<?, ?> range)) {
+            return "__UNPARTITIONED__";
+        }
+        try {
+            BigInteger number = new BigInteger(String.valueOf(value));
+            BigInteger start = new BigInteger(String.valueOf(range.get("start")));
+            BigInteger end = new BigInteger(String.valueOf(range.get("end")));
+            BigInteger interval = new BigInteger(String.valueOf(range.get("interval")));
+            if (number.compareTo(start) < 0 || number.compareTo(end) >= 0) {
+                return "__UNPARTITIONED__";
+            }
+            return start.add(number.subtract(start).divide(interval).multiply(interval)).toString();
+        } catch (RuntimeException expected) {
+            // Legacy rows or metadata with an unevaluable range remain visible in BigQuery's
+            // __UNPARTITIONED__ bucket instead of making the entire partitions view fail.
+            return "__UNPARTITIONED__";
+        }
+    }
+
+    private static long serializedBytes(List<Map<String, Object>> rows) {
+        long bytes = 0;
+        for (Map<String, Object> row : rows) {
+            try {
+                bytes += JSON.writeValueAsBytes(row).length;
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not size partition row data", e);
+            }
+        }
+        return bytes;
+    }
+
+    private static String tableKey(String datasetId, String tableId) {
+        return datasetId + "/" + tableId;
     }
 
     private static Map<String, Object> schemataRow(String projectId, Dataset dataset) {
@@ -173,33 +313,60 @@ final class InformationSchema {
     private static List<Map<String, Object>> columnRows(String projectId, String datasetId, Table table) {
         List<Map<String, Object>> rows = new ArrayList<>();
         List<TableFieldSchema> fields = fieldsOf(table);
+        String partitionField = partitionField(table);
         for (int i = 0; i < fields.size(); i++) {
             TableFieldSchema field = fields.get(i);
-            Map<String, Object> row = base(projectId, datasetId, table.getTableReference().getTableId());
-            row.put("column_name", field.getName());
-            row.put("ordinal_position", (long) (i + 1));
-            row.put("is_nullable", "REQUIRED".equals(field.getMode()) ? "NO" : "YES");
-            row.put("data_type", dataType(field));
-            row.put("is_generated", "NEVER");
-            row.put("generation_expression", null);
-            row.put("is_stored", null);
-            row.put("is_hidden", "NO");
-            row.put("is_updatable", null);
-            row.put("is_system_defined", "NO");
-            row.put("is_partitioning_column", "NO");
-            row.put("clustering_ordinal_position", null);
-            row.put("collation_name", null);
-            row.put("column_default", null);
-            row.put("rounding_mode", null);
-            row.put("policy_tags", List.of());
-            row.put("is_identity", "NO");
-            for (String nullColumn : List.of("identity_generation", "identity_start", "identity_increment",
-                    "identity_maximum", "identity_minimum", "identity_cycle")) {
-                row.put(nullColumn, null);
+            boolean partitioning = partitionField != null && partitionField.equalsIgnoreCase(field.getName());
+            rows.add(columnRow(projectId, datasetId, table, field.getName(), (long) (i + 1),
+                    "REQUIRED".equals(field.getMode()) ? "NO" : "YES", dataType(field), false, partitioning));
+        }
+        if (BigQueryService.isIngestionTimePartitioned(table)) {
+            rows.add(columnRow(projectId, datasetId, table, BigQueryService.PARTITION_TIME, null,
+                    "YES", "TIMESTAMP", true, true));
+            if (BigQueryService.hasPartitionDatePseudocolumn(table)) {
+                rows.add(columnRow(projectId, datasetId, table, BigQueryService.PARTITION_DATE, null,
+                        "YES", "DATE", true, true));
             }
-            rows.add(row);
         }
         return rows;
+    }
+
+    private static Map<String, Object> columnRow(String projectId, String datasetId, Table table, String name,
+                                                  Long ordinal, String nullable, String type, boolean system,
+                                                  boolean partitioning) {
+        Map<String, Object> row = base(projectId, datasetId, table.getTableReference().getTableId());
+        row.put("column_name", name);
+        row.put("ordinal_position", ordinal);
+        row.put("is_nullable", nullable);
+        row.put("data_type", type);
+        row.put("is_generated", "NEVER");
+        row.put("generation_expression", null);
+        row.put("is_stored", null);
+        row.put("is_hidden", system ? "YES" : "NO");
+        row.put("is_updatable", null);
+        row.put("is_system_defined", system ? "YES" : "NO");
+        row.put("is_partitioning_column", partitioning ? "YES" : "NO");
+        row.put("clustering_ordinal_position", null);
+        row.put("collation_name", null);
+        row.put("column_default", null);
+        row.put("rounding_mode", null);
+        row.put("policy_tags", List.of());
+        row.put("is_identity", "NO");
+        for (String nullColumn : List.of("identity_generation", "identity_start", "identity_increment",
+                "identity_maximum", "identity_minimum", "identity_cycle")) {
+            row.put(nullColumn, null);
+        }
+        return row;
+    }
+
+    private static String partitionField(Table table) {
+        for (String key : List.of("timePartitioning", "rangePartitioning")) {
+            Object raw = table.getExtra().get(key);
+            if (raw instanceof Map<?, ?> partitioning && partitioning.get("field") instanceof String field) {
+                return field;
+            }
+        }
+        return null;
     }
 
     private static List<Map<String, Object>> fieldPathRows(String projectId, String datasetId, Table table) {
@@ -308,7 +475,41 @@ final class InformationSchema {
             }
             ddl.append(')');
         }
+        appendPartitioning(ddl, table);
         return ddl.append(';').toString();
+    }
+
+    private static void appendPartitioning(StringBuilder ddl, Table table) {
+        Object rawTime = table.getExtra().get("timePartitioning");
+        if (rawTime instanceof Map<?, ?> partitioning) {
+            String type = String.valueOf(partitioning.get("type"));
+            Object rawField = partitioning.get("field");
+            ddl.append("\nPARTITION BY ");
+            if (!(rawField instanceof String field)) {
+                ddl.append("DAY".equals(type) ? BigQueryService.PARTITION_DATE
+                        : "TIMESTAMP_TRUNC(" + BigQueryService.PARTITION_TIME + ", " + type + ")");
+                return;
+            }
+            TableFieldSchema schemaField = fieldsOf(table).stream()
+                    .filter(candidate -> candidate.getName().equalsIgnoreCase(field)).findFirst().orElse(null);
+            String actualField = schemaField != null ? schemaField.getName() : field;
+            String fieldType = schemaField != null ? schemaField.getType() : "";
+            if ("DATE".equals(fieldType)) {
+                ddl.append("DAY".equals(type) ? actualField : "DATE_TRUNC(" + actualField + ", " + type + ")");
+            } else if ("DATETIME".equals(fieldType)) {
+                ddl.append("DATETIME_TRUNC(").append(actualField).append(", ").append(type).append(')');
+            } else {
+                ddl.append("TIMESTAMP_TRUNC(").append(actualField).append(", ").append(type).append(')');
+            }
+            return;
+        }
+        Object rawRange = table.getExtra().get("rangePartitioning");
+        if (rawRange instanceof Map<?, ?> partitioning && partitioning.get("field") instanceof String field
+                && partitioning.get("range") instanceof Map<?, ?> range) {
+            ddl.append("\nPARTITION BY RANGE_BUCKET(").append(field).append(", GENERATE_ARRAY(")
+                    .append(range.get("start")).append(", ").append(range.get("end")).append(", ")
+                    .append(range.get("interval")).append("))");
+        }
     }
 
     /** The GoogleSQL type of a column: {@code INT64}, {@code ARRAY<STRING>}, {@code STRUCT<a INT64>}. */

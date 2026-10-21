@@ -370,7 +370,21 @@ public class BigQueryController {
                 string(config.get("parameterMode"), "parameterMode"), dryRun, useLegacySql, destinationTable,
                 disposition(config.get("writeDisposition"), "writeDisposition", WRITE_DISPOSITIONS),
                 disposition(config.get("createDisposition"), "createDisposition", CREATE_DISPOSITIONS),
-                schemaUpdateOptions(config.get("schemaUpdateOptions")));
+                schemaUpdateOptions(config.get("schemaUpdateOptions")),
+                copyMap(config.get("timePartitioning"), "timePartitioning"),
+                copyMap(config.get("rangePartitioning"), "rangePartitioning"));
+    }
+
+    private static Map<String, Object> copyMap(Object raw, String field) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?> map)) {
+            throw QueryEngine.invalidQuery(field + " must be an object");
+        }
+        Map<String, Object> copy = new LinkedHashMap<>();
+        map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+        return copy;
     }
 
     /**

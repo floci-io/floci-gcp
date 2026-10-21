@@ -80,7 +80,12 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
   (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
   reported in the job status (`duplicate`, `notFound`); any other disposition value is an
-  HTTP 400 (`invalid`).
+  HTTP 400 (`invalid`). A partition-decorated destination writes that named partition of an existing
+  partitioned table; `WRITE_TRUNCATE`, `WRITE_APPEND` and `WRITE_EMPTY` apply to that partition.
+  Queries over an ingestion-time-partitioned base table materialize `_PARTITIONTIME` for stored
+  rows and `_PARTITIONDATE` for daily partitions, so they can filter or explicitly project a
+  selected partition. These pseudocolumns are not expanded by `SELECT *`. An undecorated read sees
+  all stored rows, while a decorator selects one partition.
 - **Views**: logical and materialized views, created with `tables.insert` (`view.query`) or
   DDL. The view query is validated and its schema derived on creation; views are expanded at
   query time, including views over views. A materialized view is evaluated on read, like a
@@ -114,12 +119,21 @@ Server-side behavior driven by these fields:
   `externalDataConfiguration` get the matching `type`.
 - Validation: `defaultTableExpirationMs` of at least one hour, `maxTimeTravelHours` from 48 to
   168, an `expirationTime` that parses as an int64, `timePartitioning.type` one of
-  `DAY`/`HOUR`/`MONTH`/`YEAR` with a positive `expirationMs` and a `field` that exists in the
-  schema, and not both time and range partitioning. Violations return 400 with reason `invalid`,
-  and a rejected update leaves the stored resource unchanged.
+  `DAY`/`HOUR`/`MONTH`/`YEAR` with a positive `expirationMs`, and not both time and range
+  partitioning. A time partition field must be a non-repeated `DATE`, `DATETIME` or `TIMESTAMP`
+  field, with `HOUR` unavailable for `DATE`. A range partition needs a non-repeated `INTEGER`
+  field and integer `start`, `end` and positive `interval` values. `_PARTITIONDATE` and
+  `_PARTITIONTIME` are reserved schema names. Violations return 400 with reason `invalid`, and a
+  rejected update leaves the stored resource unchanged.
 
-Partitioning and clustering are metadata only: queries do not prune partitions and
-`requirePartitionFilter` is not enforced.
+Partitioning and clustering are metadata only apart from partition-aware reads and writes,
+`_PARTITIONDATE`/`_PARTITIONTIME` query pseudocolumns, and partition rows reported by
+`INFORMATION_SCHEMA.PARTITIONS`. Decorated `tabledata.insertAll` is limited, like BigQuery's legacy
+streaming API, to daily ingestion-time partitions from 31 days in the past through 16 days in the
+future. Streaming through `tabledata.insertAll` or the Storage Write API into a time-unit column
+partition accepts values from 10 years in the past through 1 year in the future. Queries do not
+physically prune partitions, partition expiration is not applied, and `requirePartitionFilter` is
+not enforced.
 
 ## GoogleSQL support
 
@@ -202,6 +216,7 @@ columns BigQuery documents:
 |---|---|
 | `SCHEMATA` | `[project.]INFORMATION_SCHEMA.SCHEMATA` (US region), ``[project.]`region-x`.INFORMATION_SCHEMA.SCHEMATA`` |
 | `TABLES`, `COLUMNS`, `COLUMN_FIELD_PATHS`, `TABLE_OPTIONS`, `VIEWS` | `[project.]dataset.INFORMATION_SCHEMA.VIEW` or ``[project.]`region-x`.INFORMATION_SCHEMA.VIEW`` |
+| `PARTITIONS` | `[project.]dataset.INFORMATION_SCHEMA.PARTITIONS` |
 
 - A region qualifier covers every dataset whose location matches (`region-us` matches `US`); a
   dataset qualifier for a missing dataset is a 404. Without a qualifier, the request's
@@ -211,10 +226,15 @@ columns BigQuery documents:
 - `ddl` is a `CREATE TABLE` / `CREATE VIEW` / `CREATE SCHEMA` statement in BigQuery's format.
 - `TABLE_OPTIONS` reports `description`, `friendly_name` and `labels` as GoogleSQL literals
   (`"text"`, `[STRUCT("key", "value")]`).
+- `PARTITIONS` reports one row with a null `partition_id` for every unpartitioned table, reports
+  decorator-written ingestion-time partitions, and derives partitions from rows in
+  field-partitioned tables, including `__NULL__` and `__UNPARTITIONED__`. `total_logical_bytes` and
+  `total_billable_bytes` are the size of the emulator's stored JSON rows, and
+  `last_modified_time` is the table-level modification time.
 - Columns describing features the emulator does not model (clones, snapshots, replicas, identity
   and generated columns, policy tags) are present and `NULL`, `NO` or empty. `COLUMNS` omits
   `async_generation_status` and `data_policies`; `COLUMN_FIELD_PATHS` omits `data_policies`.
-- Other views (`JOBS`, `PARTITIONS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
+- Other views (`JOBS`, `ROUTINES`, `TABLE_STORAGE`, ...) are not emulated.
 
 ## Storage Read API
 
@@ -353,6 +373,8 @@ BigQuery's 10 MB `AppendRows` limit.
   a header gets generic names such as `string_field_0`. `skipLeadingRows` follows BigQuery's
   auto-detection rules (unset: detect a header; `0`: no header; `N`: skip `N-1` rows and detect a
   header in row `N`).
+- **Partition decorators**: a destination such as `table$YYYYMMDD` reuses the pre-created
+  partitioned base table's schema and writes only the selected partition.
 - **CSV options**: `skipLeadingRows`, `fieldDelimiter` (including `\t`), `quote`,
   `allowJaggedRows`, `nullMarker`, `encoding` (`UTF-8`, `ISO-8859-1`) and `maxBadRecords`. Without
   a `nullMarker`, an empty `STRING` value stays an empty string and empty values of other types
@@ -379,8 +401,8 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `DELETE [FROM] t WHERE ...` | `WHERE` is required |
 | `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); `PARTITION BY`, `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions populate table metadata, while ingestion-time partitioning is rejected |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
 | `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`; only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
@@ -389,6 +411,9 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREATE`, `REPLACE`,
 `ALTER`, `SKIP`, `DROP`) and `ddlTargetTable` / `ddlTargetDataset`. DML and DDL results have no rows, so
 `getQueryResults` returns `totalRows: "0"` and the SDKs return an empty result.
+`CREATE OR REPLACE TABLE` must preserve the existing partitioning kind, field, granularity and
+range specification. DML that writes `_PARTITIONTIME` requires an exact partition boundary from
+1970-01-01 through 2159-12-31.
 
 DML needs a floci-duck image that supports `followup_sql` (see
 [floci-duck](https://github.com/floci-io/floci-duck)). Table, dataset and plain `CREATE TABLE` /
@@ -462,12 +487,13 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   yet; they fail with `invalidQuery`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
-- Table-level `PARTITION BY`, `CLUSTER BY` and `OPTIONS` in DDL are not stored.
+- `CLUSTER BY` and table `OPTIONS` in DDL are not stored. Time-based `PARTITION BY` metadata is
+  stored for the supported expressions documented above.
 - Legacy SQL (`useLegacySql: true`) is rejected. A request that omits `useLegacySql` runs as
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
 - `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias
   (`UNNEST(array) AS x`) the element is one column `x`.
-- INFORMATION_SCHEMA views other than the six above, non-terminal wildcard table patterns,
+- INFORMATION_SCHEMA views other than the seven above, non-terminal wildcard table patterns,
   `FOR SYSTEM_TIME AS OF`, `GEOGRAPHY` functions, BigQuery ML, and remote functions are not
   emulated.
 - Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.FROM_HEX`, `SAFE.PARSE_DATE`,

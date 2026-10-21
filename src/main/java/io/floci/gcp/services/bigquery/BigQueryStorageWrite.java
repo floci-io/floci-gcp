@@ -411,7 +411,7 @@ public class BigQueryStorageWrite implements Resettable {
         } catch (GcpException e) {
             throw new AppendException(Status.Code.INVALID_ARGUMENT, null, streamName, e.getMessage());
         }
-        List<Map<String, Object>> rows = validate(decoded, fields, streamName);
+        List<Map<String, Object>> rows = validate(decoded, fields, resource, streamName);
 
         if (isDefault(name)) {
             if (request.hasOffset()) {
@@ -505,7 +505,7 @@ public class BigQueryStorageWrite implements Resettable {
     }
 
     /** Validates every row; one bad row rejects the whole request with row errors. */
-    private static List<Map<String, Object>> validate(Rows decoded, List<TableFieldSchema> fields,
+    private static List<Map<String, Object>> validate(Rows decoded, List<TableFieldSchema> fields, Table table,
                                                       String streamName) {
         // The model TableSchema is qualified: the storage v1 TableSchema is imported for the wire.
         io.floci.gcp.services.bigquery.model.TableSchema tableSchema =
@@ -517,11 +517,12 @@ public class BigQueryStorageWrite implements Resettable {
                 Map<String, Object> normalized = new LinkedHashMap<>();
                 List<ErrorProto> errors = RowCodec.normalizeRow(tableSchema, decoded.row(i), true, normalized);
                 if (errors.isEmpty()) {
+                    BigQueryService.validateStreamingPartitionValue(table, normalized);
                     rows.add(normalized);
                 } else {
                     rowErrors.add(rowError(i, errors.get(0).getMessage()));
                 }
-            } catch (IllegalArgumentException | ArithmeticException | ClassCastException
+            } catch (GcpException | IllegalArgumentException | ArithmeticException | ClassCastException
                      | IndexOutOfBoundsException | DateTimeException e) {
                 rowErrors.add(rowError(i, e.getMessage()));
             }

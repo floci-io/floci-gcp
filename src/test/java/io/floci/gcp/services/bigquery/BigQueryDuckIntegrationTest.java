@@ -22,6 +22,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -694,6 +695,116 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("id", "marker", "_TABLE_SUFFIX")))
                 .body("rows[0].f.v", equalTo(List.of("1", "derived", "kept")));
+
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "reviewed_partition"},
+                 "timePartitioning": {"type": "DAY"},
+                 "schema": {"fields": [
+                   {"name": "id", "type": "INT64"},
+                   {"name": "name", "type": "STRING"},
+                   {"name": "secret", "type": "STRING"}
+                 ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"rows": [{"json": {"id": 1, "name": "ana", "secret": "hidden"}}]}
+                """).when().post(BASE + "/datasets/shop/tables/reviewed_partition/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+
+        query(Map.of("query", "CREATE VIEW shop.reviewed_partition_times AS"
+                        + " SELECT _PARTITIONTIME AS pt FROM shop.reviewed_partition",
+                        "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT pt FROM shop.reviewed_partition_times", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("pt")))
+                .body("rows[0].f[0].v", notNullValue());
+
+        query(Map.of("query", "SELECT * EXCEPT(secret) REPLACE(id + 1 AS id)"
+                        + " FROM shop.reviewed_partition", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "name")))
+                .body("rows[0].f.v", equalTo(List.of("2", "ana")));
+
+        query(Map.of("query", "SELECT * FROM (SELECT 'derived' AS marker) d"
+                        + " CROSS JOIN shop.reviewed_partition e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("marker", "id", "name", "secret")))
+                .body("rows[0].f.v", equalTo(List.of("derived", "1", "ana", "hidden")));
+
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "reviewed_plain"},
+                 "schema": {"fields": [{"name": "marker", "type": "STRING"}]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"rows": [{"json": {"marker": "physical"}}]}
+                """).when().post(BASE + "/datasets/shop/tables/reviewed_plain/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+        query(Map.of("query", "SELECT * FROM shop.reviewed_plain p"
+                        + " CROSS JOIN shop.reviewed_partition e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("marker", "id", "name", "secret")))
+                .body("rows[0].f.v", equalTo(List.of("physical", "1", "ana", "hidden")));
+
+        query(Map.of("query", "SELECT * FROM (SELECT 2 AS id, 'left' AS label) d"
+                        + " LEFT JOIN shop.reviewed_partition e USING(id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "label", "name", "secret")))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("left"));
+
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "reviewed_left"},
+                 "schema": {"fields": [
+                   {"name": "id", "type": "INT64"},
+                   {"name": "label", "type": "STRING"}
+                 ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"rows": [{"json": {"id": 2, "label": "left"}}]}
+                """).when().post(BASE + "/datasets/shop/tables/reviewed_left/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+        query(Map.of("query", "SELECT * FROM (SELECT * FROM shop.reviewed_left) d"
+                        + " LEFT JOIN shop.reviewed_partition e USING(id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "label", "name", "secret")))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("left"));
+
+        query(Map.of("query", "SELECT * FROM shop.reviewed_left l CROSS JOIN"
+                        + " (SELECT DATE '2026-10-01' AS _PARTITIONDATE) d", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "label", "_PARTITIONDATE")))
+                .body("rows[0].f.v", equalTo(List.of("2", "left", "2026-10-01")));
+
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "reviewed_upper"},
+                 "schema": {"fields": [
+                   {"name": "ID", "type": "INT64"},
+                   {"name": "name", "type": "STRING"}
+                 ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"rows": [{"json": {"ID": 1, "name": "ana"}}]}
+                """).when().post(BASE + "/datasets/shop/tables/reviewed_upper/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+        query(Map.of("query", "SELECT * FROM (SELECT 1 AS ID, 'left' AS label) d"
+                        + " JOIN shop.reviewed_upper a USING(id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("ID", "label", "name")))
+                .body("rows[0].f.v", equalTo(List.of("1", "left", "ana")));
+
+        query(Map.of("query", "SELECT * FROM (SELECT 1 AS id) d"
+                        + " JOIN shop.reviewed_partition a USING(id)"
+                        + " JOIN shop.reviewed_partition b ON b.id = a.id", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("duplicate(s): id"));
+
+        query(Map.of("query", "SELECT e.* REPLACE(id + 1 AS id),"
+                        + " DATE '2026-10-01' AS _PARTITIONDATE FROM shop.reviewed_partition e",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "name", "secret", "_PARTITIONDATE")))
+                .body("rows[0].f.v", equalTo(List.of("2", "ana", "hidden", "2026-10-01")));
     }
 
     @Test

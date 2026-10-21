@@ -169,9 +169,10 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         }
     }
     private static ObjectNode reservation(ComputeService.Context c, String value) {
+        String key = c.path(value);
         ObjectNode address = c.state.resources.entrySet().stream()
                 .filter(e -> e.getKey().startsWith("global/addresses/") && (e.getValue().path("address").asText().equals(value)
-                        || e.getValue().path("selfLink").asText().equals(value) || e.getKey().equals(value)))
+                        || e.getKey().equals(key)))
                 .map(Map.Entry::getValue).findFirst().orElseThrow(() -> GcpException.invalidArgument("A global address reservation is required"));
         if (!address.path("addressType").asText().equals("EXTERNAL") || !address.path("ipVersion").asText().equals("IPV4")
                 || !address.path("networkTier").asText("PREMIUM").equals("PREMIUM")) {

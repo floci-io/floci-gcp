@@ -89,4 +89,25 @@ class ComputeAddressIntegrationTest extends ComputeTestSupport {
         done(root, given().queryParam("networkInterface", "nic0").queryParam("accessConfig", "External NAT").post(zone + "/instances/vm/deleteAccessConfig"));
         done(root, post(region + "/addresses", Map.of("name", "reuse", "address", ip)));
     }
+    @Test void forwardingRuleResolvesEveryAddressForm() throws Exception {
+        String root = root(), project = root.substring(root.lastIndexOf('/') + 1);
+        done(root, post(root + "/global/networks", Map.of("name", "net", "autoCreateSubnetworks", false)));
+        done(root, post(root + "/global/healthChecks", Map.of("name", "health", "type", "HTTP")));
+        done(root, post(root + "/global/backendServices", Map.of("name", "backend", "healthChecks", List.of("global/healthChecks/health"))));
+        done(root, post(root + "/global/urlMaps", Map.of("name", "routes", "defaultService", "global/backendServices/backend")));
+        done(root, post(root + "/global/targetHttpProxies", Map.of("name", "proxy", "urlMap", "global/urlMaps/routes")));
+        done(root, post(root + "/global/addresses", Map.of("name", "web-ip")));
+        String ip = given().get(root + "/global/addresses/web-ip").jsonPath().getString("address");
+        List<String> forms = List.of("https://www.googleapis.com/compute/v1/projects/" + project + "/global/addresses/web-ip",
+                "projects/" + project + "/global/addresses/web-ip", "global/addresses/web-ip", ip);
+        int port = 8000;
+        for (String form : forms) {
+            String name = "rule-" + port;
+            done(root, post(root + "/global/forwardingRules", Map.of("name", name, "IPAddress", form, "portRange", Integer.toString(port++),
+                    "IPProtocol", "TCP", "loadBalancingScheme", "EXTERNAL_MANAGED", "target", "projects/" + project + "/global/targetHttpProxies/proxy")));
+            assertEquals(ip, given().get(root + "/global/forwardingRules/" + name).jsonPath().getString("IPAddress"));
+        }
+        post(root + "/global/forwardingRules", Map.of("name", "missing", "IPAddress", "projects/" + project + "/global/addresses/nope", "portRange", "9000",
+                "IPProtocol", "TCP", "loadBalancingScheme", "EXTERNAL_MANAGED", "target", "global/targetHttpProxies/proxy")).then().statusCode(400);
+    }
 }

@@ -537,6 +537,197 @@ class BigQueryTest {
     }
 
     @Test
+    void scalarOffsetUsingKeysAndSuccessivePivotsExecuteThroughTheSdk() throws InterruptedException {
+        TableResult joined = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT t.id, pos FROM (SELECT 1 AS id) t"
+                        + " JOIN UNNEST([1]) id WITH OFFSET AS pos USING(id)").build());
+        FieldValueList row = joined.iterateAll().iterator().next();
+        assertThat(row.get("id").getLongValue()).isEqualTo(1);
+        assertThat(row.get("pos").getLongValue()).isZero();
+        TableResult pivoted = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT a.id, a.x, b.y FROM"
+                        + " (SELECT 1 AS id, 2 AS v, 'x' AS k) PIVOT(SUM(v) FOR k IN ('x')) a"
+                        + " CROSS JOIN (SELECT 3 AS v, 'y' AS k) PIVOT(SUM(v) FOR k IN ('y')) b").build());
+        assertThat(pivoted.getSchema().getFields()).extracting(Field::getName).containsExactly("id", "x", "y");
+        FieldValueList pivotRow = pivoted.iterateAll().iterator().next();
+        assertThat(pivotRow.get("x").getLongValue()).isEqualTo(2);
+        assertThat(pivotRow.get("y").getLongValue()).isEqualTo(3);
+    }
+
+    @Test
+    void leftJoinUnnestUsingPreservesRowsThroughTheSdk() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT id, item, pos FROM (SELECT 1 AS id UNION ALL SELECT 2 AS id) t LEFT JOIN"
+                        + " UNNEST([STRUCT(1 AS id)]) item WITH OFFSET AS pos USING(id) ORDER BY id").build());
+        assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("id", "item", "pos");
+        List<FieldValueList> rows = new ArrayList<>();
+        result.iterateAll().forEach(rows::add);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("id").getLongValue()).isEqualTo(1);
+        assertThat(rows.get(0).get("item").getRecordValue().get("id").getLongValue()).isEqualTo(1);
+        assertThat(rows.get(0).get("pos").getLongValue()).isZero();
+        assertThat(rows.get(1).get("id").getLongValue()).isEqualTo(2);
+        assertThat(rows.get(1).get("item").isNull()).isTrue();
+        assertThat(rows.get(1).get("pos").isNull()).isTrue();
+    }
+
+    @Test
+    void distinctCountIfAndImplicitPivotAliasesExecuteThroughTheSdk() throws InterruptedException {
+        TableResult counts = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT COUNTIF(DISTINCT x > 0) AS positive, COUNTIF(DISTINCT x > 10) AS absent"
+                        + " FROM UNNEST([1, 2, -1, NULL]) x").build());
+        FieldValueList row = counts.iterateAll().iterator().next();
+        assertThat(row.get("positive").getLongValue()).isEqualTo(1);
+        assertThat(row.get("absent").getLongValue()).isZero();
+        TableResult pivot = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT * FROM (SELECT 1 sample, 'one' AS metric)"
+                        + " PIVOT(ANY_VALUE(sample) FOR metric IN ('one'))").build());
+        assertThat(pivot.getSchema().getFields()).extracting(Field::getName).containsExactly("one");
+        assertThat(pivot.iterateAll().iterator().next().get("one").getLongValue()).isEqualTo(1);
+    }
+
+    @Test
+    void structOffsetsExposeFieldsAndWholeRecordsThroughTheSdk() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT *, item AS whole FROM UNNEST([STRUCT(1 AS x)]) AS item WITH OFFSET AS pos").build());
+        assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("x", "pos", "whole");
+        assertThat(result.getSchema().getFields().get("whole").getSubFields())
+                .extracting(Field::getName).containsExactly("x");
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("x").getLongValue()).isEqualTo(1);
+        assertThat(row.get("pos").getLongValue()).isZero();
+        assertThat(row.get("whole").getRecordValue().get("x").getLongValue()).isEqualTo(1);
+    }
+
+    @Test
+    void correlatedOffsetsAndNestedReplacementStarsKeepTheirSchemaThroughTheSdk() throws InterruptedException {
+        TableResult correlated = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT (SELECT item.x) AS x, (SELECT item) AS whole FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos").build());
+        FieldValueList row = correlated.iterateAll().iterator().next();
+        assertThat(row.get("x").getLongValue()).isEqualTo(1);
+        assertThat(row.get("whole").getRecordValue().get("x").getLongValue()).isEqualTo(1);
+        assertThat(correlated.getSchema().getFields().get("whole").getSubFields())
+                .extracting(Field::getName).containsExactly("x");
+
+        TableResult replaced = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT * FROM (SELECT * REPLACE(x + 1 AS x), item AS original FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos) q").build());
+        assertThat(replaced.getSchema().getFields()).extracting(Field::getName)
+                .containsExactly("x", "pos", "original");
+        FieldValueList replacedRow = replaced.iterateAll().iterator().next();
+        assertThat(replacedRow.get("x").getLongValue()).isEqualTo(2);
+        assertThat(replacedRow.get("pos").getLongValue()).isZero();
+        assertThat(replacedRow.get("original").getRecordValue().get("x").getLongValue()).isEqualTo(1);
+    }
+
+    @Test
+    void parsedTimestampZonesOverrideFallbackThroughTheSdk() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder("""
+                SELECT PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S%z',
+                         '2024-01-01 00:00:00+0000', 'America/Los_Angeles') AS utc,
+                       SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S%z',
+                         '2024-01-01 00:00:00+0200', 'America/Los_Angeles') AS shifted,
+                       PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S',
+                         '2024-01-01 00:00:00', 'America/Los_Angeles') AS fallback
+                """).build());
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("utc").getTimestampInstant()).isEqualTo(Instant.parse("2024-01-01T00:00:00Z"));
+        assertThat(row.get("shifted").getTimestampInstant()).isEqualTo(Instant.parse("2023-12-31T22:00:00Z"));
+        assertThat(row.get("fallback").getTimestampInstant()).isEqualTo(Instant.parse("2024-01-01T08:00:00Z"));
+    }
+
+    @Test
+    void safeFromHexPreservesBytesAndNullsThroughTheSdk() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder("""
+                SELECT SAFE.FROM_HEX(hex) AS decoded
+                FROM UNNEST(['4142', 'aBc', '', 'xyz', NULL]) AS hex WITH OFFSET AS position
+                ORDER BY position
+                """).build());
+        assertThat(result.getSchema().getFields().get("decoded").getType().getStandardType())
+                .isEqualTo(StandardSQLTypeName.BYTES);
+        List<FieldValue> values = new ArrayList<>();
+        result.iterateAll().forEach(row -> values.add(row.get("decoded")));
+        assertThat(values).hasSize(5);
+        assertThat(values.get(0).getBytesValue()).containsExactly("AB".getBytes(StandardCharsets.UTF_8));
+        assertThat(values.get(1).getBytesValue()).containsExactly((byte) 0x0a, (byte) 0xbc);
+        assertThat(values.get(2).getBytesValue()).isEmpty();
+        assertThat(values.get(3).isNull()).isTrue();
+        assertThat(values.get(4).isNull()).isTrue();
+
+        TableResult parameterized = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT TO_HEX(SAFE.FROM_HEX(@hex)) AS decoded")
+                .addNamedParameter("hex", QueryParameterValue.string("fF")).build());
+        assertThat(parameterized.iterateAll().iterator().next().get("decoded").getStringValue()).isEqualTo("ff");
+    }
+
+    @Test
+    void safeFromHexDoesNotSuppressAnArgumentEvaluationError() {
+        assertThatThrownBy(() -> bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT SAFE.FROM_HEX(CAST(ERROR('argument failed') AS STRING)) AS decoded").build()))
+                .isInstanceOf(BigQueryException.class)
+                .hasMessageContaining("argument failed");
+    }
+
+    @Test
+    void mixedStructStarsReturnSiblingFields() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t").build());
+        assertThat(result.getSchema().getFields()).hasSize(1);
+        Field record = result.getSchema().getFields().get(0);
+        assertThat(record.getSubFields()).extracting(Field::getName).containsExactly("x", "y");
+        FieldValueList value = result.iterateAll().iterator().next().get(0).getRecordValue();
+        assertThat(value.get("x").getLongValue()).isEqualTo(1);
+        assertThat(value.get("y").getLongValue()).isEqualTo(2);
+    }
+
+    @Test
+    void mixedStructStarsPreserveImplicitReservedAliasesInNestedQueries() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 sample) t").build());
+        Field record = result.getSchema().getFields().get(0);
+        assertThat(record.getSubFields()).extracting(Field::getName).containsExactly("sample", "y");
+        FieldValueList value = result.iterateAll().iterator().next().get(0).getRecordValue();
+        assertThat(value.get("sample").getLongValue()).isEqualTo(1);
+        assertThat(value.get("y").getLongValue()).isEqualTo(2);
+    }
+
+    @Test
+    void quotedDerivedTableAliasWorksWithoutAs() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT `select`.x FROM (SELECT 1 AS x) `select`").build());
+        assertThat(result.iterateAll().iterator().next().get("x").getLongValue()).isEqualTo(1);
+    }
+
+    @Test
+    void structUnnestAliasReturnsTheRecordWhenAFieldHasTheSameName() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT al, al.al AS field, al.x FROM UNNEST([STRUCT(1 AS al, 2 AS x)]) al").build());
+        assertThat(result.getSchema().getFields().get("al").getType().getStandardType())
+                .isEqualTo(StandardSQLTypeName.STRUCT);
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("al").getRecordValue().get("al").getLongValue()).isEqualTo(1);
+        assertThat(row.get("al").getRecordValue().get("x").getLongValue()).isEqualTo(2);
+        assertThat(row.get("field").getLongValue()).isEqualTo(1);
+        assertThat(row.get("x").getLongValue()).isEqualTo(2);
+    }
+
+    @Test
+    void arrayConcatAggLimitSkipsNullArraysAndCountsEmptyArrays() throws InterruptedException {
+        for (boolean emptyArray : List.of(false, true)) {
+            String first = emptyArray ? "ARRAY<INT64>[]" : "[1]";
+            TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                    "SELECT ARRAY_CONCAT_AGG(items ORDER BY id LIMIT 2) AS items FROM UNNEST(["
+                            + "STRUCT(0 AS id, CAST(NULL AS ARRAY<INT64>) AS items),"
+                            + " STRUCT(1 AS id, " + first + " AS items),"
+                            + " STRUCT(2 AS id, [2] AS items), STRUCT(3 AS id, [3] AS items)])").build());
+            List<Long> items = result.iterateAll().iterator().next().get("items").getRepeatedValue()
+                    .stream().map(FieldValue::getLongValue).toList();
+            assertThat(items).containsExactlyElementsOf(emptyArray ? List.of(2L) : List.of(1L, 2L));
+        }
+    }
+
+    @Test
     @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),

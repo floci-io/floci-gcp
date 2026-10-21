@@ -168,6 +168,38 @@ class IamServiceTest {
     }
 
     @Test
+    void createServiceAccountWithoutDisplayNameLeavesItEmpty() {
+        service.createServiceAccount("p1", "plain", null, null);
+
+        assertNull(service.getServiceAccount("p1", "plain@p1.iam.gserviceaccount.com").getDisplayName());
+    }
+
+    @Test
+    void updateServiceAccountWithMaskClearsNamedFieldsTheBodyOmits() {
+        service.createServiceAccount("p1", "sa1", "Named", "Described");
+        String email = "sa1@p1.iam.gserviceaccount.com";
+
+        service.updateServiceAccount("p1", email, null, null, Set.of("displayName"));
+
+        StoredServiceAccount sa = service.getServiceAccount("p1", email);
+        assertNull(sa.getDisplayName());
+        assertEquals("Described", sa.getDescription());
+    }
+
+    @Test
+    void updateServiceAccountWithoutMaskSetsOnlyNonNullFields() {
+        service.createServiceAccount("p1", "sa1", "Named", "Described");
+        String email = "sa1@p1.iam.gserviceaccount.com";
+
+        service.updateServiceAccount("p1", email, null, null, null);
+        service.updateServiceAccount("p1", email, "Renamed", null);
+
+        StoredServiceAccount sa = service.getServiceAccount("p1", email);
+        assertEquals("Renamed", sa.getDisplayName());
+        assertEquals("Described", sa.getDescription());
+    }
+
+    @Test
     void createServiceAccountDuplicateThrowsAlreadyExists() {
         service.createServiceAccount("p1", "sa1", "Test SA", "");
 

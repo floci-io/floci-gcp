@@ -21,8 +21,10 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * REST controller for the IAM v1 API.
@@ -93,24 +95,52 @@ public class IamController {
     // { "serviceAccount": {...}, "updateMask": "displayName,description" }.
     @PATCH
     @Path("/{rest:.+}")
-    public Response patch(@PathParam("rest") String rest, Map<String, Object> body) {
+    public Response patch(@PathParam("rest") String rest, @QueryParam("updateMask") String queryMask,
+            Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM PATCH %s project=%s id=%s", rest, p.project(), p.identifier());
         if (!"serviceAccounts".equals(p.resourceType()) || p.identifier() == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
+        if (body == null) {
+            body = Map.of();
+        }
         @SuppressWarnings("unchecked")
         Map<String, Object> sa = body.get("serviceAccount") instanceof Map<?, ?> m
                 ? (Map<String, Object>) m : body;
-        return updateServiceAccount(p, sa);
+        Object mask = body.get("updateMask") != null ? body.get("updateMask") : queryMask;
+        return updateServiceAccount(p, sa, mask instanceof String s ? parseUpdateMask(s) : null);
     }
 
     private Response updateServiceAccount(IamPath p, Map<String, Object> saProps) {
+        return updateServiceAccount(p, saProps, null);
+    }
+
+    private Response updateServiceAccount(IamPath p, Map<String, Object> saProps, Set<String> updateMask) {
         String displayName = (String) saProps.get("displayName");
         String description = (String) saProps.get("description");
         StoredServiceAccount sa = service.updateServiceAccount(
-                p.project(), p.identifier(), displayName, description);
+                p.project(), p.identifier(), displayName, description, updateMask);
         return Response.ok(sa).build();
+    }
+
+    // hashicorp/google sends snake_case paths ("display_name"); the API also accepts camelCase.
+    private static Set<String> parseUpdateMask(String mask) {
+        Set<String> fields = new HashSet<>();
+        for (String path : mask.split(",")) {
+            String field = path.trim();
+            if (field.startsWith("serviceAccount.")) {
+                field = field.substring("serviceAccount.".length());
+            } else if (field.startsWith("service_account.")) {
+                field = field.substring("service_account.".length());
+            }
+            switch (field) {
+                case "displayName", "display_name" -> fields.add("displayName");
+                case "description" -> fields.add("description");
+                default -> { }
+            }
+        }
+        return fields;
     }
 
     @GET

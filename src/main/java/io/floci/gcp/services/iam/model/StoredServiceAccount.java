@@ -1,5 +1,6 @@
 package io.floci.gcp.services.iam.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
@@ -9,7 +10,10 @@ public class StoredServiceAccount {
     private String projectId;
     private String uniqueId;
     private String email;
+    // Real IAM omits an unset displayName or description rather than returning "".
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private String displayName;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private String description;
     private String createTime;
     private String etag;

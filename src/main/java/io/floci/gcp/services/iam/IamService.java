@@ -154,7 +154,7 @@ public class IamService {
             StoredServiceAccount sa = new StoredServiceAccount(
                     "projects/" + project + "/serviceAccounts/" + email,
                     project, uniqueId, email,
-                    displayName != null ? displayName : accountId,
+                    displayName,
                     description,
                     Instant.now().toString(),
                     etag);
@@ -217,16 +217,26 @@ public class IamService {
 
     public StoredServiceAccount updateServiceAccount(String project, String emailOrId,
             String displayName, String description) {
-        LOG.debugf("updateServiceAccount project=%s id=%s", project, emailOrId);
+        return updateServiceAccount(project, emailOrId, displayName, description, null);
+    }
+
+    /**
+     * Updates a service account. With an {@code updateMask} (field names {@code displayName} and
+     * {@code description}), each named field takes the given value, so a null clears it, as in real
+     * IAM. Without one, only the non-null fields are set.
+     */
+    public StoredServiceAccount updateServiceAccount(String project, String emailOrId,
+            String displayName, String description, Set<String> updateMask) {
+        LOG.debugf("updateServiceAccount project=%s id=%s mask=%s", project, emailOrId, updateMask);
         ServiceAccountRef ref = resolve(project, emailOrId);
         String key = saKey(ref.project(), ref.email());
         return withPolicyLocks(accountPolicyResources(ref.project(), ref.email()), () -> {
             StoredServiceAccount sa = saStore.get(key)
                     .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
-            if (displayName != null) {
+            if (updateMask == null ? displayName != null : updateMask.contains("displayName")) {
                 sa.setDisplayName(displayName);
             }
-            if (description != null) {
+            if (updateMask == null ? description != null : updateMask.contains("description")) {
                 sa.setDescription(description);
             }
             saStore.put(key, sa);

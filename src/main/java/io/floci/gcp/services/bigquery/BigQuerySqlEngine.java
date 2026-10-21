@@ -25,6 +25,9 @@ interface BigQuerySqlEngine {
     interface Tables {
         Table table(String datasetId, String tableId);
 
+        /** Tables in a dataset, used to expand BigQuery wildcard table references. */
+        List<Table> listTables(String datasetId);
+
         List<Map<String, Object>> rows(String datasetId, String tableId);
 
         /** Rows of an INFORMATION_SCHEMA view; a missing dataset qualifier throws 404. */

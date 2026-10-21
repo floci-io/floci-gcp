@@ -7,8 +7,11 @@ import java.math.BigDecimal;
 import java.time.DateTimeException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -16,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * Rewrites a GoogleSQL {@code SELECT} into DuckDB SQL. Works on a token stream, never on raw
@@ -38,6 +42,8 @@ final class SqlDialectTranslator {
 
     record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema) {}
 
+    private record UnnestOffset(String name, int nextToken) {}
+
     private static final Set<String> CLAUSE_END_KEYWORDS = Set.of(
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET",
             "UNION", "INTERSECT", "EXCEPT", "SELECT");
@@ -48,7 +54,7 @@ final class SqlDialectTranslator {
             "CROSS", "OUTER", "ON", "USING", "AS", "END", "AND", "OR", "NOT", "IS", "NULL", "IN",
             "LIKE", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "TRUE", "FALSE", "DESC", "ASC",
             "WITH", "UNNEST", "TABLESAMPLE", "FOR", "ROWS", "RANGE", "OVER", "PARTITION", "BY",
-            "NULLS", "FIRST", "LAST", "DISTINCT", "ALL", "INTERVAL", "LATERAL", "NATURAL");
+            "NULLS", "FIRST", "LAST", "DISTINCT", "ALL", "INTERVAL", "LATERAL", "NATURAL", "PIVOT", "UNPIVOT");
 
     /**
      * GoogleSQL reserved keywords
@@ -67,9 +73,14 @@ final class SqlDialectTranslator {
             "TABLESAMPLE", "THEN", "TO", "TREAT", "TRUE", "UNBOUNDED", "UNION", "UNNEST", "USING", "WHEN",
             "WHERE", "WINDOW", "WITH", "WITHIN");
 
+    private static final Set<String> CALLABLE_RESERVED_KEYWORDS = Set.of(
+            "ARRAY", "CAST", "COLLATE", "EXISTS", "EXTRACT", "GRAPH_TABLE", "GROUPING", "IF", "STRUCT", "TREAT");
+
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
-            "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF",
-            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT",
+            "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF", "CONCAT",
+            "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "ARRAY_AGG", "ARRAY_CONCAT_AGG", "CONTAINS_SUBSTR",
+            "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND",
+            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
@@ -77,7 +88,8 @@ final class SqlDialectTranslator {
             "TIME_ADD", "TIMESTAMP_SUB", "DATETIME_SUB", "TIME_SUB", "DATE_ADD", "DATE_SUB",
             "TIMESTAMP_DIFF", "DATETIME_DIFF", "DATE_DIFF", "TIME_DIFF", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
             "DATE_TRUNC", "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME",
-            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP", "ARRAY_AGG");
+            "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP",
+            "GENERATE_UUID");
 
     /**
      * Words DuckDB reserves (or restricts) that GoogleSQL allows as plain column names; they
@@ -98,9 +110,13 @@ final class SqlDialectTranslator {
     private final String projectId;
     private final String defaultDatasetId;
     private final QueryParameters parameters;
-    private final Set<String> cteNames = new HashSet<>();
+    private final List<CteScope> cteScopes = new ArrayList<>();
     private final Set<TableRef> tables = new LinkedHashSet<>();
     private final Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
+    private final Map<Token, String> offsetValueColumns = new IdentityHashMap<>();
+    private int generatedUnnestAlias;
+    private int generatedDerivedTableAlias;
+    private int generatedConcatAlias;
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -120,6 +136,8 @@ final class SqlDialectTranslator {
      */
     private record MergeScope(Set<String> names, Set<String> columns, boolean complete) {}
 
+    private record CteScope(String name, Token start, Token end) {}
+
     private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
         this.projectId = projectId;
         this.defaultDatasetId = defaultDatasetId;
@@ -128,8 +146,165 @@ final class SqlDialectTranslator {
 
     static Translation translate(String sql, String projectId, String defaultDatasetId,
                                  QueryParameters parameters) {
+        return translate(sql, projectId, defaultDatasetId, parameters, ref -> null);
+    }
+
+    /**
+     * As {@link #translate(String, String, String, QueryParameters)}, with {@code columnsOf} giving a
+     * table's lower-cased column names (or null when unknown), which nested queries use to resolve
+     * local columns before correlated range variables.
+     */
+    static Translation translate(String sql, String projectId, String defaultDatasetId,
+                                 QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters);
+        translator.columnsOf = columnsOf;
         return translator.run(sql);
+    }
+
+    /** Converts BigQuery's {@code FROM source PIVOT (aggregate FOR column IN (...))} clause to DuckDB syntax. */
+    private void rewritePivotSyntax() {
+        for (int pivot = 0; pivot < tokens.size(); pivot++) {
+            if (!tokens.get(pivot).upper().equals("PIVOT")) {
+                continue;
+            }
+            int open = nextSignificant(pivot + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParen(open);
+            int forIndex = topLevelKeyword(open + 1, close, "FOR");
+            int inIndex = forIndex < 0 ? -1 : topLevelKeyword(forIndex + 1, close, "IN");
+            if (forIndex < 0 || inIndex < 0) {
+                continue;
+            }
+            int source = pivotSourceStart(pivot);
+            if (source < 0 || source >= pivot) {
+                continue;
+            }
+            // Render the source and PIVOT body before replacing them with RAW SQL. In a normal
+            // FROM rendering pass, USING is interpreted as JOIN/MERGE syntax and its aggregate
+            // function as a table source.
+            boolean preserveSourceTokens = tokens.get(source).isPunct("(");
+            List<Token> sourceTokens = preserveSourceTokens
+                    ? new ArrayList<>(tokens.subList(source, pivot)) : List.of();
+            String sourceSql = preserveSourceTokens ? null : renderPivotSource(source, pivot);
+            String column = render(forIndex + 1, inIndex).trim();
+            String aggregate = render(open + 1, forIndex).trim();
+            String values = render(inIndex, close).trim();
+            List<Token> replacement = new ArrayList<>();
+            replacement.add(new Token(Kind.PUNCT, "(", null));
+            String renames = pivotColumnRenames(open, forIndex, inIndex, close);
+            if (renames != null) {
+                replacement.add(Token.raw("SELECT * RENAME (" + renames + ") FROM"));
+                replacement.add(new Token(Kind.PUNCT, "(", null));
+            }
+            if (preserveSourceTokens) {
+                replacement.add(Token.raw("PIVOT "));
+                replacement.addAll(sourceTokens);
+                replacement.add(Token.raw(" ON " + column + " " + values + " USING " + aggregate));
+            } else {
+                replacement.add(Token.raw("PIVOT " + sourceSql + " ON " + column + " " + values
+                        + " USING " + aggregate));
+            }
+            if (renames != null) {
+                replacement.add(new Token(Kind.PUNCT, ")", null));
+            }
+            replacement.add(new Token(Kind.PUNCT, ")", null));
+            tokens.subList(source, close + 1).clear();
+            tokens.addAll(source, replacement);
+            pivot = source + replacement.size() - 1;
+        }
+    }
+
+    /**
+     * DuckDB names pivot columns {@code <value>_<aggregate alias>}; GoogleSQL names them
+     * {@code <prefix>_<value>}. Returns a RENAME list for the aggregates that carry a prefix, or null when
+     * no rename is needed or a value's column name cannot be derived statically.
+     */
+    private String pivotColumnRenames(int open, int forIndex, int inIndex, int close) {
+        List<String> prefixes = new ArrayList<>();
+        for (int[] range : argumentRanges(open, forIndex)) {
+            int as = topLevelAs(range[0], range[1]);
+            int alias = as >= 0 ? nextSignificant(as + 1, range[1]) : implicitSelectAlias(range[0], range[1]);
+            prefixes.add(alias < 0 ? null : tokens.get(alias).identifierText());
+        }
+        if (prefixes.stream().allMatch(prefix -> prefix == null)) {
+            return null;
+        }
+        int valuesOpen = nextSignificant(inIndex + 1, close);
+        if (valuesOpen < 0 || !tokens.get(valuesOpen).isPunct("(")) {
+            return null;
+        }
+        List<String> names = new ArrayList<>();
+        for (int[] range : argumentRanges(valuesOpen, matchingParen(valuesOpen))) {
+            int as = topLevelAs(range[0], range[1]);
+            int alias = as >= 0 ? nextSignificant(as + 1, range[1]) : implicitSelectAlias(range[0], range[1]);
+            if (alias >= 0) {
+                names.add(tokens.get(alias).identifierText());
+                continue;
+            }
+            List<Token> value = significant(range[0], range[1]);
+            if (value.size() != 1 || value.getFirst().kind != Kind.STRING && value.getFirst().kind != Kind.NUMBER) {
+                return null;
+            }
+            names.add(value.getFirst().kind == Kind.STRING ? value.getFirst().value : value.getFirst().text);
+        }
+        List<String> renames = new ArrayList<>();
+        for (String prefix : prefixes) {
+            if (prefix == null) {
+                continue;
+            }
+            for (String name : names) {
+                String duckName = name + "_" + prefix;
+                String googleName = prefix + "_" + name;
+                if (!duckName.equals(googleName)) {
+                    renames.add(DuckTypes.quoteIdentifier(duckName) + " AS " + DuckTypes.quoteIdentifier(googleName));
+                }
+            }
+        }
+        return renames.isEmpty() ? null : String.join(", ", renames);
+    }
+
+    private String renderPivotSource(int source, int pivot) {
+        Token first = tokens.get(source);
+        if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT || first.isKeyword("UNNEST")) {
+            return render(source, pivot).trim();
+        }
+        StringBuilder rendered = new StringBuilder();
+        int next = renderTablePath(source, pivot, rendered, new HashSet<>());
+        rendered.append(render(next, pivot));
+        return rendered.toString().trim();
+    }
+
+    /** Finds the {@code from_item} immediately decorated by a PIVOT operator. */
+    private int pivotSourceStart(int pivot) {
+        int depth = 0;
+        for (int i = pivot - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")")) {
+                depth++;
+            } else if (token.isPunct("(")) {
+                depth--;
+            } else if (depth == 0 && (token.isKeyword("FROM") || token.isKeyword("JOIN")
+                    || token.isPunct(","))) {
+                return nextSignificant(i + 1, pivot);
+            }
+        }
+        return -1;
+    }
+
+    private int topLevelKeyword(int start, int end, String keyword) {
+        int depth = 0;
+        for (int i = start; i < end; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                depth++;
+            } else if (tokens.get(i).isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && tokens.get(i).upper().equals(keyword)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     // ── Statements (DML / DDL) ──────────────────────────────────────────────
@@ -162,6 +337,7 @@ final class SqlDialectTranslator {
             return kind == StatementKind.INSERT || kind == StatementKind.UPDATE || kind == StatementKind.DELETE
                     || kind == StatementKind.MERGE;
         }
+
     }
 
     /** Classifies a statement and resolves its target, without translating it to DuckDB. */
@@ -223,12 +399,12 @@ final class SqlDialectTranslator {
         int i = 0;
         while (i < tokens.size()) {
             Token t = tokens.get(i);
-            int previous = previousSignificant(i);
+            int previous = previousSignificantBefore(i);
             if (!t.isPunct("[") || previous < 0 || !endsArrayOperand(tokens.get(previous))) {
                 i++;
                 continue;
             }
-            int close = matchingBracket(i);
+            int close = matchingArraySubscriptBracket(i);
             int first = nextSignificant(i + 1, close);
             String accessor = first >= 0 ? tokens.get(first).upper() : "";
             boolean wrapped = Set.of("OFFSET", "SAFE_OFFSET", "ORDINAL", "SAFE_ORDINAL").contains(accessor)
@@ -288,9 +464,9 @@ final class SqlDialectTranslator {
         int start;
         if (t.isPunct(")")) {
             start = matchingOpen(last, "(", ")");
-            int name = previousSignificant(start);
+            int name = previousSignificantBefore(start);
             if (name >= 0 && tokens.get(name).isKeyword("OVER")) {
-                int call = previousSignificant(name);
+                int call = previousSignificantBefore(name);
                 return call >= 0 && tokens.get(call).isPunct(")") ? arrayOperandStart(call) : start;
             }
             if (name >= 0 && tokens.get(name).kind == Kind.IDENT && (endsArrayOperand(tokens.get(name))
@@ -299,7 +475,7 @@ final class SqlDialectTranslator {
             }
         } else if (t.isPunct("]")) {
             start = matchingOpen(last, "[", "]");
-            int before = previousSignificant(start);
+            int before = previousSignificantBefore(start);
             if (before >= 0 && tokens.get(before).isKeyword("ARRAY")) {
                 return before;
             }
@@ -309,15 +485,15 @@ final class SqlDialectTranslator {
             return start;
         } else {
             start = last;
-            int over = previousSignificant(last);
+            int over = previousSignificantBefore(last);
             if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
-                int call = previousSignificant(over);
+                int call = previousSignificantBefore(over);
                 return call >= 0 && tokens.get(call).isPunct(")") ? arrayOperandStart(call) : start;
             }
         }
-        int dot = previousSignificant(start);
+        int dot = previousSignificantBefore(start);
         while (dot >= 0 && tokens.get(dot).isPunct(".")) {
-            int name = previousSignificant(dot);
+            int name = previousSignificantBefore(dot);
             if (name >= 0 && (tokens.get(name).isPunct(")") || tokens.get(name).isPunct("]"))) {
                 return arrayOperandStart(name);
             }
@@ -325,12 +501,12 @@ final class SqlDialectTranslator {
                 break;
             }
             start = name;
-            dot = previousSignificant(start);
+            dot = previousSignificantBefore(start);
         }
         return start;
     }
 
-    private int previousSignificant(int before) {
+    private int previousSignificantBefore(int before) {
         int k = before - 1;
         while (k >= 0 && tokens.get(k).kind == Kind.SPACE) {
             k--;
@@ -338,7 +514,7 @@ final class SqlDialectTranslator {
         return k;
     }
 
-    private int matchingBracket(int open) {
+    private int matchingArraySubscriptBracket(int open) {
         int depth = 0;
         for (int k = open; k < tokens.size(); k++) {
             if (tokens.get(k).isPunct("[")) {
@@ -791,7 +967,11 @@ final class SqlDialectTranslator {
 
     private Translation runDml(String sql) {
         prepare(sql);
+        bindPositionalParameters();
+        collectCteNames();
+        rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
+        rewriteSelectAsStruct();
         List<Integer> sig = significantIndexes();
         String first = tokens.get(sig.getFirst()).upper();
         int at = 1;
@@ -1802,17 +1982,32 @@ final class SqlDialectTranslator {
 
     private Translation run(String sql) {
         prepare(sql);
-        rewriteArraySubscripts();
+        bindPositionalParameters();
         String statement = statementType(sql);
         if (!statement.equals("SELECT")) {
             throw invalidQuery("Statement type " + statement + " is not supported by the floci BigQuery"
                     + " emulator yet; only SELECT queries run on the SQL engine.");
         }
         collectCteNames();
+        rewriteTypedArrayLiterals();
+        rewriteArraySubscripts();
+        // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
+        expandHavingStructAliasFields();
+        rewritePivotSyntax();
+        rewriteSelectAsStruct();
+        rewriteIndexedStructWildcards();
+        quoteImplicitSelectAliases();
+        expandHavingStructAliasFields();
+        rewritePivotSyntax();
         nameAnonymousColumns();
         expandStructStars();
+        String replacementStarExclusion = soleReplacementStarExclusion();
         String rendered = render(0, tokens.size()).trim();
+        if (replacementStarExclusion != null) {
+            rendered = "SELECT *" + replacementStarExclusion + " FROM (" + rendered
+                    + ") AS \"_floci_star_replace\"";
+        }
         return new Translation(rendered, tables, informationSchema);
     }
 
@@ -1917,6 +2112,714 @@ final class SqlDialectTranslator {
         throw invalidQuery("Syntax error: Unexpected \"" + closeText + "\"");
     }
 
+    /**
+     * Binds every positional placeholder once, in source order, before rewrites can render expressions
+     * out of order or copy their tokens. The bound literal stays on the token, so every later rendering
+     * of that placeholder uses the same value.
+     */
+    private void bindPositionalParameters() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.POSITIONAL_PARAM) {
+                tokens.set(i, new Token(token.kind, token.text, parameters.nextPositional()));
+            }
+        }
+    }
+
+    private void rewriteTypedArrayLiterals() {
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).isKeyword("ARRAY")) {
+                continue;
+            }
+            int openAngle = nextSignificant(i + 1, tokens.size());
+            if (openAngle < 0 || !tokens.get(openAngle).isPunct("<")) {
+                continue;
+            }
+            int closeAngle = matchingTypeAngle(openAngle);
+            if (closeAngle < 0) {
+                continue;
+            }
+            int openBracket = nextSignificant(closeAngle + 1, tokens.size());
+            if (openBracket < 0 || !tokens.get(openBracket).isPunct("[")) {
+                continue;
+            }
+            int closeBracket = matchingBracket(openBracket);
+            if (closeBracket < 0) {
+                continue;
+            }
+            List<Token> type = tokens.subList(i, closeAngle + 1).stream()
+                    .filter(token -> token.kind != Kind.SPACE).toList();
+            if (nextSignificant(openBracket + 1, closeBracket) == -1) {
+                String literal = "CAST([] AS " + translateType(type) + ")";
+                tokens.subList(i, closeBracket + 1).clear();
+                tokens.add(i, Token.raw(literal));
+            } else {
+                // DuckDB infers anonymous struct member names for e.g. [(id_type, company_id)].
+                // Keep the GoogleSQL element type as a cast so ARRAY<STRUCT<type STRING,
+                // company_id INT64>>[(...)] retains its declared field names.
+                String translatedType = translateType(type);
+                tokens.subList(i, openBracket).clear();
+                tokens.add(i, new Token(Kind.IDENT, "CAST", "CAST"));
+                tokens.add(i + 1, new Token(Kind.PUNCT, "(", null));
+                int castEnd = matchingBracket(i + 2) + 1;
+                tokens.add(castEnd, Token.raw(" AS " + translatedType));
+                tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
+            }
+        }
+    }
+
+    /** Rewrites BigQuery's {@code SELECT AS STRUCT ...} into a DuckDB struct value. */
+    private void rewriteSelectAsStruct() {
+        // Work from the innermost SELECT outwards.  This lets render() handle a nested
+        // SELECT AS STRUCT while the enclosing struct is being assembled.
+        for (int select = tokens.size() - 1; select >= 0; select--) {
+            if (!tokens.get(select).isKeyword("SELECT")) {
+                continue;
+            }
+            int marker = nextSignificant(select + 1, tokens.size());
+            String modifier = "";
+            while (marker >= 0 && (tokens.get(marker).isKeyword("DISTINCT")
+                    || tokens.get(marker).isKeyword("ALL"))) {
+                modifier = " " + tokens.get(marker).upper();
+                marker = nextSignificant(marker + 1, tokens.size());
+            }
+            if (marker < 0 || !tokens.get(marker).isKeyword("AS")) {
+                continue;
+            }
+            int struct = nextSignificant(marker + 1, tokens.size());
+            if (struct < 0 || !tokens.get(struct).isKeyword("STRUCT")) {
+                continue;
+            }
+
+            int listStart = struct + 1;
+            int listEnd = selectStructListEnd(listStart);
+            List<int[]> items = selectStructItems(listStart, listEnd);
+            if (items.isEmpty()) {
+                continue;
+            }
+            if (items.size() == 1 && isStarProjection(significant(items.getFirst()[0], items.getFirst()[1]))) {
+                int itemStart = items.getFirst()[0];
+                int itemEnd = items.getFirst()[1];
+                String indexed = indexedStructWildcardExpression(itemStart, itemEnd);
+                String projection;
+                if (indexed != null) {
+                    projection = "(SELECT struct_pack(*COLUMNS(*)) FROM (SELECT unnest([" + indexed
+                            + "], max_depth := 2)) AS \"_floci_indexed_struct\")";
+                } else {
+                    String star = renderSelectAsStructStar(itemStart, itemEnd);
+                    projection = "struct_pack(*COLUMNS(" + star + "))";
+                }
+                boolean clauseFollows = listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT;
+                tokens.subList(select, listEnd).clear();
+                String suffix = clauseFollows ? " " : "";
+                replaceSelectHead(select, modifier, projection + suffix);
+                select = tokens.size();
+                continue;
+            }
+            boolean mixedStars = items.stream().anyMatch(item -> isStarProjection(significant(item[0], item[1])));
+            if (mixedStars) {
+                wrapStructProjection(select, marker, struct, listEnd);
+                select = tokens.size();
+                continue;
+            }
+            StringBuilder replacement = new StringBuilder("{");
+            for (int n = 0; n < items.size(); n++) {
+                int[] item = items.get(n);
+                List<Token> significant = significant(item[0], item[1]);
+                if (significant.isEmpty()) {
+                    continue;
+                }
+                if (n > 0) {
+                    replacement.append(", ");
+                }
+                int as = topLevelAs(item[0], item[1]);
+                String name;
+                String expression;
+                if (as >= 0) {
+                    name = significant(as + 1, item[1]).getFirst().identifierText();
+                    expression = render(item[0], as).trim();
+                } else {
+                    int implicitAlias = implicitSelectAlias(item[0], item[1]);
+                    if (implicitAlias >= 0) {
+                        name = tokens.get(implicitAlias).identifierText();
+                        expression = render(item[0], implicitAlias).trim();
+                    } else {
+                        name = isPath(significant) ? significant.getLast().identifierText() : "_field_" + (n + 1);
+                        expression = render(item[0], item[1]).trim();
+                    }
+                }
+                replacement.append(DuckTypes.quoteLiteral(name)).append(": ").append(expression);
+            }
+            replacement.append('}');
+            if (listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT) {
+                replacement.append(' ');
+            }
+            tokens.subList(select, listEnd).clear();
+            replaceSelectHead(select, modifier, replacement.toString());
+            select = tokens.size();
+        }
+    }
+
+    /** The head stays recognisable as a SELECT so later clauses can still resolve the query's FROM scope. */
+    private void replaceSelectHead(int select, String modifier, String projection) {
+        tokens.add(select, Token.rawSelectHead("SELECT" + modifier + " " + projection));
+    }
+
+    private void wrapStructProjection(int select, int marker, int struct, int listEnd) {
+        int queryEnd = structQueryEnd(listEnd, parenthesisDepth(select));
+        tokens.addAll(queryEnd, new Lexer(") AS _floci_struct_row ").tokenize());
+        tokens.subList(marker, struct + 1).clear();
+        List<Token> prefix = new ArrayList<>(new Lexer("SELECT ").tokenize());
+        prefix.add(Token.raw("struct_pack(*COLUMNS(_floci_struct_row.*))"));
+        prefix.addAll(new Lexer(" FROM (").tokenize());
+        tokens.addAll(select, prefix);
+    }
+
+    private int structQueryEnd(int start, int depth) {
+        for (int i = start; i < tokens.size(); i++) {
+            int currentDepth = parenthesisDepth(i);
+            Token token = tokens.get(i);
+            if (currentDepth < depth || currentDepth == depth && (token.isPunct(")")
+                    || token.isKeyword("UNION") || token.isKeyword("INTERSECT") || token.isKeyword("EXCEPT"))) {
+                return i;
+            }
+        }
+        return tokens.size();
+    }
+
+    private String renderSelectAsStructStar(int start, int end) {
+        int star = start;
+        while (star < end && !tokens.get(star).isPunct("*")) {
+            star++;
+        }
+        int except = nextSignificant(star + 1, end);
+        if (star >= end || except < 0 || !tokens.get(except).isKeyword("EXCEPT")
+                || !nextSignificantIs(except + 1, end, "(")) {
+            return render(start, end).trim();
+        }
+        int open = nextSignificant(except + 1, end);
+        int close = matchingParen(open);
+        return (render(start, star) + "*" + starExclusionList(star, open, close)
+                + render(close + 1, end)).trim();
+    }
+
+    private String indexedStructWildcardExpression(int start, int end) {
+        int star = previousSignificant(end - 1);
+        int dot = star < 0 ? -1 : previousSignificant(star - 1);
+        int expressionEnd = dot < 0 ? -1 : previousSignificant(dot - 1);
+        if (star < 0 || !tokens.get(star).isPunct("*") || dot < start || !tokens.get(dot).isPunct(".")
+                || expressionEnd < start || !isIndexedStructWildcardExpression(expressionEnd)) {
+            return null;
+        }
+        return render(start, dot).trim();
+    }
+
+    private boolean isIndexedStructWildcardExpression(int expressionEnd) {
+        if (tokens.get(expressionEnd).isPunct("]")) {
+            return matchingBracketBefore(expressionEnd) >= 0;
+        }
+        if (tokens.get(expressionEnd).isPunct(")")) {
+            int openParen = matchingOpen(expressionEnd, "(", ")");
+            return render(openParen, expressionEnd + 1).trim()
+                    .startsWith("(list_transform([struct_pack(a := ");
+        }
+        return tokens.get(expressionEnd).kind == Kind.RAW;
+    }
+
+    /** Rewrites BigQuery's {@code array_expression[OFFSET(n)].*} projection.
+     *
+     * DuckDB cannot expand a struct-valued expression followed by {@code .*}, but its
+     * recursive UNNEST expands a singleton list of that struct into the same columns.
+     */
+    private void rewriteIndexedStructWildcards() {
+        for (int dot = tokens.size() - 1; dot >= 0; dot--) {
+            if (!tokens.get(dot).isPunct(".")) {
+                continue;
+            }
+            int star = nextSignificant(dot + 1, tokens.size());
+            int expressionEnd = previousSignificant(dot - 1);
+            if (star < 0 || !tokens.get(star).isPunct("*") || expressionEnd < 0) {
+                continue;
+            }
+            int expressionStart;
+            if (tokens.get(expressionEnd).isPunct("]")) {
+                int openBracket = matchingBracketBefore(expressionEnd);
+                if (openBracket < 0) {
+                    continue;
+                }
+                expressionStart = projectionExpressionStart(openBracket);
+            } else if (tokens.get(expressionEnd).isPunct(")")) {
+                int openParen = matchingOpen(expressionEnd, "(", ")");
+                if (!render(openParen, expressionEnd + 1).trim()
+                        .startsWith("(list_transform([struct_pack(a := ")) {
+                    continue;
+                }
+                expressionStart = openParen;
+            } else if (tokens.get(expressionEnd).kind == Kind.RAW) {
+                expressionStart = expressionEnd;
+            } else {
+                continue;
+            }
+            String indexed = render(expressionStart, expressionEnd + 1).trim();
+            tokens.subList(expressionStart, star + 1).clear();
+            tokens.add(expressionStart, Token.raw(" unnest([" + indexed + "], max_depth := 2)"));
+            dot = expressionStart;
+        }
+    }
+
+    private int matchingBracketBefore(int close) {
+        int depth = 0;
+        for (int i = close; i >= 0; i--) {
+            if (tokens.get(i).isPunct("]")) {
+                depth++;
+            } else if (tokens.get(i).isPunct("[") && --depth == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int projectionExpressionStart(int openBracket) {
+        int parens = 0;
+        int brackets = 0;
+        for (int i = openBracket - 1; i >= 0; i--) {
+            Token t = tokens.get(i);
+            if (t.isPunct(")")) {
+                parens++;
+            } else if (t.isPunct("(") && parens > 0) {
+                parens--;
+            } else if (t.isPunct("]")) {
+                brackets++;
+            } else if (t.isPunct("[") && brackets > 0) {
+                brackets--;
+            } else if (parens == 0 && brackets == 0
+                    && (t.isPunct(",") || t.isKeyword("SELECT"))) {
+                return i + 1;
+            }
+        }
+        return 0;
+    }
+
+    private int implicitSelectAlias(int start, int end) {
+        List<Token> item = significant(start, end);
+        if (!endsWithImplicitAlias(item)) {
+            return -1;
+        }
+        for (int i = end - 1; i >= start; i--) {
+            if (tokens.get(i).kind != Kind.SPACE) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int selectStructListEnd(int start) {
+        int parens = 0;
+        int brackets = 0;
+        int angles = 0;
+        for (int i = start; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("(")) {
+                parens++;
+            } else if (t.isPunct(")")) {
+                if (parens == 0 && brackets == 0 && angles == 0) {
+                    return i;
+                }
+                parens--;
+            } else if (t.isPunct("[")) {
+                brackets++;
+            } else if (t.isPunct("]")) {
+                brackets--;
+            } else if (t.isPunct("<") && opensTypeArguments(i, angles)) {
+                angles++;
+            } else if (angles > 0 && (t.isPunct(">") || t.isPunct(">>"))) {
+                angles = Math.max(0, angles - (t.isPunct(">>") ? 2 : 1));
+            } else if (parens == 0 && brackets == 0 && angles == 0 && t.kind == Kind.IDENT
+                    && (t.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(t.upper()))
+                    && !(t.isKeyword("EXCEPT") && followsStar(i))) {
+                return i;
+            }
+        }
+        return tokens.size();
+    }
+
+    private boolean opensTypeArguments(int index, int angles) {
+        if (angles > 0) {
+            return true;
+        }
+        int previous = previousSignificant(index - 1);
+        if (previous < 0) {
+            return false;
+        }
+        String name = tokens.get(previous).upper();
+        return name.equals("ARRAY") || name.equals("STRUCT") || name.equals("RANGE");
+    }
+
+    private List<int[]> selectStructItems(int start, int end) {
+        List<int[]> items = new ArrayList<>();
+        int itemStart = start;
+        int parens = 0;
+        int brackets = 0;
+        int angles = 0;
+        for (int i = start; i < end; i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("(")) {
+                parens++;
+            } else if (t.isPunct(")")) {
+                parens--;
+            } else if (t.isPunct("[")) {
+                brackets++;
+            } else if (t.isPunct("]")) {
+                brackets--;
+            } else if (t.isPunct("<") && opensTypeArguments(i, angles)) {
+                angles++;
+            } else if (angles > 0 && t.isPunct(">")) {
+                angles--;
+            } else if (angles > 0 && t.isPunct(">>")) {
+                angles = Math.max(0, angles - 2);
+            } else if (t.isPunct(",") && parens == 0 && brackets == 0 && angles == 0) {
+                items.add(new int[] {itemStart, i});
+                itemStart = i + 1;
+            }
+        }
+        if (nextSignificant(itemStart, end) >= 0) {
+            items.add(new int[] {itemStart, end});
+        }
+        return items;
+    }
+
+    private int topLevelAs(int start, int end) {
+        int parens = 0;
+        int brackets = 0;
+        for (int i = start; i < end; i++) {
+            Token t = tokens.get(i);
+            if (t.isPunct("(")) {
+                parens++;
+            } else if (t.isPunct(")")) {
+                parens--;
+            } else if (t.isPunct("[")) {
+                brackets++;
+            } else if (t.isPunct("]")) {
+                brackets--;
+            } else if (parens == 0 && brackets == 0 && t.isKeyword("AS")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * BigQuery lets HAVING dereference a SELECT alias that is a STRUCT, including aggregate
+     * fields such as {@code HAVING latest.pt <= ...}. DuckDB instead binds {@code pt} to an input
+     * column and rejects it as ungrouped. Expand only explicit STRUCT alias fields in HAVING.
+     */
+    private void expandHavingStructAliasFields() {
+        for (int having = tokens.size() - 1; having >= 0; having--) {
+            if (!tokens.get(having).isKeyword("HAVING")) {
+                continue;
+            }
+
+            int depth = parenthesisDepth(having);
+            int select = precedingSelect(having, depth);
+            if (select < 0) {
+                continue;
+            }
+            Map<String, Map<String, List<Token>>> aliases = structSelectAliases(select, having, depth);
+            if (aliases.isEmpty()) {
+                continue;
+            }
+            int end = clauseEnd(having + 1, depth);
+            boolean[] nestedQuery = nestedQueryPositions(having + 1, end);
+            for (int i = end - 1; i >= having; i--) {
+                if (nestedQuery[i]) {
+                    continue;
+                }
+                Token alias = tokens.get(i);
+                int dot = nextSignificant(i + 1, end);
+                int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+                if ((alias.kind != Kind.IDENT && alias.kind != Kind.QIDENT) || dot < 0 || field < 0
+                        || !tokens.get(dot).isPunct(".")
+                        || (tokens.get(field).kind != Kind.IDENT && tokens.get(field).kind != Kind.QIDENT)) {
+                    continue;
+                }
+                Map<String, List<Token>> fields = aliases.get(alias.identifierText().toLowerCase(Locale.ROOT));
+                List<Token> expression = fields == null
+                        ? null
+                        : fields.get(tokens.get(field).identifierText().toLowerCase(Locale.ROOT));
+                if (expression == null) {
+                    continue;
+                }
+                List<Token> replacement = new ArrayList<>();
+                replacement.add(Token.raw("("));
+                replacement.addAll(expression);
+                replacement.add(Token.raw(")"));
+                tokens.subList(i, field + 1).clear();
+                tokens.addAll(i, replacement);
+            }
+        }
+    }
+
+    /** Marks tokens that belong to a query nested inside the current clause. */
+    private boolean[] nestedQueryPositions(int start, int end) {
+        boolean[] nested = new boolean[end];
+        Deque<Boolean> queryParentheses = new ArrayDeque<>();
+        int queryDepth = 0;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                int close = matchingParen(i);
+                boolean query = close < end && isQuery(i + 1, close);
+                queryParentheses.push(query);
+                if (query) {
+                    queryDepth++;
+                }
+            }
+            nested[i] = queryDepth > 0;
+            if (token.isPunct(")") && !queryParentheses.isEmpty()) {
+                if (queryParentheses.pop()) {
+                    queryDepth--;
+                }
+            }
+        }
+        return nested;
+    }
+
+    private int parenthesisDepth(int end) {
+        if (tokens instanceof TokenList list) {
+            return list.depthBefore(end);
+        }
+        int depth = 0;
+        for (int i = 0; i < end; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                depth++;
+            } else if (tokens.get(i).isPunct(")")) {
+                depth--;
+            }
+        }
+        return depth;
+    }
+
+    /**
+     * Token list that caches the parenthesis depth before every token. Depth lookups sit inside
+     * scans over the whole list, so recomputing them per call made translation cubic in script size.
+     * The cache is rebuilt after any structural change; {@code set} never swaps a parenthesis.
+     */
+    private static final class TokenList extends ArrayList<Token> {
+        private int[] depths;
+        private int cachedModCount = -1;
+
+        int depthBefore(int end) {
+            if (end < 0 || end > size()) {
+                throw new IndexOutOfBoundsException("Index: " + end + ", Size: " + size());
+            }
+            if (depths == null || cachedModCount != modCount) {
+                int[] computed = new int[size() + 1];
+                int depth = 0;
+                for (int i = 0; i < size(); i++) {
+                    Token token = get(i);
+                    if (token.isPunct("(")) {
+                        depth++;
+                    } else if (token.isPunct(")")) {
+                        depth--;
+                    }
+                    computed[i + 1] = depth;
+                }
+                depths = computed;
+                cachedModCount = modCount;
+            }
+            return depths[end];
+        }
+    }
+
+    private int precedingSelect(int before, int depth) {
+        for (int i = before - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("SELECT")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int clauseEnd(int start, int depth) {
+        for (int i = start; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            if (parenthesisDepth(i) < depth
+                    || parenthesisDepth(i) == depth && token.kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(token.upper())) {
+                return i;
+            }
+        }
+        return tokens.size();
+    }
+
+    private Map<String, Map<String, List<Token>>> structSelectAliases(int select, int before, int depth) {
+        Map<String, Map<String, List<Token>>> aliases = new HashMap<>();
+        int start = select + 1;
+        int selectEnd = before;
+        for (int i = start; i < before; i++) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("FROM")) {
+                selectEnd = i;
+                break;
+            }
+        }
+        int braceDepth = 0;
+        for (int end = start; end <= selectEnd; end++) {
+            Token token = end == selectEnd ? null : tokens.get(end);
+            boolean atEnd = end == selectEnd || braceDepth == 0 && parenthesisDepth(end) == depth
+                    && token.isPunct(",");
+            if (atEnd) {
+                addStructSelectAlias(start, end, aliases);
+                start = end + 1;
+            }
+            if (token != null && token.isPunct("{")) {
+                braceDepth++;
+            } else if (token != null && token.isPunct("}")) {
+                braceDepth--;
+            }
+        }
+        return aliases;
+    }
+
+    private void addStructSelectAlias(int start, int end, Map<String, Map<String, List<Token>>> aliases) {
+        int as = -1;
+        for (int i = end - 1; i >= start; i--) {
+            if (tokens.get(i).isKeyword("AS")) {
+                as = i;
+                break;
+            }
+        }
+        int alias = as < 0 ? -1 : nextSignificant(as + 1, end);
+        int open = nextSignificant(start, as < 0 ? end : as);
+        if (alias < 0 || open < 0) {
+            return;
+        }
+        int close;
+        Map<String, List<Token>> fields;
+        if (tokens.get(open).isPunct("{")) {
+            close = matchingBrace(open);
+            fields = structFields(open, close);
+        } else if (tokens.get(open).isKeyword("STRUCT")) {
+            int parenthesis = nextSignificant(open + 1, as);
+            if (parenthesis < 0 || !tokens.get(parenthesis).isPunct("(")) {
+                return;
+            }
+            close = matchingParen(parenthesis);
+            fields = googleSqlStructFields(parenthesis, close);
+        } else {
+            return;
+        }
+        if (close >= as) {
+            return;
+        }
+        if (!fields.isEmpty()) {
+            aliases.put(tokens.get(alias).identifierText().toLowerCase(Locale.ROOT), fields);
+        }
+    }
+
+    private int matchingBrace(int open) {
+        int depth = 0;
+        for (int i = open; i < tokens.size(); i++) {
+            if (tokens.get(i).isPunct("{")) {
+                depth++;
+            } else if (tokens.get(i).isPunct("}") && --depth == 0) {
+                return i;
+            }
+        }
+        return tokens.size();
+    }
+
+    private Map<String, List<Token>> structFields(int open, int close) {
+        Map<String, List<Token>> fields = new HashMap<>();
+        int start = nextSignificant(open + 1, close);
+        while (start >= 0 && start < close) {
+            Token key = tokens.get(start);
+            int colon = nextSignificant(start + 1, close);
+            int value = colon < 0 ? -1 : nextSignificant(colon + 1, close);
+            if (key.kind != Kind.STRING || colon < 0 || !tokens.get(colon).isPunct(":") || value < 0) {
+                return Map.of();
+            }
+            int end = value;
+            int nesting = 0;
+            while (end < close) {
+                Token token = tokens.get(end);
+                if (token.isPunct("(") || token.isPunct("{") || token.isPunct("[")) {
+                    nesting++;
+                } else if (token.isPunct(")") || token.isPunct("}") || token.isPunct("]")) {
+                    nesting--;
+                } else if (nesting == 0 && token.isPunct(",")) {
+                    break;
+                }
+                end++;
+            }
+            fields.put(key.value.toLowerCase(Locale.ROOT), new ArrayList<>(tokens.subList(value, end)));
+            start = nextSignificant(end + 1, close);
+        }
+        return fields;
+    }
+
+    private Map<String, List<Token>> googleSqlStructFields(int open, int close) {
+        Map<String, List<Token>> fields = new HashMap<>();
+        int start = nextSignificant(open + 1, close);
+        while (start >= 0 && start < close) {
+            int end = structArgumentEnd(start, close);
+            int as = -1;
+            int nesting = 0;
+            for (int i = start; i < end; i++) {
+                Token token = tokens.get(i);
+                if (token.isPunct("(") || token.isPunct("{") || token.isPunct("[")) {
+                    nesting++;
+                } else if (token.isPunct(")") || token.isPunct("}") || token.isPunct("]")) {
+                    nesting--;
+                } else if (nesting == 0 && token.isKeyword("AS")) {
+                    as = i;
+                }
+            }
+            int field = as < 0 ? start : nextSignificant(as + 1, end);
+            if (field < 0 || (tokens.get(field).kind != Kind.IDENT && tokens.get(field).kind != Kind.QIDENT)) {
+                return Map.of();
+            }
+            int expressionEnd = as < 0 ? end : as;
+            List<Token> expression = new ArrayList<>(tokens.subList(start, expressionEnd));
+            while (!expression.isEmpty() && expression.getLast().kind == Kind.SPACE) {
+                expression.removeLast();
+            }
+            fields.put(tokens.get(field).identifierText().toLowerCase(Locale.ROOT), expression);
+            start = nextSignificant(end + 1, close);
+        }
+        return fields;
+    }
+
+    private int structArgumentEnd(int start, int close) {
+        int nesting = 0;
+        for (int i = start; i < close; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(") || token.isPunct("{") || token.isPunct("[")) {
+                nesting++;
+            } else if (token.isPunct(")") || token.isPunct("}") || token.isPunct("]")) {
+                nesting--;
+            } else if (nesting == 0 && token.isPunct(",")) {
+                return i;
+            }
+        }
+        return close;
+    }
+
+    private int matchingTypeAngle(int openAngle) {
+        int depth = 0;
+        for (int i = openAngle; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("<")) {
+                depth++;
+            } else if (token.kind == Kind.PUNCT && token.text.matches(">+")) {
+                depth -= token.text.length();
+            }
+            if (depth == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private void stripTrailingSemicolons() {
         while (!tokens.isEmpty() && (tokens.getLast().isPunct(";") || tokens.getLast().kind == Kind.SPACE)) {
             tokens.removeLast();
@@ -1938,45 +2841,62 @@ final class SqlDialectTranslator {
      * parenthesized queries and subqueries ({@code (WITH s AS (...) SELECT * FROM s)}).
      */
     private void collectCteNames() {
-        Token previous = null;
         for (int i = 0; i < tokens.size(); i++) {
-            Token t = tokens.get(i);
-            if (t.kind == Kind.SPACE) {
-                continue;
+            if (tokens.get(i).isKeyword("WITH")) {
+                collectCteNamesAt(i);
             }
-            if (t.isKeyword("WITH") && (previous == null || previous.isPunct("("))) {
-                collectCteList(i);
-            }
-            previous = t;
         }
     }
 
-    private void collectCteList(int with) {
-        int n = tokens.size();
-        int i = nextSignificant(with + 1, n);
+    private void collectCteNamesAt(int with) {
+        int scopeEnd = cteScopeEnd(with);
+        int i = nextSignificant(with + 1, scopeEnd);
         if (i >= 0 && tokens.get(i).isKeyword("RECURSIVE")) {
-            i = nextSignificant(i + 1, n);
+            i = nextSignificant(i + 1, scopeEnd);
         }
         while (i >= 0) {
             Token name = tokens.get(i);
             if (name.kind != Kind.IDENT && name.kind != Kind.QIDENT) {
                 return;
             }
-            cteNames.add(name.identifierText().toLowerCase(Locale.ROOT));
-            i = nextSignificant(i + 1, n);
+            i = nextSignificant(i + 1, scopeEnd);
             if (i < 0 || !tokens.get(i).isKeyword("AS")) {
                 return;
             }
-            i = nextSignificant(i + 1, n);
+            i = nextSignificant(i + 1, scopeEnd);
             if (i < 0 || !tokens.get(i).isPunct("(")) {
                 return;
             }
-            i = nextSignificant(matchingParen(i) + 1, n);
+            int close = matchingParen(i);
+            cteScopes.add(new CteScope(name.identifierText().toLowerCase(Locale.ROOT), tokens.get(with),
+                    scopeEnd < tokens.size() ? tokens.get(scopeEnd) : null));
+            i = nextSignificant(close + 1, scopeEnd);
             if (i < 0 || !tokens.get(i).isPunct(",")) {
                 return;
             }
-            i = nextSignificant(i + 1, n);
+            i = nextSignificant(i + 1, scopeEnd);
         }
+    }
+
+    private int cteScopeEnd(int with) {
+        Deque<Integer> openParens = new ArrayDeque<>();
+        for (int i = 0; i < with; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                openParens.push(i);
+            } else if (tokens.get(i).isPunct(")")) {
+                openParens.pop();
+            }
+        }
+        return openParens.isEmpty() ? tokens.size() : matchingParen(openParens.peek());
+    }
+
+    private boolean cteVisibleAt(String name, int position) {
+        String normalized = name.toLowerCase(Locale.ROOT);
+        return cteScopes.stream().anyMatch(scope -> {
+            int start = tokens.indexOf(scope.start());
+            int end = scope.end() == null ? tokens.size() : tokens.indexOf(scope.end());
+            return scope.name().equals(normalized) && start < position && position < end;
+        });
     }
 
     /**
@@ -2135,7 +3055,8 @@ final class SqlDialectTranslator {
         if (item.isEmpty()) {
             return null;
         }
-        Token last = item.getLast();
+        List<Token> path = parenthesizedPath(item);
+        Token last = path != null ? path.getLast() : item.getLast();
         if (last.kind != Kind.IDENT && last.kind != Kind.QIDENT) {
             return null;
         }
@@ -2175,9 +3096,9 @@ final class SqlDialectTranslator {
         int itemStart = start;
         for (; end < tokens.size(); end++) {
             Token t = tokens.get(end);
-            if (t.isPunct("(") || t.isPunct("[")) {
+            if (t.isPunct("(") || t.isPunct("[") || t.isPunct("{")) {
                 depth++;
-            } else if (t.isPunct(")") || t.isPunct("]")) {
+            } else if (t.isPunct(")") || t.isPunct("]") || t.isPunct("}")) {
                 if (depth == 0) {
                     break; // closes a parenthesized query: (SELECT ...)
                 }
@@ -2222,7 +3143,7 @@ final class SqlDialectTranslator {
 
     private boolean needsGeneratedName(int start, int end) {
         List<Token> item = significant(start, end);
-        if (item.isEmpty() || item.getLast().isPunct("*") || isPath(item)) {
+        if (item.isEmpty() || item.getLast().isPunct("*") || parenthesizedPath(item) != null) {
             return false; // *, t.*, or a column/field reference that keeps its own name
         }
         for (int k = 0; k + 1 < item.size(); k++) {
@@ -2236,6 +3157,56 @@ final class SqlDialectTranslator {
             return false; // explicit or implicit alias
         }
         return true;
+    }
+
+    /** A path with any number of parentheses around it, or null when the item is an expression. */
+    private static List<Token> parenthesizedPath(List<Token> item) {
+        List<Token> candidate = item;
+        while (candidate.size() >= 3 && enclosesEntireItem(candidate)) {
+            candidate = candidate.subList(1, candidate.size() - 1);
+        }
+        return isPath(candidate) ? candidate : null;
+    }
+
+    private static boolean enclosesEntireItem(List<Token> item) {
+        if (!item.getFirst().isPunct("(") || !item.getLast().isPunct(")")) {
+            return false;
+        }
+        int depth = 0;
+        for (int i = 0; i < item.size(); i++) {
+            if (item.get(i).isPunct("(")) {
+                depth++;
+            } else if (item.get(i).isPunct(")")) {
+                depth--;
+                if (depth == 0 && i < item.size() - 1) {
+                    return false;
+                }
+            }
+        }
+        return depth == 0;
+    }
+
+    /** DuckDB requires its pattern-filtered star and REPLACE modifiers to live in separate SELECTs. */
+    private String soleReplacementStarExclusion() {
+        int select = firstTopLevelSelect();
+        if (select < 0) {
+            return null;
+        }
+        List<int[]> items = selectItems(select);
+        if (items == null || items.size() != 1) {
+            return null;
+        }
+        int[] item = items.getFirst();
+        for (int i = item[0]; i < item[1]; i++) {
+            if (!tokens.get(i).isPunct("*")) {
+                continue;
+            }
+            int next = nextSignificant(i + 1, item[1]);
+            if (next >= 0 && tokens.get(next).isKeyword("REPLACE")) {
+                return projectionStarExclusion(i);
+            }
+        }
+        return null;
     }
 
     private static boolean isName(Token t) {
@@ -2345,6 +3316,21 @@ final class SqlDialectTranslator {
         return item.size() % 2 == 1;
     }
 
+    /** True for {@code *}, {@code table.*}, and {@code * EXCEPT/REPLACE}, not multiplication. */
+    private static boolean isStarProjection(List<Token> item) {
+        for (int i = 0; i < item.size(); i++) {
+            if (!item.get(i).isPunct("*")) {
+                continue;
+            }
+            if (i == 0 || item.get(i - 1).isPunct(".")
+                    || (i + 1 < item.size() && (item.get(i + 1).isKeyword("EXCEPT")
+                    || item.get(i + 1).isKeyword("REPLACE")))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private List<Token> significant(int start, int end) {
         List<Token> out = new ArrayList<>();
         for (int i = start; i < end; i++) {
@@ -2378,7 +3364,7 @@ final class SqlDialectTranslator {
                     continue;
                 }
                 case BYTES -> {
-                    out.append("CAST(").append(DuckTypes.quoteLiteral(t.value)).append(" AS BLOB)");
+                    out.append("from_hex(").append(DuckTypes.quoteLiteral(bytesHex(t.value))).append(')');
                     i++;
                     continue;
                 }
@@ -2388,7 +3374,7 @@ final class SqlDialectTranslator {
                     continue;
                 }
                 case POSITIONAL_PARAM -> {
-                    out.append(parameters.nextPositional());
+                    out.append(t.value);
                     i++;
                     continue;
                 }
@@ -2401,6 +3387,10 @@ final class SqlDialectTranslator {
                 if (t.text.equals("(")) {
                     int close = matchingParen(i);
                     out.append('(').append(render(i + 1, close)).append(')');
+                    if (expectTable && isQuery(i + 1, close) && !hasTableAlias(close + 1, end)) {
+                        out.append(" AS ").append(DuckTypes.quoteIdentifier(
+                                "_floci_derived_" + generatedDerivedTableAlias++));
+                    }
                     i = close + 1;
                     expectTable = false;
                     continue;
@@ -2410,9 +3400,30 @@ final class SqlDialectTranslator {
                     int next = nextSignificant(i + 1, end);
                     if (next >= 0 && tokens.get(next).isKeyword("EXCEPT")
                             && nextSignificantIs(next + 1, end, "(")) {
-                        out.append(" EXCLUDE");
-                        i = next + 1;
+                        int open = nextSignificant(next + 1, end);
+                        int close = matchingParen(open);
+                        int after = nextSignificant(close + 1, end);
+                        if (after >= 0 && tokens.get(after).isKeyword("REPLACE")) {
+                            out.append(starExclusionList(i, open, close));
+                        } else {
+                            out.append(" NOT SIMILAR TO ").append(DuckTypes.quoteLiteral(
+                                    starExclusionPattern(i, open, close)));
+                        }
+                        i = close + 1;
                         continue;
+                    }
+                    if (isProjectionStar(i) && next >= 0 && tokens.get(next).isKeyword("REPLACE")) {
+                        List<String> hidden = offsetStarHiddenColumns(i);
+                        if (!hidden.isEmpty()) {
+                            out.append(" EXCLUDE (").append(hidden.stream().map(DuckTypes::quoteIdentifier)
+                                    .collect(Collectors.joining(", "))).append(')');
+                        }
+                    }
+                    if (isProjectionStar(i) && (next < 0 || !tokens.get(next).isKeyword("REPLACE"))) {
+                        String exclusion = projectionStarExclusion(i);
+                        if (exclusion != null) {
+                            out.append(exclusion);
+                        }
                     }
                     i++;
                     continue;
@@ -2445,6 +3456,13 @@ final class SqlDialectTranslator {
                 continue;
             }
 
+            String record = unnestRangeValue(i);
+            if (record != null) {
+                out.append(record);
+                i++;
+                continue;
+            }
+
             if (t.kind == Kind.QIDENT) {
                 out.append(quotePath(t.value));
                 i++;
@@ -2456,6 +3474,21 @@ final class SqlDialectTranslator {
                 inFrom = true;
                 expectTable = true;
             } else if (upper.equals("JOIN")) {
+                // GoogleSQL permits a correlated UNNEST to be introduced with a bare JOIN
+                // (without an ON clause). That is an implicit cross join; DuckDB requires
+                // the CROSS keyword for the same form.
+                int joined = nextSignificant(i + 1, end);
+                int modifier = previousSignificant(i - 1);
+                boolean bareJoin = modifier < 0 || !(tokens.get(modifier).isKeyword("LEFT")
+                        || tokens.get(modifier).isKeyword("RIGHT") || tokens.get(modifier).isKeyword("FULL")
+                        || tokens.get(modifier).isKeyword("INNER") || tokens.get(modifier).isKeyword("CROSS"));
+                if (bareJoin && joined >= 0 && tokens.get(joined).isKeyword("UNNEST")
+                        && !unnestHasJoinCondition(joined, end)) {
+                    out.append("CROSS JOIN");
+                    expectTable = true;
+                    i++;
+                    continue;
+                }
                 expectTable = true;
             } else if (upper.equals("ON")) {
                 expectTable = false;
@@ -2479,6 +3512,19 @@ final class SqlDialectTranslator {
             }
 
             int next = nextSignificant(i + 1, end);
+            if (upper.equals("SAFE") && next >= 0 && tokens.get(next).isPunct(".")) {
+                int function = nextSignificant(next + 1, end);
+                int open = function < 0 ? -1 : nextSignificant(function + 1, end);
+                if (function >= 0 && open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParen(open);
+                    String call = renderSafeCall(tokens.get(function).upper(), open, close);
+                    if (call != null) {
+                        out.append(call);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
             if (upper.equals("IN") && next >= 0 && tokens.get(next).isKeyword("UNNEST")) {
                 // x IN UNNEST(array): DuckDB only accepts UNNEST in a select list.
                 int open = nextSignificant(next + 1, end);
@@ -2532,6 +3578,569 @@ final class SqlDialectTranslator {
         return k >= 0 && tokens.get(k).isKeyword("CURRENT");
     }
 
+    private boolean unnestHasJoinCondition(int unnest, int end) {
+        int open = nextSignificant(unnest + 1, end);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int close = matchingParen(open);
+        int depth = 0;
+        for (int i = close + 1; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                if (depth == 0) {
+                    return false;
+                }
+                depth--;
+            } else if (depth == 0 && (token.isKeyword("ON") || token.isKeyword("USING"))) {
+                return true;
+            } else if (depth == 0 && (token.isPunct(",") || token.isKeyword("JOIN")
+                    || token.isKeyword("WHERE") || token.isKeyword("GROUP") || token.isKeyword("HAVING")
+                    || token.isKeyword("QUALIFY") || token.isKeyword("WINDOW") || token.isKeyword("ORDER")
+                    || token.isKeyword("LIMIT") || token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+                    || token.isKeyword("EXCEPT"))) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private boolean isIntervalPartSyntax(int index) {
+        List<Integer> significant = significantIndexes();
+        List<Token> significantTokens = new ArrayList<>(significant.size());
+        int tokenPosition = -1;
+        for (int i = 0; i < significant.size(); i++) {
+            significantTokens.add(tokens.get(significant.get(i)));
+            if (significant.get(i) == index) {
+                tokenPosition = i;
+            }
+        }
+        if (tokenPosition < 0) {
+            return false;
+        }
+        for (int i = 0; i < tokenPosition; i++) {
+            if (significantTokens.get(i).isKeyword("INTERVAL")
+                    && intervalEnd(significantTokens, i) == tokenPosition) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isDatePartSyntax(int index, int end) {
+        int next = nextSignificant(index + 1, end);
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")") || token.isPunct("]")) {
+                depth++;
+            } else if (token.isPunct("(") || token.isPunct("[")) {
+                if (depth > 0) {
+                    depth--;
+                    continue;
+                }
+                if (token.isPunct("[")) {
+                    return false;
+                }
+                int callee = previousSignificant(i - 1);
+                if (callee < 0 || tokens.get(callee).kind != Kind.IDENT) {
+                    return false;
+                }
+                String function = tokens.get(callee).upper();
+                if (function.equals("EXTRACT")) {
+                    return next >= 0 && tokens.get(next).isKeyword("FROM");
+                }
+                if (function.equals("WEEK")) {
+                    return true;
+                }
+                Integer partArgument = DATE_PART_ARGUMENT.get(function);
+                return partArgument != null && functionArgumentIndex(i, index) == partArgument;
+            }
+        }
+        return false;
+    }
+
+    private int functionArgumentIndex(int open, int index) {
+        int argument = 0;
+        int parens = 0;
+        int brackets = 0;
+        int angles = 0;
+        for (int i = open + 1; i < index; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                parens++;
+            } else if (token.isPunct(")")) {
+                parens--;
+            } else if (token.isPunct("[")) {
+                brackets++;
+            } else if (token.isPunct("]")) {
+                brackets--;
+            } else if (token.isPunct("<") && opensTypeArguments(i, angles)) {
+                angles++;
+            } else if (angles > 0 && token.isPunct(">")) {
+                angles--;
+            } else if (angles > 0 && token.isPunct(">>")) {
+                angles = Math.max(0, angles - 2);
+            } else if (token.isPunct(",") && parens == 0 && brackets == 0 && angles == 0) {
+                argument++;
+            }
+        }
+        return argument;
+    }
+
+    private String starExclusionPattern(int star, int open, int close) {
+        List<String> names = new ArrayList<>(projectionStarHiddenColumns(star));
+        for (Token token : significant(open + 1, close)) {
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                names.add(token.identifierText());
+            }
+        }
+        return "(?i)^(" + names.stream().map(SqlDialectTranslator::regexLiteral).collect(Collectors.joining("|"))
+                + ")$";
+    }
+
+    /** DuckDB supports EXCLUDE followed by REPLACE, unlike its pattern-filtered star form. */
+    private String starExclusionList(int star, int open, int close) {
+        ProjectionSource source = projectionSourceForStar(star);
+        List<String> names = projectionStarHiddenColumns(star).stream()
+                .filter(name -> !name.equals("_TABLE_SUFFIX") || source != null && source.wildcardTable())
+                .map(DuckTypes::quoteIdentifier).collect(Collectors.toCollection(ArrayList::new));
+        for (Token token : significant(open + 1, close)) {
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                names.add(DuckTypes.quoteIdentifier(token.identifierText()));
+            }
+        }
+        return " EXCLUDE (" + String.join(", ", names) + ")";
+    }
+
+    /**
+     * A pseudocolumn belongs to a physical table scan, not to a derived table or CTE result that
+     * happens to expose a column with the same name. Limit the DuckDB star filter to direct table
+     * sources in this SELECT scope.
+     */
+    private String projectionStarExclusion(int star) {
+        List<String> names = projectionStarHiddenColumns(star);
+        if (names.isEmpty()) {
+            return null;
+        }
+        return " NOT SIMILAR TO " + DuckTypes.quoteLiteral("^(" + names.stream()
+                .map(SqlDialectTranslator::regexLiteral).collect(Collectors.joining("|")) + ")$");
+    }
+
+    private List<String> projectionStarHiddenColumns(int star) {
+        List<ProjectionSource> sources = projectionSourcesForStar(star);
+        List<String> names = new ArrayList<>();
+        if (!sources.isEmpty() && sources.getFirst().directTable()) {
+            names.add("_TABLE_SUFFIX");
+        }
+        names.addAll(offsetStarHiddenColumns(star));
+        return names;
+    }
+
+    private List<String> offsetStarHiddenColumns(int star) {
+        int previous = previousSignificant(star - 1);
+        if (previous >= 0 && tokens.get(previous).isPunct(".")) {
+            return List.of();
+        }
+        return projectionSourcesForStar(star).stream().map(ProjectionSource::offsetValueColumn)
+                .filter(name -> name != null).toList();
+    }
+
+    private ProjectionSource projectionSourceForStar(int star) {
+        List<ProjectionSource> sources = projectionSourcesForStar(star);
+        return sources.isEmpty() ? null : sources.getFirst();
+    }
+
+    private List<ProjectionSource> projectionSourcesForStar(int star) {
+        int depth = parenthesisDepth(star);
+        int from = -1;
+        for (int i = star + 1; i < tokens.size(); i++) {
+            int currentDepth = parenthesisDepth(i);
+            if (currentDepth < depth) {
+                break;
+            }
+            if (currentDepth == depth && tokens.get(i).isKeyword("FROM")) {
+                from = i;
+                break;
+            }
+            if (currentDepth == depth && tokens.get(i).kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(tokens.get(i).upper()) && !followsStar(i)) {
+                break;
+            }
+        }
+        if (from < 0) {
+            return List.of();
+        }
+        int dot = previousSignificant(star - 1);
+        String qualifier = null;
+        if (dot >= 0 && tokens.get(dot).isPunct(".")) {
+            int name = previousSignificant(dot - 1);
+            if (name < 0 || (tokens.get(name).kind != Kind.IDENT && tokens.get(name).kind != Kind.QIDENT)) {
+                return List.of();
+            }
+            qualifier = tokens.get(name).identifierText();
+        }
+        List<ProjectionSource> sources = projectionSources(from, depth);
+        String name = qualifier;
+        return qualifier == null ? sources : sources.stream()
+                .filter(source -> source.alias() != null && source.alias().equalsIgnoreCase(name)).toList();
+    }
+
+    private record ProjectionSource(String alias, boolean directTable, boolean wildcardTable,
+                                    boolean structAliasCollision, int nextToken, String offsetValueColumn, int startToken) {}
+
+    /** A value-table alias denotes the entire element even when a struct field has that name. */
+    private String unnestRangeValue(int index) {
+        Token token = tokens.get(index);
+        if (token.kind != Kind.IDENT && token.kind != Kind.QIDENT || isPrecededByDot(index)
+                || isUsingColumnList(index) || isDatePartSyntax(index, tokens.size())
+                || isIntervalPartSyntax(index)) {
+            return null;
+        }
+        int next = nextSignificant(index + 1, tokens.size());
+        int previous = previousSignificant(index - 1);
+        if (next >= 0 && tokens.get(next).isPunct("(")
+                || previous >= 0 && tokens.get(previous).isKeyword("AS")) {
+            return null;
+        }
+        int depth = parenthesisDepth(index);
+        int nearestSelect = -1;
+        ProjectionSource source = null;
+        for (int i = index - 1; i >= 0; i--) {
+            depth = Math.min(depth, parenthesisDepth(i));
+            if (!tokens.get(i).isKeyword("SELECT") || parenthesisDepth(i) != depth) {
+                continue;
+            }
+            if (nearestSelect < 0) {
+                nearestSelect = i;
+            }
+            int from = queryFrom(i, depth);
+            List<ProjectionSource> sources = from < 0 ? List.of() : projectionSources(from, depth);
+            source = sources.stream().filter(candidate -> candidate.alias() != null
+                    && candidate.alias().equalsIgnoreCase(token.identifierText())).findFirst().orElse(null);
+            if (source != null) {
+                break;
+            }
+            if (sources.stream().anyMatch(candidate -> sourceExposesColumn(candidate, token.identifierText()))) {
+                return null;
+            }
+            // A sibling SELECT in a set operation is not an enclosing scope.
+            depth--;
+        }
+        if (source == null || source.nextToken() - 1 == index) {
+            return null;
+        }
+        String value;
+        if (source.offsetValueColumn() != null) {
+            value = DuckTypes.quoteIdentifier(source.offsetValueColumn());
+        } else if (source.structAliasCollision() && !(next >= 0 && tokens.get(next).isPunct("."))) {
+            value = "struct_pack(*COLUMNS(" + DuckTypes.quoteIdentifier(source.alias()) + ".*))";
+        } else {
+            return null;
+        }
+        List<int[]> items = selectItems(nearestSelect);
+        if (items != null) {
+            for (int[] item : items) {
+                if (implicitSelectAlias(item[0], item[1]) == index) {
+                    return null;
+                }
+                if (nextSignificant(item[0], item[1]) == index
+                        && nextSignificant(index + 1, item[1]) < 0) {
+                    return value + " AS " + DuckTypes.quoteIdentifier(token.identifierText());
+                }
+            }
+        }
+        return value;
+    }
+
+    private boolean isUsingColumnList(int index) {
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            if (tokens.get(i).isPunct(")")) {
+                depth++;
+            } else if (tokens.get(i).isPunct("(")) {
+                if (depth == 0) {
+                    int previous = previousSignificant(i - 1);
+                    return previous >= 0 && tokens.get(previous).isKeyword("USING")
+                            && !isQuery(i + 1, matchingParen(i));
+                }
+                depth--;
+            }
+        }
+        return false;
+    }
+
+    private int queryFrom(int select, int depth) {
+        for (int i = select + 1; i < tokens.size(); i++) {
+            int currentDepth = parenthesisDepth(i);
+            if (currentDepth < depth || currentDepth == depth && tokens.get(i).kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(tokens.get(i).upper())) {
+                break;
+            }
+            if (currentDepth == depth && tokens.get(i).isKeyword("FROM")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether the first SELECT directly inside the parenthesised query at {@code open} outputs {@code name}. */
+    private boolean parenthesizedQueryExposesColumn(int open, String name) {
+        int close = matchingParen(open);
+        int depth = parenthesisDepth(open) + 1;
+        for (int i = open + 1; i < close; i++) {
+            if (tokens.get(i).isKeyword("SELECT") && parenthesisDepth(i) == depth) {
+                List<int[]> items = selectItems(i);
+                if (items == null) {
+                    return false;
+                }
+                for (int[] item : items) {
+                    List<Token> expression = significant(item[0], item[1]);
+                    if (!expression.isEmpty() && !isStarProjection(expression)
+                            && expression.getLast().identifierText().equalsIgnoreCase(name)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** The "(" opening the body of the nearest CTE called {@code name} declared before {@code before}. */
+    private int cteBodyOpen(String name, int before) {
+        for (int i = before - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if ((token.kind != Kind.IDENT && token.kind != Kind.QIDENT) || !token.identifierText().equalsIgnoreCase(name)) {
+                continue;
+            }
+            int previous = previousSignificant(i - 1);
+            int as = nextSignificant(i + 1, tokens.size());
+            int open = as < 0 ? -1 : nextSignificant(as + 1, tokens.size());
+            if (previous >= 0 && (tokens.get(previous).isKeyword("WITH") || tokens.get(previous).isKeyword("RECURSIVE")
+                    || tokens.get(previous).isPunct(",")) && as >= 0 && tokens.get(as).isKeyword("AS")
+                    && open >= 0 && tokens.get(open).isPunct("(")) {
+                return open;
+            }
+        }
+        return -1;
+    }
+
+    private boolean sourceExposesColumn(ProjectionSource source, String name) {
+        int start = source.startToken();
+        if (tokens.get(start).isPunct("(")) {
+            return parenthesizedQueryExposesColumn(start, name);
+        } else if (source.directTable()) {
+            TableRef ref = projectionSourceTable(start);
+            Set<String> columns = ref == null ? null : columnsOf.apply(ref);
+            return columns != null && columns.contains(name.toLowerCase(Locale.ROOT));
+        } else if (!source.directTable() && (tokens.get(start).kind == Kind.IDENT
+                || tokens.get(start).kind == Kind.QIDENT) && !tokens.get(start).isKeyword("UNNEST")) {
+            int body = cteBodyOpen(tokens.get(start).identifierText(), start);
+            return body >= 0 && parenthesizedQueryExposesColumn(body, name);
+        } else if (tokens.get(start).isKeyword("UNNEST")) {
+            int open = nextSignificant(start + 1, tokens.size());
+            int close = matchingParen(open);
+            if (isExplicitStructArray(open, close)) {
+                int bracket = nextSignificant(open + 1, close);
+                int struct = nextSignificant(bracket + 1, close);
+                int structOpen = nextSignificant(struct + 1, close);
+                if (structOpen >= 0 && tokens.get(structOpen).isPunct("(")) {
+                    return googleSqlStructFields(structOpen, matchingParen(structOpen))
+                            .containsKey(name.toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        return false;
+    }
+
+    private TableRef projectionSourceTable(int start) {
+        List<String> segments = new ArrayList<>();
+        int current = start;
+        while (current < tokens.size()) {
+            Token name = tokens.get(current);
+            if (name.kind == Kind.QIDENT) {
+                segments.addAll(List.of(name.value.split("\\.", -1)));
+            } else if (name.kind == Kind.IDENT) {
+                segments.add(name.identifierText());
+            } else {
+                break;
+            }
+            int dot = nextSignificant(current + 1, tokens.size());
+            int afterDot = dot < 0 ? -1 : nextSignificant(dot + 1, tokens.size());
+            if (dot < 0 || !tokens.get(dot).isPunct(".") || afterDot < 0
+                    || tokens.get(afterDot).kind != Kind.IDENT && tokens.get(afterDot).kind != Kind.QIDENT) {
+                break;
+            }
+            current = afterDot;
+        }
+        return tableRefOrNull(segments);
+    }
+
+    private List<ProjectionSource> projectionSources(int from, int depth) {
+        List<ProjectionSource> sources = new ArrayList<>();
+        boolean expectSource = true;
+        for (int i = from + 1; i < tokens.size(); i++) {
+            int currentDepth = parenthesisDepth(i);
+            if (currentDepth < depth) {
+                break;
+            }
+            Token token = tokens.get(i);
+            if (currentDepth == depth && token.kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(token.upper())) {
+                break;
+            }
+            if (currentDepth == depth && (token.isKeyword("JOIN") || token.isPunct(","))) {
+                expectSource = true;
+                continue;
+            }
+            if (!expectSource || currentDepth != depth || token.kind == Kind.SPACE) {
+                continue;
+            }
+            if (token.isKeyword("LATERAL")) {
+                continue;
+            }
+            ProjectionSource source = parseProjectionSource(i);
+            if (source == null) {
+                expectSource = false;
+                continue;
+            }
+            sources.add(source);
+            expectSource = false;
+            i = source.nextToken() - 1;
+        }
+        return sources;
+    }
+
+    private ProjectionSource parseProjectionSource(int source) {
+        Token first = tokens.get(source);
+        if (first.isPunct("(")) {
+            int close = matchingParen(source);
+            SourceAlias alias = sourceAlias(close + 1, null);
+            return new ProjectionSource(alias.name(), false, false, false, alias.nextToken(), null, source);
+        }
+        if (first.isKeyword("UNNEST")) {
+            int open = nextSignificant(source + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                return null;
+            }
+            int close = matchingParen(open);
+            SourceAlias alias = sourceAlias(close + 1, null);
+            int afterAlias = nextSignificant(alias.nextToken(), tokens.size());
+            if (alias.name() != null && afterAlias >= 0 && tokens.get(afterAlias).isKeyword("WITH")) {
+                UnnestOffset offset = unnestOffset(afterAlias, tokens.size());
+                return new ProjectionSource(alias.name(), false, false, false,
+                        offset.nextToken(), offsetValueColumn(source), source);
+            }
+            boolean expanded = alias.name() != null && isExplicitStructArray(open, close)
+                    && !(afterAlias >= 0 && tokens.get(afterAlias).isKeyword("WITH"));
+            boolean collision = false;
+            if (expanded) {
+                int bracket = nextSignificant(open + 1, close);
+                int struct = nextSignificant(bracket + 1, close);
+                int structOpen = nextSignificant(struct + 1, close);
+                if (structOpen >= 0 && tokens.get(structOpen).isPunct("(")) {
+                    collision = googleSqlStructFields(structOpen, matchingParen(structOpen))
+                            .containsKey(alias.name().toLowerCase(Locale.ROOT));
+                }
+            }
+            String valueColumn = expanded ? offsetValueColumn(source) : null;
+            return new ProjectionSource(alias.name(), false, false, collision, alias.nextToken(), valueColumn, source);
+        }
+        if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT) {
+            return null;
+        }
+        List<String> segments = new ArrayList<>();
+        int end = source;
+        while (end < tokens.size()) {
+            Token name = tokens.get(end);
+            if (name.kind == Kind.QIDENT) {
+                segments.addAll(List.of(name.value.split("\\.", -1)));
+            } else if (name.kind == Kind.IDENT) {
+                segments.add(name.identifierText());
+            } else {
+                break;
+            }
+            int dot = nextSignificant(end + 1, tokens.size());
+            int afterDot = dot < 0 ? -1 : nextSignificant(dot + 1, tokens.size());
+            if (dot >= 0 && tokens.get(dot).isPunct(".") && afterDot >= 0
+                    && (tokens.get(afterDot).kind == Kind.IDENT || tokens.get(afterDot).kind == Kind.QIDENT)) {
+                end = afterDot;
+                continue;
+            }
+            end++;
+            break;
+        }
+        SourceAlias alias = sourceAlias(end, segments.getLast());
+        boolean direct = segments.size() > 1 || !cteVisibleAt(segments.getFirst(), source);
+        boolean wildcard = direct && segments.getLast().endsWith("*");
+        return new ProjectionSource(alias.name(), direct, wildcard, false, alias.nextToken(), null, source);
+    }
+
+    private record SourceAlias(String name, int nextToken) {}
+
+    private SourceAlias sourceAlias(int start, String implicit) {
+        int next = nextSignificant(start, tokens.size());
+        if (next < 0) {
+            return new SourceAlias(implicit, start);
+        }
+        if (tokens.get(next).isKeyword("AS")) {
+            int name = nextSignificant(next + 1, tokens.size());
+            if (name >= 0 && (tokens.get(name).kind == Kind.IDENT || tokens.get(name).kind == Kind.QIDENT)) {
+                return new SourceAlias(tokens.get(name).identifierText(), name + 1);
+            }
+        } else if ((tokens.get(next).kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(tokens.get(next).upper()))
+                || tokens.get(next).kind == Kind.QIDENT) {
+            return new SourceAlias(tokens.get(next).identifierText(), next + 1);
+        }
+        return new SourceAlias(implicit, start);
+    }
+
+    private static String regexLiteral(String value) {
+        return value.replace("\\", "\\\\").replace(".", "\\.").replace("^", "\\^")
+                .replace("$", "\\$").replace("|", "\\|").replace("?", "\\?")
+                .replace("*", "\\*").replace("+", "\\+").replace("(", "\\(")
+                .replace(")", "\\)").replace("[", "\\[").replace("]", "\\]")
+                .replace("{", "\\{").replace("}", "\\}");
+    }
+
+    private boolean isQuery(int start, int end) {
+        int first = nextSignificant(start, end);
+        if (first < 0) {
+            return false;
+        }
+        if (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH")) {
+            return true;
+        }
+        if (!tokens.get(first).isPunct("(")) {
+            return false;
+        }
+
+        // A parenthesized join group can also start with '('. Unlike a parenthesized
+        // set-operation query, it preserves the range variables declared inside it;
+        // turning it into a derived table would hide names such as pw/cw from its
+        // enclosing join condition. Only a following set operator identifies this
+        // nested form as a query that needs a DuckDB alias.
+        int close = matchingParen(first);
+        int next = nextSignificant(close + 1, end);
+        return next >= 0 && (tokens.get(next).isKeyword("UNION") || tokens.get(next).isKeyword("INTERSECT")
+                || tokens.get(next).isKeyword("EXCEPT"));
+    }
+
+    private boolean hasTableAlias(int start, int end) {
+        int next = nextSignificant(start, end);
+        if (next < 0) {
+            return false;
+        }
+        if (tokens.get(next).isKeyword("AS")) {
+            return true;
+        }
+        return tokens.get(next).kind == Kind.QIDENT
+                || tokens.get(next).kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(tokens.get(next).upper());
+    }
+
     private boolean isPrecededByDot(int index) {
         for (int k = index - 1; k >= 0; k--) {
             Token t = tokens.get(k);
@@ -2541,6 +4150,24 @@ final class SqlDialectTranslator {
             return t.isPunct(".");
         }
         return false;
+    }
+
+    /** Distinguishes a select-list wildcard from multiplication and function stars such as {@code COUNT(*)}. */
+    private boolean isProjectionStar(int index) {
+        int depth = parenthesisDepth(index);
+        int select = precedingSelect(index, depth);
+        if (select < 0) {
+            return false;
+        }
+        for (int i = select + 1; i < index; i++) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("FROM")) {
+                return false;
+            }
+        }
+        int previous = previousSignificant(index - 1);
+        return previous == select || previous >= 0 && (tokens.get(previous).isPunct(".")
+                || tokens.get(previous).isPunct(",") || tokens.get(previous).isKeyword("DISTINCT")
+                || tokens.get(previous).isKeyword("ALL"));
     }
 
     /** Renders a table path in a FROM/JOIN position plus its optional alias. */
@@ -2620,7 +4247,7 @@ final class SqlDialectTranslator {
             out.append(" AS ").append(DuckTypes.quoteIdentifier(name));
             return aliasEnd;
         }
-        TableRef ref = resolveTable(segments);
+        TableRef ref = resolveTable(segments, i);
         if (ref == null) {
             out.append(DuckTypes.quoteIdentifier(first));
             rangeVariables.add(first.toLowerCase(Locale.ROOT));
@@ -2639,6 +4266,7 @@ final class SqlDialectTranslator {
 
     /** {@code UNNEST(expr) [AS] x} in FROM: DuckDB needs {@code AS t(x)} to name the element column. */
     private int renderUnnest(int i, int end, StringBuilder out) {
+        boolean leftJoin = isCorrelatedLeftJoin(i);
         int open = nextSignificant(i + 1, end);
         if (open < 0 || !tokens.get(open).isPunct("(")) {
             out.append(tokens.get(i).text);
@@ -2654,29 +4282,154 @@ final class SqlDialectTranslator {
                 && !NON_ALIAS_KEYWORDS.contains(tokens.get(next).upper())) || tokens.get(next).kind == Kind.QIDENT)) {
             nameIndex = next;
         }
-        if (next >= 0 && tokens.get(next).isKeyword("WITH")) {
-            throw invalidQuery("UNNEST ... WITH OFFSET is not supported by the floci BigQuery emulator.");
-        }
         if (nameIndex < 0) {
             // Unaliased: GoogleSQL expands STRUCT elements into one column per field.
+            if (next >= 0 && tokens.get(next).isKeyword("WITH")) {
+                UnnestOffset offset = unnestOffset(next, end);
+                out.append("LATERAL (SELECT UNNEST([").append(DuckTypes.quoteIdentifier("_value"))
+                        .append("], max_depth := 2), ")
+                        .append(DuckTypes.quoteIdentifier("_ordinality")).append(" - 1 AS ")
+                        .append(DuckTypes.quoteIdentifier(offset.name()))
+                        .append(" FROM UNNEST(").append(array).append(") WITH ORDINALITY AS ")
+                        .append(DuckTypes.quoteIdentifier("_floci_offset")).append('(')
+                        .append(DuckTypes.quoteIdentifier("_value")).append(", ")
+                        .append(DuckTypes.quoteIdentifier("_ordinality")).append(")) AS ")
+                        .append(DuckTypes.quoteIdentifier("_floci_unnest_" + generatedUnnestAlias++));
+                appendLeftJoinCondition(out, offset.nextToken(), end, leftJoin);
+                return offset.nextToken();
+            }
+            if (leftJoin) {
+                out.append("LATERAL ");
+            }
             out.append("(SELECT UNNEST(").append(array).append(", max_depth := 2))");
             if (tokens.get(i) == mergeUnnestSource) {
                 out.append(" AS ").append(DuckTypes.quoteIdentifier(mergeUnnestName));
+            } else {
+                // DuckDB requires every derived table in FROM to have an alias. GoogleSQL's
+                // unaliased UNNEST has no range variable, so use a private, unique one while
+                // preserving the expanded STRUCT fields exposed by the inner SELECT.
+                out.append(" AS ")
+                        .append(DuckTypes.quoteIdentifier("_floci_unnest_" + generatedUnnestAlias++));
             }
+            appendLeftJoinCondition(out, close + 1, end, leftJoin);
             return close + 1;
         }
-        out.append("UNNEST(").append(array).append(')');
+        if (leftJoin) {
+            out.append("LATERAL ");
+        }
         if (tokens.get(nameIndex).kind == Kind.IDENT || tokens.get(nameIndex).kind == Kind.QIDENT) {
             String element = tokens.get(nameIndex).identifierText();
-            out.append(" AS ").append(DuckTypes.quoteIdentifier("_unnest_" + element)).append('(')
-                    .append(DuckTypes.quoteIdentifier(element)).append(')');
             int after = nextSignificant(nameIndex + 1, end);
             if (after >= 0 && tokens.get(after).isKeyword("WITH")) {
-                throw invalidQuery("UNNEST ... WITH OFFSET is not supported by the floci BigQuery emulator.");
+                UnnestOffset offset = unnestOffset(after, end);
+                if (!leftJoin) {
+                    out.append("LATERAL ");
+                }
+                out.append("(SELECT ")
+                        .append(DuckTypes.quoteIdentifier("_value")).append(" AS ")
+                        .append(DuckTypes.quoteIdentifier(offsetValueColumn(i)))
+                        .append(", UNNEST([").append(DuckTypes.quoteIdentifier("_value"))
+                        .append("], max_depth := 2) AS ")
+                        .append(DuckTypes.quoteIdentifier(element)).append(", ")
+                        .append(DuckTypes.quoteIdentifier("_ordinality")).append(" - 1 AS ")
+                        .append(DuckTypes.quoteIdentifier(offset.name()))
+                        .append(" FROM UNNEST(").append(array).append(") WITH ORDINALITY AS ")
+                        .append(DuckTypes.quoteIdentifier("_floci_offset")).append('(')
+                        .append(DuckTypes.quoteIdentifier("_value")).append(", ")
+                        .append(DuckTypes.quoteIdentifier("_ordinality")).append(")) AS ")
+                        .append(DuckTypes.quoteIdentifier("_unnest_" + element));
+                appendLeftJoinCondition(out, offset.nextToken(), end, leftJoin);
+                return offset.nextToken();
             }
+            if (isExplicitStructArray(open, close)) {
+                out.append("(SELECT ")
+                        .append(DuckTypes.quoteIdentifier("_value")).append(" AS ")
+                        .append(DuckTypes.quoteIdentifier(offsetValueColumn(i)))
+                        .append(", UNNEST([").append(DuckTypes.quoteIdentifier("_value"))
+                        .append("], max_depth := 2) AS ")
+                        .append(DuckTypes.quoteIdentifier(element))
+                        .append(" FROM UNNEST(").append(array).append(") AS ")
+                        .append(DuckTypes.quoteIdentifier("_floci_value")).append('(')
+                        .append(DuckTypes.quoteIdentifier("_value")).append(")) AS ")
+                        .append(DuckTypes.quoteIdentifier("_unnest_" + element));
+                appendLeftJoinCondition(out, nameIndex + 1, end, leftJoin);
+                return nameIndex + 1;
+            }
+            out.append("UNNEST(").append(array).append(')');
+            out.append(" AS ").append(DuckTypes.quoteIdentifier("_unnest_" + element)).append('(')
+                    .append(DuckTypes.quoteIdentifier(element)).append(')');
+            appendLeftJoinCondition(out, nameIndex + 1, end, leftJoin);
             return nameIndex + 1;
         }
+        out.append("UNNEST(").append(array).append(')');
+        appendLeftJoinCondition(out, close + 1, end, leftJoin);
         return close + 1;
+    }
+
+    private String offsetValueColumn(int source) {
+        return offsetValueColumns.computeIfAbsent(tokens.get(source),
+                ignored -> "_floci_offset_value_" + offsetValueColumns.size());
+    }
+
+    private boolean isExplicitStructArray(int open, int close) {
+        int bracket = nextSignificant(open + 1, close);
+        if (bracket < 0 || !tokens.get(bracket).isPunct("[")) {
+            return false;
+        }
+        int firstElement = nextSignificant(bracket + 1, matchingBracket(bracket));
+        return firstElement >= 0 && tokens.get(firstElement).isKeyword("STRUCT");
+    }
+
+    private UnnestOffset unnestOffset(int with, int end) {
+        int offset = nextSignificant(with + 1, end);
+        if (offset < 0 || !tokens.get(offset).isKeyword("OFFSET")) {
+            throw invalidQuery("Expected OFFSET after WITH in UNNEST");
+        }
+        int candidate = nextSignificant(offset + 1, end);
+        if (candidate >= 0 && tokens.get(candidate).isKeyword("AS")) {
+            int alias = nextSignificant(candidate + 1, end);
+            if (alias < 0 || (tokens.get(alias).kind != Kind.IDENT && tokens.get(alias).kind != Kind.QIDENT)) {
+                throw invalidQuery("Expected an alias after AS in UNNEST WITH OFFSET");
+            }
+            return new UnnestOffset(tokens.get(alias).identifierText(), alias + 1);
+        }
+        if (candidate >= 0 && (tokens.get(candidate).kind == Kind.QIDENT
+                || tokens.get(candidate).kind == Kind.IDENT
+                && !NON_ALIAS_KEYWORDS.contains(tokens.get(candidate).upper()))) {
+            return new UnnestOffset(tokens.get(candidate).identifierText(), candidate + 1);
+        }
+        return new UnnestOffset("offset", offset + 1);
+    }
+
+    private boolean isCorrelatedLeftJoin(int unnest) {
+        int join = previousSignificant(unnest - 1);
+        if (join < 0 || !tokens.get(join).isKeyword("JOIN")) {
+            return false;
+        }
+        int modifier = previousSignificant(join - 1);
+        if (modifier >= 0 && tokens.get(modifier).isKeyword("OUTER")) {
+            modifier = previousSignificant(modifier - 1);
+        }
+        return modifier >= 0 && tokens.get(modifier).isKeyword("LEFT");
+    }
+
+    private int previousSignificant(int index) {
+        for (int k = index; k >= 0; k--) {
+            if (tokens.get(k).kind != Kind.SPACE) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    private void appendLeftJoinCondition(StringBuilder out, int afterUnnest, int end, boolean leftJoin) {
+        if (!leftJoin) {
+            return;
+        }
+        int next = nextSignificant(afterUnnest, end);
+        if (next < 0 || !(tokens.get(next).isKeyword("ON") || tokens.get(next).isKeyword("USING"))) {
+            out.append(" ON TRUE");
+        }
     }
 
     /**
@@ -2729,9 +4482,14 @@ final class SqlDialectTranslator {
     }
 
     private TableRef resolveTable(List<String> segments) {
+        return resolveTable(segments, -1);
+    }
+
+    private TableRef resolveTable(List<String> segments, int position) {
+        validateWildcard(segments);
         if (segments.size() == 1) {
             String name = segments.getFirst();
-            if (cteNames.contains(name.toLowerCase(Locale.ROOT))) {
+            if (position >= 0 && cteVisibleAt(name, position)) {
                 return null;
             }
             if (defaultDatasetId == null || defaultDatasetId.isBlank()) {
@@ -2751,7 +4509,20 @@ final class SqlDialectTranslator {
             return new TableRef(segments.get(1), segments.get(2));
         }
         throw invalidQuery("Unsupported table reference " + String.join(".", segments)
-                + " (INFORMATION_SCHEMA and wildcard tables are not emulated).");
+                + " (INFORMATION_SCHEMA is not emulated).");
+    }
+
+    private static void validateWildcard(List<String> segments) {
+        long wildcards = segments.stream().filter(segment -> segment.indexOf('*') >= 0).count();
+        if (wildcards == 0) {
+            return;
+        }
+        if (wildcards != 1 || segments.getLast().indexOf('*') < 0
+                || !segments.getLast().endsWith("*") || segments.getLast().length() == 1
+                || segments.getLast().indexOf('*') != segments.getLast().length() - 1) {
+            throw invalidQuery("Wildcard table references must contain one terminal '*' after a non-empty prefix: "
+                    + String.join(".", segments));
+        }
     }
 
     // ── Functions, casts and literals ───────────────────────────────────────
@@ -2775,6 +4546,20 @@ final class SqlDialectTranslator {
         };
     }
 
+    /** Renders the lexer-decoded contents of a GoogleSQL BYTES literal without UTF-8 re-encoding. */
+    private static String bytesHex(String value) {
+        StringBuilder hex = new StringBuilder(value.length() * 2);
+        for (int i = 0; i < value.length(); i++) {
+            int valueByte = value.charAt(i);
+            if (valueByte > 0xff) {
+                throw invalidQuery("BYTES literals may contain only bytes, not Unicode characters");
+            }
+            hex.append(Character.forDigit(valueByte >>> 4, 16));
+            hex.append(Character.forDigit(valueByte & 0xf, 16));
+        }
+        return hex.toString();
+    }
+
     /** Returns the DuckDB rendering of {@code name(...)} when it needs a shim, else {@code null}. */
     private String renderCall(String name, String original, int open, int close) {
         switch (name) {
@@ -2790,6 +4575,12 @@ final class SqlDialectTranslator {
             case "ARRAY_AGG" -> {
                 return renderArrayAgg(original, open, close);
             }
+            case "ARRAY_CONCAT_AGG" -> {
+                return renderArrayConcatAgg(open, close);
+            }
+            case "COUNTIF" -> {
+                return renderCountIf(open, close);
+            }
             default -> {
                 // fall through to argument-based shims
             }
@@ -2802,11 +4593,27 @@ final class SqlDialectTranslator {
             case "DIV" -> args(a, 2, name, "((" + at(a, 0) + ") // (" + at(a, 1) + "))");
             case "IF" -> args(a, 3, name, "(CASE WHEN " + at(a, 0) + " THEN " + at(a, 1) + " ELSE "
                     + at(a, 2) + " END)");
-            case "COUNTIF" -> "count_if(" + String.join(", ", a) + ")";
+            // DuckDB skips NULL arguments while BigQuery propagates NULL. Preserve BigQuery's
+            // behavior explicitly; this is especially important for distinct counts of pairs.
+            case "CONCAT" -> renderConcat(a, argumentRanges(open, close));
             case "LOGICAL_AND" -> "bool_and(" + String.join(", ", a) + ")";
             case "LOGICAL_OR" -> "bool_or(" + String.join(", ", a) + ")";
             case "ARRAY_LENGTH" -> "len(" + String.join(", ", a) + ")";
             case "ARRAY_REVERSE" -> "list_reverse(" + String.join(", ", a) + ")";
+            // DuckDB's generate_series is integral-only. Build the integral positions first,
+            // then map them to DOUBLE quantile positions for quantile_disc. BigQuery's
+            // APPROX_QUANTILES returns observed/discrete values rather than interpolating.
+            case "APPROX_QUANTILES" -> renderApproxQuantiles(a, name);
+            case "CONTAINS_SUBSTR" -> args(a, 2, name, "contains(lower(nfc_normalize(CAST(" + at(a, 0)
+                    + " AS VARCHAR))), lower(nfc_normalize(CAST(" + at(a, 1) + " AS VARCHAR))))");
+            // BigQuery emits lowercase hexadecimal text; DuckDB's hex/to_hex emits uppercase.
+            case "TO_HEX" -> args(a, 1, name, "lower(hex(" + at(a, 0) + "))");
+            // BigQuery's cryptographic hash functions return raw BYTES. DuckDB returns the
+            // hexadecimal digest as VARCHAR, so decode it back to a BLOB before exposing it.
+            case "MD5" -> args(a, 1, name, "from_hex(md5(" + at(a, 0) + "))");
+            case "SHA1" -> args(a, 1, name, "from_hex(sha1(" + at(a, 0) + "))");
+            case "SHA256" -> args(a, 1, name, "from_hex(sha256(" + at(a, 0) + "))");
+            case "RAND" -> args(a, 0, name, "random()");
             case "GENERATE_ARRAY" -> "generate_series(" + String.join(", ", a) + ")";
             case "GENERATE_DATE_ARRAY" -> generateDateArray(a);
             case "SPLIT" -> a.size() == 1 ? "string_split(" + a.getFirst() + ", ',')"
@@ -2833,6 +4640,8 @@ final class SqlDialectTranslator {
             case "CURRENT_TIMESTAMP" -> "current_timestamp";
             case "CURRENT_DATE" -> "current_date";
             case "CURRENT_DATETIME" -> "CAST(current_timestamp AS TIMESTAMP)";
+            case "GENERATE_UUID" -> "uuid()";
+            case "APPROX_COUNT_DISTINCT" -> args(a, 1, name, "COUNT(DISTINCT " + at(a, 0) + ")");
             case "UNIX_SECONDS" -> "CAST(epoch(" + at(a, 0) + ") AS BIGINT)";
             case "UNIX_MILLIS" -> "epoch_ms(" + at(a, 0) + ")";
             case "UNIX_MICROS" -> "epoch_us(" + at(a, 0) + ")";
@@ -2840,23 +4649,28 @@ final class SqlDialectTranslator {
             case "TIMESTAMP_SECONDS" -> "make_timestamptz(CAST(" + at(a, 0) + " AS BIGINT) * 1000000)";
             case "TIMESTAMP_MILLIS" -> "make_timestamptz(CAST(" + at(a, 0) + " AS BIGINT) * 1000)";
             case "TIMESTAMP_MICROS" -> "make_timestamptz(CAST(" + at(a, 0) + " AS BIGINT))";
-            case "TIMESTAMP_ADD", "DATETIME_ADD", "TIME_ADD" -> args(a, 2, name,
+            case "TIMESTAMP_ADD" -> args(a, 2, name,
+                    "(" + timestampArithmeticValue(at(a, 0)) + " + " + at(a, 1) + ")");
+            case "TIMESTAMP_SUB" -> args(a, 2, name,
+                    "(" + timestampArithmeticValue(at(a, 0)) + " - " + at(a, 1) + ")");
+            case "DATETIME_ADD", "TIME_ADD" -> args(a, 2, name,
                     "(" + at(a, 0) + " + " + at(a, 1) + ")");
-            case "TIMESTAMP_SUB", "DATETIME_SUB", "TIME_SUB" -> args(a, 2, name,
+            case "DATETIME_SUB", "TIME_SUB" -> args(a, 2, name,
                     "(" + at(a, 0) + " - " + at(a, 1) + ")");
             case "DATE_ADD" -> args(a, 2, name, "CAST(" + at(a, 0) + " + " + at(a, 1) + " AS DATE)");
             case "DATE_SUB" -> args(a, 2, name, "CAST(" + at(a, 0) + " - " + at(a, 1) + " AS DATE)");
             case "TIMESTAMP_DIFF", "DATETIME_DIFF", "DATE_DIFF", "TIME_DIFF" -> args(a, 3, name,
-                    "date_diff(" + DuckTypes.quoteLiteral(datePart(a.get(2))) + ", " + at(a, 1) + ", "
-                            + at(a, 0) + ")");
-            case "TIMESTAMP_TRUNC", "DATETIME_TRUNC" -> args(a, 2, name,
-                    "date_trunc(" + DuckTypes.quoteLiteral(datePart(a.get(1))) + ", " + at(a, 0) + ")");
-            case "DATE_TRUNC" -> args(a, 2, name, "CAST(date_trunc(" + DuckTypes.quoteLiteral(datePart(a.get(1)))
-                    + ", " + at(a, 0) + ") AS DATE)");
+                    dateDiff(at(a, 0), at(a, 1), at(a, 2)));
+            case "TIMESTAMP_TRUNC" -> renderTimestampTrunc(a, name);
+            case "DATETIME_TRUNC" -> exactArgs(a, 2, name,
+                    dateTrunc(at(a, 0), at(a, 1), false, "TIMESTAMP"));
+            // DATE_TRUNC is overloaded in BigQuery and returns the type of its first argument.
+            // In particular, a TIMESTAMP input must remain a TIMESTAMP rather than becoming a
+            // DATE. DuckDB's cast_to_type preserves that runtime type for column expressions too.
+            case "DATE_TRUNC" -> renderDateTrunc(a, name);
             case "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME" -> args(a, 2, name,
                     "strftime(" + at(a, 1) + ", " + at(a, 0) + ")");
-            case "PARSE_TIMESTAMP" -> args(a, 2, name,
-                    "CAST(strptime(" + at(a, 1) + ", " + at(a, 0) + ") AS TIMESTAMPTZ)");
+            case "PARSE_TIMESTAMP" -> renderParseTimestamp(a, name, false);
             case "PARSE_DATETIME" -> args(a, 2, name, "strptime(" + at(a, 1) + ", " + at(a, 0) + ")");
             case "PARSE_DATE" -> args(a, 2, name,
                     "CAST(strptime(" + at(a, 1) + ", " + at(a, 0) + ") AS DATE)");
@@ -2885,9 +4699,175 @@ final class SqlDialectTranslator {
                 + " END)";
     }
 
+    /** COUNT keeps empty-input and window semantics, with DISTINCT outside the conditional. */
+    private String renderCountIf(int open, int close) {
+        List<int[]> ranges = argumentRanges(open, close);
+        if (ranges.size() != 1) {
+            return args(arguments(open, close), 1, "COUNTIF", "");
+        }
+        int first = nextSignificant(open + 1, close);
+        boolean distinct = first >= 0 && tokens.get(first).isKeyword("DISTINCT");
+        String condition = render(distinct ? first + 1 : open + 1, close).trim();
+        return "count(" + (distinct ? "DISTINCT " : "") + "CASE WHEN " + condition + " THEN 1 END)";
+    }
+
+    private String renderConcat(List<String> arguments, List<int[]> ranges) {
+        if (arguments.isEmpty()) {
+            throw invalidQuery("CONCAT requires at least one argument");
+        }
+        // DuckDB's concat() always returns VARCHAR; || keeps BLOB operands as BLOB and propagates NULL.
+        if (ranges.stream().anyMatch(range -> isBytesExpression(range[0], range[1]))) {
+            return "(" + arguments.stream().map(argument -> "(" + argument + ")")
+                    .collect(Collectors.joining(" || ")) + ")";
+        }
+        int call = generatedConcatAlias++;
+        String value = "_floci_concat_value_" + call;
+        List<String> fields = new ArrayList<>(arguments.size());
+        List<String> values = new ArrayList<>(arguments.size());
+        for (int i = 0; i < arguments.size(); i++) {
+            String field = DuckTypes.quoteIdentifier("_floci_concat_" + call + "_" + i);
+            fields.add(field);
+            values.add(value + "." + field);
+        }
+        List<String> packed = new ArrayList<>(arguments.size());
+        for (int i = 0; i < arguments.size(); i++) {
+            packed.add(fields.get(i) + " := " + arguments.get(i));
+        }
+        return "list_extract(list_transform([struct_pack(" + String.join(", ", packed) + ")], " + value
+                + " -> CASE WHEN " + values.stream().map(item -> item + " IS NULL")
+                .collect(Collectors.joining(" OR ")) + " THEN NULL ELSE concat("
+                + String.join(", ", values) + ") END), 1)";
+    }
+
+    private static final Set<String> BYTES_FUNCTIONS = Set.of("FROM_HEX", "FROM_BASE64", "FROM_BASE32", "MD5",
+            "SHA1", "SHA256", "SHA512", "CODE_POINTS_TO_BYTES");
+
+    /** Recognises expressions that are statically BYTES: literals, casts to BYTES and bytes-returning calls. */
+    private boolean isBytesExpression(int start, int end) {
+        List<Token> item = significant(start, end);
+        if (item.isEmpty()) {
+            return false;
+        }
+        if (item.size() == 1) {
+            return item.getFirst().kind == Kind.BYTES;
+        }
+        int first = start;
+        while (tokens.get(first).kind == Kind.SPACE || tokens.get(first).kind == Kind.RAW) {
+            first++;
+        }
+        int open = nextSignificant(first + 1, end);
+        if (tokens.get(first).kind != Kind.IDENT || open < 0 || !tokens.get(open).isPunct("(")
+                || nextSignificant(matchingParen(open) + 1, end) >= 0) {
+            return false;
+        }
+        String name = tokens.get(first).upper();
+        if (BYTES_FUNCTIONS.contains(name)) {
+            return true;
+        }
+        if (name.equals("CAST") || name.equals("SAFE_CAST")) {
+            int as = topLevelAs(open + 1, matchingParen(open));
+            int type = as < 0 ? -1 : nextSignificant(as + 1, matchingParen(open));
+            return type >= 0 && tokens.get(type).isKeyword("BYTES");
+        }
+        return false;
+    }
+
+    /** GoogleSQL applies ARRAY_CONCAT_AGG's LIMIT to input arrays before concatenating them. */
+    private String renderArrayConcatAgg(int open, int close) {
+        int limit = -1;
+        int depth = 0;
+        for (int k = open + 1; k < close; k++) {
+            Token token = tokens.get(k);
+            if (token.isPunct("(") || token.isPunct("[")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]")) {
+                depth--;
+            } else if (depth == 0 && !isPrecededByDot(k) && token.isKeyword("LIMIT")) {
+                limit = k;
+            }
+        }
+        int bodyEnd = limit >= 0 ? limit : close;
+        String arrays = "list(" + render(open + 1, bodyEnd).trim() + ")";
+        arrays = "list_filter(" + arrays + ", _floci_concat_array -> _floci_concat_array IS NOT NULL)";
+        String concatenated = "_floci_concat_arrays";
+        if (limit >= 0) {
+            concatenated = "list_slice(" + concatenated + ", 1, " + arrayAggLimit(limit, close) + ")";
+        }
+        // No non-NULL input arrays at all yields NULL, not an empty array.
+        return "list_extract(list_transform([" + arrays + "], _floci_concat_arrays -> CASE WHEN"
+                + " coalesce(len(_floci_concat_arrays), 0) = 0 THEN NULL ELSE flatten(" + concatenated
+                + ") END), 1)";
+    }
+
+    private static String renderApproxQuantiles(List<String> arguments, String name) {
+        if (arguments.size() != 2) {
+            return args(arguments, 2, name, "");
+        }
+        String countArgument = arguments.get(1);
+        boolean respectNulls = countArgument.matches("(?is).*\\s+RESPECT\\s+NULLS\\s*$");
+        String quantileCount = countArgument
+                .replaceFirst("(?i)\\s+(?:IGNORE|RESPECT)\\s+NULLS\\s*$", "").trim();
+        if (respectNulls) {
+            String value = at(arguments, 0);
+            String expression = value.replaceFirst("(?i)^DISTINCT\\s+", "").trim();
+            String values = "list(" + value + " ORDER BY " + expression + " ASC NULLS FIRST)";
+            String index = "CAST(floor(CAST(_floci_quantile_index AS DOUBLE)"
+                    + " * (len(_floci_quantile_values) - 1) / CAST(" + quantileCount
+                    + " AS DOUBLE)) AS BIGINT) + 1";
+            return "list_extract(list_transform([" + values + "], _floci_quantile_values -> CASE WHEN len("
+                    + "list_filter(_floci_quantile_values, _floci_quantile_value -> _floci_quantile_value IS NOT NULL))"
+                    + " = 0 THEN NULL ELSE list_transform(generate_series(0, CAST(" + quantileCount
+                    + " AS BIGINT)), _floci_quantile_index -> list_extract(_floci_quantile_values, " + index
+                    + ")) END), 1)";
+        }
+        return "quantile_disc(" + at(arguments, 0) + ", list_transform(generate_series(0, CAST(" + quantileCount
+                + " AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(" + quantileCount + " AS DOUBLE)))";
+    }
+
+    private String renderSafeCall(String function, int open, int close) {
+        List<String> a = arguments(open, close);
+        return switch (function) {
+            case "PARSE_DATE" -> args(a, 2, "SAFE.PARSE_DATE",
+                    "CAST(try_strptime(" + at(a, 1) + ", " + at(a, 0) + ") AS DATE)");
+            case "PARSE_TIMESTAMP" -> renderParseTimestamp(a, "SAFE.PARSE_TIMESTAMP", true);
+            case "FROM_HEX" -> renderSafeFromHex(a);
+            default -> null;
+        };
+    }
+
+    private static String renderSafeFromHex(List<String> arguments) {
+        exactArgs(arguments, 1, "SAFE.FROM_HEX", "");
+        return "list_extract(list_transform([coalesce(" + at(arguments, 0)
+                + ", CAST(NULL AS VARCHAR))], _floci_hex_value -> CASE WHEN"
+                + " regexp_full_match(_floci_hex_value, '[0-9A-Fa-f]*')"
+                + " THEN from_hex(_floci_hex_value) END), 1)";
+    }
+
+    private static String renderParseTimestamp(List<String> arguments, String name, boolean safe) {
+        if (arguments.size() < 2 || arguments.size() > 3) {
+            throw invalidQuery("No matching signature for function " + name + " with " + arguments.size()
+                    + " arguments");
+        }
+        String parser = safe ? "try_strptime" : "strptime";
+        String parsed = parser + "(" + at(arguments, 1) + ", " + at(arguments, 0) + ")";
+        String zone = arguments.size() == 3 ? at(arguments, 2) : DuckTypes.quoteLiteral("UTC");
+        return "list_extract(list_transform([" + parsed + "], _floci_parsed_timestamp -> CASE WHEN"
+                + " typeof(_floci_parsed_timestamp) = 'TIMESTAMP WITH TIME ZONE'"
+                + " THEN CAST(_floci_parsed_timestamp AS TIMESTAMPTZ) ELSE timezone("
+                + zone + ", CAST(_floci_parsed_timestamp AS TIMESTAMP)) END), 1)";
+    }
+
     private static String args(List<String> a, int expected, String name, String rendered) {
         if (a.size() < expected) {
             throw invalidQuery("No matching signature for function " + name + " with " + a.size() + " arguments");
+        }
+        return rendered;
+    }
+
+    private static String exactArgs(List<String> arguments, int expected, String name, String rendered) {
+        if (arguments.size() != expected) {
+            throw invalidQuery("No matching signature for function " + name + " with " + arguments.size()
+                    + " arguments");
         }
         return rendered;
     }
@@ -2907,6 +4887,85 @@ final class SqlDialectTranslator {
             case "isoweek" -> "week";
             default -> p;
         };
+    }
+
+    /**
+     * DuckDB weeks start on Monday; GoogleSQL's WEEK defaults to Sunday and allows every weekday
+     * as a week boundary. Shift to DuckDB's Monday boundary, then shift the result back where a
+     * truncated value is required.
+     */
+    private static Integer weekStartOffset(String part) {
+        String normalized = part.trim().replaceAll("\\s+", "").toUpperCase(Locale.ROOT);
+        if (normalized.equals("WEEK")) {
+            return 6;
+        }
+        if (!normalized.startsWith("WEEK(") || !normalized.endsWith(")")) {
+            return null;
+        }
+        return switch (normalized.substring("WEEK(".length(), normalized.length() - 1)) {
+            case "MONDAY" -> 0;
+            case "TUESDAY" -> 1;
+            case "WEDNESDAY" -> 2;
+            case "THURSDAY" -> 3;
+            case "FRIDAY" -> 4;
+            case "SATURDAY" -> 5;
+            case "SUNDAY" -> 6;
+            default -> null;
+        };
+    }
+
+    private static String dateDiff(String end, String start, String part) {
+        Integer offset = weekStartOffset(part);
+        if (offset == null) {
+            return "date_diff(" + DuckTypes.quoteLiteral(datePart(part)) + ", " + start + ", " + end + ")";
+        }
+        String shift = " INTERVAL " + offset + " DAY";
+        return "date_diff('week', (" + start + " -" + shift + "), (" + end + " -" + shift + "))";
+    }
+
+    private static String dateTrunc(String value, String part, boolean preserveInputType, String literalType) {
+        String input = dateTruncValue(value, literalType);
+        Integer offset = weekStartOffset(part);
+        String rendered;
+        if (offset == null) {
+            rendered = "date_trunc(" + DuckTypes.quoteLiteral(datePart(part)) + ", " + input + ")";
+        } else {
+            String shift = " INTERVAL " + offset + " DAY";
+            rendered = "(date_trunc('week', " + input + " -" + shift + ") +" + shift + ")";
+        }
+        return preserveInputType ? "cast_to_type(" + rendered + ", " + input + ")" : rendered;
+    }
+
+    private static String renderTimestampTrunc(List<String> arguments, String name) {
+        if (arguments.size() < 2 || arguments.size() > 3) {
+            throw invalidQuery("No matching signature for function " + name + " with " + arguments.size()
+                    + " arguments");
+        }
+        String input = dateTruncValue(at(arguments, 0), "TIMESTAMPTZ");
+        String zone = arguments.size() == 3 ? at(arguments, 2) : DuckTypes.quoteLiteral("UTC");
+        String local = "timezone(" + zone + ", " + input + ")";
+        String truncated = dateTrunc(local, at(arguments, 1), false, null);
+        return "timezone(" + zone + ", " + truncated + ")";
+    }
+
+    private static String renderDateTrunc(List<String> arguments, String name) {
+        if (arguments.size() == 2) {
+            return dateTrunc(at(arguments, 0), at(arguments, 1), true, "DATE");
+        }
+        return renderTimestampTrunc(arguments, name);
+    }
+
+    /**
+     * BigQuery coerces a string literal supplied to DATE_TRUNC into DATE. DuckDB cannot pick
+     * a date_trunc overload when both its part and value arguments are string literals.
+     */
+    private static String dateTruncValue(String value, String literalType) {
+        return literalType != null && value.startsWith("'")
+                ? "CAST(" + value + " AS " + literalType + ")" : value;
+    }
+
+    private static String timestampArithmeticValue(String value) {
+        return value.startsWith("'") ? "CAST(" + value + " AS TIMESTAMPTZ)" : value;
     }
 
     private boolean hasCaptureGroup(int open, int close) {
@@ -2956,8 +5015,7 @@ final class SqlDialectTranslator {
 
     private String renderExtract(int open, int close) {
         List<Token> inner = significant(open + 1, close);
-        if (inner.size() >= 3 && inner.get(1).isKeyword("FROM")) {
-            String part = inner.getFirst().upper();
+        if (inner.size() >= 3) {
             int fromIndex = -1;
             for (int k = open + 1; k < close; k++) {
                 if (tokens.get(k).isKeyword("FROM")) {
@@ -2965,7 +5023,15 @@ final class SqlDialectTranslator {
                     break;
                 }
             }
+            if (fromIndex < 0) {
+                return "EXTRACT(" + render(open + 1, close) + ")";
+            }
+            String part = text(open + 1, fromIndex).trim().toUpperCase(Locale.ROOT);
             String expr = render(fromIndex + 1, close).trim();
+            Integer weekOffset = weekStartOffset(part);
+            if (weekOffset != null) {
+                return extractWeek(expr, weekOffset);
+            }
             return switch (part) {
                 case "DAYOFWEEK" -> "(dayofweek(" + expr + ") + 1)";
                 case "DAYOFYEAR" -> "dayofyear(" + expr + ")";
@@ -2976,12 +5042,26 @@ final class SqlDialectTranslator {
         return "EXTRACT(" + render(open + 1, close) + ")";
     }
 
+    /** BigQuery's WEEK(WEEKDAY) numbers are Gregorian-year weeks, with dates before the first
+     * requested weekday in the year assigned week zero. */
+    private static String extractWeek(String expression, int weekday) {
+        String date = "CAST(" + expression + " AS DATE)";
+        String yearStart = "make_date(year(" + date + "), 1, 1)";
+        // weekStartOffset is Monday-based, while DuckDB dayofweek is Sunday-based.
+        int duckWeekday = (weekday + 1) % 7;
+        String firstWeekday = "CAST(" + yearStart + " + (((" + duckWeekday + " - dayofweek(" + yearStart
+                + ") + 7) % 7) * INTERVAL 1 DAY) AS DATE)";
+        return "(CASE WHEN " + date + " < " + firstWeekday + " THEN 0 ELSE (date_diff('day', "
+                + firstWeekday + ", " + date + ") // 7) + 1 END)";
+    }
+
     /** {@code STRUCT(a AS x, b AS y)} → {@code {'x': a, 'y': b}}. */
     private String renderStruct(int open, int close) {
         List<int[]> ranges = argumentRanges(open, close);
         if (ranges.isEmpty()) {
             return "{}";
         }
+        List<String> inheritedNames = inheritedArrayStructFieldNames(open);
         StringBuilder sb = new StringBuilder("{");
         for (int n = 0; n < ranges.size(); n++) {
             int[] r = ranges.get(n);
@@ -3001,9 +5081,14 @@ final class SqlDialectTranslator {
             String expr;
             if (asIndex >= 0) {
                 expr = render(r[0], asIndex).trim();
-                name = significant(asIndex + 1, r[1]).getFirst().identifierText();
             } else {
                 expr = render(r[0], r[1]).trim();
+            }
+            if (n < inheritedNames.size()) {
+                name = inheritedNames.get(n);
+            } else if (asIndex >= 0) {
+                name = significant(asIndex + 1, r[1]).getFirst().identifierText();
+            } else {
                 List<Token> item = significant(r[0], r[1]);
                 name = isPath(item) ? item.getLast().identifierText() : "_field_" + (n + 1);
             }
@@ -3013,6 +5098,91 @@ final class SqlDialectTranslator {
             sb.append(DuckTypes.quoteLiteral(name)).append(": ").append(expr);
         }
         return sb.append('}').toString();
+    }
+
+    /**
+     * BigQuery gives an array of STRUCT values one positional schema: field names come from the
+     * first element even when later STRUCT constructors omit (or use different) aliases. DuckDB
+     * instead keeps each struct literal's names, so make later literals use the first schema.
+     */
+    private List<String> inheritedArrayStructFieldNames(int structOpen) {
+        int arrayOpen = -1;
+        int bracketDepth = 0;
+        for (int i = structOpen - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct("]")) {
+                bracketDepth++;
+            } else if (token.isPunct("[")) {
+                if (bracketDepth == 0) {
+                    arrayOpen = i;
+                    break;
+                }
+                bracketDepth--;
+            }
+        }
+        if (arrayOpen < 0 || !directArrayElementStruct(arrayOpen, structOpen)) {
+            return List.of();
+        }
+
+        int firstStruct = nextSignificant(arrayOpen + 1, structOpen);
+        if (firstStruct < 0 || !tokens.get(firstStruct).isKeyword("STRUCT")) {
+            return List.of();
+        }
+        int firstOpen = nextSignificant(firstStruct + 1, structOpen + 1);
+        if (firstOpen < 0 || !tokens.get(firstOpen).isPunct("(") || firstOpen == structOpen) {
+            return List.of();
+        }
+        int firstClose = matchingParen(firstOpen);
+        if (firstClose >= structOpen) {
+            return List.of();
+        }
+
+        List<String> names = new ArrayList<>();
+        List<int[]> firstRanges = argumentRanges(firstOpen, firstClose);
+        for (int n = 0; n < firstRanges.size(); n++) {
+            int[] range = firstRanges.get(n);
+            int asIndex = -1;
+            int depth = 0;
+            for (int i = range[0]; i < range[1]; i++) {
+                Token token = tokens.get(i);
+                if (token.isPunct("(")) {
+                    depth++;
+                } else if (token.isPunct(")")) {
+                    depth--;
+                } else if (depth == 0 && token.isKeyword("AS")) {
+                    asIndex = i;
+                }
+            }
+            if (asIndex >= 0) {
+                names.add(significant(asIndex + 1, range[1]).getFirst().identifierText());
+            } else {
+                List<Token> item = significant(range[0], range[1]);
+                names.add(isPath(item) ? item.getLast().identifierText() : "_field_" + (n + 1));
+            }
+        }
+        return names;
+    }
+
+    private boolean directArrayElementStruct(int arrayOpen, int structOpen) {
+        int struct = previousSignificant(structOpen - 1);
+        if (struct < 0 || !tokens.get(struct).isKeyword("STRUCT")) {
+            return false;
+        }
+        int parentheses = 0;
+        int brackets = 0;
+        for (int i = arrayOpen + 1; i < struct; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                parentheses++;
+            } else if (token.isPunct(")")) {
+                parentheses--;
+            } else if (token.isPunct("[")) {
+                brackets++;
+            } else if (token.isPunct("]")) {
+                brackets--;
+            }
+        }
+        return parentheses == 0 && brackets == 0;
     }
 
     /** Maps a GoogleSQL type (possibly {@code ARRAY<...>} / {@code STRUCT<...>}) to DuckDB. */
@@ -3233,6 +5403,22 @@ final class SqlDialectTranslator {
         throw invalidQuery("Syntax error: Expected \")\" but got end of script");
     }
 
+    private int matchingBracket(int open) {
+        int depth = 0;
+        for (int k = open; k < tokens.size(); k++) {
+            Token token = tokens.get(k);
+            if (token.isPunct("[")) {
+                depth++;
+            } else if (token.isPunct("]")) {
+                depth--;
+                if (depth == 0) {
+                    return k;
+                }
+            }
+        }
+        return -1;
+    }
+
     private int nextSignificant(int from, int end) {
         for (int k = from; k < end; k++) {
             if (tokens.get(k).kind != Kind.SPACE && tokens.get(k).kind != Kind.RAW) {
@@ -3436,8 +5622,10 @@ final class SqlDialectTranslator {
     static final class Token {
         final Kind kind;
         final String text;
-        /** Decoded content for STRING/BYTES/QIDENT, the name for NAMED_PARAM. */
+        /** Decoded content for STRING/BYTES/QIDENT, the name for NAMED_PARAM, or a bound positional literal. */
         final String value;
+        /** A rewritten "SELECT ..." head that must still act as its query's SELECT when resolving scopes. */
+        private boolean selectHead;
 
         Token(Kind kind, String text, String value) {
             this.kind = kind;
@@ -3449,12 +5637,19 @@ final class SqlDialectTranslator {
             return new Token(Kind.RAW, text, text);
         }
 
+        static Token rawSelectHead(String text) {
+            Token token = raw(text);
+            token.selectHead = true;
+            return token;
+        }
+
         String upper() {
             return text.toUpperCase(Locale.ROOT);
         }
 
         boolean isKeyword(String keyword) {
-            return kind == Kind.IDENT && text.equalsIgnoreCase(keyword);
+            return kind == Kind.IDENT && text.equalsIgnoreCase(keyword)
+                    || selectHead && keyword.equals("SELECT");
         }
 
         boolean isPunct(String punct) {
@@ -3480,7 +5675,7 @@ final class SqlDialectTranslator {
         }
 
         List<Token> tokenize() {
-            List<Token> out = new ArrayList<>();
+            List<Token> out = new TokenList();
             while (pos < s.length()) {
                 char c = s.charAt(pos);
                 if (Character.isWhitespace(c)) {
@@ -3603,17 +5798,60 @@ final class SqlDialectTranslator {
                         continue;
                     }
                     switch (e) {
+                        case 'a' -> value.append('\u0007');
+                        case 'b' -> value.append('\b');
+                        case 'f' -> value.append('\f');
                         case 'n' -> value.append('\n');
                         case 't' -> value.append('\t');
                         case 'r' -> value.append('\r');
-                        case '0' -> value.append('\0');
+                        case 'v' -> value.append('\u000b');
+                        case 'x', 'X' -> value.append((char) readEscapeDigits(2, 16, "hexadecimal"));
+                        case 'u' -> appendUnicodeEscape(value, bytes, 4);
+                        case 'U' -> appendUnicodeEscape(value, bytes, 8);
+                        case '0', '1', '2', '3', '4', '5', '6', '7' -> {
+                            int octal = (e - '0') * 64 + readEscapeDigits(2, 8, "octal");
+                            if (octal > 0xff) {
+                                throw invalidQuery("Syntax error: Octal escape sequence exceeds one byte");
+                            }
+                            value.append((char) octal);
+                        }
                         default -> value.append(e);
                     }
                     continue;
                 }
+                if (bytes && c > 0x7f) {
+                    throw invalidQuery("BYTES literals may contain only ASCII characters or byte escapes");
+                }
                 value.append(c);
             }
             return new Token(bytes ? Kind.BYTES : Kind.STRING, s.substring(start, pos), value.toString());
+        }
+
+        private int readEscapeDigits(int count, int radix, String description) {
+            if (pos + count > s.length()) {
+                throw invalidQuery("Syntax error: Incomplete " + description + " escape sequence");
+            }
+            int value = 0;
+            for (int i = 0; i < count; i++) {
+                int digit = Character.digit(s.charAt(pos++), radix);
+                if (digit < 0) {
+                    throw invalidQuery("Syntax error: Invalid " + description + " escape sequence");
+                }
+                value = value * radix + digit;
+            }
+            return value;
+        }
+
+        private void appendUnicodeEscape(StringBuilder value, boolean bytes, int digits) {
+            if (bytes) {
+                throw invalidQuery("Unicode escape sequences are not allowed in BYTES literals");
+            }
+            int codePoint = readEscapeDigits(digits, 16, "Unicode");
+            if (!Character.isValidCodePoint(codePoint)
+                    || codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) {
+                throw invalidQuery("Syntax error: Invalid Unicode code point in escape sequence");
+            }
+            value.appendCodePoint(codePoint);
         }
 
         private Token readPunct() {

@@ -12,6 +12,10 @@ the payload, severity, and resource.
 |---|---|---|
 | `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Enable/disable Cloud Logging |
 
+When disabled, sink management is unavailable: the gRPC ConfigServiceV2 API is not
+bound and returns `UNIMPLEMENTED`, while REST sink requests return HTTP 503 with
+`UNAVAILABLE`. Existing sink configurations remain stored.
+
 ## Endpoint
 
 Cloud Logging has **no `*_EMULATOR_HOST` convention**. Point the client at floci-gcp by overriding

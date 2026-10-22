@@ -70,7 +70,9 @@ public class CloudLoggingService {
                 .usageAdapter(new CloudLoggingServiceUsageAdapter())
                 .build());
         grpcServerManager.bind(new CloudLoggingController(this));
-        grpcServerManager.bind(new CloudLoggingConfigController(sinkService));
+        if (config.services().logging().enabled()) {
+            grpcServerManager.bind(new CloudLoggingConfigController(sinkService));
+        }
     }
 
     // ── Write ────────────────────────────────────────────────────────────────

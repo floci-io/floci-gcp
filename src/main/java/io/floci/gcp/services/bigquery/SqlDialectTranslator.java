@@ -1451,6 +1451,7 @@ final class SqlDialectTranslator {
             throw invalidQuery("Statement type " + statement + " is not supported by the floci BigQuery"
                     + " emulator yet; only SELECT queries run on the SQL engine.");
         }
+        rewriteSelectAsStruct();
         collectCteNames();
         quoteImplicitSelectAliases();
         nameAnonymousColumns();
@@ -1470,6 +1471,109 @@ final class SqlDialectTranslator {
                 throw invalidQuery("Multi-statement scripts are not supported by the floci BigQuery emulator.");
             }
         }
+    }
+
+    // ── SELECT AS STRUCT ────────────────────────────────────────────────────
+
+    /** Keywords before a parenthesized query that read it as rows: a FROM item, a CTE, a set operation branch. */
+    private static final Set<String> ROW_QUERY_KEYWORDS = Set.of(
+            "FROM", "JOIN", "WITH", "USING", "UNION", "INTERSECT", "EXCEPT");
+
+    /** Keywords before a parenthesized query that read it as a value: an expression of a clause. */
+    private static final Set<String> VALUE_QUERY_KEYWORDS = Set.of(
+            "SELECT", "WHERE", "ON", "HAVING", "QUALIFY", "BY", "SET", "VALUES", "WHEN", "THEN", "ELSE",
+            "AND", "OR", "NOT", "IN", "EXISTS", "LIMIT", "CASE");
+
+    /**
+     * Rewrites {@code SELECT AS STRUCT a, b}, which DuckDB lacks. Where the query is read as a value
+     * ({@code ARRAY(SELECT AS STRUCT ...)}, a scalar subquery) its items become {@code STRUCT(a, b)},
+     * one struct per row. Where it is read as rows (the statement itself, a {@code FROM} subquery, a
+     * CTE, a set operation branch) the struct's fields already are the columns, so {@code AS STRUCT}
+     * is dropped.
+     */
+    private void rewriteSelectAsStruct() {
+        // From the last SELECT back, so rewriting a nested query keeps the indexes before it.
+        for (int select = tokens.size() - 1; select >= 0; select--) {
+            if (!tokens.get(select).isKeyword("SELECT")) {
+                continue;
+            }
+            int as = nextSignificant(select + 1, tokens.size());
+            while (as >= 0 && (tokens.get(as).isKeyword("DISTINCT") || tokens.get(as).isKeyword("ALL"))) {
+                as = nextSignificant(as + 1, tokens.size());
+            }
+            if (as < 0 || !tokens.get(as).isKeyword("AS")) {
+                continue;
+            }
+            int struct = nextSignificant(as + 1, tokens.size());
+            if (struct < 0 || !tokens.get(struct).isKeyword("STRUCT")) {
+                continue;
+            }
+            int through = struct + 1 < tokens.size() && tokens.get(struct + 1).kind == Kind.SPACE ? struct + 1 : struct;
+            tokens.subList(as, through + 1).clear();
+            if (!readAsValue(select)) {
+                continue;
+            }
+            List<int[]> items = selectItems(select);
+            int end = items.getLast()[1];
+            while (end > as && tokens.get(end - 1).kind == Kind.SPACE) {
+                end--;
+            }
+            tokens.add(end, new Token(Kind.PUNCT, ")", null));
+            tokens.add(as, new Token(Kind.PUNCT, "(", null));
+            tokens.add(as, new Token(Kind.IDENT, "STRUCT", "STRUCT"));
+        }
+    }
+
+    /**
+     * Whether the query that starts at {@code select} is read as a value: it sits in parentheses
+     * after an expression keyword or inside a call, rather than at the top or after a keyword that
+     * reads rows.
+     */
+    private boolean readAsValue(int select) {
+        int open = enclosingParen(select);
+        if (open < 0) {
+            return false;
+        }
+        int depth = 0;
+        for (int k = open - 1; k >= 0; k--) {
+            Token t = tokens.get(k);
+            if (t.isPunct(")")) {
+                depth++;
+            } else if (t.isPunct("(")) {
+                if (depth > 0) {
+                    depth--;
+                } else if (nextSignificant(k + 1, open) >= 0) {
+                    return true; // an argument of a call such as UNNEST(ARRAY(SELECT AS STRUCT ...))
+                } else {
+                    open = k; // ((SELECT ...)): the outer parentheses only wrap the query
+                }
+            } else if (depth == 0 && t.kind == Kind.IDENT) {
+                if (ROW_QUERY_KEYWORDS.contains(t.upper()) && !followsStar(k)) {
+                    return false;
+                }
+                if (VALUE_QUERY_KEYWORDS.contains(t.upper())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The {@code (} that encloses {@code index}, or -1 at the top level. */
+    private int enclosingParen(int index) {
+        int depth = 0;
+        for (int k = index - 1; k >= 0; k--) {
+            Token t = tokens.get(k);
+            if (t.isPunct(")")) {
+                depth++;
+            } else if (t.isPunct("(")) {
+                if (depth == 0) {
+                    return k;
+                }
+                depth--;
+            }
+        }
+        return -1;
     }
 
     // ── CTEs and anonymous column names ─────────────────────────────────────

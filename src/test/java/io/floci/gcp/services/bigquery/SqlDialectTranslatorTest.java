@@ -252,6 +252,27 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void selectAsStructBuildsAStructWhereTheQueryIsAValue() {
+        assertEquals(sql("SELECT ARRAY(SELECT STRUCT(x AS a) FROM UNNEST([1, 2]) AS x) AS arr"),
+                sql("SELECT ARRAY(SELECT AS STRUCT x AS a FROM UNNEST([1, 2]) AS x) AS arr"));
+        assertEquals(sql("SELECT ARRAY(SELECT DISTINCT STRUCT(x, x * 2 AS y) FROM UNNEST([1, 1]) AS x) AS arr"),
+                sql("SELECT ARRAY(SELECT DISTINCT AS STRUCT x, x * 2 AS y FROM UNNEST([1, 1]) AS x) AS arr"));
+        assertEquals(sql("SELECT (SELECT STRUCT(1 AS a, 'x' AS b)) AS s"),
+                sql("SELECT (SELECT AS STRUCT 1 AS a, 'x' AS b) AS s"));
+        assertEquals(sql("SELECT * FROM UNNEST(ARRAY(SELECT STRUCT(1 AS a)))"),
+                sql("SELECT * FROM UNNEST(ARRAY(SELECT AS STRUCT 1 AS a))"));
+    }
+
+    @Test
+    void selectAsStructKeepsTheFieldsAsColumnsWhereTheQueryIsRows() {
+        assertEquals("SELECT 1 AS a, 2 AS b", sql("SELECT AS STRUCT 1 AS a, 2 AS b"));
+        assertEquals(sql("((SELECT 1 AS a))"), sql("((SELECT AS STRUCT 1 AS a))"));
+        assertEquals(sql("SELECT a FROM (SELECT 1 AS a)"), sql("SELECT a FROM (SELECT AS STRUCT 1 AS a)"));
+        assertEquals(sql("WITH s AS (SELECT 1 AS a) SELECT a FROM s"),
+                sql("WITH s AS (SELECT AS STRUCT 1 AS a) SELECT a FROM s"));
+    }
+
+    @Test
     void jsonTypeMapsDuckDbTypesToBigQueryJsonTypeNames() {
         assertEquals("SELECT (CASE json_type(j)"
                         + " WHEN 'OBJECT' THEN 'object' WHEN 'ARRAY' THEN 'array' WHEN 'VARCHAR' THEN 'string'"

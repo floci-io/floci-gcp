@@ -16,6 +16,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         c.scope("zones");
         if (c.collection().equals("disks")) { disk(c, r); return; }
         machine(c, r);
+        ComputeResourcePolicyResources.validateAttached(c, r, "instances");
         List<ObjectNode> nics = objectArray(r, "networkInterfaces");
         if (nics.size() != 1) { throw GcpException.unimplemented("Exactly one IPv4 NIC is required"); }
         ObjectNode nic = nics.getFirst();
@@ -99,6 +100,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         if (size < sourceSize) { throw GcpException.invalidArgument("Disk is smaller than its source"); }
         r.put("sizeGb", Integer.toString(size));
         performance(r); labels(r.path("labels"));
+        ComputeResourcePolicyResources.validateAttached(c, r, "disks");
         r.putArray("users"); c.transition(r, "CREATING", "READY");
     }
     private static void performance(ObjectNode r) {
@@ -134,6 +136,9 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
     public void action(ComputeService.Context c, ObjectNode r, String action, ObjectNode body, Map<String,String> query) {
         if (c.collection().equals("disks")) {
             if (action.equals("resize")) { update(c, r, body, "PATCH"); return; }
+            if (action.equals("addResourcePolicies") || action.equals("removeResourcePolicies")) {
+                ComputeResourcePolicyResources.change(c, r, body, action.startsWith("add")); return;
+            }
             ComputeResourceHandler.super.action(c, r, action, body, query); return;
         }
         switch (action) {
@@ -155,6 +160,8 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                 c.transition(r, "STOPPING", "TERMINATED"); r.put("lastStopTimestamp", Instant.now().toString());
             }
             case "reset" -> { requireState(r, "RUNNING"); r.put("lastStartTimestamp", Instant.now().toString()); }
+            case "addResourcePolicies", "removeResourcePolicies" ->
+                    ComputeResourcePolicyResources.change(c, r, body, action.startsWith("add"));
             case "setMachineType" -> { requireState(r, "TERMINATED"); r.put("machineType", required(body, "machineType")); machine(c, r); }
             case "setMetadata", "setTags" -> {
                 String field = action.equals("setTags") ? "tags" : "metadata";

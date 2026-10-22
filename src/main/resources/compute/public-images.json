@@ -1,0 +1,29 @@
+{
+  "comment": "Synthetic public images, one current image per family. Names follow Google's naming so Terraform's DiskImageDiffSuppress matches an image to its family.",
+  "projects": {
+    "debian-cloud": [
+      { "name": "debian-13-trixie-v20261001", "family": "debian-13", "architecture": "X86_64", "diskSizeGb": "10" },
+      { "name": "debian-13-trixie-arm64-v20261001", "family": "debian-13-arm64", "architecture": "ARM64", "diskSizeGb": "10" },
+      { "name": "debian-12-bookworm-v20261001", "family": "debian-12", "architecture": "X86_64", "diskSizeGb": "10" },
+      { "name": "debian-12-bookworm-arm64-v20261001", "family": "debian-12-arm64", "architecture": "ARM64", "diskSizeGb": "10" },
+      { "name": "debian-11-bullseye-v20261001", "family": "debian-11", "architecture": "X86_64", "diskSizeGb": "10" }
+    ],
+    "ubuntu-os-cloud": [
+      { "name": "ubuntu-2404-noble-amd64-v20261001", "family": "ubuntu-2404-lts-amd64", "architecture": "X86_64", "diskSizeGb": "10" },
+      { "name": "ubuntu-2404-noble-arm64-v20261001", "family": "ubuntu-2404-lts-arm64", "architecture": "ARM64", "diskSizeGb": "10" },
+      { "name": "ubuntu-2204-jammy-v20261001", "family": "ubuntu-2204-lts", "architecture": "X86_64", "diskSizeGb": "10" },
+      { "name": "ubuntu-2204-jammy-arm64-v20261001", "family": "ubuntu-2204-lts-arm64", "architecture": "ARM64", "diskSizeGb": "10" }
+    ],
+    "rocky-linux-cloud": [
+      { "name": "rocky-linux-9-v20261001", "family": "rocky-linux-9", "architecture": "X86_64", "diskSizeGb": "20" },
+      { "name": "rocky-linux-8-v20261001", "family": "rocky-linux-8", "architecture": "X86_64", "diskSizeGb": "20" }
+    ],
+    "centos-cloud": [
+      { "name": "centos-stream-9-v20261001", "family": "centos-stream-9", "architecture": "X86_64", "diskSizeGb": "20" }
+    ],
+    "cos-cloud": [
+      { "name": "cos-stable-121-18867-0-50", "family": "cos-stable", "architecture": "X86_64", "diskSizeGb": "10" },
+      { "name": "cos-121-18867-0-50", "family": "cos-121-lts", "architecture": "X86_64", "diskSizeGb": "10" }
+    ]
+  }
+}

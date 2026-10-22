@@ -134,6 +134,7 @@ public class ComputeService {
                 .orElseThrow(() -> GcpException.unimplemented("Compute collection not implemented: " + c.collection()));
     }
     public synchronized ObjectNode get(String project, String path, Map<String, String> query) {
+        if (ComputePublicImages.isPublicProject(project)) { return publicImage(project, path, query); }
         Context c = context(project, path, state(project));
         if (c.collection().equals("operations")) {
             if (c.name() != null) { return operation(c).response.deepCopy(); }
@@ -176,6 +177,9 @@ public class ComputeService {
         return result;
     }
     public synchronized ObjectNode mutate(String project, String path, String verb, ObjectNode input, Map<String, String> query) {
+        if (ComputePublicImages.isPublicProject(project)) {
+            throw GcpException.permissionDenied("Required 'compute.images.create' permission for 'projects/" + project + "'");
+        }
         Context c = context(project, path, state(project));
         ObjectNode body = input == null ? object() : input.deepCopy();
         c.query = query;
@@ -278,6 +282,24 @@ public class ComputeService {
         c.state.operations.put(operationKey, op);
         save(project, c.state);
         return op.response.deepCopy();
+    }
+    /** Images of a public image project are readable by every project; nothing else in it is. */
+    private ObjectNode publicImage(String project, String path, Map<String, String> query) {
+        String[] parts = path.split("/");
+        if (parts.length >= 2 && parts[0].equals("global") && parts[1].equals("images")) {
+            if (parts.length == 2) {
+                return page(context(project, path, new ComputeProject()), ComputePublicImages.images(project), query);
+            }
+            if (parts.length == 3) {
+                return ComputePublicImages.image(project, parts[2])
+                        .orElseThrow(() -> GcpException.notFound("The resource 'projects/" + project + "/global/images/" + parts[2] + "' was not found"));
+            }
+            if (parts.length == 4 && parts[2].equals("family")) {
+                return ComputePublicImages.fromFamily(project, parts[3])
+                        .orElseThrow(() -> GcpException.notFound("The resource 'projects/" + project + "/global/images/family/" + parts[3] + "' was not found"));
+            }
+        }
+        throw GcpException.permissionDenied("Required 'compute.projects.get' permission for 'projects/" + project + "'");
     }
     private ComputeOperation operation(Context c) {
         ComputeOperation op = c.state.operations.get(c.key());
@@ -436,6 +458,12 @@ public class ComputeService {
         }
         public ObjectNode reference(ObjectNode body, String field, String expectedCollection) {
             String ref = required(body, field);
+            if (expectedCollection.equals("images") && ComputePublicImages.isPublicReference(ref)) {
+                ObjectNode image = ComputePublicImages.resolve(ref)
+                        .orElseThrow(() -> GcpException.notFound("The resource '" + ref + "' was not found"));
+                body.put(field, image.path("selfLink").asText());
+                return image;
+            }
             String path = path(ref);
             if (!path.contains("/" + expectedCollection + "/")) { throw GcpException.invalidArgument("Invalid " + field + " reference"); }
             ObjectNode result = require(path); ready(result);

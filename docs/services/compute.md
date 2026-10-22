@@ -27,7 +27,8 @@ Custom-mode networks, regional subnetworks, firewall rules, and global/regional
 IPv4 addresses support insert/get/list/delete. Firewalls also support updates.
 Subnet overlap, scope, references, firewall ports and dependent-resource deletion
 are validated. External addresses come from the documentation-only 203.0.113.0/24
-range. Auto-mode VPCs, IPv6, Shared VPC and cross-project references are unsupported.
+range. Auto-mode VPCs, IPv6, Shared VPC and cross-project references are unsupported,
+except [public images](#public-images).
 
 Global, regional and zonal operations support get/list/wait/delete. A wait may
 return an unfinished operation, which clients must continue polling. Nonzero UUID
@@ -67,8 +68,31 @@ labels, inventory and deletion. Global standard snapshots support disk sources,
 labels, inventory and deletion. Source identity and size survive source deletion;
 restored disks cannot be smaller than their source. Images do not acquire invented
 backing snapshots. Copying a snapshot means restoring a disk and snapshotting it.
-Guest disk bytes, regional/instant snapshots and public OS image catalogs are not
-emulated.
+Guest disk bytes and regional/instant snapshots are not emulated.
+
+### Public images
+
+The public image projects `debian-cloud`, `ubuntu-os-cloud`, `rocky-linux-cloud`,
+`centos-cloud` and `cos-cloud` serve a small read-only catalog, with one current
+image per family. Any project can boot from these images, or copy them into an
+image of its own:
+
+| Project | Families |
+|---|---|
+| `debian-cloud` | `debian-13`, `debian-13-arm64`, `debian-12`, `debian-12-arm64`, `debian-11` |
+| `ubuntu-os-cloud` | `ubuntu-2404-lts-amd64`, `ubuntu-2404-lts-arm64`, `ubuntu-2204-lts`, `ubuntu-2204-lts-arm64` |
+| `rocky-linux-cloud` | `rocky-linux-9`, `rocky-linux-8` |
+| `centos-cloud` | `centos-stream-9` |
+| `cos-cloud` | `cos-stable`, `cos-121-lts` |
+
+`images.get`, `images.list` (including `filter`) and `images.getFromFamily` work in
+those projects. A boot disk created from a family
+(`projects/debian-cloud/global/images/family/debian-12`) records the concrete image
+(`debian-12-bookworm-v20261001`) in `sourceImage`, as GCP does. Image names follow
+Google's naming, so Terraform's `image = "debian-cloud/debian-12"` resolves and
+shows no diff on later plans. Writes into a public project, and reads of anything
+other than its images, return 403. Image versions are fixed: there are no deprecated
+or older images, licenses or guest OS features.
 
 ## Global external application load balancer
 

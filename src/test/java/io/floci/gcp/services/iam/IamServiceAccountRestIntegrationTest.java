@@ -40,7 +40,7 @@ class IamServiceAccountRestIntegrationTest {
         String sa = create("clear-snake", Map.of("displayName", "Named", "description", "Kept"));
 
         given().contentType("application/json")
-                .body(Map.of("serviceAccount", Map.of("description", "Kept"), "updateMask", "display_name"))
+                .body(Map.of("serviceAccount", Map.of("description", "Unmasked"), "updateMask", "display_name"))
                 .when().patch(sa)
                 .then().statusCode(200)
                 .body("$", not(hasKey("displayName")))
@@ -48,7 +48,8 @@ class IamServiceAccountRestIntegrationTest {
 
         given().when().get(sa)
                 .then().statusCode(200)
-                .body("$", not(hasKey("displayName")));
+                .body("$", not(hasKey("displayName")))
+                .body("description", equalTo("Kept"));
     }
 
     @Test

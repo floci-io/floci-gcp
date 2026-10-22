@@ -11,7 +11,6 @@ import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
 import com.google.protobuf.NullValue;
-import com.google.type.LatLng;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ServiceDescriptor;
@@ -30,6 +29,7 @@ import org.jboss.logging.Logger;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -372,7 +372,9 @@ public class FirestoreService {
             if (!query.hasStartAt() && !query.hasEndAt()) {
                 return docs;
             }
-            return docs.stream().sorted(Comparator.comparing(StoredDocument::getName)).toList();
+            return docs.stream()
+                    .sorted((a, b) -> FirestoreValueOrder.compareResourceNames(a.getName(), b.getName()))
+                    .toList();
         }
         Comparator<StoredDocument> comparator = null;
         for (StructuredQuery.Order order : orders) {
@@ -388,7 +390,7 @@ public class FirestoreService {
 
     private int compareDocsByField(StoredDocument a, StoredDocument b, String path) {
         if ("__name__".equals(path)) {
-            return a.getName().compareTo(b.getName());
+            return FirestoreValueOrder.compareResourceNames(a.getName(), b.getName());
         }
         StoredValue va = resolveFieldPath(a, path);
         StoredValue vb = resolveFieldPath(b, path);
@@ -401,7 +403,7 @@ public class FirestoreService {
         if (vb == null) {
             return 1;
         }
-        return compareValues(va, vb.toProto());
+        return FirestoreValueOrder.compare(va, vb);
     }
 
     /**
@@ -454,13 +456,14 @@ public class FirestoreService {
     private int compareDocFieldToValue(StoredDocument doc, String path, Value value) {
         if ("__name__".equals(path)) {
             String target = value.hasReferenceValue() ? value.getReferenceValue() : value.getStringValue();
-            return doc.getName().compareTo(target);
+            return FirestoreValueOrder.compareResourceNames(doc.getName(), target);
         }
         StoredValue stored = resolveFieldPath(doc, path);
         if (stored == null) {
             return -1;
         }
-        return compareValues(stored, value);
+        StoredValue target = orderable(value);
+        return target == null ? 0 : FirestoreValueOrder.compare(stored, target);
     }
 
     private List<StoredDocument> applyLimitAndOffset(List<StoredDocument> docs, StructuredQuery query) {
@@ -712,97 +715,28 @@ public class FirestoreService {
     }
 
     /**
-     * Compares values for inequality filters. Unlike ordering and cursor comparison, an
-     * unsupported type pairing is explicitly incomparable and therefore cannot match an
-     * inclusive inequality merely because the ordering comparator returned zero.
+     * Compares values for inequality filters, which match only values of the same type as the
+     * filter value (integers and doubles are both numbers). Null and NaN satisfy no inequality.
      */
     private OptionalInt compareFilterValues(StoredValue stored, Value proto) {
-        return switch (proto.getValueTypeCase()) {
-            case INTEGER_VALUE -> {
-                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
-                    yield OptionalInt.of(Long.compare(stored.getIntegerValue(), proto.getIntegerValue()));
-                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
-                    yield OptionalInt.of(Double.compare(stored.getDoubleValue(), (double) proto.getIntegerValue()));
-                yield OptionalInt.empty();
-            }
-            case DOUBLE_VALUE -> {
-                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
-                    yield OptionalInt.of(Double.compare(stored.getDoubleValue(), proto.getDoubleValue()));
-                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
-                    yield OptionalInt.of(Double.compare((double) stored.getIntegerValue(), proto.getDoubleValue()));
-                yield OptionalInt.empty();
-            }
-            case STRING_VALUE -> {
-                if ("string".equals(stored.getType()) && stored.getStringValue() != null)
-                    yield OptionalInt.of(stored.getStringValue().compareTo(proto.getStringValue()));
-                yield OptionalInt.empty();
-            }
-            case TIMESTAMP_VALUE -> {
-                if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
-                    try {
-                        Instant a = StoredValue.toInstant(stored.getStringValue());
-                        Instant b = StoredValue.toInstant(proto.getTimestampValue());
-                        yield OptionalInt.of(a.compareTo(b));
-                    } catch (Exception ignored) {}
-                }
-                yield OptionalInt.empty();
-            }
-            case GEO_POINT_VALUE -> {
-                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null) {
-                    yield OptionalInt.of(compareGeoPoints(
-                            stored.toProto().getGeoPointValue(), proto.getGeoPointValue()));
-                }
-                yield OptionalInt.empty();
-            }
-            default -> OptionalInt.empty();
-        };
+        StoredValue filterValue = orderable(proto);
+        if (filterValue == null
+                || !FirestoreValueOrder.sameType(stored, filterValue)
+                || FirestoreValueOrder.isNull(stored)
+                || FirestoreValueOrder.isNaN(stored)
+                || FirestoreValueOrder.isNaN(filterValue)) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(FirestoreValueOrder.compare(stored, filterValue));
     }
 
-    private int compareValues(StoredValue stored, Value proto) {
-        return switch (proto.getValueTypeCase()) {
-            case INTEGER_VALUE -> {
-                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
-                    yield Long.compare(stored.getIntegerValue(), proto.getIntegerValue());
-                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
-                    yield Double.compare(stored.getDoubleValue(), (double) proto.getIntegerValue());
-                yield 0;
-            }
-            case DOUBLE_VALUE -> {
-                if ("double".equals(stored.getType()) && stored.getDoubleValue() != null)
-                    yield Double.compare(stored.getDoubleValue(), proto.getDoubleValue());
-                if ("integer".equals(stored.getType()) && stored.getIntegerValue() != null)
-                    yield Double.compare((double) stored.getIntegerValue(), proto.getDoubleValue());
-                yield 0;
-            }
-            case STRING_VALUE -> {
-                if ("string".equals(stored.getType()) && stored.getStringValue() != null)
-                    yield stored.getStringValue().compareTo(proto.getStringValue());
-                yield 0;
-            }
-            case TIMESTAMP_VALUE -> {
-                if ("timestamp".equals(stored.getType()) && stored.getStringValue() != null) {
-                    try {
-                        Instant a = StoredValue.toInstant(stored.getStringValue());
-                        Instant b = StoredValue.toInstant(proto.getTimestampValue());
-                        yield a.compareTo(b);
-                    } catch (Exception ignored) {}
-                }
-                yield 0;
-            }
-            case GEO_POINT_VALUE -> {
-                if ("geo_point".equals(stored.getType()) && stored.getStringValue() != null) {
-                    yield compareGeoPoints(stored.toProto().getGeoPointValue(), proto.getGeoPointValue());
-                }
-                yield 0;
-            }
-            default -> 0;
-        };
-    }
-
-    /** Firestore orders geo points by latitude, then by longitude. */
-    private static int compareGeoPoints(LatLng a, LatLng b) {
-        int byLatitude = Double.compare(a.getLatitude(), b.getLatitude());
-        return byLatitude != 0 ? byLatitude : Double.compare(a.getLongitude(), b.getLongitude());
+    /** Converts a query value for comparison, or null when it holds an unrepresentable timestamp. */
+    private static StoredValue orderable(Value value) {
+        try {
+            return StoredValue.fromProto(value);
+        } catch (DateTimeException e) {
+            return null;
+        }
     }
 
     private boolean matchesUnaryFilter(StoredDocument doc, StructuredQuery.UnaryFilter uf) {

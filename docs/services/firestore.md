@@ -195,6 +195,11 @@ registration.remove();
 - `RunAggregationQuery` does not reject duplicate aliases, or a request with no
   aggregations or more than five, although the proto requires unique aliases and
   one to five aggregations.
+- Queries do not add the implicit trailing `__name__` order, so documents with
+  equal `order_by` values come back in storage order rather than by name.
+- Documents that lack an `order_by` field are not excluded from the results.
+- `ListDocuments` ignores `order_by`, `page_size` and `page_token`: it returns
+  every document of the collection in one page, in storage order.
 - Transactions expire after 15 minutes instead of Firestore's shorter
   server-side deadlines.
 - Transaction state is held in memory; transactions do not survive an emulator

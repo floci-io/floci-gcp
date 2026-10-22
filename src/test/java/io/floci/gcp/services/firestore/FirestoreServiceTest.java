@@ -11,6 +11,7 @@ import com.google.firestore.v1.StructuredQuery;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.NullValue;
 import com.google.protobuf.Timestamp;
 import com.google.type.LatLng;
 import io.floci.gcp.core.common.GcpException;
@@ -411,6 +412,114 @@ class FirestoreServiceTest {
                 StructuredQuery.FieldFilter.Operator.LESS_THAN, geoPoint(0, 0)))));
         assertEquals(Set.of("south", "origin"), Set.copyOf(ids(runTopLevelFilter("at",
                 StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL, geoPoint(0, 0)))));
+    }
+
+    @Test
+    void orderByMixedTypesFollowsFirestoreTypeOrder() {
+        List<String> ascending = List.of("null", "bool", "number", "timestamp", "string",
+                "bytes", "reference", "geo", "array", "map");
+        service.applyWrite(topLevelValueDocument("map", "v", mapOf("k", intValue(1))), Instant.now());
+        service.applyWrite(topLevelValueDocument("string", "v",
+                Value.newBuilder().setStringValue("a").build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("null", "v",
+                Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("geo", "v", geoPoint(1, 1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("number", "v", intValue(7)), Instant.now());
+        service.applyWrite(topLevelValueDocument("array", "v", stringArray("a")), Instant.now());
+        service.applyWrite(topLevelValueDocument("bytes", "v",
+                Value.newBuilder().setBytesValue(ByteString.copyFromUtf8("a")).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("timestamp", "v", timestamp(1, 0)), Instant.now());
+        service.applyWrite(topLevelValueDocument("reference", "v",
+                Value.newBuilder().setReferenceValue(DB + "/documents/customers/x").build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("bool", "v",
+                Value.newBuilder().setBooleanValue(true).build()), Instant.now());
+
+        assertEquals(ascending, ids(runOrder("v", StructuredQuery.Direction.ASCENDING, null)));
+        assertEquals(ascending.reversed(), ids(runOrder("v", StructuredQuery.Direction.DESCENDING, null)));
+    }
+
+    @Test
+    void startAtOnBytesPositionsTheCursorInsteadOfMatchingEverything() {
+        service.applyWrite(topLevelValueDocument("low", "b", bytesOf(0x01)), Instant.now());
+        service.applyWrite(topLevelValueDocument("mid", "b", bytesOf(0x7f)), Instant.now());
+        service.applyWrite(topLevelValueDocument("high", "b", bytesOf(0x80)), Instant.now());
+
+        Cursor startAtMid = Cursor.newBuilder().addValues(bytesOf(0x7f)).setBefore(true).build();
+        assertEquals(List.of("mid", "high"), ids(runOrder("b", StructuredQuery.Direction.ASCENDING, startAtMid)));
+    }
+
+    @Test
+    void cursorOnMixedTypesSkipsLowerTypeRanks() {
+        service.applyWrite(topLevelValueDocument("number", "v", intValue(99)), Instant.now());
+        service.applyWrite(topLevelValueDocument("bool", "v",
+                Value.newBuilder().setBooleanValue(true).build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("string", "v",
+                Value.newBuilder().setStringValue("m").build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("array", "v", stringArray("a")), Instant.now());
+
+        Cursor startAtA = Cursor.newBuilder()
+                .addValues(Value.newBuilder().setStringValue("a")).setBefore(true).build();
+        assertEquals(List.of("string", "array"),
+                ids(runOrder("v", StructuredQuery.Direction.ASCENDING, startAtA)));
+    }
+
+    @Test
+    void orderByNameComparesPathSegments() {
+        service.applyWrite(upsert(DB + "/documents/p/a-b/sub/s1", "k", "v"), Instant.now());
+        service.applyWrite(upsert(DB + "/documents/p/a/sub/s1", "k", "v"), Instant.now());
+
+        List<String> names = service.runQuery(DB + "/documents", collectionGroupQuery("sub")
+                        .addOrderBy(StructuredQuery.Order.newBuilder()
+                                .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("__name__")))
+                        .build())
+                .stream().map(StoredDocument::getName).toList();
+        assertEquals(List.of(DB + "/documents/p/a/sub/s1", DB + "/documents/p/a-b/sub/s1"), names);
+    }
+
+    @Test
+    void rangeFiltersAgainstNaNMatchNothing() {
+        service.applyWrite(topLevelValueDocument("one", "n", dbl(1.0)), Instant.now());
+        service.applyWrite(topLevelValueDocument("nan", "n", dbl(Double.NaN)), Instant.now());
+        service.applyWrite(topLevelValueDocument("two", "n", intValue(2)), Instant.now());
+
+        assertEquals(List.of(), ids(runTopLevelFilter("n",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN, dbl(Double.NaN))));
+        assertEquals(List.of(), ids(runTopLevelFilter("n",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL, dbl(Double.NaN))));
+        assertEquals(Set.of("one", "two"), Set.copyOf(ids(runTopLevelFilter("n",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN, dbl(Double.NEGATIVE_INFINITY)))));
+    }
+
+    @Test
+    void rangeFiltersOnBytesCompareUnsignedAndSkipOtherTypes() {
+        service.applyWrite(topLevelValueDocument("mid", "b", bytesOf(0x7f)), Instant.now());
+        service.applyWrite(topLevelValueDocument("high", "b", bytesOf(0x80)), Instant.now());
+        service.applyWrite(topLevelValueDocument("text", "b",
+                Value.newBuilder().setStringValue("zzz").build()), Instant.now());
+
+        assertEquals(List.of("high"), ids(runTopLevelFilter("b",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN, bytesOf(0x7f))));
+    }
+
+    private List<StoredDocument> runOrder(String field, StructuredQuery.Direction direction, Cursor startAt) {
+        StructuredQuery.Builder query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder()
+                        .setCollectionId("customers").build())
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath(field))
+                        .setDirection(direction));
+        if (startAt != null) {
+            query.setStartAt(startAt);
+        }
+        return service.runQuery(DB + "/documents", query.build());
+    }
+
+    private static Value bytesOf(int... values) {
+        byte[] raw = new byte[values.length];
+        for (int i = 0; i < values.length; i++) {
+            raw[i] = (byte) values[i];
+        }
+        return Value.newBuilder().setBytesValue(ByteString.copyFrom(raw)).build();
     }
 
     private void writeGeoPointFixture() {

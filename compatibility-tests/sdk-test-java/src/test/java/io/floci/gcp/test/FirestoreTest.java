@@ -1,9 +1,12 @@
 package io.floci.gcp.test;
 
+import com.google.cloud.Timestamp;
+import com.google.cloud.firestore.Blob;
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.FieldValue;
 import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.GeoPoint;
 import com.google.cloud.firestore.Precondition;
 import com.google.cloud.firestore.Query;
 import com.google.cloud.firestore.QueryDocumentSnapshot;
@@ -17,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -302,6 +306,43 @@ class FirestoreTest {
             assertThat(afterIncrement.get("properties")).isEqualTo(Map.of("seed", "s", "count", 2L));
         } finally {
             docRef.delete().get();
+        }
+    }
+
+    @Test
+    @Order(13)
+    void orderByMixedTypesFollowsFirestoreTypeOrder() throws ExecutionException, InterruptedException {
+        String collection = TestFixtures.uniqueName("mixed-order");
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("a-null", null);
+        values.put("b-bool", true);
+        values.put("c-number", 7L);
+        values.put("d-timestamp", Timestamp.ofTimeSecondsAndNanos(1, 0));
+        values.put("e-string", "text");
+        values.put("f-bytes", Blob.fromBytes(new byte[] {1}));
+        values.put("g-reference", firestore.collection(collection).document("target"));
+        values.put("h-geo", new GeoPoint(1, 1));
+        values.put("i-array", List.of("x"));
+        values.put("j-map", Map.of("k", 1L));
+        List<String> ids = List.copyOf(values.keySet());
+        for (String id : ids.reversed()) {
+            Map<String, Object> data = new HashMap<>();
+            data.put("v", values.get(id));
+            firestore.collection(collection).document(id).set(data).get();
+        }
+        try {
+            List<String> asc = firestore.collection(collection).orderBy("v").get().get()
+                    .getDocuments().stream().map(DocumentSnapshot::getId).toList();
+            assertThat(asc).containsExactlyElementsOf(ids);
+
+            List<String> fromString = firestore.collection(collection).orderBy("v")
+                    .startAt("a").get().get()
+                    .getDocuments().stream().map(DocumentSnapshot::getId).toList();
+            assertThat(fromString).containsExactlyElementsOf(ids.subList(4, ids.size()));
+        } finally {
+            for (String id : ids) {
+                firestore.collection(collection).document(id).delete().get();
+            }
         }
     }
 }

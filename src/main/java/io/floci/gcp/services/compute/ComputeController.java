@@ -17,6 +17,14 @@ public class ComputeController {
     @Inject
     public ComputeController(ComputeService service) { this.service = service; }
 
+    @GET
+    public Object project(@PathParam("project") String project) {
+        return service.project(project);
+    }
+    @POST @Path("/setCommonInstanceMetadata")
+    public Object setCommonInstanceMetadata(@PathParam("project") String project, @Context UriInfo uri, byte[] body) {
+        return service.setCommonInstanceMetadata(project, body(body), query(uri));
+    }
     @GET @Path("/{path:.+}")
     public Object get(@PathParam("project") String project, @PathParam("path") String path, @Context UriInfo uri) {
         return service.get(project, path, query(uri));

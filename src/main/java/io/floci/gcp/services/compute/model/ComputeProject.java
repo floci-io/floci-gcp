@@ -13,4 +13,6 @@ public class ComputeProject {
     public Map<String, ComputeOperation> operations = new LinkedHashMap<>();
     public Map<String, java.util.List<ObjectNode>> endpoints = new LinkedHashMap<>();
     public Map<String, String> requests = new LinkedHashMap<>();
+    public String creationTimestamp;
+    public ObjectNode commonInstanceMetadata;
 }

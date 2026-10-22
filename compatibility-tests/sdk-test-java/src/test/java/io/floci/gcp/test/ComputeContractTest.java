@@ -26,6 +26,23 @@ class ComputeContractTest {
             assertThat(accelerators.get(project, zone, "nvidia-l4-vws").getName()).isEqualTo("nvidia-l4-vws");
         }
     }
+    @Test void projectCommonInstanceMetadataRoundTrips() throws Exception {
+        String project = TestFixtures.uniqueName("java-project-md");
+        NoCredentialsProvider auth = NoCredentialsProvider.create();
+        try (ProjectsClient projects = ProjectsClient.create(ProjectsSettings.newBuilder().setEndpoint(endpoint()).setCredentialsProvider(auth).build())) {
+            Project before = projects.get(project);
+            assertThat(before.getName()).isEqualTo(project);
+            assertThat(before.getCommonInstanceMetadata().getFingerprint()).isNotEmpty();
+            Metadata metadata = Metadata.newBuilder().setFingerprint(before.getCommonInstanceMetadata().getFingerprint())
+                    .addItems(Items.newBuilder().setKey("ssh-keys").setValue("alice:ssh-ed25519 AAAA alice").build()).build();
+            projects.setCommonInstanceMetadataAsync(project, metadata).get(20, TimeUnit.SECONDS);
+            Project after = projects.get(project);
+            assertThat(after.getCommonInstanceMetadata().getItemsList()).extracting(Items::getKey).containsExactly("ssh-keys");
+            assertThat(after.getCommonInstanceMetadata().getFingerprint()).isNotEqualTo(before.getCommonInstanceMetadata().getFingerprint());
+            assertThatThrownBy(() -> projects.setCommonInstanceMetadataAsync(project, metadata).get(20, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class);
+        }
+    }
     @Test void lifecycleImagesSnapshotsAndRetainedDisks() throws Exception {
         String project = TestFixtures.uniqueName("java-compute"), zone = "us-central1-a";
         NoCredentialsProvider auth = NoCredentialsProvider.create();

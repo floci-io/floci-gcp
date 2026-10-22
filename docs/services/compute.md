@@ -40,6 +40,14 @@ family and labels, combined with AND. Other expressions fail explicitly. Tokens
 are bound to project, collection, scope, filters and ordering. Inventory is not a
 snapshot across concurrent writes.
 
+`projects.get` returns the project's Compute resource: its number as `id`, the
+default Compute service account, and `commonInstanceMetadata`.
+`projects.setCommonInstanceMetadata` replaces that metadata through a global
+operation. It needs the current fingerprint, so a missing or stale one fails with
+412 (`conditionNotMet`). Keys must match `[a-zA-Z0-9-_]{1,128}`, values must be
+strings of at most 256 KiB, and keys must be unique. The other project methods
+(usage export, default network tier, Shared VPC, moves) are unsupported.
+
 Public interfaces follow the [Compute REST reference](https://docs.cloud.google.com/compute/docs/reference/rest/v1).
 Credential acceptance retains the emulator's existing auth bypass; resource
 isolation is not IAM enforcement.

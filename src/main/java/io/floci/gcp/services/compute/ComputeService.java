@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.ProjectAwareStorageBackend;
@@ -30,6 +31,8 @@ public class ComputeService {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Logger LOG = Logger.getLogger(ComputeService.class);
     private static final Pattern NAME = Pattern.compile("[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?");
+    private static final Pattern METADATA_KEY = Pattern.compile("[a-zA-Z0-9-_]{1,128}");
+    private static final int METADATA_VALUE_MAX_BYTES = 262144;
     private static final Set<String> LABELLED = Set.of("instances", "disks", "images", "snapshots", "addresses", "forwardingRules");
     private final ProjectAwareStorageBackend<ComputeProject> store;
     private final EmulatorConfig config;
@@ -201,20 +204,9 @@ public class ComputeService {
             return result;
         }
         String requestId = query.get("requestId");
-        String requestKey = null;
-        if (requestId != null) {
-            try {
-                UUID id = UUID.fromString(requestId);
-                if (!id.toString().equalsIgnoreCase(requestId) || id.equals(new UUID(0, 0))) { throw new IllegalArgumentException(); }
-            } catch (IllegalArgumentException e) { throw GcpException.invalidArgument("requestId must be a nonzero UUID"); }
-            requestKey = verb + " " + path + " " + requestId;
-            String prior = c.state.requests.get(requestKey);
-            if (prior != null) {
-                ComputeOperation op = c.state.operations.get(prior);
-                if (op != null && !op.deleted) { return op.response.deepCopy(); }
-                throw GcpException.alreadyExists("The request has already completed and its operation was deleted");
-            }
-        }
+        String requestKey = requestKey(verb, path, requestId);
+        ObjectNode prior = priorOperation(c.state, requestKey);
+        if (prior != null) { return prior; }
         ObjectNode resource;
         String operationType;
         if (verb.equals("POST") && c.name() == null) {
@@ -260,6 +252,76 @@ public class ComputeService {
                 handler.update(c, resource, body, verb); operationType = "update";
             } else { throw GcpException.unimplemented("Unsupported Compute method"); }
         }
+        return operation(c, resource, operationType, requestId, requestKey);
+    }
+    public synchronized ObjectNode project(String project) {
+        Context c = context(project, "global/operations", state(project));
+        if (c.state.creationTimestamp == null) {
+            c.state.creationTimestamp = Instant.now().toString();
+            commonInstanceMetadata(c.state);
+            save(project, c.state);
+        }
+        ObjectNode result = object().put("kind", "compute#project").put("id", ProjectNumbers.of(project))
+                .put("name", project).put("creationTimestamp", c.state.creationTimestamp)
+                .put("selfLink", "https://www.googleapis.com/compute/v1/projects/" + project)
+                .put("defaultServiceAccount", ProjectNumbers.of(project) + "-compute@developer.gserviceaccount.com")
+                .put("defaultNetworkTier", "PREMIUM").put("xpnProjectStatus", "UNSPECIFIED_XPN_PROJECT_STATUS");
+        result.set("commonInstanceMetadata", commonInstanceMetadata(c.state).deepCopy());
+        return result;
+    }
+    public synchronized ObjectNode setCommonInstanceMetadata(String project, ObjectNode input, Map<String, String> query) {
+        Context c = context(project, "global/operations", state(project));
+        ObjectNode body = input == null ? object() : input.deepCopy();
+        String requestId = query.get("requestId");
+        String requestKey = requestKey("POST", "setCommonInstanceMetadata", requestId);
+        ObjectNode prior = priorOperation(c.state, requestKey);
+        if (prior != null) { return prior; }
+        ObjectNode current = commonInstanceMetadata(c.state);
+        checkFingerprint(current, body, "fingerprint");
+        metadataItems(body);
+        ObjectNode replacement = object().put("kind", "compute#metadata").put("fingerprint", fingerprint());
+        if (body.has("items")) { replacement.set("items", body.get("items")); }
+        c.state.commonInstanceMetadata = replacement;
+        if (c.state.creationTimestamp == null) { c.state.creationTimestamp = Instant.now().toString(); }
+        ObjectNode target = object().put("selfLink", "https://www.googleapis.com/compute/v1/projects/" + project)
+                .put("id", ProjectNumbers.of(project));
+        return operation(c, target, "setCommonInstanceMetadata", requestId, requestKey);
+    }
+    private ObjectNode commonInstanceMetadata(ComputeProject state) {
+        if (state.commonInstanceMetadata == null) {
+            state.commonInstanceMetadata = object().put("kind", "compute#metadata").put("fingerprint", fingerprint());
+        }
+        return state.commonInstanceMetadata;
+    }
+    /** Validates metadata items as GCE does: a key matching [a-zA-Z0-9-_]{1,128}, a string value, no repeated key. */
+    static void metadataItems(ObjectNode metadata) {
+        Set<String> keys = new java.util.HashSet<>();
+        for (ObjectNode item : objectArray(metadata, "items")) {
+            String key = required(item, "key");
+            if (!METADATA_KEY.matcher(key).matches()) { throw GcpException.invalidArgument("Invalid metadata key: " + key); }
+            if (!item.path("value").isTextual()) { throw GcpException.invalidArgument("Missing or invalid value for metadata key " + key); }
+            if (item.path("value").asText().getBytes(StandardCharsets.UTF_8).length > METADATA_VALUE_MAX_BYTES) {
+                throw GcpException.invalidArgument("Value for metadata key " + key + " exceeds 256 KiB");
+            }
+            if (!keys.add(key)) { throw GcpException.invalidArgument("Duplicate metadata key: " + key); }
+        }
+    }
+    private static String requestKey(String verb, String path, String requestId) {
+        if (requestId == null) { return null; }
+        try {
+            UUID id = UUID.fromString(requestId);
+            if (!id.toString().equalsIgnoreCase(requestId) || id.equals(new UUID(0, 0))) { throw new IllegalArgumentException(); }
+        } catch (IllegalArgumentException e) { throw GcpException.invalidArgument("requestId must be a nonzero UUID"); }
+        return verb + " " + path + " " + requestId;
+    }
+    private static ObjectNode priorOperation(ComputeProject state, String requestKey) {
+        String prior = requestKey == null ? null : state.requests.get(requestKey);
+        if (prior == null) { return null; }
+        ComputeOperation op = state.operations.get(prior);
+        if (op != null && !op.deleted) { return op.response.deepCopy(); }
+        throw GcpException.alreadyExists("The request has already completed and its operation was deleted");
+    }
+    private ObjectNode operation(Context c, ObjectNode resource, String operationType, String requestId, String requestKey) {
         ComputeOperation op = new ComputeOperation();
         long now = System.currentTimeMillis();
         long delay = Math.max(2, config.services().compute().operationDelayMs());
@@ -276,7 +338,7 @@ public class ComputeService {
         if (c.scope().startsWith("regions/")) { op.response.put("region", c.link(c.scope())); }
         if (requestId != null) { op.response.put("clientOperationId", requestId); c.state.requests.put(requestKey, operationKey); }
         c.state.operations.put(operationKey, op);
-        save(project, c.state);
+        save(c.project, c.state);
         return op.response.deepCopy();
     }
     private ComputeOperation operation(Context c) {

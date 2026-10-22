@@ -128,6 +128,24 @@ class CloudRunJobsRuntimeTest {
         verify(lifecycleManager, never()).forceRemove(eq("other-ns"), any());
     }
 
+    @Test
+    void orphanSweepLeavesTaskContainersOwnedByAnotherEmulatorOnTheSameDaemon() {
+        when(config.port()).thenReturn(4588);
+        sweep(ownedTask("mine", "4588"), ownedTask("other-port", "4599"), ownedTask("unlabelled", null));
+
+        verify(lifecycleManager).forceRemove(eq("mine"), isNull());
+        verify(lifecycleManager).forceRemove(eq("unlabelled"), isNull());
+        verify(lifecycleManager, never()).forceRemove(eq("other-port"), any());
+    }
+
+    private static Container ownedTask(String id, String owner) {
+        Map<String, String> labels = new HashMap<>(CloudRunRuntimeService.workloadLabels("p", "l", task(0)));
+        if (owner != null) {
+            labels.put(ContainerStorageHelper.OWNER_LABEL, owner);
+        }
+        return container(id, labels);
+    }
+
     private void namespace(String namespace) {
         when(config.docker().resourceNamespace()).thenReturn(Optional.ofNullable(namespace));
     }

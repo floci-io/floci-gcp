@@ -111,6 +111,8 @@ Every container and volume floci-gcp spawns carries the labels `floci=true`, `fl
 
 This makes `docker ps --filter label=io.floci.service=cloudsql --filter label=io.floci.resource-id=orders-db` resolve an emulated resource to its backing container directly, without inferring it from names. Applied to Cloud Run (service revisions, job tasks, worker pools and instances), GKE, Managed Kafka, Managed Kafka Connect and Cloud SQL. The shared BigQuery SQL engine container carries only `io.floci` and `io.floci.service`, since it serves every project and has no single resource. Cloud Run workload containers also carry `io.floci.cloudrun.resource-name` with the full resource name (`projects/.../revisions/...`), which floci-gcp uses to clean up after a restart.
 
+Cloud Run workload containers also carry `io.floci.owner`, which identifies the floci-gcp deployment that created them: its port, or `<namespace>/<port>` when `FLOCI_GCP_DOCKER_RESOURCE_NAMESPACE` is set. At startup, floci-gcp removes only leftover containers that carry its own owner value, or no owner value at all (containers from versions that predate the label). Several floci-gcp instances can therefore share one Docker daemon without removing each other's containers. The key and its value format are shared with floci-aws.
+
 Cloud Run containers used to carry these keys under older names. They are still written next to the new keys, and floci-gcp still recognises containers that carry only the old keys. Three of them keep the same value as their new key; `floci_resource` changed value:
 
 | Legacy label | New label | Status |

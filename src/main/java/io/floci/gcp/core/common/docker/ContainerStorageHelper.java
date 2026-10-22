@@ -44,6 +44,8 @@ public final class ContainerStorageHelper {
     public static final String RESOURCE_ID_LABEL = "io.floci.resource-id";
     public static final String PROJECT_LABEL = "io.floci.project";
     public static final String LOCATION_LABEL = "io.floci.location";
+    /** The label carrying {@link #ownerIdentity(EmulatorConfig)}. */
+    public static final String OWNER_LABEL = "io.floci.owner";
 
     /**
      * Legacy alias of each resource-identity label, keyed by the new label. Call sites set only the
@@ -190,6 +192,28 @@ public final class ContainerStorageHelper {
             }
         }
         return conflicts;
+    }
+
+    /**
+     * Identity of the Floci deployment that owns a container, stamped as {@link #OWNER_LABEL} so a
+     * startup sweep collects only its own leftovers. The API port alone collides when two
+     * independently namespaced Flocis share a Docker daemon on the same internal port, so the
+     * resource namespace goes in front of it; an unnamespaced Floci keeps the bare port.
+     */
+    public static String ownerIdentity(EmulatorConfig config) {
+        String namespace = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("");
+        return namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
+    }
+
+    /**
+     * Whether this deployment may treat a container as its own leftover: its {@link #OWNER_LABEL}
+     * names this deployment, or it has none because an earlier version created it before the label
+     * existed. A container another deployment owns is never collected.
+     */
+    public static boolean ownedBy(EmulatorConfig config, Map<String, String> labels) {
+        String owner = labels == null ? null : labels.get(OWNER_LABEL);
+        return owner == null || owner.equals(ownerIdentity(config));
     }
 
     private static void putIfNotBlank(Map<String, String> labels, String key, String value) {

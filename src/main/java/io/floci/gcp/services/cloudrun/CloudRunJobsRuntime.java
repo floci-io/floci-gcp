@@ -11,6 +11,7 @@ import com.google.cloud.run.v2.Task;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.Events;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
@@ -147,7 +148,8 @@ public class CloudRunJobsRuntime implements CloudRunExecutionCoordinator.TaskRun
             }
             String resource = CloudRunRuntimeService.workloadResourceName(labels);
             if (resource != null && TASK_RESOURCE.matcher(resource).matches()
-                    && Objects.equals(namespace, labels.get("floci_namespace"))) {
+                    && Objects.equals(namespace, labels.get("floci_namespace"))
+                    && ContainerStorageHelper.ownedBy(config, labels)) {
                 LOG.infof("Removing orphaned Cloud Run job task container=%s task=%s", container.getId(), resource);
                 lifecycleManager.forceRemove(container.getId(), null);
             }

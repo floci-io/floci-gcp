@@ -5,6 +5,7 @@ import com.google.cloud.run.v2.Revision;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeVolumeMount;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -141,6 +142,7 @@ public class CloudRunWorkerPoolRuntime {
                     CloudRunRuntimeService.workloadResourceName(container.labels()), "");
             if (!resource.contains("/workerPools/") || tracked.contains(container.id())
                     || !Objects.equals(namespace, container.labels().get("floci_namespace"))
+                    || !ContainerStorageHelper.ownedBy(config, container.labels())
                     || !CloudRunRuntimeService.isRemovableWorkload(container.id(), container.labels())) {
                 continue;
             }

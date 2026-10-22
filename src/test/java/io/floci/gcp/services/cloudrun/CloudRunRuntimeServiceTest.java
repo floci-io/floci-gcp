@@ -17,6 +17,7 @@ import io.floci.gcp.core.common.dns.EmbeddedDnsServer;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
@@ -106,7 +107,8 @@ class CloudRunRuntimeServiceTest {
                 "io.floci.resource-id", "svc-00001",
                 "io.floci.project", "p1",
                 "io.floci.location", "us-central1",
-                "io.floci.cloudrun.resource-name", revision.getName()), spec.labels());
+                "io.floci.cloudrun.resource-name", revision.getName(),
+                ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)), spec.labels());
     }
 
     @Test

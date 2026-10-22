@@ -1,10 +1,8 @@
 package io.floci.gcp.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
-import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
@@ -12,21 +10,16 @@ import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
-import com.github.dockerjava.api.model.StreamType;
 import io.floci.gcp.config.EmulatorConfig;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
+import java.io.OutputStream;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -586,37 +579,23 @@ public class ContainerLifecycleManager {
      */
     public ExecResult exec(String containerId, List<String> env, List<String> command) {
         return dockerApi("exec in container " + containerId, () -> {
-            ExecCreateCmd createCmd = dockerClient().execCreateCmd(containerId)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .withCmd(command.toArray(new String[0]));
-            if (env != null && !env.isEmpty()) {
-                createCmd.withEnv(env);
-            }
-            String execId = createCmd.exec().getId();
-            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-            dockerClient().execStartCmd(execId)
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            try {
-                                if (frame.getStreamType() == StreamType.STDERR) {
-                                    stderr.write(frame.getPayload());
-                                } else {
-                                    stdout.write(frame.getPayload());
-                                }
-                            } catch (IOException e) {
-                                throw new UncheckedIOException(e);
-                            }
-                        }
-                    })
-                    .awaitCompletion();
-            Long exitCode = dockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ExecResult(exitCode == null ? -1 : exitCode.intValue(),
-                    stdout.toString(StandardCharsets.UTF_8),
-                    stderr.toString(StandardCharsets.UTF_8));
+            // The Docker API timeout bounds this call, so the exec itself waits without its own limit.
+            ContainerExec.Result result = ContainerExec.run(dockerClient(), containerId, env,
+                    command.toArray(new String[0]), Integer.MAX_VALUE);
+            return new ExecResult((int) result.exitCode(), result.stdout(), result.stderr());
         });
+    }
+
+    /**
+     * Runs a long command (a guest script, for example) inside a running container, writing its output to the given
+     * streams as it arrives. Unlike {@link #exec}, it is bounded by {@code timeout} rather than the Docker API
+     * timeout, and a command that outlives it is reported as timed out and left running.
+     */
+    public ContainerExec.Result execStreaming(String containerId, List<String> env, List<String> command,
+                                              Duration timeout, OutputStream stdout, OutputStream stderr) {
+        int seconds = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, timeout.toSeconds()));
+        return ContainerExec.run(dockerClient(), containerId, env, command.toArray(new String[0]), seconds,
+                stdout, stderr);
     }
 
     private DockerClient dockerClient() {

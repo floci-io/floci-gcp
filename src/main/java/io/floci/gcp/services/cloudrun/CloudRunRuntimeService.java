@@ -12,6 +12,7 @@ import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
+import io.floci.gcp.core.common.docker.RetryingTarCopier;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
@@ -23,7 +24,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -282,6 +282,7 @@ public class CloudRunRuntimeService {
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(workloadLabels(project, location, resourceName))
+                .withLabels(Map.of(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
                 .withSecurityOpts(configuredSecurityOpts());
 
         builder.withEnv(env.entrySet().stream()
@@ -515,11 +516,8 @@ public class CloudRunRuntimeService {
         byte[] tar = gcsVolumeTar(bucket, objectPrefix, snapshot);
         withGcsVolumeHelper(volumeName, helperId -> lifecycleManager.runDockerApi(
                 "copy GCS snapshot to Docker volume " + volumeName, () -> {
-                    lifecycleManager.getDockerClient()
-                            .copyArchiveToContainerCmd(helperId)
-                            .withRemotePath(GCS_VOLUME_HELPER_MOUNT)
-                            .withTarInputStream(new ByteArrayInputStream(tar))
-                            .exec();
+                    RetryingTarCopier.copyArchive(lifecycleManager.getDockerClient(), helperId,
+                            GCS_VOLUME_HELPER_MOUNT, "GCS snapshot for " + volumeName, tar);
                     return null;
                 }));
     }

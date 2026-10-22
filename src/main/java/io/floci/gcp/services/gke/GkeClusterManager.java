@@ -13,6 +13,7 @@ import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.common.docker.PortAllocator;
+import io.floci.gcp.core.common.docker.RetryingTarCopier;
 import io.floci.gcp.services.gke.model.StoredCluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -283,11 +284,8 @@ public class GkeClusterManager {
     /** Streams the webhook kubeconfig into the (created, not-yet-started) k3s container at /etc. */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("GKE token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());

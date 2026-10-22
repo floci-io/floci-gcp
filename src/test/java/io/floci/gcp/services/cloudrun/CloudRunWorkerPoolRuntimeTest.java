@@ -43,11 +43,12 @@ class CloudRunWorkerPoolRuntimeTest {
     private ContainerLifecycleManager lifecycleManager;
     private CloudRunRuntimeService runtimeService;
     private CloudRunWorkerPoolRuntime runtime;
+    private EmulatorConfig config;
 
     @BeforeEach
     void setUp() {
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudrun().execution().maxWorkerInstances()).thenReturn(2);
         runtimeService = mock(CloudRunRuntimeService.class);
         runtime = new CloudRunWorkerPoolRuntime(runtimeService, lifecycleManager, config);
@@ -122,6 +123,25 @@ class CloudRunWorkerPoolRuntimeTest {
         verify(lifecycleManager).forceRemove(eq("legacy"), isNull());
         verify(lifecycleManager, never()).forceRemove(eq("disagreeing"), any());
         verify(lifecycleManager, never()).forceRemove(eq("service"), any());
+    }
+
+    @Test
+    void leftoverSweepLeavesContainersOwnedByAnotherEmulatorOnTheSameDaemon() {
+        when(config.port()).thenReturn(4588);
+        String mine = POOL + "/revisions/wp-00004-mine";
+        Map<String, String> mineLabels = new HashMap<>(CloudRunRuntimeService.workloadLabels("p", "l", mine));
+        mineLabels.put(ContainerStorageHelper.OWNER_LABEL, "4588");
+        Map<String, String> foreign = new HashMap<>(CloudRunRuntimeService.workloadLabels(
+                "p", "l", POOL + "/revisions/wp-00005-foreign"));
+        foreign.put(ContainerStorageHelper.OWNER_LABEL, "4599");
+        List<com.github.dockerjava.api.model.Container> containers = List.of(
+                container("mine", mineLabels), container("foreign", foreign));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(containers);
+
+        Set<String> removed = runtime.removeLeftoverContainers();
+
+        assertEquals(Set.of(mine), removed);
+        verify(lifecycleManager, never()).forceRemove(eq("foreign"), any());
     }
 
     // com.github.dockerjava.api.model.Container is written fully qualified: it collides with the imported

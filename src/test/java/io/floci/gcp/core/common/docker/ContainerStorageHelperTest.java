@@ -8,7 +8,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -138,6 +140,29 @@ class ContainerStorageHelperTest {
                 Map.of("io.floci.service", "floci_service", "io.floci.resource-id", "floci_resource",
                         "io.floci.project", "floci_project", "io.floci.location", "floci_location"),
                 ContainerStorageHelper.LEGACY_LABEL_ALIASES);
+    }
+
+    @Test
+    void ownerIdentityIsThePortBehindTheNamespace() {
+        EmulatorConfig bare = config("");
+        when(bare.port()).thenReturn(4588);
+        EmulatorConfig namespaced = config("run-one");
+        when(namespaced.port()).thenReturn(4588);
+
+        assertEquals("4588", ContainerStorageHelper.ownerIdentity(bare));
+        assertEquals("run-one/4588", ContainerStorageHelper.ownerIdentity(namespaced));
+    }
+
+    @Test
+    void containersWithoutAnOwnerOrWithThisOwnerAreOwned() {
+        EmulatorConfig config = config("run-one");
+        when(config.port()).thenReturn(4588);
+
+        assertTrue(ContainerStorageHelper.ownedBy(config, Map.of("io.floci.owner", "run-one/4588")));
+        assertTrue(ContainerStorageHelper.ownedBy(config, Map.of("floci", "true")));
+        assertTrue(ContainerStorageHelper.ownedBy(config, null));
+        assertFalse(ContainerStorageHelper.ownedBy(config, Map.of("io.floci.owner", "run-one/4599")));
+        assertFalse(ContainerStorageHelper.ownedBy(config, Map.of("io.floci.owner", "4588")));
     }
 
     private static EmulatorConfig config(String namespace) {

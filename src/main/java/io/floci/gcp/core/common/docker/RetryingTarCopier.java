@@ -42,6 +42,9 @@ public final class RetryingTarCopier {
      */
     private static final int TAR_PIPE_BUFFER_BYTES = 16 * 1024 * 1024;
 
+    /** How long a failed attempt waits for its writer to stop before the next attempt starts. */
+    private static final long WRITER_STOP_MILLIS = 5_000L;
+
     private RetryingTarCopier() {
     }
 
@@ -119,9 +122,10 @@ public final class RetryingTarCopier {
                                     int maxAttempts, long backoffMillis) {
         retry(label, containerId, maxAttempts, backoffMillis, () -> {
             AtomicReference<Throwable> writerFailure = new AtomicReference<>();
+            Thread streamer = null;
             try (PipedOutputStream pos = new PipedOutputStream();
                  PipedInputStream pis = new PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
-                Thread streamer = new Thread(() -> {
+                streamer = new Thread(() -> {
                     try (pos) {
                         tarWriter.write(pos);
                     } catch (Throwable e) {
@@ -135,16 +139,30 @@ public final class RetryingTarCopier {
                     }
                 }, "tar-streamer-" + label);
                 streamer.start();
-                docker.copyArchiveToContainerCmd(containerId)
-                        .withRemotePath(remotePath)
-                        .withTarInputStream(pis)
-                        .exec();
+                try {
+                    docker.copyArchiveToContainerCmd(containerId)
+                            .withRemotePath(remotePath)
+                            .withTarInputStream(pis)
+                            .exec();
+                } catch (RuntimeException e) {
+                    // The pipes close on the way out, which ends a writer blocked on a write; the
+                    // interrupt ends one waiting on its source, so a retry never runs two writers.
+                    streamer.interrupt();
+                    throw e;
+                }
                 // Joined before the try-with-resources closes pos/pis on the way out: a real
                 // exec() only returns after consuming the tar to EOF, which the streamer causes
                 // by closing pos once it's done, so this never blocks in production, but closing
                 // pos out from under a still-writing streamer (as a mocked/short-circuited exec()
                 // would) turns its own write into a spurious "Pipe closed" failure.
                 streamer.join();
+            } finally {
+                if (streamer != null && streamer.isAlive()) {
+                    streamer.join(WRITER_STOP_MILLIS);
+                    if (streamer.isAlive()) {
+                        LOG.warnv("Tar streamer for {0} did not stop within {1} ms", label, WRITER_STOP_MILLIS);
+                    }
+                }
             }
             Throwable failure = writerFailure.get();
             if (failure != null) {

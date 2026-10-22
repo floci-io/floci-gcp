@@ -256,8 +256,40 @@ class RetryingTarCopierTest {
                 MAX_ATTEMPTS, 0L);
 
         assertEquals(2, calls.get());
-        // A failed attempt's writer is never joined, so it may still be starting when copyStreamed returns.
         assertTrue(writes.await(5, TimeUnit.SECONDS), "the tar content must be regenerated for every attempt");
+    }
+
+    @Test
+    void copyStreamedStopsAFailedAttemptsWriterBeforeRetrying() {
+        DockerClient docker = mock(DockerClient.class);
+        AtomicInteger calls = new AtomicInteger();
+        failingOnce(docker, calls);
+        CountDownLatch slowSource = new CountDownLatch(1);
+        AtomicInteger writers = new AtomicInteger();
+        AtomicInteger running = new AtomicInteger();
+        AtomicInteger overlaps = new AtomicInteger();
+
+        RetryingTarCopier.copyStreamed(docker, "c-1", "/var/task", "fn-code",
+                out -> {
+                    if (running.incrementAndGet() > 1) {
+                        overlaps.incrementAndGet();
+                    }
+                    try {
+                        if (writers.incrementAndGet() == 1) {
+                            slowSource.await();
+                        }
+                        out.write("x".getBytes(StandardCharsets.UTF_8));
+                    } catch (InterruptedException e) {
+                        throw new IOException("source read interrupted", e);
+                    } finally {
+                        running.decrementAndGet();
+                    }
+                },
+                MAX_ATTEMPTS, 0L);
+
+        assertEquals(2, calls.get());
+        assertEquals(2, writers.get());
+        assertEquals(0, overlaps.get(), "the first writer must stop before the retry starts a second one");
     }
 
     @Test

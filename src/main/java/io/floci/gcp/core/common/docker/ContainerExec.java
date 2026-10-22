@@ -10,9 +10,11 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Runs a command in a running container and waits for its exit code, shared by every container
@@ -78,6 +80,9 @@ public final class ContainerExec {
     /**
      * Runs {@code cmd}, writing its stdout and stderr to the given streams, which may be the same
      * one. The returned {@code stdout} is empty and its {@code stderr} holds only the timeout note.
+     *
+     * @throws UncheckedIOException when writing to {@code stdout} or {@code stderr} failed, since the
+     *                              caller's copy of the output is then incomplete
      */
     public static Result run(DockerClient dockerClient, String containerId, List<String> env, String[] cmd,
                              int timeoutSeconds, OutputStream stdout, OutputStream stderr) {
@@ -89,12 +94,13 @@ public final class ContainerExec {
             create.withEnv(env);
         }
         String execId = create.exec().getId();
+        AtomicReference<IOException> writeFailure = new AtomicReference<>();
 
         ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
             @Override
             public void onNext(Frame frame) {
                 byte[] payload = frame.getPayload();
-                if (payload == null) {
+                if (payload == null || writeFailure.get() != null) {
                     return;
                 }
                 try {
@@ -104,6 +110,7 @@ public final class ContainerExec {
                         stdout.write(payload);
                     }
                 } catch (IOException e) {
+                    writeFailure.compareAndSet(null, e);
                     LOG.warnv(e, "Failed to capture output of container exec {0}", execId);
                 }
             }
@@ -114,6 +121,10 @@ public final class ContainerExec {
             // docker-java closes the attach stream on completion, timeout, or interruption.
             if (!callback.awaitCompletion(timeoutSeconds, TimeUnit.SECONDS)) {
                 return new Result(-1, "", "Timed out after " + timeoutSeconds + "s", true);
+            }
+            if (writeFailure.get() != null) {
+                throw new UncheckedIOException("Lost output of a command in container " + containerId,
+                        writeFailure.get());
             }
             Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
             return new Result(exitCode != null ? exitCode : -1, "", "", false);

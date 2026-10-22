@@ -14,6 +14,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Consumer;
@@ -188,6 +190,21 @@ class ContainerExecTest {
         } finally {
             Thread.interrupted();
         }
+    }
+
+    @Test
+    void aFailedOutputWriteIsRaisedInsteadOfASuccessfulResult() {
+        completeWith(List.of(frame(StreamType.STDOUT, "lost"), frame(StreamType.STDOUT, "also lost")));
+        OutputStream full = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                throw new IOException("No space left on device");
+            }
+        };
+
+        UncheckedIOException failure = assertThrows(UncheckedIOException.class,
+                () -> ContainerExec.run(dockerClient, CONTAINER_ID, List.of(), CMD, 5, full, full));
+        assertEquals("No space left on device", failure.getCause().getMessage());
     }
 
     private void completeWith(List<Frame> frames) {

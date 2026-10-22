@@ -1475,9 +1475,8 @@ final class SqlDialectTranslator {
 
     // ── SELECT AS STRUCT ────────────────────────────────────────────────────
 
-    /** Keywords before a parenthesized query that read it as rows: a FROM item, a CTE, a set operation branch. */
-    private static final Set<String> ROW_QUERY_KEYWORDS = Set.of(
-            "FROM", "JOIN", "WITH", "USING", "UNION", "INTERSECT", "EXCEPT");
+    /** Keywords before a parenthesized query that read it as rows: a FROM item or a CTE. */
+    private static final Set<String> ROW_QUERY_KEYWORDS = Set.of("FROM", "JOIN", "WITH", "USING");
 
     /** Keywords before a parenthesized query that read it as a value: an expression of a clause. */
     private static final Set<String> VALUE_QUERY_KEYWORDS = Set.of(
@@ -1487,9 +1486,10 @@ final class SqlDialectTranslator {
     /**
      * Rewrites {@code SELECT AS STRUCT a, b}, which DuckDB lacks. Where the query is read as a value
      * ({@code ARRAY(SELECT AS STRUCT ...)}, a scalar subquery) its items become {@code STRUCT(a, b)},
-     * one struct per row. Where it is read as rows (the statement itself, a {@code FROM} subquery, a
-     * CTE, a set operation branch) the struct's fields already are the columns, so {@code AS STRUCT}
-     * is dropped.
+     * one struct per row; with a {@code *} item the query becomes a derived table whose alias DuckDB
+     * reads as the row's struct. Where it is read as rows (the statement itself, a {@code FROM}
+     * subquery, a CTE) the struct's fields already are the columns, so {@code AS STRUCT} is dropped.
+     * A set operation branch is read the way the whole set operation is.
      */
     private void rewriteSelectAsStruct() {
         // From the last SELECT back, so rewriting a nested query keeps the indexes before it.
@@ -1513,6 +1513,11 @@ final class SqlDialectTranslator {
             if (!readAsValue(select)) {
                 continue;
             }
+            if (selectItems(select).stream().anyMatch(this::expandsStar)) {
+                wrapRowAsStruct(select);
+                continue;
+            }
+            quoteImplicitAliases(select); // renderStruct names a field only after an explicit AS
             List<int[]> items = selectItems(select);
             int end = items.getLast()[1];
             while (end > as && tokens.get(end - 1).kind == Kind.SPACE) {
@@ -1525,9 +1530,45 @@ final class SqlDialectTranslator {
     }
 
     /**
+     * Turns the query that starts at {@code select} into {@code SELECT "_struct" FROM (query) AS "_struct"}:
+     * DuckDB reads a table alias as the struct of its row, which names the fields a {@code *} expands to.
+     */
+    private void wrapRowAsStruct(int select) {
+        int end = queryEnd(select);
+        while (end > select && tokens.get(end - 1).kind == Kind.SPACE) {
+            end--;
+        }
+        String alias = DuckTypes.quoteIdentifier("_struct");
+        tokens.add(end, Token.raw(" AS " + alias));
+        tokens.add(end, new Token(Kind.PUNCT, ")", null));
+        tokens.add(select, new Token(Kind.PUNCT, "(", null));
+        tokens.add(select, Token.raw("SELECT " + alias + " FROM "));
+    }
+
+    /** The index right after the query that starts at {@code select}: its closing parenthesis, a set operation, or the end. */
+    private int queryEnd(int select) {
+        int depth = 0;
+        for (int k = select + 1; k < tokens.size(); k++) {
+            Token t = tokens.get(k);
+            if (t.isPunct("(")) {
+                depth++;
+            } else if (t.isPunct(")")) {
+                if (depth == 0) {
+                    return k;
+                }
+                depth--;
+            } else if (depth == 0 && (t.isKeyword("UNION") || t.isKeyword("INTERSECT")
+                    || (t.isKeyword("EXCEPT") && !followsStar(k)))) {
+                return k;
+            }
+        }
+        return tokens.size();
+    }
+
+    /**
      * Whether the query that starts at {@code select} is read as a value: it sits in parentheses
      * after an expression keyword or inside a call, rather than at the top or after a keyword that
-     * reads rows.
+     * reads rows. Set operations are looked through, so every branch is read like the first.
      */
     private boolean readAsValue(int select) {
         int open = enclosingParen(select);
@@ -1542,13 +1583,16 @@ final class SqlDialectTranslator {
             } else if (t.isPunct("(")) {
                 if (depth > 0) {
                     depth--;
-                } else if (nextSignificant(k + 1, open) >= 0) {
-                    return true; // an argument of a call such as UNNEST(ARRAY(SELECT AS STRUCT ...))
-                } else {
-                    open = k; // ((SELECT ...)): the outer parentheses only wrap the query
+                    continue;
                 }
+                int before = previousSignificantIndex(k);
+                if (nextSignificant(k + 1, open) >= 0 && before >= 0 && tokens.get(before).kind == Kind.IDENT
+                        && !ROW_QUERY_KEYWORDS.contains(tokens.get(before).upper()) && !tokens.get(before).isKeyword("AS")) {
+                    return true; // an argument of a call such as UNNEST(ARRAY(SELECT AS STRUCT ...))
+                }
+                open = k; // these parentheses wrap the query, or the set operation it is a branch of
             } else if (depth == 0 && t.kind == Kind.IDENT) {
-                if (ROW_QUERY_KEYWORDS.contains(t.upper()) && !followsStar(k)) {
+                if (ROW_QUERY_KEYWORDS.contains(t.upper())) {
                     return false;
                 }
                 if (VALUE_QUERY_KEYWORDS.contains(t.upper())) {

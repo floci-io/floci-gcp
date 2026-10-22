@@ -3,6 +3,7 @@ package io.floci.gcp.core.storage;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.RequestContext;
 import com.fasterxml.jackson.core.type.TypeReference;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -34,6 +35,7 @@ public class StorageFactory {
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
+    private DataDirectoryLock dataDirectoryLock;
 
     @Inject
     Instance<RequestContext> requestContextInstance;
@@ -63,6 +65,7 @@ public class StorageFactory {
                                                        TypeReference<Map<String, V>> typeReference) {
         String mode = config.storage().mode();
         Path filePath = Path.of(config.storage().persistentPath()).resolve(fileName);
+        ensureDataDirectoryLocked(mode);
 
         StorageBackend<String, V> existing = findExisting(mode, serviceName, filePath);
         if (existing != null) {
@@ -92,6 +95,7 @@ public class StorageFactory {
                                                      TypeReference<Map<String, V>> typeReference) {
         String mode = config.storage().mode();
         Path filePath = Path.of(config.storage().persistentPath()).resolve(fileName);
+        ensureDataDirectoryLocked(mode);
 
         StorageBackend<String, V> existing = findExisting(mode, serviceName, filePath);
         if (existing != null) {
@@ -108,6 +112,17 @@ public class StorageFactory {
         allBackends.add(backend);
         backendsByPath.put(filePath, backend);
         return backend;
+    }
+
+    /**
+     * Takes ownership of the persistent data directory before the first backend loads from it,
+     * so a second process pointed at the same directory fails at startup instead of overwriting
+     * this one's files.
+     */
+    private void ensureDataDirectoryLocked(String mode) {
+        if (dataDirectoryLock == null && !"memory".equals(mode)) {
+            dataDirectoryLock = DataDirectoryLock.acquire(Path.of(config.storage().persistentPath()));
+        }
     }
 
     /**
@@ -179,6 +194,41 @@ public class StorageFactory {
         for (WalStorage<?, ?> wal : walBackends) {
             wal.shutdown();
         }
-        flushAll();
+        try {
+            flushAll();
+        } finally {
+            releaseDataDirectory();
+        }
+    }
+
+    synchronized boolean workersStopped() {
+        return hybridBackends.stream().allMatch(HybridStorage::isSchedulerTerminated)
+                && walBackends.stream().allMatch(WalStorage::isSchedulerTerminated);
+    }
+
+    /**
+     * Releases the data directory even when shutdown never ran, e.g. after a failed startup. The
+     * hybrid and wal workers stop first, without a final write, and the directory stays locked
+     * until this process exits if one of them does not, so no worker writes into a directory
+     * another emulator may own.
+     */
+    @PreDestroy
+    synchronized void releaseDataDirectory() {
+        if (dataDirectoryLock != null) {
+            boolean stopped = true;
+            for (HybridStorage<?, ?> hybrid : hybridBackends) {
+                stopped &= hybrid.stopScheduler();
+            }
+            for (WalStorage<?, ?> wal : walBackends) {
+                stopped &= wal.stopScheduler();
+            }
+            if (!stopped) {
+                LOG.errorv("Storage workers for {0} did not stop; the directory stays locked until"
+                        + " this process exits", config.storage().persistentPath());
+                return;
+            }
+            dataDirectoryLock.close();
+            dataDirectoryLock = null;
+        }
     }
 }

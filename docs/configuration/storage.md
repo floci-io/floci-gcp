@@ -22,6 +22,9 @@ floci-gcp supports four storage backends configurable via `FLOCI_GCP_STORAGE_MOD
 !!! tip "Use `memory` for CI"
     Use **`memory`** for fast CI pipelines. Use **`hybrid`** for local development when you want state preserved across restarts.
 
+!!! warning "One emulator per data directory"
+    With any mode other than `memory`, an emulator takes an exclusive lock on `FLOCI_GCP_STORAGE_PERSISTENT_PATH` (the `.floci-gcp.lock` file) at startup. A second emulator pointed at the same directory fails to start with `Persistent storage path '...' is already in use`, instead of silently overwriting the first one's data. Give each instance its own path or volume. The lock is released when the emulator stops, including when it is killed.
+
 ## Recommended Profiles
 
 === "Fast CI"

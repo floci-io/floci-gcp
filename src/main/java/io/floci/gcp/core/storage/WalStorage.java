@@ -173,17 +173,32 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     public void shutdown() {
+        stopScheduler();
+        compact();
+        closeWalWriter();
+    }
+
+    /**
+     * Stops the background compactor without a final compaction.
+     *
+     * @return whether the compactor has exited, so no compaction can still be running
+     */
+    boolean stopScheduler() {
         scheduler.shutdown();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 scheduler.shutdownNow();
+                scheduler.awaitTermination(5, TimeUnit.SECONDS);
             }
         } catch (InterruptedException e) {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        compact();
-        closeWalWriter();
+        return scheduler.isTerminated();
+    }
+
+    boolean isSchedulerTerminated() {
+        return scheduler.isTerminated();
     }
 
     private void compact() {

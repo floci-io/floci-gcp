@@ -184,19 +184,24 @@ public class EmulatorLifecycle {
         // and trigger SIGKILL; if the flush ran last it would be skipped and in-memory (hybrid)
         // data would be lost on an otherwise-graceful shutdown. shutdownAll() still runs at the
         // end to stop the flush schedulers and capture any shutdown-time writes.
-        storageFactory.flushAll();
-        // Centralized teardown for process-bound containers (Cloud Run instances, Cloud
-        // Functions workers, in-flight build/job containers). Runs before shutdownAll() so any
-        // state written while stopping is captured by the final flush.
-        for (ContainerTeardown teardown : containerTeardowns) {
-            try {
-                teardown.stopManagedContainers();
-            } catch (Exception e) {
-                LOG.warnv("Container teardown failed for {0}: {1}",
-                        teardown.getClass().getSimpleName(), e.getMessage());
+        // shutdownAll() runs even when this flush fails, so the data directory lock is released
+        // before an in-JVM restart (dev-mode reload, test profiles) reopens the same path.
+        try {
+            storageFactory.flushAll();
+            // Centralized teardown for process-bound containers (Cloud Run instances, Cloud
+            // Functions workers, in-flight build/job containers). Runs before shutdownAll() so any
+            // state written while stopping is captured by the final flush.
+            for (ContainerTeardown teardown : containerTeardowns) {
+                try {
+                    teardown.stopManagedContainers();
+                } catch (Exception e) {
+                    LOG.warnv("Container teardown failed for {0}: {1}",
+                            teardown.getClass().getSimpleName(), e.getMessage());
+                }
             }
+        } finally {
+            storageFactory.shutdownAll();
         }
-        storageFactory.shutdownAll();
         LOG.info("=== floci-gcp Stopped ===");
     }
 }

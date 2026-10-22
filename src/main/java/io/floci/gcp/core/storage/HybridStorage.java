@@ -118,16 +118,31 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     public void shutdown() {
+        stopScheduler();
+        flush();
+    }
+
+    /**
+     * Stops the background flusher without a final flush.
+     *
+     * @return whether the flusher has exited, so no flush can still be running
+     */
+    boolean stopScheduler() {
         scheduler.shutdown();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 scheduler.shutdownNow();
+                scheduler.awaitTermination(5, TimeUnit.SECONDS);
             }
         } catch (InterruptedException e) {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        flush();
+        return scheduler.isTerminated();
+    }
+
+    boolean isSchedulerTerminated() {
+        return scheduler.isTerminated();
     }
 
     private void flushIfDirty() {

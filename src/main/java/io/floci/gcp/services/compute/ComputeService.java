@@ -295,7 +295,7 @@ public class ComputeService {
     }
     /** Validates metadata items as GCE does: a key matching [a-zA-Z0-9-_]{1,128}, a string value, no repeated key. */
     static void metadataItems(ObjectNode metadata) {
-        Set<String> keys = new java.util.HashSet<>();
+        Set<String> keys = new HashSet<>();
         for (ObjectNode item : objectArray(metadata, "items")) {
             String key = required(item, "key");
             if (!METADATA_KEY.matcher(key).matches()) { throw GcpException.invalidArgument("Invalid metadata key: " + key); }

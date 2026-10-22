@@ -124,12 +124,14 @@ class BigQueryDuckLoadIntegrationTest {
         assertEquals(List.of("ana", "bo", "c, d"),
                 rows("people_string_skip").stream().map(r -> r.getFirst()).toList());
 
-        load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/people.csv"), "skipLeadingRows", "abc",
-                "destinationTable", destination("people_bad_skip")))
-                .then().statusCode(400)
-                .body("error.message", equalTo("Invalid value at 'job.configuration.load.skip_leading_rows.value'"
-                        + " (TYPE_INT32), \"abc\""))
-                .body("error.errors[0].reason", equalTo("invalid"));
+        for (String bad : List.of("abc", "", "  ", " 1 ", "1 ")) {
+            load(Map.of("sourceUris", List.of("gs://" + BUCKET + "/people.csv"), "skipLeadingRows", bad,
+                    "destinationTable", destination("people_bad_skip")))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo("Invalid value at 'job.configuration.load.skip_leading_rows.value'"
+                            + " (TYPE_INT32), \"" + bad + "\""))
+                    .body("error.errors[0].reason", equalTo("invalid"));
+        }
     }
 
     @Test

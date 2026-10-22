@@ -654,16 +654,16 @@ public class BigQueryService {
 
     /**
      * An int32 job option. JSON clients send it as a number or, like the Python client for
-     * {@code skipLeadingRows}, as a decimal string; BigQuery rejects any other string with a 400 that
-     * names the field's path in the request.
+     * {@code skipLeadingRows}, as a decimal string; BigQuery rejects any other string, an empty or
+     * padded one included, with a 400 that names the field's path in the request.
      */
     private static Integer integerOption(Object value, String fieldPath) {
         if (value instanceof Number n) {
             return n.intValue();
         }
-        if (value instanceof String s && !s.isBlank()) {
+        if (value instanceof String s) {
             try {
-                return Integer.valueOf(s.trim());
+                return Integer.valueOf(s);
             } catch (NumberFormatException e) {
                 throw GcpException.invalidArgument("Invalid value at '" + fieldPath + "' (TYPE_INT32), \"" + s + "\"")
                         .withReason("invalid");

@@ -65,6 +65,12 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         c.transition(r, "PROVISIONING", "RUNNING");
         r.put("lastStartTimestamp", Instant.now().toString());
     }
+    static boolean defaultConfidentialCompute(ObjectNode instance) {
+        ObjectNode confidential = objectField(instance, "confidentialInstanceConfig");
+        if (confidential.has("enableConfidentialCompute")) { return false; }
+        confidential.put("enableConfidentialCompute", false);
+        return true;
+    }
     private void machine(ComputeService.Context c, ObjectNode r) {
         c.reference(r, "machineType", "machineTypes");
         if (!r.path("machineType").asText().startsWith(c.link(c.scope() + "/machineTypes/"))) { throw GcpException.invalidArgument("Machine type must be in VM zone"); }
@@ -75,8 +81,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
             }
             integer(accelerator.path("acceleratorCount").asText(), 1, 4, "acceleratorCount");
         }
-        ObjectNode confidential = objectField(r, "confidentialInstanceConfig");
-        if (!confidential.has("enableConfidentialCompute")) { confidential.put("enableConfidentialCompute", false); }
+        defaultConfidentialCompute(r);
         if (r.has("scheduling")) { requireObject(r.get("scheduling"), "scheduling"); }
         if (!r.path("guestAccelerators").isEmpty() && !r.path("scheduling").path("onHostMaintenance").asText().equals("TERMINATE")) {
             throw GcpException.invalidArgument("GPU instances require onHostMaintenance=TERMINATE");

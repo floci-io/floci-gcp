@@ -52,6 +52,22 @@ class ComputeIntegrationTest extends ComputeTestSupport {
         post(root + "/zones/europe-west1-a/disks", Map.of("name", "fresh")).then().statusCode(404);
     }
 
+    @Test @SuppressWarnings("unchecked")
+    void savedInstancesWithoutConfidentialInstanceConfigReturnTheDefault() {
+        String project = "compute-" + UUID.randomUUID(), root = "/compute/v1/projects/" + project;
+        var store = (ProjectAwareStorageBackend<ComputeProject>) storage.<ComputeProject>create("compute", "compute.json",
+                new TypeReference<Map<String, ComputeProject>>() {});
+        ComputeProject state = new ComputeProject();
+        state.resources.put("zones/us-central1-a/instances/saved",
+                JsonNodeFactory.instance.objectNode().put("kind", "compute#instance").put("name", "saved"));
+        store.putForProject(project, "state", state);
+
+        given().get(root + "/zones/us-central1-a/instances/saved").then().statusCode(200)
+                .body("confidentialInstanceConfig.enableConfidentialCompute", equalTo(false));
+        given().get(root + "/zones/us-central1-a/instances").then().statusCode(200)
+                .body("items[0].confidentialInstanceConfig.enableConfidentialCompute", equalTo(false));
+    }
+
     @Test void diskTypeZonesAreUrlsWhileOtherCatalogsUseZoneNames() {
         for (String zone : java.util.List.of("us-central1-a", "europe-west1-b")) {
             String root = root(), catalog = root + "/zones/" + zone;

@@ -78,6 +78,11 @@ public class ComputeService {
                 changed = true;
             }
         }
+        for (Map.Entry<String, ObjectNode> entry : state.resources.entrySet()) {
+            if (entry.getKey().matches("zones/[^/]+/instances/[^/]+")) {
+                changed |= ComputeWorkloadResources.defaultConfidentialCompute(entry.getValue());
+            }
+        }
         if (changed) {
             state.operations.values().removeIf(op -> op.deleted && op.response.path("status").asText().equals("DONE"));
             save(project, state);

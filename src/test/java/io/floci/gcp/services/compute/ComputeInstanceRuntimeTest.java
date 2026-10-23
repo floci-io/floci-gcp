@@ -20,8 +20,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +42,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -65,6 +68,7 @@ class ComputeInstanceRuntimeTest {
         when(config.services().compute().dockerNetwork()).thenReturn(Optional.empty());
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
         when(config.port()).thenReturn(4588);
+        when(config.docker().apiTimeout()).thenReturn(Duration.ofSeconds(30));
         containerBuilder = mock(ContainerBuilder.class);
         builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
@@ -310,7 +314,8 @@ class ComputeInstanceRuntimeTest {
             if (Thread.currentThread().isInterrupted()) { throw new IllegalStateException("Docker API interrupted"); }
             return creating.getCount() == 0 ? Optional.of(created) : Optional.empty();
         });
-        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of());
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenAnswer(invocation ->
+                creating.getCount() == 0 ? List.of(created) : List.of());
         ExecutorService pool = Executors.newFixedThreadPool(1);
         ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
                 lifecycleManager, imageCache, pool);
@@ -327,7 +332,50 @@ class ComputeInstanceRuntimeTest {
         release.countDown();
         teardown.join(15_000);
 
-        verify(docker.stopContainerCmd("new").withTimeout(10)).exec();
+        verify(docker.stopContainerCmd("new").withTimeout(10), timeout(5_000).atLeastOnce()).exec();
+    }
+
+    @Test
+    void teardownWaitsForAContainerStillStartingBeforeListingContainers() throws Exception {
+        CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        List<String> events = new CopyOnWriteArrayList<>();
+        when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
+            creating.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            events.add("created");
+            return null;
+        });
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenAnswer(invocation -> {
+            events.add("listed");
+            return List.of();
+        });
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        // Reports a step outliving any fixed wait, as a create slower than the old 10 second wait did.
+        ExecutorService impatient = new AbstractExecutorService() {
+            @Override public void execute(Runnable command) { pool.execute(command); }
+            @Override public void shutdown() { pool.shutdown(); }
+            @Override public List<Runnable> shutdownNow() { return pool.shutdownNow(); }
+            @Override public boolean isShutdown() { return pool.isShutdown(); }
+            @Override public boolean isTerminated() { return pool.isTerminated(); }
+            @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return false; }
+        };
+        ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
+                lifecycleManager, imageCache, impatient);
+        concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
+        assertTrue(creating.await(5, TimeUnit.SECONDS));
+
+        Thread teardown = new Thread(concurrent::stopManagedContainers);
+        teardown.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!events.contains("listed") && teardown.getState() != Thread.State.TIMED_WAITING
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        release.countDown();
+        teardown.join(15_000);
+
+        assertEquals(List.of("created", "listed"), events);
     }
 
     @Test

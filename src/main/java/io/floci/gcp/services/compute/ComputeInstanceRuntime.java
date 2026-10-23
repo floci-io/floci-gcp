@@ -26,6 +26,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Runs Compute instances as Docker containers when {@code floci-gcp.services.compute.mock} is false.
@@ -67,6 +69,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final ExecutorService executor;
     /** Set at teardown: a worker still running after it creates no container. */
     private volatile boolean closed;
+    /** Held shared while a step brings a container up; teardown takes it exclusively before listing containers. */
+    private final ReadWriteLock startLock = new ReentrantReadWriteLock();
 
     @Inject
     public ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
@@ -168,14 +172,14 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     launch(operationKey, intent, name);
                 } else {
                     stage(operationKey);
-                    lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
+                    bringUp(() -> lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
                         try {
                             lifecycleManager.getDockerClient().startContainerCmd(existing.get().getId()).exec();
                         } catch (NotModifiedException alreadyRunning) {
                             LOG.debugv("Compute instance container {0} was already running", name);
                         }
                         return null;
-                    });
+                    }));
                 }
             }
             case STOP -> ownedContainer(name).ifPresent(container ->
@@ -189,11 +193,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                         return null;
                     }));
             case RESTART -> ownedContainer(name).ifPresent(container ->
-                    lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
+                    bringUp(() -> lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
                         lifecycleManager.getDockerClient().restartContainerCmd(container.getId())
                                 .withTimeout(0).exec();
                         return null;
-                    }));
+                    })));
             case REMOVE -> ownedContainer(name).ifPresent(container -> lifecycleManager.forceRemove(container.getId(), null));
         }
     }
@@ -230,8 +234,10 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 if (!owned(existing.get(), name)) { return; }
                 lifecycleManager.forceRemove(existing.get().getId(), null);
             }
-            lifecycleManager.createAndStart(spec(intent, name));
-            LOG.infof("Started Compute instance container=%s image=%s", name, intent.image());
+            bringUp(() -> {
+                lifecycleManager.createAndStart(spec(intent, name));
+                LOG.infof("Started Compute instance container=%s image=%s", name, intent.image());
+            });
         } catch (RuntimeException e) {
             LOG.warnf("Compute instance %s/%s/%s runs without a container: %s",
                     intent.project(), intent.zone(), intent.name(), e.getMessage());
@@ -304,14 +310,14 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         } else if (current.equals("RUNNING") && !"running".equals(container.getState())) {
             LOG.infof("Restarting container of running Compute instance %s/%s/%s", project, zone, name);
             try {
-                lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
+                bringUp(() -> lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
                     try {
                         lifecycleManager.getDockerClient().startContainerCmd(container.getId()).exec();
                     } catch (NotModifiedException alreadyRunning) {
                         LOG.debugv("Compute instance container {0} was already running", name);
                     }
                     return null;
-                });
+                }));
             } catch (RuntimeException e) {
                 LOG.warnf("Compute instance %s/%s/%s runs without a container: %s", project, zone, name,
                         e.getMessage());
@@ -326,25 +332,45 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /**
-     * Stops this deployment's running instance containers on shutdown; they restart with the emulator. Queued steps
-     * see {@code closed} and do nothing. A step already running is left to finish rather than interrupted: Docker
-     * may still complete an interrupted create or start, and the interrupt would also fail the step's own cleanup in
-     * {@link #run}, which stops a container the step started after the list below was taken.
+     * Stops this deployment's running instance containers on shutdown; they restart with the emulator. Steps are not
+     * interrupted: Docker may still complete an interrupted create or start. Once {@code closed} is set no step brings
+     * a container up, and taking {@code startLock} waits for one already doing so, each bounded by the Docker API
+     * timeout, so the list below includes every container this process started. A step still pulling its image is
+     * not waited for; it sees {@code closed} after the pull and creates nothing.
      */
     @Override
     public void stopManagedContainers() {
         if (!enabled()) { return; }
         closed = true;
         executor.shutdown();
+        boolean quiet = false;
         try {
-            if (!executor.awaitTermination(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                LOG.warn("Compute instance container steps still running at shutdown");
-            }
+            quiet = startLock.writeLock().tryLock(
+                    config.docker().apiTimeout().toMillis() + TimeUnit.SECONDS.toMillis(STOP_TIMEOUT_SECONDS),
+                    TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        for (Container container : ownedContainers()) {
-            if ("running".equals(container.getState())) { stop(container.getId()); }
+        if (!quiet) {
+            LOG.warn("A Compute instance container was still starting at shutdown and may be left running");
+        }
+        try {
+            for (Container container : ownedContainers()) {
+                if ("running".equals(container.getState())) { stop(container.getId()); }
+            }
+        } finally {
+            if (quiet) { startLock.writeLock().unlock(); }
+        }
+    }
+
+    /** Runs a step that brings a container up, unless teardown has begun; see {@link #stopManagedContainers}. */
+    private void bringUp(Runnable action) {
+        startLock.readLock().lock();
+        try {
+            if (closed) { return; }
+            action.run();
+        } finally {
+            startLock.readLock().unlock();
         }
     }
 

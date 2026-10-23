@@ -137,7 +137,16 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private void run(String operationKey, Intent intent) {
         String name = containerName(intent.project(), intent.zone(), intent.name());
         synchronized (lock(name)) {
-            step(operationKey, intent, name);
+            if (closed) { return; }
+            try {
+                step(operationKey, intent, name);
+            } finally {
+                if (closed) {
+                    // Teardown began during this step and may have listed containers before it started this one.
+                    ownedContainer(name).filter(container -> "running".equals(container.getState()))
+                            .ifPresent(container -> stop(container.getId()));
+                }
+            }
         }
     }
 

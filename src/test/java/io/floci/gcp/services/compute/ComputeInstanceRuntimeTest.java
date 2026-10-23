@@ -48,6 +48,7 @@ class ComputeInstanceRuntimeTest {
     private static final String CONTAINER = "floci-gcp-compute-p-us-central1-a-vm";
 
     private EmulatorConfig config;
+    private ContainerBuilder containerBuilder;
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
     private ImageCacheService imageCache;
@@ -64,7 +65,7 @@ class ComputeInstanceRuntimeTest {
         when(config.services().compute().dockerNetwork()).thenReturn(Optional.empty());
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
         when(config.port()).thenReturn(4588);
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        containerBuilder = mock(ContainerBuilder.class);
         builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(mock(ContainerSpec.class));
@@ -282,6 +283,39 @@ class ComputeInstanceRuntimeTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void aContainerStartedWhileTeardownRunsIsStoppedByItsOwnStep() throws Exception {
+        CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
+            creating.countDown();
+            while (true) {
+                try {
+                    release.await();
+                    return null;
+                } catch (InterruptedException ignored) {
+                    // Docker calls do not stop on an interrupt either.
+                }
+            }
+        });
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of());
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
+                lifecycleManager, imageCache, pool);
+        concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
+        assertTrue(creating.await(5, TimeUnit.SECONDS));
+        Container created = container("new", "running", identity("vm", "4588"));
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(created));
+
+        Thread teardown = new Thread(concurrent::stopManagedContainers);
+        teardown.start();
+        Thread.sleep(200);
+        release.countDown();
+        teardown.join(15_000);
+
+        verify(docker.stopContainerCmd("new").withTimeout(10)).exec();
     }
 
     @Test

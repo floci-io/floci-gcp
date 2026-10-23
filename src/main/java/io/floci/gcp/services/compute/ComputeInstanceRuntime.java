@@ -126,6 +126,10 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         return tracked.phase();
     }
 
+    boolean closed() {
+        return closed;
+    }
+
     public boolean finished(String operationKey) {
         return phase(operationKey) == Phase.DONE;
     }
@@ -322,14 +326,16 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /**
-     * Stops this deployment's running instance containers on shutdown; they restart with the emulator. The workers
-     * stop first, so no launch creates a container after the list below is taken.
+     * Stops this deployment's running instance containers on shutdown; they restart with the emulator. Queued steps
+     * see {@code closed} and do nothing. A step already running is left to finish rather than interrupted: Docker
+     * may still complete an interrupted create or start, and the interrupt would also fail the step's own cleanup in
+     * {@link #run}, which stops a container the step started after the list below was taken.
      */
     @Override
     public void stopManagedContainers() {
         if (!enabled()) { return; }
         closed = true;
-        executor.shutdownNow();
+        executor.shutdown();
         try {
             if (!executor.awaitTermination(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 LOG.warn("Compute instance container steps still running at shutdown");

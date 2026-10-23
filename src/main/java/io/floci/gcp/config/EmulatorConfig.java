@@ -172,7 +172,10 @@ public interface EmulatorConfig {
         /** Bounds each instance container by its machine type's vCPUs and memory. */
         @WithDefault("true")
         boolean instanceResourceLimits();
-        /** At startup, restarts containers of RUNNING instances and removes those of deleted instances. */
+        /**
+         * At startup, restarts containers of RUNNING instances, stops running containers of TERMINATED instances
+         * and removes those of deleted instances.
+         */
         @WithDefault("true")
         boolean reconcileContainersOnStartup();
         /** Longest an operation waits for its container before the instance continues without one. */

@@ -185,7 +185,7 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_COMPUTE_IMAGE_CATALOG_PATH` | _(none)_ | JSON file that replaces the bundled Compute image catalog |
 | `FLOCI_GCP_SERVICES_COMPUTE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for Compute instance containers only |
 | `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS` | `true` | Bound each instance container by its machine type's vCPUs and memory |
-| `FLOCI_GCP_SERVICES_COMPUTE_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | At startup, restart the containers of RUNNING instances and remove those of deleted instances |
+| `FLOCI_GCP_SERVICES_COMPUTE_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | At startup, restart the containers of RUNNING instances, stop the running containers of TERMINATED instances and remove those of deleted instances |
 | `FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT` | `5m` | Longest a Compute operation waits for its container before the instance continues without one |
 
 ---

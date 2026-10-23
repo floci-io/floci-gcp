@@ -289,16 +289,26 @@ class ComputeInstanceRuntimeTest {
     void aContainerStartedWhileTeardownRunsIsStoppedByItsOwnStep() throws Exception {
         CountDownLatch creating = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
+        // Like ContainerLifecycleManager.dockerApi: an interrupted call fails and leaves the interrupt flag set, so
+        // every later Docker call on that thread fails too, although the daemon may have created the container.
         when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
             creating.countDown();
-            while (true) {
-                try {
-                    release.await();
-                    return null;
-                } catch (InterruptedException ignored) {
-                    // Docker calls do not stop on an interrupt either.
-                }
+            try {
+                release.await();
+                return null;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Docker API interrupted", e);
             }
+        });
+        doAnswer(invocation -> {
+            if (Thread.currentThread().isInterrupted()) { throw new IllegalStateException("Docker API interrupted"); }
+            return invocation.<Callable<?>>getArgument(1).call();
+        }).when(lifecycleManager).runDockerApi(anyString(), any());
+        Container created = container("new", "running", identity("vm", "4588"));
+        when(lifecycleManager.findByName(CONTAINER)).thenAnswer(invocation -> {
+            if (Thread.currentThread().isInterrupted()) { throw new IllegalStateException("Docker API interrupted"); }
+            return creating.getCount() == 0 ? Optional.of(created) : Optional.empty();
         });
         when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of());
         ExecutorService pool = Executors.newFixedThreadPool(1);
@@ -306,12 +316,14 @@ class ComputeInstanceRuntimeTest {
                 lifecycleManager, imageCache, pool);
         concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
         assertTrue(creating.await(5, TimeUnit.SECONDS));
-        Container created = container("new", "running", identity("vm", "4588"));
-        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(created));
 
         Thread teardown = new Thread(concurrent::stopManagedContainers);
         teardown.start();
-        Thread.sleep(200);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!concurrent.closed() && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertTrue(concurrent.closed());
         release.countDown();
         teardown.join(15_000);
 

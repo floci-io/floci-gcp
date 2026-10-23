@@ -814,6 +814,27 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void alterRejectsLabelTuplesWithoutSeparators() {
+        for (String labels : List.of("[('a','b')('c','d')]", "[('a','b'),]", "[,('a','b')]",
+                "[STRUCT('a' AS key, 'b' AS value) STRUCT('c' AS key, 'd' AS value)]")) {
+            assertEquals("invalidQuery", assertThrows(GcpException.class,
+                    () -> statement("ALTER TABLE ds.t SET OPTIONS(labels=" + labels + ")")).getReason(), labels);
+        }
+    }
+
+    @Test
+    void alterRejectsInvalidExpirationTimestampsLikeBigQuery() {
+        assertEquals("Invalid TIMESTAMP literal; failed to set 'expiration_timestamp' in OPTIONS()",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(expiration_timestamp=TIMESTAMP '2099-13-01 00:00:00 UTC')"))
+                        .getMessage());
+        assertEquals("Could not cast literal \"2099-02-30 00:00:00 UTC\" to type TIMESTAMP;"
+                        + " failed to set 'expiration_timestamp' in OPTIONS()",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(expiration_timestamp='2099-02-30 00:00:00 UTC')")).getMessage());
+    }
+
+    @Test
     void dropAndSchemaStatements() {
         SqlDialectTranslator.Statement drop = statement("DROP TABLE IF EXISTS ds.t");
         assertEquals(SqlDialectTranslator.StatementKind.DROP_TABLE, drop.kind());

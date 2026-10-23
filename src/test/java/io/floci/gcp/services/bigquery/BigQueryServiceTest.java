@@ -633,6 +633,21 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void alterSetOptionsDoesNotReviveAnExpiredTable() {
+        seedTwoRows();
+        Table patch = new Table();
+        patch.setExtra("expirationTime", String.valueOf(System.currentTimeMillis() - 1));
+        service.patchTable(PROJECT, DATASET, TABLE, patch);
+
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "ALTER TABLE ds1.t1 SET OPTIONS(expiration_timestamp=NULL)", null)).getGcpStatus());
+        assertEquals("SKIP", service.query(PROJECT, "US", null,
+                "ALTER TABLE IF EXISTS ds1.t1 SET OPTIONS(expiration_timestamp=NULL)", null).getDdlOperationPerformed());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, TABLE)).getGcpStatus());
+    }
+
+    @Test
     void rejectedDatasetPatchLeavesTheStoredDatasetUntouched() {
         Dataset created = newDataset(DATASET);
         created.setDescription("original");

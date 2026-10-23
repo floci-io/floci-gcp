@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -701,8 +702,13 @@ final class SqlDialectTranslator {
         }
         Map<String, String> labels = new LinkedHashMap<>();
         List<String> pair = new ArrayList<>();
+        boolean afterTuple = false;
         for (int k = 1; k < value.size() - 1; k++) {
             Token t = value.get(k);
+            boolean tupleStart = t.isKeyword("STRUCT") || (t.isPunct("(") && !value.get(k - 1).isKeyword("STRUCT"));
+            if (tupleStart && afterTuple) {
+                throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+            }
             if (t.kind == Kind.STRING) {
                 pair.add(t.value);
             } else if (t.isPunct(")")) {
@@ -711,15 +717,34 @@ final class SqlDialectTranslator {
                 }
                 labels.put(pair.get(0), pair.get(1));
                 pair.clear();
+                afterTuple = true;
+            } else if (t.isPunct(",") && pair.isEmpty() && !tupleOpen(value, k)) {
+                if (!afterTuple) {
+                    throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
+                }
+                afterTuple = false;
             } else if (!(t.isPunct("(") || t.isPunct(",") || t.isKeyword("STRUCT") || t.isKeyword("AS")
                     || (t.kind == Kind.IDENT && k > 0 && value.get(k - 1).isKeyword("AS")))) {
                 throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
             }
         }
-        if (!pair.isEmpty()) {
+        if (!pair.isEmpty() || (!labels.isEmpty() && !afterTuple)) {
             throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
         }
         return labels;
+    }
+
+    /** Whether the token at {@code index} sits inside a label tuple's parentheses. */
+    private static boolean tupleOpen(List<Token> value, int index) {
+        int depth = 0;
+        for (int k = 1; k < index; k++) {
+            if (value.get(k).isPunct("(")) {
+                depth++;
+            } else if (value.get(k).isPunct(")")) {
+                depth--;
+            }
+        }
+        return depth > 0;
     }
 
     /** {@code TIMESTAMP '...'} (or a plain string) as epoch milliseconds. */
@@ -737,11 +762,12 @@ final class SqlDialectTranslator {
         if (text.matches("-?\\d{4,}-\\d{2}-\\d{2}")) {
             text = text + " 00:00:00";
         }
-        String seconds = DuckTypes.timestampTextToSeconds(text);
         try {
-            return new BigDecimal(seconds).movePointRight(3).longValue();
-        } catch (NumberFormatException e) {
-            throw invalidQuery("Invalid TIMESTAMP literal for option expiration_timestamp: " + literal.value);
+            return new BigDecimal(DuckTypes.timestampTextToSeconds(text)).movePointRight(3).longValue();
+        } catch (NumberFormatException | DateTimeException | ArithmeticException e) {
+            String reason = value.size() == 2 ? "Invalid TIMESTAMP literal"
+                    : "Could not cast literal \"" + literal.value + "\" to type TIMESTAMP";
+            throw invalidQuery(reason + "; failed to set 'expiration_timestamp' in OPTIONS()");
         }
     }
 

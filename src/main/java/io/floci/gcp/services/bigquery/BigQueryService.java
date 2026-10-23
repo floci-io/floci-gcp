@@ -736,7 +736,8 @@ public class BigQueryService {
      */
     private Optional<Table> alterTarget(String projectId, SqlDialectTranslator.Statement statement) {
         SqlDialectTranslator.TableRef target = statement.target();
-        Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+        Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()))
+                .filter(table -> !expire(target.datasetId(), target.tableId(), table));
         if (existing.isEmpty()) {
             if (statement.ifExists()) {
                 return existing;

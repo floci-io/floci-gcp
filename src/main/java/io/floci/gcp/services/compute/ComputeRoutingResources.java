@@ -169,7 +169,7 @@ public class ComputeRoutingResources implements ComputeResourceHandler {
         }
     }
     private static ObjectNode reservation(ComputeService.Context c, String value) {
-        String key = c.path(value);
+        String key = value.contains("/") ? c.path(value) : "global/addresses/" + value;
         ObjectNode address = c.state.resources.entrySet().stream()
                 .filter(e -> e.getKey().startsWith("global/addresses/") && (e.getValue().path("address").asText().equals(value)
                         || e.getKey().equals(key)))

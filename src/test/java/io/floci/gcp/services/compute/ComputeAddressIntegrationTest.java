@@ -99,7 +99,7 @@ class ComputeAddressIntegrationTest extends ComputeTestSupport {
         done(root, post(root + "/global/addresses", Map.of("name", "web-ip")));
         String ip = given().get(root + "/global/addresses/web-ip").jsonPath().getString("address");
         List<String> forms = List.of("https://www.googleapis.com/compute/v1/projects/" + project + "/global/addresses/web-ip",
-                "projects/" + project + "/global/addresses/web-ip", "global/addresses/web-ip", ip);
+                "projects/" + project + "/global/addresses/web-ip", "global/addresses/web-ip", "web-ip", ip);
         int port = 8000;
         for (String form : forms) {
             String name = "rule-" + port;

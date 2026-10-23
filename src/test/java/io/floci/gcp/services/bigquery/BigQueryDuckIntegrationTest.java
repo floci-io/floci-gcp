@@ -433,6 +433,11 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[3].v", equalTo(List.of()))
                 .body("rows[0].f[4].v", equalTo(List.of()));
         query("""
+                {"query": "SELECT GENERATE_DATE_ARRAY('2024-01-01', NULL) IS NULL, ARRAY_LENGTH(GENERATE_DATE_ARRAY(NULL, '2024-01-03')), ARRAY_LENGTH(GENERATE_DATE_ARRAY('2024-01-03', '2024-01-01'))", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList("true", null, "0")));
+        query("""
                 {"query": "SELECT d FROM UNNEST(GENERATE_DATE_ARRAY('2024-01-01', '2024-01-03', INTERVAL 1 WEEK)) d", "useLegacySql": false}
                 """)
                 .then().statusCode(200)

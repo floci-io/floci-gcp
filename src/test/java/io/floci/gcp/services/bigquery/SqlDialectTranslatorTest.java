@@ -260,8 +260,8 @@ class SqlDialectTranslatorTest {
     @Test
     void generateDateArrayBecomesADateSeries() {
         assertEquals("SELECT (CASE WHEN (INTERVAL 1 DAY) = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
-                + " ELSE coalesce(CAST(generate_series(CAST(CAST(a AS DATE) AS TIMESTAMP), CAST(CAST(b AS DATE) AS TIMESTAMP),"
-                + " INTERVAL 1 DAY) AS DATE[]), CAST([] AS DATE[])) END) AS d FROM \"ds\".\"t\"",
+                + " ELSE CAST(generate_series(CAST(CAST(a AS DATE) AS TIMESTAMP), CAST(CAST(b AS DATE) AS TIMESTAMP),"
+                + " INTERVAL 1 DAY) AS DATE[]) END) AS d FROM \"ds\".\"t\"",
                 sql("SELECT GENERATE_DATE_ARRAY(a, b) AS d FROM ds.t"));
         assertTrue(sql("SELECT GENERATE_DATE_ARRAY(a, b, INTERVAL 1 MONTH) AS d FROM ds.t")
                 .contains("CAST(CAST(b AS DATE) AS TIMESTAMP), INTERVAL 1 MONTH) AS DATE[])"));

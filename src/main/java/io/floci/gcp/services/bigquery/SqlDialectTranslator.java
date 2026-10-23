@@ -2571,8 +2571,9 @@ final class SqlDialectTranslator {
 
     /**
      * {@code GENERATE_DATE_ARRAY(start, end[, INTERVAL n part])}: every date from start to end, both
-     * included, one day apart by default. DuckDB's generate_series steps the same way over timestamps, but
-     * returns NULL for a NULL bound where BigQuery returns an empty array, and BigQuery rejects a zero step.
+     * included, one day apart by default. DuckDB's generate_series steps the same way over timestamps and, like
+     * BigQuery, returns a NULL array for a NULL argument (which the response shows as {@code []}); BigQuery also
+     * rejects a zero step.
      */
     private static String generateDateArray(List<String> a) {
         if (a.size() < 2 || a.size() > 3) {
@@ -2580,8 +2581,8 @@ final class SqlDialectTranslator {
         }
         String step = a.size() == 3 ? a.get(2) : "INTERVAL 1 DAY";
         return "(CASE WHEN (" + step + ") = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
-                + " ELSE coalesce(CAST(generate_series(CAST(CAST(" + a.get(0) + " AS DATE) AS TIMESTAMP),"
-                + " CAST(CAST(" + a.get(1) + " AS DATE) AS TIMESTAMP), " + step + ") AS DATE[]), CAST([] AS DATE[]))"
+                + " ELSE CAST(generate_series(CAST(CAST(" + a.get(0) + " AS DATE) AS TIMESTAMP),"
+                + " CAST(CAST(" + a.get(1) + " AS DATE) AS TIMESTAMP), " + step + ") AS DATE[])"
                 + " END)";
     }
 

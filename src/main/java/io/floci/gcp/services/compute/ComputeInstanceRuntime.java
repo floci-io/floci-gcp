@@ -49,6 +49,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     static final List<String> IDLE_ENTRYPOINT = List.of("/bin/sh", "-c",
             "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done");
     private static final int STOP_TIMEOUT_SECONDS = 10;
+    /** Docker calls one start can make under {@code startLock}: create, start, network connect, remove on failure. */
+    private static final int DOCKER_CALLS_PER_START = 4;
 
     public enum Kind { LAUNCH, START, STOP, RESTART, REMOVE }
 
@@ -334,9 +336,10 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     /**
      * Stops this deployment's running instance containers on shutdown; they restart with the emulator. Steps are not
      * interrupted: Docker may still complete an interrupted create or start. Once {@code closed} is set no step brings
-     * a container up, and taking {@code startLock} waits for one already doing so, each bounded by the Docker API
-     * timeout, so the list below includes every container this process started. A step still pulling its image is
-     * not waited for; it sees {@code closed} after the pull and creates nothing.
+     * a container up, and taking {@code startLock} waits for one already doing so. That wait covers every Docker call a
+     * start can make, each bounded by the Docker API timeout, so with a responsive daemon the list below includes every
+     * container this process started; past it, teardown logs that a container may be left running. A step still
+     * pulling its image is not waited for; it sees {@code closed} after the pull and creates nothing.
      */
     @Override
     public void stopManagedContainers() {
@@ -346,7 +349,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         boolean quiet = false;
         try {
             quiet = startLock.writeLock().tryLock(
-                    config.docker().apiTimeout().toMillis() + TimeUnit.SECONDS.toMillis(STOP_TIMEOUT_SECONDS),
+                    DOCKER_CALLS_PER_START * config.docker().apiTimeout().toMillis()
+                            + TimeUnit.SECONDS.toMillis(STOP_TIMEOUT_SECONDS),
                     TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

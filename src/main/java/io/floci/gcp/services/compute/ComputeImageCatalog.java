@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Maps a Compute image to the Docker image an instance container runs. An entry matches an image whose
@@ -63,7 +64,7 @@ public class ComputeImageCatalog {
     private List<Entry> load() {
         try {
             JsonNode root;
-            var custom = config.services().compute().imageCatalogPath().filter(p -> !p.isBlank());
+            Optional<String> custom = config.services().compute().imageCatalogPath().filter(p -> !p.isBlank());
             if (custom.isPresent()) {
                 root = new ObjectMapper().readTree(Files.readAllBytes(Path.of(custom.get())));
             } else {

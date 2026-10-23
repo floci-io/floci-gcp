@@ -22,7 +22,9 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -33,7 +35,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * operation run in order on a bounded executor, and the operation reaches DONE only once they finish (see
  * {@link #finished}). A container that cannot be created leaves the instance running without one: the API
  * state never depends on Docker. Instance containers carry no state of their own on the resource; they are found
- * by a name derived from project, zone and instance name.
+ * by a name derived from project, zone and instance name, and a container another deployment owns under that name
+ * (see {@link ContainerStorageHelper#ownedBy}) is never stopped, restarted or removed. Steps for one instance run one
+ * at a time, in submission order.
  */
 @ApplicationScoped
 public class ComputeInstanceRuntime implements ContainerTeardown {
@@ -59,6 +63,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final ImageCacheService imageCache;
     private final Map<String, Tracked> operations = new ConcurrentHashMap<>();
+    private final Map<String, Object> instanceLocks = new ConcurrentHashMap<>();
     private final ExecutorService executor;
 
     @Inject
@@ -85,17 +90,22 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     public void submit(String operationKey, List<Intent> intents) {
         long deadline = System.currentTimeMillis() + config.services().compute().launchTimeout().toMillis();
         operations.put(operationKey, new Tracked(Phase.PROVISIONING, deadline));
-        executor.execute(() -> {
-            try {
-                for (Intent intent : intents) {
-                    run(operationKey, intent);
+        try {
+            executor.execute(() -> {
+                try {
+                    for (Intent intent : intents) {
+                        run(operationKey, intent);
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warnf("Compute instance container step failed for operation %s: %s", operationKey, e.getMessage());
+                } finally {
+                    operations.computeIfPresent(operationKey, (key, tracked) -> new Tracked(Phase.DONE, tracked.deadline()));
                 }
-            } catch (RuntimeException e) {
-                LOG.warnf("Compute instance container step failed for operation %s: %s", operationKey, e.getMessage());
-            } finally {
-                operations.computeIfPresent(operationKey, (key, tracked) -> new Tracked(Phase.DONE, tracked.deadline()));
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.warnf("Compute instance container steps for operation %s skipped: the emulator is shutting down", operationKey);
+            operations.computeIfPresent(operationKey, (key, tracked) -> new Tracked(Phase.DONE, tracked.deadline()));
+        }
     }
 
     /**
@@ -124,10 +134,17 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     private void run(String operationKey, Intent intent) {
         String name = containerName(intent.project(), intent.zone(), intent.name());
+        synchronized (instanceLocks.computeIfAbsent(name, key -> new Object())) {
+            step(operationKey, intent, name);
+        }
+    }
+
+    private void step(String operationKey, Intent intent, String name) {
         switch (intent.kind()) {
             case LAUNCH -> launch(operationKey, intent, name);
             case START -> {
                 Optional<Container> existing = lifecycleManager.findByName(name);
+                if (existing.isPresent() && !owned(existing.get(), name)) { return; }
                 if (existing.isEmpty()) {
                     launch(operationKey, intent, name);
                 } else {
@@ -142,7 +159,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     });
                 }
             }
-            case STOP -> lifecycleManager.findByName(name).ifPresent(container ->
+            case STOP -> ownedContainer(name).ifPresent(container ->
                     lifecycleManager.runDockerApi("stop Compute instance " + name, () -> {
                         try {
                             lifecycleManager.getDockerClient().stopContainerCmd(container.getId())
@@ -152,21 +169,47 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                         }
                         return null;
                     }));
-            case RESTART -> lifecycleManager.findByName(name).ifPresent(container ->
+            case RESTART -> ownedContainer(name).ifPresent(container ->
                     lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
                         lifecycleManager.getDockerClient().restartContainerCmd(container.getId())
                                 .withTimeout(0).exec();
                         return null;
                     }));
-            case REMOVE -> lifecycleManager.removeIfExists(name);
+            case REMOVE -> ownedContainer(name).ifPresent(container -> lifecycleManager.forceRemove(container.getId(), null));
         }
+    }
+
+    /** The container named {@code name} when this deployment owns it; another deployment's is left alone. */
+    private Optional<Container> ownedContainer(String name) {
+        return lifecycleManager.findByName(name).filter(container -> owned(container, name));
+    }
+
+    private boolean owned(Container container, String name) {
+        if (ContainerStorageHelper.ownedBy(config, container.getLabels())) { return true; }
+        LOG.warnf("Container %s belongs to another floci-gcp deployment on this Docker daemon; leaving it alone", name);
+        return false;
+    }
+
+    /** Whether the operation stopped waiting for its container (timed out, or already finished and forgotten). */
+    private boolean expired(String operationKey) {
+        Tracked tracked = operations.get(operationKey);
+        return tracked == null || tracked.phase() == Phase.DONE || System.currentTimeMillis() > tracked.deadline();
     }
 
     private void launch(String operationKey, Intent intent, String name) {
         try {
             imageCache.ensureImageExists(intent.image());
+            if (expired(operationKey)) {
+                LOG.warnf("Compute instance %s/%s/%s: the image arrived after its operation finished; not creating a container",
+                        intent.project(), intent.zone(), intent.name());
+                return;
+            }
             stage(operationKey);
-            lifecycleManager.removeIfExists(name);
+            Optional<Container> existing = lifecycleManager.findByName(name);
+            if (existing.isPresent()) {
+                if (!owned(existing.get(), name)) { return; }
+                lifecycleManager.forceRemove(existing.get().getId(), null);
+            }
             lifecycleManager.createAndStart(spec(intent, name));
             LOG.infof("Started Compute instance container=%s image=%s", name, intent.image());
         } catch (RuntimeException e) {
@@ -204,8 +247,9 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     /**
      * Brings this deployment's instance containers in line with the stored instances after a restart: a RUNNING
-     * instance's container is started again, a TERMINATED instance keeps its stopped container, and a container
-     * whose instance no longer exists is removed. {@code status} answers an instance's status, or null when it
+     * instance's container is started again, a TERMINATED instance's container is stopped if it still runs (the
+     * emulator stopped after saving the stop but before Docker stopped it), and a container whose instance no longer
+     * exists is removed. {@code status} answers an instance's status, or null when it
      * does not exist. Runs on the executor so startup does not wait for Docker.
      */
     public void reconcile(StatusLookup status) {
@@ -225,6 +269,9 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 if (current == null) {
                     LOG.infof("Removing container of deleted Compute instance container=%s", container.getId());
                     lifecycleManager.forceRemove(container.getId(), null);
+                } else if (current.equals("TERMINATED") && "running".equals(container.getState())) {
+                    LOG.infof("Stopping container of stopped Compute instance %s/%s/%s", project, zone, name);
+                    stop(container.getId());
                 } else if (current.equals("RUNNING") && !"running".equals(container.getState())) {
                     LOG.infof("Restarting container of running Compute instance %s/%s/%s", project, zone, name);
                     try {
@@ -247,21 +294,38 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         String apply(String project, String zone, String name);
     }
 
-    /** Stops this deployment's running instance containers on shutdown; they restart with the emulator. */
+    /**
+     * Stops this deployment's running instance containers on shutdown; they restart with the emulator. The workers
+     * stop first, so no launch creates a container after the list below is taken.
+     */
     @Override
     public void stopManagedContainers() {
         if (!enabled()) { return; }
-        for (Container container : ownedContainers()) {
-            if (!"running".equals(container.getState())) { continue; }
-            try {
-                lifecycleManager.runDockerApi("stop Compute instance " + container.getId(), () -> {
-                    lifecycleManager.getDockerClient().stopContainerCmd(container.getId())
-                            .withTimeout(STOP_TIMEOUT_SECONDS).exec();
-                    return null;
-                });
-            } catch (RuntimeException e) {
-                LOG.warnf("Could not stop Compute instance container %s: %s", container.getId(), e.getMessage());
+        executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                LOG.warn("Compute instance container steps still running at shutdown");
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        for (Container container : ownedContainers()) {
+            if ("running".equals(container.getState())) { stop(container.getId()); }
+        }
+    }
+
+    private void stop(String containerId) {
+        try {
+            lifecycleManager.runDockerApi("stop Compute instance " + containerId, () -> {
+                try {
+                    lifecycleManager.getDockerClient().stopContainerCmd(containerId).withTimeout(STOP_TIMEOUT_SECONDS).exec();
+                } catch (NotModifiedException alreadyStopped) {
+                    LOG.debugv("Compute instance container {0} was already stopped", containerId);
+                }
+                return null;
+            });
+        } catch (RuntimeException e) {
+            LOG.warnf("Could not stop Compute instance container %s: %s", containerId, e.getMessage());
         }
     }
 

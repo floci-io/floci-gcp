@@ -77,7 +77,7 @@ class ComputeInstanceRuntimeTest {
         runtime.submit("op", List.of(intent(Kind.LAUNCH)));
 
         verify(imageCache).ensureImageExists("debian:12");
-        verify(lifecycleManager).removeIfExists(CONTAINER);
+        verify(lifecycleManager, never()).forceRemove(any(), any());
         verify(lifecycleManager).createAndStart(any());
         verify(builder).withName(CONTAINER);
         verify(builder).withEntrypoint(ComputeInstanceRuntime.IDLE_ENTRYPOINT);
@@ -147,7 +147,55 @@ class ComputeInstanceRuntimeTest {
 
         verify(docker.stopContainerCmd("c-1").withTimeout(10)).exec();
         verify(docker.restartContainerCmd("c-1").withTimeout(0)).exec();
-        verify(lifecycleManager).removeIfExists(CONTAINER);
+        verify(lifecycleManager).forceRemove(eq("c-1"), isNull());
+    }
+
+    @Test
+    void launchReplacesALeftoverContainerThisDeploymentOwns() {
+        Container old = container("old", "exited", identity("vm", "4588"));
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(old));
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(lifecycleManager).forceRemove(eq("old"), isNull());
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void aContainerAnotherDeploymentOwnsUnderTheSameNameIsNeverTouched() {
+        Container theirs = container("theirs", "running", identity("vm", "4599"));
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(theirs));
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH), intent(Kind.START), intent(Kind.STOP),
+                intent(Kind.RESTART), intent(Kind.REMOVE)));
+
+        verify(lifecycleManager, never()).forceRemove(any(), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        verify(docker, never()).startContainerCmd("theirs");
+        verify(docker, never()).stopContainerCmd("theirs");
+        verify(docker, never()).restartContainerCmd("theirs");
+        assertTrue(runtime.finished("op"));
+    }
+
+    @Test
+    void aLaunchWhoseOperationTimedOutDuringThePullCreatesNoContainer() {
+        when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMillis(-1));
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(imageCache).ensureImageExists("debian:12");
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void stepsSubmittedAfterTeardownAreSkippedAndTheirOperationFinishes() {
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of());
+        runtime.stopManagedContainers();
+
+        runtime.submit("late", List.of(intent(Kind.LAUNCH)));
+
+        verify(imageCache, never()).ensureImageExists(anyString());
+        assertTrue(runtime.finished("late"));
     }
 
     @Test
@@ -174,10 +222,11 @@ class ComputeInstanceRuntimeTest {
     }
 
     @Test
-    void reconcileRestartsRunningInstancesRemovesDeletedOnesAndLeavesOtherOwners() {
+    void reconcileRestartsRunningInstancesStopsTerminatedOnesRemovesDeletedOnesAndLeavesOtherOwners() {
         List<Container> containers = List.of(
                 container("running-stopped", "exited", identity("vm-running", "4588")),
                 container("terminated", "exited", identity("vm-stopped", "4588")),
+                container("terminated-running", "running", identity("vm-stopped", "4588")),
                 container("deleted", "running", identity("vm-gone", "4588")),
                 container("foreign", "running", identity("vm-gone", "4599")));
         when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(containers);
@@ -187,6 +236,8 @@ class ComputeInstanceRuntimeTest {
 
         verify(docker.startContainerCmd("running-stopped")).exec();
         verify(docker, never()).startContainerCmd("terminated");
+        verify(docker, never()).stopContainerCmd("terminated");
+        verify(docker.stopContainerCmd("terminated-running").withTimeout(10)).exec();
         verify(lifecycleManager).forceRemove(eq("deleted"), isNull());
         verify(lifecycleManager, never()).forceRemove(eq("foreign"), any());
         verify(lifecycleManager, never()).forceRemove(eq("terminated"), any());

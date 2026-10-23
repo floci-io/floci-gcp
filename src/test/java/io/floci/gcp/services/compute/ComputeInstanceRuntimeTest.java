@@ -1,0 +1,239 @@
+package io.floci.gcp.services.compute;
+
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.Container;
+import com.google.common.util.concurrent.MoreExecutors;
+import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.docker.ContainerBuilder;
+import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
+import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.ImageCacheService;
+import io.floci.gcp.services.compute.ComputeInstanceRuntime.Intent;
+import io.floci.gcp.services.compute.ComputeInstanceRuntime.Kind;
+import io.floci.gcp.services.compute.ComputeInstanceRuntime.Phase;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class ComputeInstanceRuntimeTest {
+
+    private static final String CONTAINER = "floci-gcp-compute-p-us-central1-a-vm";
+
+    private EmulatorConfig config;
+    private ContainerBuilder.Builder builder;
+    private ContainerLifecycleManager lifecycleManager;
+    private ImageCacheService imageCache;
+    private DockerClient docker;
+    private ComputeInstanceRuntime runtime;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().compute().mock()).thenReturn(false);
+        when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMinutes(5));
+        when(config.services().compute().instanceResourceLimits()).thenReturn(true);
+        when(config.services().compute().reconcileContainersOnStartup()).thenReturn(true);
+        when(config.services().compute().dockerNetwork()).thenReturn(Optional.empty());
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4588);
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+        lifecycleManager = mock(ContainerLifecycleManager.class);
+        docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(docker);
+        doAnswer(invocation -> invocation.<Callable<?>>getArgument(1).call())
+                .when(lifecycleManager).runDockerApi(anyString(), any());
+        imageCache = mock(ImageCacheService.class);
+        runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager, imageCache,
+                MoreExecutors.newDirectExecutorService());
+    }
+
+    @Test
+    void launchPullsTheImageAndStartsAnIdleLabelledContainerBoundByTheMachineType() {
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(imageCache).ensureImageExists("debian:12");
+        verify(lifecycleManager).removeIfExists(CONTAINER);
+        verify(lifecycleManager).createAndStart(any());
+        verify(builder).withName(CONTAINER);
+        verify(builder).withEntrypoint(ComputeInstanceRuntime.IDLE_ENTRYPOINT);
+        verify(builder).withNanoCpus(2_000_000_000L);
+        verify(builder).withMemoryMb(8192);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+        verify(builder).withLabels(labels.capture());
+        assertEquals(Map.of("io.floci", "gcp", "io.floci.service", "compute", "io.floci.resource-id", "vm",
+                "io.floci.project", "p", "io.floci.location", "us-central1-a", "io.floci.owner", "4588"),
+                labels.getValue());
+        assertEquals(Phase.DONE, runtime.phase("op"));
+    }
+
+    @Test
+    void resourceLimitsCanBeTurnedOff() {
+        when(config.services().compute().instanceResourceLimits()).thenReturn(false);
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(builder, never()).withNanoCpus(any(Long.class));
+        verify(builder, never()).withMemoryMb(any(Integer.class));
+    }
+
+    @Test
+    void aFailedLaunchStillFinishesTheOperationWithoutAContainer() {
+        doThrow(new RuntimeException("pull denied")).when(imageCache).ensureImageExists("debian:12");
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(lifecycleManager, never()).createAndStart(any());
+        assertTrue(runtime.finished("op"));
+    }
+
+    @Test
+    void phaseIsStagingOnceTheImageIsPresentAndTheContainerIsBeingCreated() {
+        Phase[] seen = new Phase[1];
+        when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
+            seen[0] = runtime.phase("op");
+            return null;
+        });
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        assertEquals(Phase.STAGING, seen[0]);
+    }
+
+    @Test
+    void startRunsTheExistingContainerOrLaunchesAMissingOne() {
+        Container existing = container("c-1", "exited", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(existing));
+        runtime.submit("op-1", List.of(intent(Kind.START)));
+        verify(docker.startContainerCmd("c-1")).exec();
+        verify(lifecycleManager, never()).createAndStart(any());
+
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.empty());
+        runtime.submit("op-2", List.of(intent(Kind.START)));
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void stopRestartAndRemoveDriveTheNamedContainer() {
+        Container running = container("c-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+
+        runtime.submit("op", List.of(intent(Kind.STOP), intent(Kind.RESTART), intent(Kind.REMOVE)));
+
+        verify(docker.stopContainerCmd("c-1").withTimeout(10)).exec();
+        verify(docker.restartContainerCmd("c-1").withTimeout(0)).exec();
+        verify(lifecycleManager).removeIfExists(CONTAINER);
+    }
+
+    @Test
+    void untrackedOperationsAndOperationsPastTheLaunchTimeoutCountAsFinished() {
+        assertTrue(runtime.finished("never-submitted"));
+
+        when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMillis(-1));
+        ComputeInstanceRuntime slow = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class), lifecycleManager,
+                imageCache, mock(java.util.concurrent.ExecutorService.class));
+        slow.submit("stuck", List.of(intent(Kind.LAUNCH)));
+        assertTrue(slow.finished("stuck"));
+    }
+
+    @Test
+    void forgetDropsTheTrackedOperation() {
+        ComputeInstanceRuntime pending = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
+                lifecycleManager, imageCache, mock(java.util.concurrent.ExecutorService.class));
+        pending.submit("op", List.of(intent(Kind.LAUNCH)));
+        assertEquals(Phase.PROVISIONING, pending.phase("op"));
+
+        pending.forget("op");
+
+        assertEquals(Phase.DONE, pending.phase("op"));
+    }
+
+    @Test
+    void reconcileRestartsRunningInstancesRemovesDeletedOnesAndLeavesOtherOwners() {
+        List<Container> containers = List.of(
+                container("running-stopped", "exited", identity("vm-running", "4588")),
+                container("terminated", "exited", identity("vm-stopped", "4588")),
+                container("deleted", "running", identity("vm-gone", "4588")),
+                container("foreign", "running", identity("vm-gone", "4599")));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(containers);
+        Map<String, String> statuses = Map.of("vm-running", "RUNNING", "vm-stopped", "TERMINATED");
+
+        runtime.reconcile((project, zone, name) -> statuses.get(name));
+
+        verify(docker.startContainerCmd("running-stopped")).exec();
+        verify(docker, never()).startContainerCmd("terminated");
+        verify(lifecycleManager).forceRemove(eq("deleted"), isNull());
+        verify(lifecycleManager, never()).forceRemove(eq("foreign"), any());
+        verify(lifecycleManager, never()).forceRemove(eq("terminated"), any());
+    }
+
+    @Test
+    void reconcileAndTeardownDoNothingInMockMode() {
+        when(config.services().compute().mock()).thenReturn(true);
+
+        runtime.reconcile((project, zone, name) -> null);
+        runtime.stopManagedContainers();
+
+        verify(lifecycleManager, never()).listContainersByLabels(anyString(), any());
+    }
+
+    @Test
+    void teardownStopsOnlyRunningContainersThisDeploymentOwns() {
+        List<Container> containers = List.of(
+                container("mine", "running", identity("a", "4588")),
+                container("mine-stopped", "exited", identity("b", "4588")),
+                container("foreign", "running", identity("c", "4599")));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(containers);
+
+        runtime.stopManagedContainers();
+
+        verify(docker.stopContainerCmd("mine").withTimeout(10)).exec();
+        verify(docker, never()).stopContainerCmd("mine-stopped");
+        verify(docker, never()).stopContainerCmd("foreign");
+    }
+
+    private static Intent intent(Kind kind) {
+        return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192);
+    }
+
+    private static Map<String, String> identity(String name, String owner) {
+        Map<String, String> labels = new HashMap<>(Map.of("floci", "true", "floci_emulator", "floci-gcp",
+                "io.floci.service", "compute", "io.floci.project", "p", "io.floci.location", "us-central1-a",
+                "io.floci.resource-id", name));
+        labels.put("io.floci.owner", owner);
+        return labels;
+    }
+
+    private static Container container(String id, String state, Map<String, String> labels) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getState()).thenReturn(state);
+        when(container.getLabels()).thenReturn(labels);
+        return container;
+    }
+}

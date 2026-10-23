@@ -2,7 +2,9 @@
 
 Compute Engine uses its native REST v1 paths under `/compute/v1/projects/{project}`
 on port 4588. Configure SDK endpoints explicitly and use synthetic credentials.
-The emulator does not execute virtual machines or forward network traffic.
+By default the emulator does not execute virtual machines or forward network traffic.
+With `FLOCI_GCP_SERVICES_COMPUTE_MOCK=false` each instance runs as a Docker container;
+see [Instance containers](#instance-containers).
 
 Set `FLOCI_GCP_SERVICES_COMPUTE_ENABLED=false` to disable the service.
 `FLOCI_GCP_SERVICES_COMPUTE_OPERATION_DELAY_MS` defaults to 50 ms.
@@ -124,3 +126,50 @@ not the IP attached to its instance or forwarding rule. The attached address
 remains unavailable to the allocator until the consumer releases it. This follows
 [Google's API release semantics](https://docs.cloud.google.com/vpc/docs/reserve-static-external-ip-address#release_ip),
 which differ from the Cloud console's restriction on releasing in-use addresses.
+
+## Instance containers
+
+Set `FLOCI_GCP_SERVICES_COMPUTE_MOCK=false` to back every instance with a Docker
+container. This mode is opt-in, and it needs the Docker socket, as GKE and Cloud
+Run do. The API stays the same in both modes; only these behaviours change:
+
+| API call | Container |
+|---|---|
+| `instances.insert` | Pulls the boot image's Docker image (status `PROVISIONING`), then creates and starts the container (`STAGING`). The operation reaches `DONE` and the instance `RUNNING` once the container is up |
+| `instances.stop` | `docker stop`, then `TERMINATED`. The stopped container is kept, as a stopped VM keeps its boot disk |
+| `instances.start` | `docker start` of the kept container, or a new one if it is gone |
+| `instances.reset` | `docker restart` |
+| `instances.setMachineType` | Removes the stopped container, so the next start creates one with the new limits |
+| `instances.delete` | `docker rm -f` |
+
+The container runs the boot image's Docker image with an idle init process, so
+nothing in it runs until you exec into it (`docker exec -it <container> bash`).
+Startup scripts, the metadata server and SSH come in later releases. The
+container is named `floci-gcp-compute-<project>-<zone>-<instance>` and carries
+the [resource identity labels](../configuration/docker-compose.md#resource-identity-labels)
+with `io.floci.service=compute`. With `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS`
+on (the default), it is limited to the machine type's vCPUs and memory.
+
+**Images.** The boot disk's source image picks the Docker image. A bundled
+catalog matches on the image's `family` first, then on its name prefix:
+`debian-12` maps to `debian:12`, `ubuntu-2204-lts` to `ubuntu:22.04`,
+`rocky-linux-9` to `rockylinux:9`, and so on. Anything else runs
+`FLOCI_GCP_SERVICES_COMPUTE_DEFAULT_IMAGE` (`debian:12`), with a warning in the log.
+To use your own mapping, point `FLOCI_GCP_SERVICES_COMPUTE_IMAGE_CATALOG_PATH` at a
+JSON file in the same format as `compute/image-catalog.json`:
+
+```json
+{"images": [{"family": "golden", "prefixes": ["golden-"], "dockerImage": "registry.local/golden:1"}]}
+```
+
+**Failures.** If Docker is unreachable, the pull fails, or the container is not
+up within `FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT` (5 minutes), the instance
+still reaches `RUNNING`, without a container, and a warning is logged. The API
+never fails because of Docker.
+
+**Restarts.** On shutdown, floci-gcp stops the running instance containers. On
+startup it starts the containers of `RUNNING` instances again, keeps those of
+`TERMINATED` instances, and removes those whose instance was deleted. It only
+touches containers that carry its own `io.floci.owner` label, so several
+emulators can share one Docker daemon.
+

@@ -39,15 +39,20 @@ public class ComputeService {
     private final ServiceRegistry registry;
     private final Instance<ComputeResourceHandler> handlers;
     private final LocationCatalog locations;
+    private final ComputeInstanceRuntime runtime;
+    private final ComputeImageCatalog images;
 
     @Inject
     public ComputeService(StorageFactory factory, EmulatorConfig config, ServiceRegistry registry,
-                          Instance<ComputeResourceHandler> handlers, LocationCatalog locations) {
+                          Instance<ComputeResourceHandler> handlers, LocationCatalog locations,
+                          ComputeInstanceRuntime runtime, ComputeImageCatalog images) {
         this.store = (ProjectAwareStorageBackend<ComputeProject>) factory.<ComputeProject>create("compute", "compute.json", new TypeReference<Map<String, ComputeProject>>() {});
         this.config = config;
         this.registry = registry;
         this.handlers = handlers;
         this.locations = locations;
+        this.runtime = runtime;
+        this.images = images;
     }
     void start(@Observes StartupEvent event) {
         config.services().compute().regions().ifPresent(allowed -> allowed.stream()
@@ -56,6 +61,12 @@ public class ComputeService {
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
                 .storageKey("compute").resourceClasses(ComputeController.class)
                 .api("compute.googleapis.com", "Compute Engine API").build());
+        runtime.reconcile(this::instanceStatus);
+    }
+    /** The stored status of an instance, or null when it does not exist. */
+    synchronized String instanceStatus(String project, String zone, String name) {
+        ObjectNode instance = state(project).resources.get("zones/" + zone + "/instances/" + name);
+        return instance == null ? null : instance.path("status").asText();
     }
     private ComputeProject state(String project) {
         if (project == null || !project.matches("[A-Za-z0-9][A-Za-z0-9:.-]{0,127}")) {
@@ -64,9 +75,19 @@ public class ComputeService {
         ComputeProject state = JSON.convertValue(store.getForProject(project, "state").orElseGet(ComputeProject::new), ComputeProject.class);
         boolean changed = false;
         long now = System.currentTimeMillis();
-        for (ComputeOperation op : state.operations.values()) {
+        for (Map.Entry<String, ComputeOperation> entry : state.operations.entrySet()) {
+            ComputeOperation op = entry.getValue();
             if (!op.response.path("status").asText().equals("DONE")) {
                 String status = now >= op.readyAt ? "DONE" : now >= op.startedAt ? "RUNNING" : "PENDING";
+                if (op.awaitRuntime) {
+                    ComputeInstanceRuntime.Phase phase = runtime.phase(entry.getKey());
+                    if (phase != ComputeInstanceRuntime.Phase.DONE) {
+                        status = now >= op.startedAt ? "RUNNING" : "PENDING";
+                        if (phase == ComputeInstanceRuntime.Phase.STAGING) { staging(state, op); }
+                    } else if (status.equals("DONE")) {
+                        runtime.forget(entry.getKey());
+                    }
+                }
                 op.response.put("status", status).put("progress", status.equals("DONE") ? 100 : status.equals("RUNNING") ? 50 : 0);
                 if (!status.equals("PENDING")) {
                     op.response.put("startTime", Instant.ofEpochMilli(op.startedAt).toString());
@@ -86,6 +107,15 @@ public class ComputeService {
             save(project, state);
         }
         return state;
+    }
+    /** Shows STAGING on the instances an unfinished operation brings to RUNNING once their container is being created. */
+    private static void staging(ComputeProject state, ComputeOperation op) {
+        op.finalStates.forEach((key, terminal) -> {
+            ObjectNode resource = state.resources.get(key);
+            if (terminal.equals("RUNNING") && resource != null && resource.path("status").asText().equals("PROVISIONING")) {
+                resource.put("status", "STAGING");
+            }
+        });
     }
     private void save(String project, ComputeProject state) {
         store.putForProject(project, "state", state);
@@ -332,6 +362,7 @@ public class ComputeService {
         op.startedAt = now + delay / 2;
         op.readyAt = now + delay;
         op.finalStates.putAll(c.finalStates);
+        op.awaitRuntime = !c.intents.isEmpty();
         String operationName = "operation-" + UUID.randomUUID();
         String operationKey = c.scope() + "/operations/" + operationName;
         op.response = object().put("kind", "compute#operation").put("id", Long.toString(++c.state.sequence))
@@ -343,6 +374,7 @@ public class ComputeService {
         if (requestId != null) { op.response.put("clientOperationId", requestId); c.state.requests.put(requestKey, operationKey); }
         c.state.operations.put(operationKey, op);
         save(c.project, c.state);
+        if (op.awaitRuntime) { runtime.submit(operationKey, List.copyOf(c.intents)); }
         return op.response.deepCopy();
     }
     /** Images of a public image project are readable by every project; nothing else in it is. */
@@ -484,6 +516,7 @@ public class ComputeService {
         private final String project, scope, collection, name, action;
         public final ComputeProject state;
         private Map<String, String> finalStates = new LinkedHashMap<>();
+        private List<ComputeInstanceRuntime.Intent> intents = new ArrayList<>();
         private Map<String, String> query = Map.of();
         Context(String project, String scope, String collection, String name, String action, ComputeProject state) {
             this.project = project; this.scope = scope; this.collection = collection; this.name = name; this.action = action; this.state = state;
@@ -500,6 +533,7 @@ public class ComputeService {
         public Context child(String path) {
             Context child = context(project, path, state);
             child.finalStates = finalStates;
+            child.intents = intents;
             return child;
         }
         public ObjectNode require(String ref) {
@@ -533,6 +567,43 @@ public class ComputeService {
             return result;
         }
         public void put(String key, ObjectNode value) { state.resources.put(key, value); }
+        /**
+         * Records a container step for an instance, run once the mutation is committed. Nothing is recorded in mock
+         * mode. LAUNCH and START carry the boot image's Docker image and the machine type's vCPUs and memory.
+         */
+        public void runtime(ComputeInstanceRuntime.Kind kind, ObjectNode instance) {
+            if (!runtime.enabled()) { return; }
+            String image = null;
+            int cpus = 0, memoryMb = 0;
+            if (kind == ComputeInstanceRuntime.Kind.LAUNCH || kind == ComputeInstanceRuntime.Kind.START) {
+                image = bootDockerImage(instance);
+                String machine = instance.path("machineType").asText();
+                machine = machine.substring(machine.lastIndexOf('/') + 1);
+                try {
+                    cpus = Integer.parseInt(machine.substring(machine.lastIndexOf('-') + 1));
+                    memoryMb = cpus * 4096;
+                } catch (NumberFormatException e) {
+                    cpus = 0;
+                }
+            }
+            intents.add(new ComputeInstanceRuntime.Intent(kind, project, scope.substring(scope.indexOf('/') + 1),
+                    instance.path("name").asText(), image, cpus, memoryMb));
+        }
+        private String bootDockerImage(ObjectNode instance) {
+            for (JsonNode attachment : instance.path("disks")) {
+                if (!attachment.path("boot").asBoolean()) { continue; }
+                ObjectNode disk = state.resources.get(path(attachment.path("source").asText()));
+                String sourceImage = disk == null ? "" : disk.path("sourceImage").asText();
+                ObjectNode image = sourceImage.isEmpty() ? null
+                        : ComputePublicImages.isPublicReference(sourceImage)
+                                ? ComputePublicImages.resolve(sourceImage).orElse(null)
+                                : state.resources.get(path(sourceImage));
+                if (image != null) {
+                    return images.dockerImage(image.path("name").asText(null), image.path("family").asText(null));
+                }
+            }
+            return images.dockerImage(null, null);
+        }
         public void transition(ObjectNode resource, String initial, String terminal) {
             resource.put("status", initial);
             finalStates.put(path(resource.path("selfLink").asText()), terminal);

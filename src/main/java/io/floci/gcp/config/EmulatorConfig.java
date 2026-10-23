@@ -156,6 +156,28 @@ public interface EmulatorConfig {
          * location catalog. Env: FLOCI_GCP_SERVICES_COMPUTE_REGIONS
          */
         Optional<List<String>> regions();
+        /**
+         * Keeps instances in memory without Docker containers. Containers are opt-in while the runtime matures.
+         * Env: FLOCI_GCP_SERVICES_COMPUTE_MOCK
+         */
+        @WithDefault("true")
+        boolean mock();
+        /** Docker image for boot images the catalog does not map. Env: FLOCI_GCP_SERVICES_COMPUTE_DEFAULT_IMAGE */
+        @WithDefault("debian:12")
+        String defaultImage();
+        /** JSON file that replaces the bundled image catalog. Env: FLOCI_GCP_SERVICES_COMPUTE_IMAGE_CATALOG_PATH */
+        Optional<String> imageCatalogPath();
+        /** Docker network for instance containers; falls back to floci-gcp.services.docker-network. */
+        Optional<String> dockerNetwork();
+        /** Bounds each instance container by its machine type's vCPUs and memory. */
+        @WithDefault("true")
+        boolean instanceResourceLimits();
+        /** At startup, restarts containers of RUNNING instances and removes those of deleted instances. */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+        /** Longest an operation waits for its container before the instance continues without one. */
+        @WithDefault("5m")
+        Duration launchTimeout();
     }
 
     interface ServicesConfig {

@@ -11,5 +11,7 @@ public class ComputeOperation {
     public long startedAt;
     public long readyAt;
     public boolean deleted;
+    /** True while the instance containers this operation starts or stops gate its completion. */
+    public boolean awaitRuntime;
     public Map<String, String> finalStates = new LinkedHashMap<>();
 }

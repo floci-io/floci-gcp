@@ -180,6 +180,13 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | When `true`, leave spawned k3s containers running after floci-gcp shuts down |
 | `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl`: `host` (a reachable `host:port`) or `network` (the container's network address, for emulator-in-Docker setups) |
 | `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
+| `FLOCI_GCP_SERVICES_COMPUTE_MOCK` | `true` | When `false`, run each Compute Engine instance as a Docker container (see [Compute Engine](../services/compute.md#instance-containers)) |
+| `FLOCI_GCP_SERVICES_COMPUTE_DEFAULT_IMAGE` | `debian:12` | Docker image for boot images the Compute image catalog does not map |
+| `FLOCI_GCP_SERVICES_COMPUTE_IMAGE_CATALOG_PATH` | _(none)_ | JSON file that replaces the bundled Compute image catalog |
+| `FLOCI_GCP_SERVICES_COMPUTE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for Compute instance containers only |
+| `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS` | `true` | Bound each instance container by its machine type's vCPUs and memory |
+| `FLOCI_GCP_SERVICES_COMPUTE_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | At startup, restart the containers of RUNNING instances and remove those of deleted instances |
+| `FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT` | `5m` | Longest a Compute operation waits for its container before the instance continues without one |
 
 ---
 

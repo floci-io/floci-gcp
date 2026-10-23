@@ -64,6 +64,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         if (boots != 1) { throw GcpException.invalidArgument("Exactly one boot disk is required"); }
         c.transition(r, "PROVISIONING", "RUNNING");
         r.put("lastStartTimestamp", Instant.now().toString());
+        c.runtime(ComputeInstanceRuntime.Kind.LAUNCH, r);
     }
     private void machine(ComputeService.Context c, ObjectNode r) {
         c.reference(r, "machineType", "machineTypes");
@@ -143,6 +144,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                     for (JsonNode access : nic.path("accessConfigs")) { if (!access.has("natIP")) { access(c, r, (ObjectNode) access); } }
                 }
                 c.transition(r, "PROVISIONING", "RUNNING"); r.put("lastStartTimestamp", Instant.now().toString());
+                c.runtime(ComputeInstanceRuntime.Kind.START, r);
             }
             case "stop" -> {
                 requireState(r, "RUNNING");
@@ -153,9 +155,17 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                     }
                 }
                 c.transition(r, "STOPPING", "TERMINATED"); r.put("lastStopTimestamp", Instant.now().toString());
+                c.runtime(ComputeInstanceRuntime.Kind.STOP, r);
             }
-            case "reset" -> { requireState(r, "RUNNING"); r.put("lastStartTimestamp", Instant.now().toString()); }
-            case "setMachineType" -> { requireState(r, "TERMINATED"); r.put("machineType", required(body, "machineType")); machine(c, r); }
+            case "reset" -> {
+                requireState(r, "RUNNING"); r.put("lastStartTimestamp", Instant.now().toString());
+                c.runtime(ComputeInstanceRuntime.Kind.RESTART, r);
+            }
+            case "setMachineType" -> {
+                requireState(r, "TERMINATED"); r.put("machineType", required(body, "machineType")); machine(c, r);
+                // The container is recreated with the new limits on the next start.
+                c.runtime(ComputeInstanceRuntime.Kind.REMOVE, r);
+            }
             case "setMetadata", "setTags" -> {
                 String field = action.equals("setTags") ? "tags" : "metadata";
                 checkFingerprint((ObjectNode) r.get(field), body, "fingerprint");
@@ -209,6 +219,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         for (JsonNode nic : r.path("networkInterfaces")) {
             for (JsonNode access : nic.path("accessConfigs")) { release(c, access.path("natIP").asText(), r.path("selfLink").asText()); }
         }
+        c.runtime(ComputeInstanceRuntime.Kind.REMOVE, r);
     }
     private void attach(ComputeService.Context c, ObjectNode instance, ObjectNode attachment, int index, boolean creating) {
         String source = required(attachment, "source");

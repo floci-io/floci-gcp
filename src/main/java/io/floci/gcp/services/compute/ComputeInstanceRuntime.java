@@ -65,6 +65,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final Map<String, Tracked> operations = new ConcurrentHashMap<>();
     private final Map<String, Object> instanceLocks = new ConcurrentHashMap<>();
     private final ExecutorService executor;
+    /** Set at teardown: a worker still running after it creates no container. */
+    private volatile boolean closed;
 
     @Inject
     public ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
@@ -134,9 +136,13 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     private void run(String operationKey, Intent intent) {
         String name = containerName(intent.project(), intent.zone(), intent.name());
-        synchronized (instanceLocks.computeIfAbsent(name, key -> new Object())) {
+        synchronized (lock(name)) {
             step(operationKey, intent, name);
         }
+    }
+
+    private Object lock(String containerName) {
+        return instanceLocks.computeIfAbsent(containerName, key -> new Object());
     }
 
     private void step(String operationKey, Intent intent, String name) {
@@ -199,6 +205,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private void launch(String operationKey, Intent intent, String name) {
         try {
             imageCache.ensureImageExists(intent.image());
+            if (closed) { return; }
             if (expired(operationKey)) {
                 LOG.warnf("Compute instance %s/%s/%s: the image arrived after its operation finished; not creating a container",
                         intent.project(), intent.zone(), intent.name());
@@ -260,32 +267,43 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 String project = labels.get(ContainerStorageHelper.PROJECT_LABEL);
                 String zone = labels.get(ContainerStorageHelper.LOCATION_LABEL);
                 String name = labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL);
-                String current;
-                try {
-                    current = status.apply(project, zone, name);
-                } catch (RuntimeException e) {
-                    current = null;
-                }
-                if (current == null) {
-                    LOG.infof("Removing container of deleted Compute instance container=%s", container.getId());
-                    lifecycleManager.forceRemove(container.getId(), null);
-                } else if (current.equals("TERMINATED") && "running".equals(container.getState())) {
-                    LOG.infof("Stopping container of stopped Compute instance %s/%s/%s", project, zone, name);
-                    stop(container.getId());
-                } else if (current.equals("RUNNING") && !"running".equals(container.getState())) {
-                    LOG.infof("Restarting container of running Compute instance %s/%s/%s", project, zone, name);
-                    try {
-                        lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
-                            lifecycleManager.getDockerClient().startContainerCmd(container.getId()).exec();
-                            return null;
-                        });
-                    } catch (RuntimeException e) {
-                        LOG.warnf("Compute instance %s/%s/%s runs without a container: %s", project, zone, name,
-                                e.getMessage());
-                    }
+                // Under the instance's lock, so a step submitted meanwhile (a start, a stop) is not undone here.
+                synchronized (lock(containerName(project, zone, name))) {
+                    reconcile(container, project, zone, name, status);
                 }
             }
         });
+    }
+
+    private void reconcile(Container container, String project, String zone, String name, StatusLookup status) {
+        String current;
+        try {
+            current = status.apply(project, zone, name);
+        } catch (RuntimeException e) {
+            current = null;
+        }
+        if (current == null) {
+            LOG.infof("Removing container of deleted Compute instance container=%s", container.getId());
+            lifecycleManager.forceRemove(container.getId(), null);
+        } else if (current.equals("TERMINATED") && "running".equals(container.getState())) {
+            LOG.infof("Stopping container of stopped Compute instance %s/%s/%s", project, zone, name);
+            stop(container.getId());
+        } else if (current.equals("RUNNING") && !"running".equals(container.getState())) {
+            LOG.infof("Restarting container of running Compute instance %s/%s/%s", project, zone, name);
+            try {
+                lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
+                    try {
+                        lifecycleManager.getDockerClient().startContainerCmd(container.getId()).exec();
+                    } catch (NotModifiedException alreadyRunning) {
+                        LOG.debugv("Compute instance container {0} was already running", name);
+                    }
+                    return null;
+                });
+            } catch (RuntimeException e) {
+                LOG.warnf("Compute instance %s/%s/%s runs without a container: %s", project, zone, name,
+                        e.getMessage());
+            }
+        }
     }
 
     /** Answers an instance's status by project, zone and name; null when the instance does not exist. */
@@ -301,6 +319,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     @Override
     public void stopManagedContainers() {
         if (!enabled()) { return; }
+        closed = true;
         executor.shutdownNow();
         try {
             if (!executor.awaitTermination(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {

@@ -21,8 +21,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -241,6 +247,41 @@ class ComputeInstanceRuntimeTest {
         verify(lifecycleManager).forceRemove(eq("deleted"), isNull());
         verify(lifecycleManager, never()).forceRemove(eq("foreign"), any());
         verify(lifecycleManager, never()).forceRemove(eq("terminated"), any());
+    }
+
+    @Test
+    void reconcileWaitsForAStepOnTheSameInstanceAndReadsTheStatusAfterIt() throws Exception {
+        CountDownLatch pulling = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            pulling.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(imageCache).ensureImageExists("debian:12");
+        Container stale = container("vm-container", "running", identity("vm", "4588"));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(stale));
+        AtomicBoolean readWhileStepRan = new AtomicBoolean();
+        CountDownLatch reconciled = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
+                    lifecycleManager, imageCache, pool);
+            concurrent.submit("start", List.of(intent(Kind.LAUNCH)));
+            assertTrue(pulling.await(5, TimeUnit.SECONDS));
+
+            concurrent.reconcile((project, zone, name) -> {
+                readWhileStepRan.set(release.getCount() > 0);
+                reconciled.countDown();
+                return "RUNNING";
+            });
+            Thread.sleep(200);
+            release.countDown();
+
+            assertTrue(reconciled.await(5, TimeUnit.SECONDS));
+            assertFalse(readWhileStepRan.get(), "reconcile must not read the status while a step on the instance runs");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

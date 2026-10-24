@@ -632,6 +632,31 @@ class GcsServiceTest {
     }
 
     @Test
+    void aSoftDeletedObjectPastItsHardDeleteTimeIsHiddenBeforeTheSweep() {
+        StorageBackend<String, GcsObjectMeta> metadata = new InMemoryStorage<>();
+        GcsService expiring = new GcsService(new InMemoryStorage<>(), metadata, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), "test-project");
+        expiring.createBucket("expiring", "p1", BASE_URL, Map.of());
+        String generation = expiring.putObject("expiring", "expired.txt", "text/plain",
+                new byte[]{1}, BASE_URL).getGeneration();
+        expiring.deleteObject("expiring", "expired.txt");
+        assertEquals(1, expiring.listSoftDeletedObjects("expiring", null).size());
+
+        for (String key : List.copyOf(metadata.keys())) {
+            GcsObjectMeta meta = metadata.get(key).orElseThrow();
+            if (meta.getHardDeleteTime() != null) {
+                meta.setHardDeleteTime(Instant.now().minusSeconds(1).toString());
+                metadata.put(key, meta);
+            }
+        }
+
+        assertTrue(expiring.listSoftDeletedObjects("expiring", null).isEmpty());
+        GcpException restore = assertThrows(GcpException.class,
+                () -> expiring.restoreObject("expiring", "expired.txt", generation));
+        assertEquals("NOT_FOUND", restore.getGcpStatus());
+    }
+
+    @Test
     void anInvalidSoftDeleteRetentionLeavesTheBucketUnchanged() {
         GcsBucket created = service.createBucket("rejected-patch", "p1", BASE_URL, Map.of());
         String metageneration = created.getMetageneration();

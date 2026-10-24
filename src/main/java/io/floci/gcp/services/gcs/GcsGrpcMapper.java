@@ -74,7 +74,7 @@ final class GcsGrpcMapper {
         }
         if (stored.getSoftDeletePolicy() != null) {
             Bucket.SoftDeletePolicy.Builder softDelete = Bucket.SoftDeletePolicy.newBuilder();
-            java.lang.Object retention = stored.getSoftDeletePolicy().get("retentionDurationSeconds");
+            Object retention = stored.getSoftDeletePolicy().get("retentionDurationSeconds");
             if (retention != null) {
                 softDelete.setRetentionDuration(Duration.newBuilder().setSeconds(parseLong(String.valueOf(retention))));
             }
@@ -252,8 +252,8 @@ final class GcsGrpcMapper {
         return merged;
     }
 
-    private static Map<String, java.lang.Object> softDeletePolicy(Bucket bucket) {
-        Map<String, java.lang.Object> policy = new LinkedHashMap<>();
+    private static Map<String, Object> softDeletePolicy(Bucket bucket) {
+        Map<String, Object> policy = new LinkedHashMap<>();
         if (bucket.getSoftDeletePolicy().hasRetentionDuration()) {
             policy.put("retentionDurationSeconds", bucket.getSoftDeletePolicy().getRetentionDuration().getSeconds());
         }

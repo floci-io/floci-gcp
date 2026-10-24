@@ -26,6 +26,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -54,8 +55,13 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     public enum Kind { LAUNCH, START, STOP, RESTART, REMOVE }
 
-    /** One Docker step for one instance. {@code image}, {@code cpus} and {@code memoryMb} matter for LAUNCH and START. */
-    public record Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb) {}
+    /**
+     * One Docker step for one instance. {@code image}, {@code cpus} and {@code memoryMb} matter for LAUNCH and START.
+     * {@code metadata} is the guest's effective metadata when the step was recorded: project keys overridden by
+     * instance keys. It supplies the startup scripts of a boot and the shutdown scripts of a stop or delete.
+     */
+    public record Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb,
+                         Map<String, String> metadata) {}
 
     /** Progress of one operation's intents. PROVISIONING covers the image pull, STAGING the container create and start. */
     public enum Phase { PROVISIONING, STAGING, DONE }
@@ -66,9 +72,12 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ImageCacheService imageCache;
+    private final ComputeGuestScripts scripts;
     private final Map<String, Tracked> operations = new ConcurrentHashMap<>();
     private final Map<String, Object> instanceLocks = new ConcurrentHashMap<>();
+    private final Map<String, ComputeSerialPort> serialPorts = new ConcurrentHashMap<>();
     private final ExecutorService executor;
+    private final ExecutorService scriptExecutor;
     /** Set at teardown: a worker still running after it creates no container. */
     private volatile boolean closed;
     /** Held shared while a step brings a container up; teardown takes it exclusively before listing containers. */
@@ -76,18 +85,23 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     @Inject
     public ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
-                                  ContainerLifecycleManager lifecycleManager, ImageCacheService imageCache) {
-        this(config, containerBuilder, lifecycleManager, imageCache, Executors.newFixedThreadPool(4, daemonThreads()));
+                                  ContainerLifecycleManager lifecycleManager, ImageCacheService imageCache,
+                                  ComputeGuestScripts scripts) {
+        this(config, containerBuilder, lifecycleManager, imageCache, scripts,
+                Executors.newFixedThreadPool(4, daemonThreads("compute-instance-runtime-")),
+                Executors.newFixedThreadPool(4, daemonThreads("compute-startup-scripts-")));
     }
 
     ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
                            ContainerLifecycleManager lifecycleManager, ImageCacheService imageCache,
-                           ExecutorService executor) {
+                           ComputeGuestScripts scripts, ExecutorService executor, ExecutorService scriptExecutor) {
         this.config = config;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.imageCache = imageCache;
+        this.scripts = scripts;
         this.executor = executor;
+        this.scriptExecutor = scriptExecutor;
     }
 
     public boolean enabled() {
@@ -166,41 +180,55 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     private void step(String operationKey, Intent intent, String name) {
         switch (intent.kind()) {
-            case LAUNCH -> launch(operationKey, intent, name);
+            case LAUNCH -> boot(intent, launch(operationKey, intent, name));
             case START -> {
                 Optional<Container> existing = lifecycleManager.findByName(name);
                 if (existing.isPresent() && !owned(existing.get(), name)) { return; }
                 if (existing.isEmpty()) {
-                    launch(operationKey, intent, name);
+                    boot(intent, launch(operationKey, intent, name));
                 } else {
                     stage(operationKey);
-                    bringUp(() -> lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
+                    if (bringUp(() -> lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
                         try {
                             lifecycleManager.getDockerClient().startContainerCmd(existing.get().getId()).exec();
                         } catch (NotModifiedException alreadyRunning) {
                             LOG.debugv("Compute instance container {0} was already running", name);
                         }
                         return null;
-                    }));
+                    }))) {
+                        boot(intent, existing.get().getId());
+                    }
                 }
             }
-            case STOP -> ownedContainer(name).ifPresent(container ->
-                    lifecycleManager.runDockerApi("stop Compute instance " + name, () -> {
-                        try {
-                            lifecycleManager.getDockerClient().stopContainerCmd(container.getId())
-                                    .withTimeout(STOP_TIMEOUT_SECONDS).exec();
-                        } catch (NotModifiedException alreadyStopped) {
-                            LOG.debugv("Compute instance container {0} was already stopped", name);
-                        }
-                        return null;
-                    }));
-            case RESTART -> ownedContainer(name).ifPresent(container ->
-                    bringUp(() -> lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
-                        lifecycleManager.getDockerClient().restartContainerCmd(container.getId())
-                                .withTimeout(0).exec();
-                        return null;
-                    })));
-            case REMOVE -> ownedContainer(name).ifPresent(container -> lifecycleManager.forceRemove(container.getId(), null));
+            case STOP -> ownedContainer(name).ifPresent(container -> {
+                runShutdownScripts(intent, container);
+                lifecycleManager.runDockerApi("stop Compute instance " + name, () -> {
+                    try {
+                        lifecycleManager.getDockerClient().stopContainerCmd(container.getId())
+                                .withTimeout(STOP_TIMEOUT_SECONDS).exec();
+                    } catch (NotModifiedException alreadyStopped) {
+                        LOG.debugv("Compute instance container {0} was already stopped", name);
+                    }
+                    return null;
+                });
+            });
+            // A reset is a hard reset: no shutdown scripts, then a fresh boot.
+            case RESTART -> ownedContainer(name).ifPresent(container -> {
+                if (bringUp(() -> lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
+                    lifecycleManager.getDockerClient().restartContainerCmd(container.getId())
+                            .withTimeout(0).exec();
+                    return null;
+                }))) {
+                    boot(intent, container.getId());
+                }
+            });
+            case REMOVE -> {
+                ownedContainer(name).ifPresent(container -> {
+                    runShutdownScripts(intent, container);
+                    lifecycleManager.forceRemove(container.getId(), null);
+                });
+                serialPorts.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
+            }
         }
     }
 
@@ -221,29 +249,63 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         return tracked == null || tracked.phase() == Phase.DONE || System.currentTimeMillis() > tracked.deadline();
     }
 
-    private void launch(String operationKey, Intent intent, String name) {
+    /** Creates and starts the instance container; returns its id, or null when the instance runs without one. */
+    private String launch(String operationKey, Intent intent, String name) {
         try {
             imageCache.ensureImageExists(intent.image());
-            if (closed) { return; }
+            if (closed) { return null; }
             if (expired(operationKey)) {
                 LOG.warnf("Compute instance %s/%s/%s: the image arrived after its operation finished; not creating a container",
                         intent.project(), intent.zone(), intent.name());
-                return;
+                return null;
             }
             stage(operationKey);
             Optional<Container> existing = lifecycleManager.findByName(name);
             if (existing.isPresent()) {
-                if (!owned(existing.get(), name)) { return; }
+                if (!owned(existing.get(), name)) { return null; }
                 lifecycleManager.forceRemove(existing.get().getId(), null);
             }
+            AtomicReference<String> started = new AtomicReference<>();
             bringUp(() -> {
-                lifecycleManager.createAndStart(spec(intent, name));
+                started.set(lifecycleManager.createAndStart(spec(intent, name)).containerId());
                 LOG.infof("Started Compute instance container=%s image=%s", name, intent.image());
             });
+            return started.get();
         } catch (RuntimeException e) {
             LOG.warnf("Compute instance %s/%s/%s runs without a container: %s",
                     intent.project(), intent.zone(), intent.name(), e.getMessage());
+            return null;
         }
+    }
+
+    /** Runs the startup scripts of a boot in the background: the boot's operation does not wait for them, as on GCE. */
+    private void boot(Intent intent, String containerId) {
+        if (containerId == null) { return; }
+        ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
+        scriptExecutor.execute(() -> scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId,
+                intent.metadata(), config.services().compute().startupScriptTimeout(), port));
+    }
+
+    /** Runs the shutdown scripts of a running container and waits for them, up to the shutdown script timeout. */
+    private void runShutdownScripts(Intent intent, Container container) {
+        if (!"running".equals(container.getState())) { return; }
+        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, intent.name(), container.getId(), intent.metadata(),
+                config.services().compute().shutdownScriptTimeout(),
+                serialPort(intent.project(), intent.zone(), intent.name()));
+    }
+
+    /** Serial port output of an instance, empty for an instance that never had a container in this process. */
+    public ComputeSerialPort.Output serialOutput(String project, String zone, String name, int port, long start) {
+        ComputeSerialPort serial = port == 1 ? serialPorts.get(instanceKey(project, zone, name)) : null;
+        return serial == null ? new ComputeSerialPort().read(start) : serial.read(start);
+    }
+
+    private ComputeSerialPort serialPort(String project, String zone, String name) {
+        return serialPorts.computeIfAbsent(instanceKey(project, zone, name), key -> new ComputeSerialPort());
+    }
+
+    private static String instanceKey(String project, String zone, String name) {
+        return project + "/" + zone + "/" + name;
     }
 
     ContainerSpec spec(Intent intent, String name) {
@@ -367,12 +429,16 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         }
     }
 
-    /** Runs a step that brings a container up, unless teardown has begun; see {@link #stopManagedContainers}. */
-    private void bringUp(Runnable action) {
+    /**
+     * Runs a step that brings a container up, unless teardown has begun; see {@link #stopManagedContainers}.
+     * Returns whether it ran, so a boot only runs startup scripts in a container that came up.
+     */
+    private boolean bringUp(Runnable action) {
         startLock.readLock().lock();
         try {
-            if (closed) { return; }
+            if (closed) { return false; }
             action.run();
+            return true;
         } finally {
             startLock.readLock().unlock();
         }
@@ -410,14 +476,15 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     @PreDestroy
-    void shutdown() {
+    void close() {
         executor.shutdownNow();
+        scriptExecutor.shutdownNow();
     }
 
-    private static ThreadFactory daemonThreads() {
+    private static ThreadFactory daemonThreads(String prefix) {
         AtomicInteger count = new AtomicInteger();
         return runnable -> {
-            Thread thread = new Thread(runnable, "compute-instance-runtime-" + count.incrementAndGet());
+            Thread thread = new Thread(runnable, prefix + count.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         };

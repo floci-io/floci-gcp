@@ -187,6 +187,8 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS` | `true` | Bound each instance container by its machine type's vCPUs and memory |
 | `FLOCI_GCP_SERVICES_COMPUTE_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | At startup, restart the containers of RUNNING instances, stop the running containers of TERMINATED instances and remove those of deleted instances |
 | `FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT` | `5m` | Longest a Compute operation waits for its container before the instance continues without one |
+| `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT` | `30m` | Startup scripts still running after this are reported on serial port 1 and left running |
+| `FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT` | `90s` | How long stop and delete wait for an instance's shutdown scripts |
 
 ---
 

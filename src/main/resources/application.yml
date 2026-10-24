@@ -84,6 +84,8 @@ floci-gcp:
       instance-resource-limits: true      # bound containers by the machine type's vCPUs and memory
       reconcile-containers-on-startup: true
       launch-timeout: 5m
+      startup-script-timeout: 30m         # startup scripts still running after this are reported on serial port 1 and left running
+      shutdown-script-timeout: 90s        # stop and delete wait this long for shutdown scripts
     gcs:
       enabled: true
       upload-session-idle-timeout-seconds: 604800

@@ -181,6 +181,12 @@ public interface EmulatorConfig {
         /** Longest an operation waits for its container before the instance continues without one. */
         @WithDefault("5m")
         Duration launchTimeout();
+        /** Longest a startup script may run before it is reported as timed out and left running. */
+        @WithDefault("30m")
+        Duration startupScriptTimeout();
+        /** Longest stop and delete wait for the shutdown scripts before stopping the container. */
+        @WithDefault("90s")
+        Duration shutdownScriptTimeout();
     }
 
     interface ServicesConfig {

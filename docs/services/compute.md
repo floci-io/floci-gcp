@@ -59,7 +59,8 @@ isolation is not IAM enforcement.
 
 Zonal instances support insert/get/list/aggregatedList/start/stop/reset/delete,
 setMachineType, setMetadata, setTags, setLabels, addAccessConfig/deleteAccessConfig,
-attachDisk/detachDisk and setDiskAutoDelete. A stopped VM has status TERMINATED;
+attachDisk/detachDisk, setDiskAutoDelete and getSerialPortOutput (see
+[Serial port output](#serial-port-output)). A stopped VM has status TERMINATED;
 reset does not imply guest health. One IPv4 NIC and one boot disk are required.
 Machine changes require a stopped VM. Ephemeral external addresses are released
 on stop; reserved addresses remain associated.
@@ -142,9 +143,9 @@ Run do. The API stays the same in both modes; only these behaviours change:
 | `instances.setMachineType` | Removes the stopped container, so the next start creates one with the new limits |
 | `instances.delete` | `docker rm -f` |
 
-The container runs the boot image's Docker image with an idle init process, so
-nothing in it runs until you exec into it (`docker exec -it <container> bash`).
-Startup scripts, the metadata server and SSH come in later releases. The
+The container runs the boot image's Docker image with an idle init process; the
+guest scripts below and anything you start with `docker exec -it <container> bash`
+run inside it. The metadata server and SSH come in later releases. The
 container is named `floci-gcp-compute-<project>-<zone>-<instance>` and carries
 the [resource identity labels](../configuration/docker-compose.md#resource-identity-labels)
 with `io.floci.service=compute`. With `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS`
@@ -172,4 +173,39 @@ startup it starts the containers of `RUNNING` instances again, keeps those of
 `TERMINATED` instances, and removes those whose instance was deleted. It only
 touches containers that carry its own `io.floci.owner` label, so several
 emulators can share one Docker daemon.
+
+### Startup and shutdown scripts
+
+On every boot (insert, start and reset), the instance runs `startup-script` and
+then `startup-script-url`, as root, as the guest environment's
+`google_metadata_script_runner` does. Instance metadata overrides project metadata
+(`projects.setCommonInstanceMetadata`) key by key. Each script is copied to
+`/var/lib/google/<key>` and run verbatim; one without a shebang runs under
+`/bin/sh`. `startup-script-url` is read from floci-gcp's own Cloud Storage
+(`gs://BUCKET/FILE` or `https://storage.googleapis.com/BUCKET/FILE`); other URLs are
+reported and skipped. The boot's operation does not wait for the scripts, and a
+script still running after `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT`
+(30 minutes) is reported and left running.
+
+`shutdown-script` and `shutdown-script-url` run on stop and delete while the
+instance is `STOPPING`, for up to `FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT`
+(90 seconds). Reset is a hard reset and runs none.
+
+### Serial port output
+
+`instances.getSerialPortOutput` serves serial port 1: the scripts' output and the
+runner's progress, one line each, in this form:
+
+```text
+2026-10-21T16:20:01.123Z vm google_metadata_script_runner[1]: Starting startup scripts.
+2026-10-21T16:20:01.456Z vm google_metadata_script_runner[1]: startup-script: hello
+2026-10-21T16:20:01.460Z vm google_metadata_script_runner[1]: startup-script exit status 0
+```
+
+`start` and `next` are byte positions across everything written, the most recent
+1 MiB is kept, a negative `start` reads the last bytes, and bytes that are not
+valid UTF-8 come back as `\xNN`. Ports 2 to 4 are empty, and so is port 1 in mock
+mode. The output is kept in memory: it does not survive an emulator restart, and
+it is dropped when the instance is deleted. Kernel and boot messages are not
+emulated.
 

@@ -108,6 +108,22 @@ public class ComputeService {
         }
         return state;
     }
+    /** {@code instances.getSerialPortOutput}: ports 1 to 4, of which port 1 carries the guest scripts' output. */
+    private ObjectNode serialPort(Context c, Map<String, String> query) {
+        ObjectNode instance = c.require(c.key());
+        int port = integer(query.getOrDefault("port", "1"), 1, 4, "port");
+        long start;
+        try {
+            start = Long.parseLong(query.getOrDefault("start", "0"));
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("Invalid start");
+        }
+        ComputeSerialPort.Output output = runtime.serialOutput(c.project, c.scope().substring(6),
+                instance.path("name").asText(), port, start);
+        return object().put("kind", "compute#serialPortOutput").put("contents", output.contents())
+                .put("start", Long.toString(output.start())).put("next", Long.toString(output.next()))
+                .put("selfLink", instance.path("selfLink").asText() + "/serialPort");
+    }
     /** Shows STAGING on the instances an unfinished operation brings to RUNNING once their container is being created. */
     private static void staging(ComputeProject state, ComputeOperation op) {
         op.finalStates.forEach((key, terminal) -> {
@@ -188,6 +204,7 @@ public class ComputeService {
                     .max(Comparator.comparing(r -> r.path("id").asLong()))
                     .orElseThrow(() -> GcpException.notFound("Image family not found")).deepCopy();
         }
+        if (c.collection().equals("instances") && "serialPort".equals(c.action)) { return serialPort(c, query); }
         if (c.action != null) { throw GcpException.unimplemented("Unsupported read action: " + c.action); }
         if (c.name() != null) { return c.require(c.key()).deepCopy(); }
         List<ObjectNode> resources = c.state.resources.entrySet().stream()
@@ -587,7 +604,20 @@ public class ComputeService {
                 }
             }
             intents.add(new ComputeInstanceRuntime.Intent(kind, project, scope.substring(scope.indexOf('/') + 1),
-                    instance.path("name").asText(), image, cpus, memoryMb));
+                    instance.path("name").asText(), image, cpus, memoryMb, guestMetadata(instance)));
+        }
+        /** The metadata a guest sees: project-wide keys, each overridden by the instance key of the same name. */
+        private Map<String, String> guestMetadata(ObjectNode instance) {
+            Map<String, String> metadata = new LinkedHashMap<>();
+            if (state.commonInstanceMetadata != null) {
+                for (JsonNode item : state.commonInstanceMetadata.path("items")) {
+                    metadata.put(item.path("key").asText(), item.path("value").asText());
+                }
+            }
+            for (JsonNode item : instance.path("metadata").path("items")) {
+                metadata.put(item.path("key").asText(), item.path("value").asText());
+            }
+            return Map.copyOf(metadata);
         }
         private String bootDockerImage(ObjectNode instance) {
             for (JsonNode attachment : instance.path("disks")) {

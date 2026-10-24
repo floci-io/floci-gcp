@@ -58,7 +58,7 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         ArgumentCaptor<List<Intent>> intents = ArgumentCaptor.forClass(List.class);
         verify(runtime).submit(eq(key), intents.capture());
         String project = root.substring(root.lastIndexOf('/') + 1);
-        assertEquals(List.of(new Intent(Kind.LAUNCH, project, "us-central1-a", "vm", "ubuntu:22.04", 2, 8192)),
+        assertEquals(List.of(new Intent(Kind.LAUNCH, project, "us-central1-a", "vm", "ubuntu:22.04", 2, 8192, Map.of())),
                 intents.getValue());
     }
 
@@ -117,6 +117,42 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
                 "labels", Map.of("team", "a"))));
 
         verify(runtime, never()).submit(anyString(), anyList());
+    }
+
+    @Test void instanceMetadataOverridesProjectMetadataKeyByKey() throws Exception {
+        String root = network();
+        String fingerprint = given().get(root).jsonPath().getString("commonInstanceMetadata.fingerprint");
+        done(root, post(root + "/setCommonInstanceMetadata", Map.of("fingerprint", fingerprint, "items", List.of(
+                Map.of("key", "startup-script", "value", "echo project"),
+                Map.of("key", "shutdown-script", "value", "echo project-shutdown")))));
+        Map<String, Object> vm = new java.util.HashMap<>(vm("vm", null));
+        vm.put("metadata", Map.of("items", List.of(Map.of("key", "startup-script", "value", "echo instance"))));
+        done(root, post(root + ZONE + "/instances", vm));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Intent>> intents = ArgumentCaptor.forClass(List.class);
+        verify(runtime).submit(anyString(), intents.capture());
+        assertEquals(Map.of("startup-script", "echo instance", "shutdown-script", "echo project-shutdown"),
+                intents.getValue().getFirst().metadata());
+    }
+
+    @Test void serialPortOutputServesTheRuntimeBuffer() throws Exception {
+        String root = network();
+        done(root, post(root + ZONE + "/instances", vm("vm", null)));
+        String project = root.substring(root.lastIndexOf('/') + 1);
+        when(runtime.serialOutput(project, "us-central1-a", "vm", 1, 5L))
+                .thenReturn(new ComputeSerialPort.Output("lo\n", 5, 8));
+
+        var output = given().queryParam("start", 5).get(root + ZONE + "/instances/vm/serialPort").then().statusCode(200)
+                .extract().jsonPath();
+        assertEquals("compute#serialPortOutput", output.getString("kind"));
+        assertEquals("lo\n", output.getString("contents"));
+        assertEquals("5", output.getString("start"));
+        assertEquals("8", output.getString("next"));
+        assertEquals("https://www.googleapis.com" + root + ZONE + "/instances/vm/serialPort", output.getString("selfLink"));
+        given().queryParam("port", 5).get(root + ZONE + "/instances/vm/serialPort").then().statusCode(400);
+        given().queryParam("start", "x").get(root + ZONE + "/instances/vm/serialPort").then().statusCode(400);
+        given().get(root + ZONE + "/instances/missing/serialPort").then().statusCode(404);
     }
 
     private String network() {

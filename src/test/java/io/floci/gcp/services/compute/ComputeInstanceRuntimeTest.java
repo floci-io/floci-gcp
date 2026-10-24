@@ -49,6 +49,7 @@ import static org.mockito.Mockito.when;
 class ComputeInstanceRuntimeTest {
 
     private static final String CONTAINER = "floci-gcp-compute-p-us-central1-a-vm";
+    private static final Map<String, String> METADATA = Map.of("startup-script", "echo hi", "shutdown-script", "echo bye");
 
     private EmulatorConfig config;
     private ContainerBuilder containerBuilder;
@@ -56,6 +57,7 @@ class ComputeInstanceRuntimeTest {
     private ContainerLifecycleManager lifecycleManager;
     private ImageCacheService imageCache;
     private DockerClient docker;
+    private ComputeGuestScripts scripts;
     private ComputeInstanceRuntime runtime;
 
     @BeforeEach
@@ -79,8 +81,14 @@ class ComputeInstanceRuntimeTest {
         doAnswer(invocation -> invocation.<Callable<?>>getArgument(1).call())
                 .when(lifecycleManager).runDockerApi(anyString(), any());
         imageCache = mock(ImageCacheService.class);
-        runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager, imageCache,
-                MoreExecutors.newDirectExecutorService());
+        scripts = mock(ComputeGuestScripts.class);
+        when(config.services().compute().startupScriptTimeout()).thenReturn(Duration.ofMinutes(30));
+        when(config.services().compute().shutdownScriptTimeout()).thenReturn(Duration.ofSeconds(90));
+        ContainerLifecycleManager.ContainerInfo started = mock(ContainerLifecycleManager.ContainerInfo.class);
+        when(started.containerId()).thenReturn("new-id");
+        when(lifecycleManager.createAndStart(any())).thenReturn(started);
+        runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager, imageCache, scripts,
+                MoreExecutors.newDirectExecutorService(), MoreExecutors.newDirectExecutorService());
     }
 
     @Test
@@ -215,7 +223,7 @@ class ComputeInstanceRuntimeTest {
 
         when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMillis(-1));
         ComputeInstanceRuntime slow = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class), lifecycleManager,
-                imageCache, mock(java.util.concurrent.ExecutorService.class));
+                imageCache, scripts, mock(java.util.concurrent.ExecutorService.class), mock(java.util.concurrent.ExecutorService.class));
         slow.submit("stuck", List.of(intent(Kind.LAUNCH)));
         assertTrue(slow.finished("stuck"));
     }
@@ -223,7 +231,8 @@ class ComputeInstanceRuntimeTest {
     @Test
     void forgetDropsTheTrackedOperation() {
         ComputeInstanceRuntime pending = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
-                lifecycleManager, imageCache, mock(java.util.concurrent.ExecutorService.class));
+                lifecycleManager, imageCache, scripts, mock(java.util.concurrent.ExecutorService.class),
+                mock(java.util.concurrent.ExecutorService.class));
         pending.submit("op", List.of(intent(Kind.LAUNCH)));
         assertEquals(Phase.PROVISIONING, pending.phase("op"));
 
@@ -270,7 +279,7 @@ class ComputeInstanceRuntimeTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
-                    lifecycleManager, imageCache, pool);
+                    lifecycleManager, imageCache, scripts, pool, MoreExecutors.newDirectExecutorService());
             concurrent.submit("start", List.of(intent(Kind.LAUNCH)));
             assertTrue(pulling.await(5, TimeUnit.SECONDS));
 
@@ -318,7 +327,7 @@ class ComputeInstanceRuntimeTest {
                 creating.getCount() == 0 ? List.of(created) : List.of());
         ExecutorService pool = Executors.newFixedThreadPool(1);
         ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
-                lifecycleManager, imageCache, pool);
+                lifecycleManager, imageCache, scripts, pool, MoreExecutors.newDirectExecutorService());
         concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
         assertTrue(creating.await(5, TimeUnit.SECONDS));
 
@@ -361,7 +370,7 @@ class ComputeInstanceRuntimeTest {
             @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return false; }
         };
         ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
-                lifecycleManager, imageCache, impatient);
+                lifecycleManager, imageCache, scripts, impatient, MoreExecutors.newDirectExecutorService());
         concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
         assertTrue(creating.await(5, TimeUnit.SECONDS));
 
@@ -404,7 +413,71 @@ class ComputeInstanceRuntimeTest {
     }
 
     private static Intent intent(Kind kind) {
-        return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192);
+        return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, METADATA);
+    }
+
+    @Test
+    void everyBootRunsTheStartupScriptsInTheNewContainer() {
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+        verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("new-id"), eq(METADATA),
+                eq(Duration.ofMinutes(30)), any());
+
+        Container running = container("c-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+        runtime.submit("reset", List.of(intent(Kind.RESTART)));
+        runtime.submit("start", List.of(intent(Kind.START)));
+        verify(scripts, org.mockito.Mockito.times(2)).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
+                eq(METADATA), any(), any());
+    }
+
+    @Test
+    void aBootWithoutAContainerRunsNoScripts() {
+        doThrow(new RuntimeException("pull denied")).when(imageCache).ensureImageExists("debian:12");
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(scripts, never()).run(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void stopAndDeleteRunTheShutdownScriptsOfARunningContainerFirst() {
+        Container running = container("c-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(scripts, lifecycleManager);
+
+        runtime.submit("stop", List.of(intent(Kind.STOP)));
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), eq(METADATA),
+                eq(Duration.ofSeconds(90)), any());
+        order.verify(lifecycleManager).runDockerApi(eq("stop Compute instance " + CONTAINER), any());
+
+        runtime.submit("delete", List.of(intent(Kind.REMOVE)));
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), any(), any(), any());
+        order.verify(lifecycleManager).forceRemove(eq("c-1"), isNull());
+    }
+
+    @Test
+    void aStoppedContainerRunsNoShutdownScripts() {
+        Container exited = container("c-1", "exited", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(exited));
+
+        runtime.submit("delete", List.of(intent(Kind.REMOVE)));
+
+        verify(scripts, never()).run(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void serialOutputComesFromPortOneAndDeleteDropsIt() {
+        doAnswer(invocation -> {
+            invocation.<ComputeSerialPort>getArgument(5).write("hello\n".getBytes());
+            return null;
+        }).when(scripts).run(any(), any(), any(), any(), any(), any());
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        assertEquals("hello\n", runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents());
+        assertEquals("", runtime.serialOutput("p", "us-central1-a", "vm", 2, 0).contents());
+        runtime.submit("delete", List.of(intent(Kind.REMOVE)));
+        assertEquals("", runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents());
     }
 
     private static Map<String, String> identity(String name, String owner) {

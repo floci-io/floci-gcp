@@ -82,6 +82,7 @@ floci-gcp:
       # image-catalog-path:               # JSON file replacing the bundled compute/image-catalog.json
       # docker-network:                   # falls back to floci-gcp.services.docker-network
       instance-resource-limits: true      # bound containers by the machine type's vCPUs and memory
+      allow-privileged-containers: false  # honour securityContext.privileged in gce-container-declaration (privileged on the Docker host)
       reconcile-containers-on-startup: true
       launch-timeout: 5m
       startup-script-timeout: 30m         # startup scripts still running after this are reported on serial port 1 and left running

@@ -173,6 +173,13 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean instanceResourceLimits();
         /**
+         * Honours {@code securityContext.privileged} in a {@code gce-container-declaration}. Off by default: the
+         * container would be privileged on the Docker host, not only inside the emulated VM.
+         * Env: FLOCI_GCP_SERVICES_COMPUTE_ALLOW_PRIVILEGED_CONTAINERS
+         */
+        @WithDefault("false")
+        boolean allowPrivilegedContainers();
+        /**
          * At startup, restarts containers of RUNNING instances, stops running containers of TERMINATED instances
          * and removes those of deleted instances.
          */

@@ -224,10 +224,15 @@ second Docker container named `floci-gcp-compute-<project>-<zone>-<instance>_klt
 in the instance container's network (konlet uses the VM's host network), so it
 shares the instance's address and the [metadata server](#metadata-server) knows
 it as that instance. It reads `image`, `command` (the entrypoint), `args` (the
-command), `env`, `stdin`, `tty`, `securityContext.privileged` and `restartPolicy`
-(`Always`, the default, `OnFailure` or `Never`), and mounts `emptyDir` volumes with
-`medium: Memory` as tmpfs. Its output goes to serial port 1, one line each behind
-the container's name, after konlet's own lines:
+command), `env`, `stdin`, `tty` and `restartPolicy` (`Always`, the default,
+`OnFailure` or `Never`), and mounts `emptyDir` volumes with `medium: Memory` as
+tmpfs (read-only when the mount says `readOnly: true`). With
+`FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS` on, it gets the machine type's
+vCPUs and memory too. `securityContext.privileged` is honoured only with
+`FLOCI_GCP_SERVICES_COMPUTE_ALLOW_PRIVILEGED_CONTAINERS=true`: the container would
+be privileged on the Docker host, not only inside the instance, so by default it
+runs unprivileged and serial port 1 says so. Its output goes to serial port 1, one
+line each behind the container's name, after konlet's own lines:
 
 ```text
 2026-10-24T15:20:01.123Z vm konlet-startup[1]: Configured container 'web' will be started with name 'floci-gcp-compute-p-us-central1-a-vm_klt'.

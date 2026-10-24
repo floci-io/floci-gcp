@@ -21,14 +21,17 @@ import java.util.Map;
  * @param args        the cmd, or null for the image's
  * @param env         {@code NAME=value} entries
  * @param restart     the Docker restart policy: {@code always}, {@code on-failure} or {@code no}
- * @param tmpfs       container paths backed by a {@code emptyDir} volume with {@code medium: Memory}
+ * @param tmpfs       mounts backed by a {@code emptyDir} volume with {@code medium: Memory}
  * @param skipped     volume mounts floci-gcp does not provide, each with the reason
  */
 record ComputeContainerDeclaration(String name, String image, List<String> command, List<String> args,
                                    List<String> env, boolean stdin, boolean tty, boolean privileged, String restart,
-                                   List<String> tmpfs, List<String> skipped) {
+                                   List<Tmpfs> tmpfs, List<String> skipped) {
 
     static final String KEY = "gce-container-declaration";
+
+    /** A memory-backed volume mount, read-only when the mount says {@code readOnly: true}. */
+    record Tmpfs(String path, boolean readOnly) {}
 
     /** A declaration konlet would refuse; the message is the one konlet logs. */
     static final class InvalidDeclaration extends RuntimeException {
@@ -77,7 +80,7 @@ record ComputeContainerDeclaration(String name, String image, List<String> comma
             Map<?, ?> volume = map(entry, "spec.volumes");
             volumes.put(string(volume.get("name")), volume);
         }
-        List<String> tmpfs = new ArrayList<>();
+        List<Tmpfs> tmpfs = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         List<String> referenced = new ArrayList<>();
         for (Object entry : list(container.get("volumeMounts"), "volumeMounts")) {
@@ -102,7 +105,7 @@ record ComputeContainerDeclaration(String name, String image, List<String> comma
                     throw new InvalidDeclaration("Volume " + volumeName + ": Unsupported emptyDir volume medium: "
                             + (medium == null ? "" : medium));
                 }
-                tmpfs.add(path);
+                tmpfs.add(new Tmpfs(path, flag(mount.get("readOnly"))));
             } else {
                 skipped.add("volume " + volumeName + " at " + path + " (" + (volume.get("hostPath") != null
                         ? "hostPath" : "gcePersistentDisk") + " volumes are not supported)");

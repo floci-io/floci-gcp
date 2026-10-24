@@ -677,9 +677,11 @@ class ComputeInstanceRuntimeTest {
         verify(builder).withRestartPolicy("on-failure");
         verify(builder).withTty(true);
         verify(builder).withStdinOpen(true);
-        verify(builder).withPrivileged(true);
+        verify(builder).withPrivileged(false);
         verify(builder).withMount(argThat(mount -> mount.getType() == MountType.TMPFS
-                && "/scratch".equals(mount.getTarget())));
+                && "/scratch".equals(mount.getTarget()) && !Boolean.TRUE.equals(mount.getReadOnly())));
+        verify(builder, times(2)).withNanoCpus(2_000_000_000L);
+        verify(builder).withMemoryBytes(8192L * 1024 * 1024);
         verify(builder, times(2)).withEnv("GCE_METADATA_HOST", "host.docker.internal:4588");
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
@@ -691,6 +693,47 @@ class ComputeInstanceRuntimeTest {
         assertTrue(serial.contains(" vm konlet-startup[1]: Configured container 'web' will be started with name '"
                 + WORKLOAD + "'."), serial);
         assertTrue(serial.contains("konlet-startup[1]: Started a container with ID: new-id"), serial);
+        assertTrue(serial.contains("konlet-startup[1]: Not running container 'web' privileged: it would be privileged"
+                + " on the Docker host."), serial);
+    }
+
+    @Test
+    void aPrivilegedDeclarationIsHonouredOnlyWhenTheHostAllowsIt() {
+        when(config.services().compute().allowPrivilegedContainers()).thenReturn(true);
+
+        runtime.submit("launch", List.of(declared(Kind.LAUNCH)));
+
+        verify(builder).withPrivileged(true);
+        assertFalse(runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents().contains("Not running container"));
+    }
+
+    @Test
+    void aWorkloadStartedAfterAnEmulatorRestartKeepsTheMachineLimits() {
+        Container stopped = container("vm-c", "exited", identity("vm", "4588"));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(stopped));
+        when(docker.inspectContainerCmd("vm-c").exec().getHostConfig().getNanoCPUs()).thenReturn(2_000_000_000L);
+        when(docker.inspectContainerCmd("vm-c").exec().getHostConfig().getMemory()).thenReturn(8192L * 1024 * 1024);
+
+        runtime.reconcile((project, zone, name) -> "RUNNING", (project, zone, name) -> declared(Kind.START).metadata());
+
+        verify(builder).withNetworkMode("container:vm-c");
+        verify(builder).withNanoCpus(2_000_000_000L);
+        verify(builder).withMemoryBytes(8192L * 1024 * 1024);
+    }
+
+    @Test
+    void reconcileFollowsTheOutputOfADeclaredContainerThatSurvived() {
+        Map<String, String> labels = new HashMap<>(identity("vm", "4588"));
+        labels.put("io.floci.compute.role", "container");
+        labels.put("io.floci.compute.container-name", "web");
+        Container survivor = container("w-1", "running", labels);
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(survivor));
+
+        runtime.reconcile((project, zone, name) -> "RUNNING");
+
+        verify(docker.logContainerCmd("w-1").withStdOut(true).withStdErr(true).withFollowStream(true))
+                .withSince(any(Integer.class));
+        verify(lifecycleManager, never()).forceRemove(eq("w-1"), any());
     }
 
     @Test

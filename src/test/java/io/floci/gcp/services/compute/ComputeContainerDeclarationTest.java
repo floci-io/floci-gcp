@@ -50,6 +50,9 @@ class ComputeContainerDeclarationTest {
                       mountPath: /scratch
                     - name: logs
                       mountPath: /var/log/app
+                    - name: cache
+                      mountPath: /cache
+                      readOnly: true
                   volumes:
                   - name: scratch
                     emptyDir:
@@ -57,6 +60,9 @@ class ComputeContainerDeclarationTest {
                   - name: logs
                     hostPath:
                       path: /var/log
+                  - name: cache
+                    emptyDir:
+                      medium: Memory
                   restartPolicy: OnFailure
                 """);
 
@@ -67,7 +73,8 @@ class ComputeContainerDeclarationTest {
         assertTrue(declaration.tty());
         assertTrue(declaration.privileged());
         assertEquals("on-failure", declaration.restart());
-        assertEquals(List.of("/scratch"), declaration.tmpfs());
+        assertEquals(List.of(new ComputeContainerDeclaration.Tmpfs("/scratch", false),
+                new ComputeContainerDeclaration.Tmpfs("/cache", true)), declaration.tmpfs());
         assertEquals(List.of("volume logs at /var/log/app (hostPath volumes are not supported)"), declaration.skipped());
     }
 

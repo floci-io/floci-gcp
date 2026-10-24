@@ -2,9 +2,11 @@ package io.floci.gcp.services.compute;
 
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import io.floci.gcp.config.EmulatorConfig;
@@ -374,6 +376,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             for (String skipped : declaration.skipped()) {
                 port.write(ComputeGuestScripts.line(instance, KONLET, "Not mounting " + skipped + "."));
             }
+            if (declaration.privileged() && !config.services().compute().allowPrivilegedContainers()) {
+                port.write(ComputeGuestScripts.line(instance, KONLET, "Not running container '" + declaration.name()
+                        + "' privileged: it would be privileged on the Docker host. Set"
+                        + " FLOCI_GCP_SERVICES_COMPUTE_ALLOW_PRIVILEGED_CONTAINERS=true to allow it."));
+            }
             ContainerSpec spec = workloadSpec(intent, declaration, workload, vmContainerId);
             port.write(ComputeGuestScripts.line(instance, KONLET, "Pulling image: '" + declaration.image() + "'"));
             // Outside the instance's lock, so a stop is not held up by a slow pull.
@@ -384,7 +391,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 AtomicReference<String> started = new AtomicReference<>();
                 if (!bringUp(() -> started.set(lifecycleManager.createAndStart(spec).containerId()))) { return; }
                 port.write(ComputeGuestScripts.line(instance, KONLET, "Started a container with ID: " + started.get()));
-                Closeable logs = followLogs(started.get(), port, instance, declaration.name());
+                Closeable logs = followLogs(started.get(), port, instance, declaration.name(), null);
                 if (logs != null) {
                     workloadLogs.put(instanceKey(intent.project(), intent.zone(), intent.name()), logs);
                 }
@@ -409,7 +416,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 .withRestartPolicy(declaration.restart())
                 .withTty(declaration.tty())
                 .withStdinOpen(declaration.stdin())
-                .withPrivileged(declaration.privileged());
+                .withPrivileged(declaration.privileged() && config.services().compute().allowPrivilegedContainers());
         if (declaration.command() != null) { builder.withEntrypoint(declaration.command()); }
         if (declaration.args() != null) { builder.withCmd(declaration.args()); }
         if (config.services().compute().metadataServer().enabled()) {
@@ -417,26 +424,49 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             builder.withEnv("GCE_METADATA_HOST", host).withEnv("GCE_METADATA_IP", host);
         }
         builder.withEnv(declaration.env());
-        for (String path : declaration.tmpfs()) {
-            builder.withMount(new Mount().withType(MountType.TMPFS).withTarget(path));
+        for (ComputeContainerDeclaration.Tmpfs tmpfs : declaration.tmpfs()) {
+            builder.withMount(new Mount().withType(MountType.TMPFS).withTarget(tmpfs.path()).withReadOnly(tmpfs.readOnly()));
         }
         if (config.services().compute().instanceResourceLimits()) {
-            if (intent.cpus() > 0) { builder.withNanoCpus(intent.cpus() * 1_000_000_000L); }
-            if (intent.memoryMb() > 0) { builder.withMemoryMb(intent.memoryMb()); }
+            long nanoCpus = intent.cpus() * 1_000_000_000L;
+            long memoryBytes = intent.memoryMb() * 1024L * 1024L;
+            if (nanoCpus <= 0 || memoryBytes <= 0) {
+                // A boot after an emulator restart knows only the instance; its container keeps the machine's limits.
+                HostConfig vm = vmHostConfig(vmContainerId);
+                if (nanoCpus <= 0 && vm != null && vm.getNanoCPUs() != null) { nanoCpus = vm.getNanoCPUs(); }
+                if (memoryBytes <= 0 && vm != null && vm.getMemory() != null) { memoryBytes = vm.getMemory(); }
+            }
+            if (nanoCpus > 0) { builder.withNanoCpus(nanoCpus); }
+            if (memoryBytes > 0) { builder.withMemoryBytes(memoryBytes); }
         }
         return builder.build();
     }
 
-    /** Copies a declared container's output to serial port 1, one line at a time, until the container goes away. */
-    private Closeable followLogs(String containerId, ComputeSerialPort port, String instance, String declaredName) {
+    private HostConfig vmHostConfig(String vmContainerId) {
+        try {
+            return lifecycleManager.runDockerApi("inspect Compute instance " + vmContainerId,
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(vmContainerId).exec()).getHostConfig();
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the limits of Compute instance container {0}: {1}", vmContainerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Copies a declared container's output to serial port 1, one line at a time, until the container goes away;
+     * from {@code since} (epoch seconds) when set, so output already copied before an emulator restart is not repeated.
+     */
+    private Closeable followLogs(String containerId, ComputeSerialPort port, String instance, String declaredName,
+                                 Integer since) {
         ComputeGuestScripts.LineWriter out = new ComputeGuestScripts.LineWriter(port, instance,
                 declaredName == null ? WORKLOAD : declaredName, "");
         try {
-            return lifecycleManager.getDockerClient().logContainerCmd(containerId)
+            LogContainerCmd command = lifecycleManager.getDockerClient().logContainerCmd(containerId)
                     .withStdOut(true)
                     .withStdErr(true)
-                    .withFollowStream(true)
-                    .exec(new ResultCallback.Adapter<Frame>() {
+                    .withFollowStream(true);
+            if (since != null) { command.withSince(since); }
+            return command.exec(new ResultCallback.Adapter<Frame>() {
                         @Override
                         public void onNext(Frame frame) {
                             for (byte b : frame.getPayload()) { out.write(b); }
@@ -662,8 +692,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /**
-     * A declared container left from before a restart: removed unless its instance is RUNNING, whose boot replaces it
-     * with one in the instance container's new network.
+     * A declared container left from before a restart: removed unless its instance is RUNNING. A running one is kept
+     * and its output followed again (an instance whose container restarts gets a new one at its boot instead).
      */
     private void reconcileWorkload(Container container, String project, String zone, String name, StatusLookup status) {
         String current;
@@ -675,6 +705,12 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         if (!"RUNNING".equals(current)) {
             LOG.infof("Removing declared container of Compute instance %s/%s/%s", project, zone, name);
             lifecycleManager.forceRemove(container.getId(), null);
+        } else if ("running".equals(container.getState())) {
+            String key = instanceKey(project, zone, name);
+            if (workloadLogs.containsKey(key)) { return; }
+            Closeable logs = followLogs(container.getId(), serialPort(project, zone, name), name,
+                    container.getLabels().get(DECLARED_NAME_LABEL), (int) (System.currentTimeMillis() / 1000));
+            if (logs != null) { workloadLogs.put(key, logs); }
         }
     }
 

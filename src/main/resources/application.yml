@@ -86,6 +86,9 @@ floci-gcp:
       launch-timeout: 5m
       startup-script-timeout: 30m         # startup scripts still running after this are reported on serial port 1 and left running
       shutdown-script-timeout: 90s        # stop and delete wait this long for shutdown scripts
+      metadata-server:
+        enabled: true                     # /computeMetadata/v1 on the main port; instance containers get GCE_METADATA_HOST
+        default-wait-timeout: 300s        # wait_for_change without timeout_sec
     gcs:
       enabled: true
       upload-session-idle-timeout-seconds: 604800

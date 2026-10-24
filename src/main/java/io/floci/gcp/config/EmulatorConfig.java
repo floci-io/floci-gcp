@@ -187,6 +187,19 @@ public interface EmulatorConfig {
         /** Longest stop and delete wait for the shutdown scripts before stopping the container. */
         @WithDefault("90s")
         Duration shutdownScriptTimeout();
+        MetadataServerConfig metadataServer();
+
+        interface MetadataServerConfig {
+            /**
+             * Serves the GCE metadata server under /computeMetadata/v1 on the main port, and points instance
+             * containers at it with GCE_METADATA_HOST. Env: FLOCI_GCP_SERVICES_COMPUTE_METADATA_SERVER_ENABLED
+             */
+            @WithDefault("true")
+            boolean enabled();
+            /** Longest a wait_for_change request blocks when it names no timeout_sec. */
+            @WithDefault("300s")
+            Duration defaultWaitTimeout();
+        }
     }
 
     interface ServicesConfig {

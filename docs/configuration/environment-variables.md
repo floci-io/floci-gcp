@@ -189,6 +189,8 @@ Some services (e.g. Managed Kafka) start real sidecar containers via the host Do
 | `FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT` | `5m` | Longest a Compute operation waits for its container before the instance continues without one |
 | `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT` | `30m` | Startup scripts still running after this are reported on serial port 1 and left running |
 | `FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT` | `90s` | How long stop and delete wait for an instance's shutdown scripts |
+| `FLOCI_GCP_SERVICES_COMPUTE_METADATA_SERVER_ENABLED` | `true` | Serve the GCE metadata server under `/computeMetadata/v1` and set `GCE_METADATA_HOST` in instance containers |
+| `FLOCI_GCP_SERVICES_COMPUTE_METADATA_SERVER_DEFAULT_WAIT_TIMEOUT` | `300s` | How long a `wait_for_change` request without `timeout_sec` blocks |
 
 ---
 

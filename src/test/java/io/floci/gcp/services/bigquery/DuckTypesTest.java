@@ -61,6 +61,19 @@ class DuckTypesTest {
     }
 
     @Test
+    void decodesBase64BytesWithinNestedStagedValues() {
+        TableFieldSchema payload = field("payload", "RECORD", "NULLABLE", List.of(
+                field("content", "BYTES", "NULLABLE", null),
+                field("attachments", "BYTES", "REPEATED", null),
+                field("priorities", "INTEGER", "REPEATED", null)));
+
+        assertEquals("CASE WHEN \"payload\" IS NULL THEN NULL ELSE struct_pack(\"content\" := from_base64(CAST(\"payload\".\"content\" AS VARCHAR)), "
+                        + "\"attachments\" := list_transform(\"payload\".\"attachments\", _floci_value -> "
+                        + "from_base64(CAST(_floci_value AS VARCHAR))), \"priorities\" := \"payload\".\"priorities\") END",
+                DuckTypes.convertNestedStagedBytes(payload, "\"payload\""));
+    }
+
+    @Test
     void decodesProjectedValuesIntoStoredRows() {
         TableFieldSchema ts = field("ts", "TIMESTAMP", "NULLABLE", null);
         assertEquals("1704164645.123456", DuckTypes.decode("1704164645123456", DuckTypes.Projection.EPOCH_MICROS,

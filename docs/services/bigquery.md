@@ -126,23 +126,68 @@ Partitioning and clustering are metadata only: queries do not prune partitions a
 Queries are translated to DuckDB SQL and executed on the sidecar, so most of GoogleSQL's
 `SELECT` surface works:
 
-- `JOIN` (all kinds), `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
+- `JOIN` (all kinds, including correlated `LEFT JOIN UNNEST(array) alias`), `GROUP BY`, `HAVING`,
+  `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
   `UNION`/`INTERSECT`/`EXCEPT` (`ALL` and `DISTINCT`), subqueries, `WITH` (CTEs), window
-  functions, `QUALIFY`, `UNNEST` (including `FROM t, t.array_column AS x` and `x IN UNNEST(...)`),
-  `SELECT * EXCEPT (...)` and `SELECT * REPLACE (...)`.
+  functions, `QUALIFY`, `PIVOT`, `UNNEST` (including `WITH OFFSET`,
+  `FROM t, t.array_column AS x`, and `x IN UNNEST(...)`), `SELECT * EXCEPT (...)`, and
+  `SELECT * REPLACE (...)`.
+- Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
+  and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes
-  literals, `TIMESTAMP`/`DATETIME`/`DATE`/`TIME`/`NUMERIC`/`JSON` typed literals.
+  literals, `TIMESTAMP`/`DATETIME`/`DATE`/`TIME`/`NUMERIC`/`JSON` typed literals, and typed
+  array literals including `ARRAY<STRUCT<...>>[...]`.
 - `CAST`/`SAFE_CAST` with GoogleSQL type names, including `ARRAY<...>` and `STRUCT<...>`.
 - Functions rewritten to their DuckDB equivalents: `SAFE_DIVIDE`, `IEEE_DIVIDE`, `DIV`, `IF`,
-  `COUNTIF`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `GENERATE_ARRAY`,
-  `SPLIT`, `FORMAT`, `TO_JSON_STRING`, `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
+  `COUNTIF`, `CONCAT`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `ARRAY_CONCAT_AGG`,
+  `GENERATE_ARRAY`, `GENERATE_UUID`, `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`,
+  `SPLIT`, `FORMAT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
+  `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
   `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
   `TIMESTAMP_SECONDS`/`TIMESTAMP_MILLIS`/`TIMESTAMP_MICROS`, `TIMESTAMP_ADD`/`TIMESTAMP_SUB`,
   `DATE_ADD`/`DATE_SUB`, `*_DIFF`, `*_TRUNC`, `FORMAT_TIMESTAMP`/`FORMAT_DATE`, `PARSE_TIMESTAMP`/`PARSE_DATE`,
   `DATE(...)`/`DATETIME(...)`/`TIMESTAMP(...)`, `EXTRACT` (including `DAYOFWEEK`, 1 = Sunday) and
   `STRUCT(... AS name)`. Functions with the same name and meaning in both dialects (`COALESCE`,
-  `IFNULL`, `CONCAT`, `LOWER`, `STRING_AGG`, `ARRAY_AGG`, `ROUND`, and many more) pass through.
+  `IFNULL`, `LOWER`, `STRING_AGG`, `ARRAY_AGG`, `ROUND`, and many more) pass through.
+- `COUNTIF(DISTINCT condition)` counts distinct `TRUE` results, returning zero for empty,
+  false-only, or null-only inputs, following [COUNTIF semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#countif).
+- `PIVOT` sources support implicit column aliases and `HAVING` references to struct select aliases.
+- `CONTAINS_SUBSTR` supports scalar `STRING` inputs with case-insensitive NFC-normalized substring
+  matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
+  emulated.
+- `RAND` returns a uniformly distributed value in the half-open interval `[0, 1)`.
+- `ARRAY_AGG(value IGNORE NULLS ORDER BY ... LIMIT n)` preserves BigQuery's null filtering,
+  aggregate ordering, and inline result limit. As in BigQuery, these aggregate modifiers are rejected
+  when the call is followed by a window `OVER` clause.
+- `ARRAY_CONCAT_AGG` applies its inline `LIMIT` to input arrays: null arrays are skipped and empty
+  arrays count as one input, following the [GoogleSQL aggregate rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/aggregate-function-calls#aggregate_function_call_syntax).
+- An alias on an explicit `UNNEST([STRUCT(...)])` literal can select the whole record even when a
+  field has the same name, following [GoogleSQL value-table alias semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#unnest_and_structs).
+- Aliased `UNNEST` with `WITH OFFSET` exposes record fields and the offset in `SELECT *`, while
+  the range alias retains the original record and `alias.*` expands only its fields. Correlated
+  scalar subqueries can reference the range alias. Nested and mixed `* REPLACE` projections
+  keep internal offset columns out of the result schema.
+- `SELECT AS STRUCT` combines expanded star fields and explicit expressions as sibling fields in
+  one record, following [GoogleSQL select semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_as_struct).
+- Array subscripts using `OFFSET(index)` preserve GoogleSQL's zero-based indexing.
+- `HAVING` can dereference a field of an explicit `STRUCT` select alias, including an aggregate
+  field such as `latest.pt` where `latest` contains `MAX(...)`.
+- `TIMESTAMP_ADD` and `TIMESTAMP_SUB` coerce GoogleSQL string timestamp literals before interval
+  arithmetic.
+- `SAFE.PARSE_DATE` and `SAFE.PARSE_TIMESTAMP` return `NULL` rather than failing when their input
+  does not match the supplied format string.
+- `PARSE_TIMESTAMP` and `SAFE.PARSE_TIMESTAMP` preserve a zone parsed from the input. The optional
+  time zone argument applies when the format does not parse a zone, following
+  [GoogleSQL timestamp parsing](https://cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#parse_timestamp).
+- `SAFE.FROM_HEX` decodes hexadecimal strings to `BYTES`, including odd-length strings with an
+  implicit leading zero. Invalid hex returns `NULL`; errors evaluating the argument still propagate.
+  See [FROM_HEX](https://cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#from_hex)
+  and the [SAFE prefix](https://cloud.google.com/bigquery/docs/reference/standard-sql/functions-reference#safe_prefix).
+- `DATE_TRUNC` accepts BigQuery-coerced date string literals as well as typed `DATE` values.
+- `UNPIVOT` supports the single-value `value FOR name IN (column, ...)` form used by analytical
+  queries. It retains BigQuery's default `EXCLUDE NULLS` behavior. Multi-column sets and aliases
+  are not emulated.
 - Unaliased expressions in the select list are named `f0_`, `f1_`, ... like BigQuery names them.
 - Result schemas carry real types: `INTEGER`, `FLOAT`, `NUMERIC`, `BOOLEAN`, `STRING`, `BYTES`,
   `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `JSON`, `RECORD` (with nested fields) and `REPEATED`
@@ -420,13 +465,14 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
 - `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias
   (`UNNEST(array) AS x`) the element is one column `x`.
-- `UNNEST ... WITH OFFSET`, INFORMATION_SCHEMA views other than the six above, wildcard tables, `FOR SYSTEM_TIME AS OF`,
-  `GEOGRAPHY` functions, BigQuery ML and remote functions are not emulated.
-- `ARRAY_AGG(... IGNORE NULLS)`, `SAFE.`-prefixed functions and GoogleSQL `WEEK` boundaries
-  (Sunday-based) follow DuckDB's behavior.
+- INFORMATION_SCHEMA views other than the six above, non-terminal wildcard table patterns,
+  `FOR SYSTEM_TIME AS OF`, `GEOGRAPHY` functions, BigQuery ML, and remote functions are not
+  emulated.
+- Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.FROM_HEX`, `SAFE.PARSE_DATE`,
+  and `SAFE.PARSE_TIMESTAMP` are supported explicitly.
 - `NUMERIC` and `BIGNUMERIC` are computed as `DECIMAL(38, 9)`.
-- `TIMESTAMP` values nested inside `RECORD` or `REPEATED` columns must be stored as ISO-8601
-  strings to be queryable; top-level `TIMESTAMP` columns accept epoch seconds too.
+- `TIMESTAMP` values are staged as ISO-8601 strings for DuckDB, including values nested inside
+  `RECORD` or `REPEATED` columns; the BigQuery wire format continues to use epoch seconds.
 - `totalBytesProcessed` is an estimate from the size of the tables a query reads.
 - No `insertId` de-duplication (real BigQuery is best-effort anyway).
 - Jobs always complete synchronously (`jobComplete=true`, state `DONE`), with no PENDING/RUNNING phase.

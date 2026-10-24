@@ -114,6 +114,42 @@ final class DuckTypes {
         };
     }
 
+    /** Converts BYTES leaves within a JSON-staged nested value. */
+    static String convertNestedStagedBytes(TableFieldSchema field, String value) {
+        if (!containsBytes(field)) {
+            return value;
+        }
+        if ("REPEATED".equals(field.getMode())) {
+            return "list_transform(" + value + ", _floci_value -> "
+                    + convertNestedStagedBytes(copyWithMode(field, "NULLABLE"), "_floci_value") + ")";
+        }
+        if ("RECORD".equals(field.getType())) {
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            StringBuilder rebuilt = new StringBuilder("struct_pack(");
+            for (int i = 0; i < children.size(); i++) {
+                if (i > 0) {
+                    rebuilt.append(", ");
+                }
+                TableFieldSchema child = children.get(i);
+                rebuilt.append(quoteIdentifier(child.getName())).append(" := ")
+                        .append(convertNestedStagedBytes(child,
+                                value + "." + quoteIdentifier(child.getName())));
+            }
+            return "CASE WHEN " + value + " IS NULL THEN NULL ELSE " + rebuilt.append(") END");
+        }
+        return "BYTES".equals(field.getType()) ? "from_base64(CAST(" + value + " AS VARCHAR))" : value;
+    }
+
+    private static boolean containsBytes(TableFieldSchema field) {
+        if ("BYTES".equals(field.getType())) {
+            return true;
+        }
+        if (!"RECORD".equals(field.getType()) || field.getFields() == null) {
+            return false;
+        }
+        return field.getFields().stream().anyMatch(DuckTypes::containsBytes);
+    }
+
     // ── DuckDB type strings ──────────────────────────────────────────────────
 
     /** Parses a DuckDB type as printed by {@code DESCRIBE}, e.g. {@code STRUCT(a INTEGER[], "b c" VARCHAR)[]}. */

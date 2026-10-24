@@ -69,6 +69,10 @@ class BigQueryDuckIntegrationTest {
     @Inject
     DuckSqlEngine engine;
 
+    private static Response query(Map<String, Object> body) {
+        return given().contentType("application/json").body(body).when().post(BASE + "/queries");
+    }
+
     @Test
     @Order(1)
     void seedTables() {
@@ -229,9 +233,29 @@ class BigQueryDuckIntegrationTest {
         query("""
                 {"query": "SELECT *, (WITH s AS (SELECT 1 x) SELECT x FROM s) y FROM (WITH s AS (SELECT 1 x) SELECT x FROM s)", "useLegacySql": false}
                 """)
+        .then().statusCode(200)
+        .body("schema.fields.name", equalTo(List.of("x", "y")))
+        .body("rows[0].f.v", equalTo(List.of("1", "1")));
+    }
+
+    @Test
+    @Order(5)
+    void resultWrapperResolvesNestedCtes() {
+        given().contentType("application/json").body(Map.of(
+                "query", """
+                        WITH INPUT AS (
+                          WITH new_aggregated AS (SELECT name FROM shop.users),
+                               nested_results AS (SELECT name FROM new_aggregated)
+                          SELECT name FROM nested_results
+                        )
+                        SELECT TO_JSON_STRING(row) FROM INPUT AS row ORDER BY name
+                        """,
+                "useLegacySql", false))
+                .when().post(BASE + "/queries")
                 .then().statusCode(200)
-                .body("schema.fields.name", equalTo(List.of("x", "y")))
-                .body("rows[0].f.v", equalTo(List.of("1", "1")));
+                .body("schema.fields.name", equalTo(List.of("f0_")))
+                .body("schema.fields.type", equalTo(List.of("STRING")))
+                .body("rows", hasSize(3));
     }
 
     @Test
@@ -282,6 +306,1047 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(java.util.Arrays.asList("object", "array", "string", "number",
                         "number", "number", "number", "boolean", "null", null)));
+    }
+
+    @Test
+    @Order(5)
+    void containsSubstrExecutesWithBigQueryScalarSemantics() {
+        query("""
+                {"query": "SELECT CONTAINS_SUBSTR('A, B', ',') AS contains_comma", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("BOOLEAN"))
+                .body("rows[0].f[0].v", equalTo("true"));
+    }
+
+    @Test
+    @Order(5)
+    void distinctCountIfCountsOnlyDistinctTrueResults() {
+        for (String values : List.of("[1, 2, -1, NULL]", "[-1, 0]", "ARRAY<INT64>[NULL]", "ARRAY<INT64>[]")) {
+            String expected = values.equals("[1, 2, -1, NULL]") ? "1" : "0";
+            query(Map.of("query", "SELECT COUNTIF(DISTINCT x > 0) AS c FROM UNNEST(" + values + ") x",
+                            "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields[0].type", equalTo("INTEGER"))
+                    .body("rows[0].f[0].v", equalTo(expected));
+        }
+        query(Map.of("query", "SELECT COUNTIF(DISTINCT x > 0) OVER () AS c FROM UNNEST([1, 2, -1]) x",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("1"), List.of("1"))));
+    }
+
+    @Test
+    @Order(5)
+    void pivotSourcesApplyAliasAndHavingRewrites() {
+        query(Map.of("query", "SELECT * FROM (SELECT 1 sample, 'one' AS metric)"
+                        + " PIVOT(ANY_VALUE(sample) FOR metric IN ('one'))", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("one")))
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "SELECT one.n AS n FROM (SELECT STRUCT(MAX(x) AS n) AS s, 'one' AS metric"
+                        + " FROM UNNEST([1,2]) x HAVING s.n > 0)"
+                        + " PIVOT(ANY_VALUE(s) FOR metric IN ('one'))", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void pivotSourcesApplyNestedSelectAsStructRewrites() {
+        query(Map.of("query", "SELECT one.x FROM"
+                        + " (SELECT (SELECT AS STRUCT 1 AS x) AS s, 'one' AS k)"
+                        + " PIVOT(ANY_VALUE(s) FOR k IN ('one'))", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void pivotExecutesOnTheDuckSidecar() {
+        query(Map.of("query", """
+                SELECT one, two
+                FROM (
+                  SELECT 'one' AS metric, 1 AS value
+                  UNION ALL
+                  SELECT 'two' AS metric, 2 AS value
+                )
+                PIVOT (ANY_VALUE(value) FOR metric IN ('one', 'two'))
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("one", "two")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
+    void mixedStructStarsExpandIntoSiblingFields() {
+        for (String sql : List.of(
+                "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t",
+                "SELECT AS STRUCT t.*, u.* FROM (SELECT 1 AS x) t CROSS JOIN (SELECT 2 AS y) u",
+                "SELECT AS STRUCT t.* FROM (SELECT 1 AS x, 2 AS y) t",
+                "SELECT AS STRUCT t.* EXCEPT(secret), 2 AS y FROM (SELECT 1 AS x, 9 AS secret) t",
+                "SELECT (SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t) AS record",
+                "SELECT DISTINCT AS STRUCT t.*, 2 y FROM (SELECT 1 AS x UNION ALL SELECT 1 AS x) t ORDER BY x LIMIT 1")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields", hasSize(1))
+                    .body("rows", hasSize(1))
+                    .body("schema.fields[0].type", equalTo("RECORD"))
+                    .body("schema.fields[0].fields.name", equalTo(List.of("x", "y")))
+                    .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+        }
+    }
+
+    @Test
+    @Order(5)
+    void mixedStructStarsPreserveLaterNestedQueryRewrites() {
+        for (String sql : List.of(
+                "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 sample) t",
+                "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT * FROM"
+                        + " (SELECT 'sample' AS metric, 1 AS amount)"
+                        + " PIVOT(ANY_VALUE(amount) FOR metric IN ('sample'))) t")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields[0].fields.name", equalTo(List.of("sample", "y")))
+                    .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+        }
+        query(Map.of("query", "SELECT AS STRUCT t.*, 2 AS y FROM"
+                        + " (SELECT STRUCT(MAX(x) AS n) AS sample FROM UNNEST([1]) x HAVING sample.n = 1) t",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("sample", "y")))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[0].v.f[1].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void quotedDerivedTableAliasesWorkWithoutAs() {
+        query(Map.of("query", "SELECT `select`.x FROM (SELECT 1 AS x) `select`", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x")))
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void safeFromHexDecodesBytesAndReturnsNullForInvalidHex() {
+        query(Map.of("query", """
+                SELECT SAFE.FROM_HEX('4142') AS decoded,
+                  TO_HEX(SAFE.FROM_HEX('aBc')) AS odd,
+                  SAFE.FROM_HEX('') AS empty,
+                  SAFE.FROM_HEX('xyz') AS invalid,
+                  SAFE.FROM_HEX('0x41') AS prefixed,
+                  SAFE.FROM_HEX('aa bb') AS spaced,
+                  SAFE.FROM_HEX('é') AS non_ascii,
+                  SAFE.FROM_HEX(NULL) AS untyped_null,
+                  SAFE.FROM_HEX(CAST(NULL AS STRING)) AS typed_null
+                """, "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].type", equalTo("BYTES"))
+                .body("rows[0].f[0].v", equalTo("QUI="))
+                .body("rows[0].f[1].v", equalTo("0abc"))
+                .body("rows[0].f[2].v", equalTo(""))
+                .body("rows[0].f[3].v", nullValue())
+                .body("rows[0].f[4].v", nullValue())
+                .body("rows[0].f[5].v", nullValue())
+                .body("rows[0].f[6].v", nullValue())
+                .body("rows[0].f[7].v", nullValue())
+                .body("rows[0].f[8].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void safeFromHexDoesNotSuppressArgumentErrorsOrAcceptNumericInputs() {
+        query(Map.of("query", "SELECT SAFE.FROM_HEX(CAST(ERROR('argument failed') AS STRING)) AS decoded",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("argument failed"));
+        query(Map.of("query", "SELECT SAFE.FROM_HEX(123) AS decoded", "useLegacySql", false))
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(5)
+    void aliasedStructOffsetsExposeFieldsAndPreserveTheWholeRecord() {
+        for (String projection : List.of("x, pos", "*")) {
+            query(Map.of("query", "SELECT " + projection
+                            + " FROM UNNEST([STRUCT(1 AS x)]) AS item WITH OFFSET AS pos", "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("x", "pos")))
+                    .body("rows[0].f.v", equalTo(List.of("1", "0")));
+        }
+        query(Map.of("query", "SELECT item, item.x AS qualified, pos FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) AS item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("x")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("0"));
+        query(Map.of("query", "SELECT item.* FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x")))
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void offsetArrayColumnsAndJoinedStarsRetainTheirVisibleFields() {
+        query(Map.of("query", "WITH inputs AS (SELECT [STRUCT(1 AS x)] AS items)"
+                        + " SELECT x, pos, item FROM inputs CROSS JOIN UNNEST(items) item WITH OFFSET AS pos",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("0"))
+                .body("schema.fields[2].fields.name", equalTo(List.of("x")));
+        query(Map.of("query", "SELECT * FROM (SELECT 9 AS marker) d CROSS JOIN"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos CROSS JOIN"
+                        + " UNNEST([STRUCT(2 AS y)]) other WITH OFFSET AS idx", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("marker", "x", "pos", "y", "idx")))
+                .body("rows[0].f.v", equalTo(List.of("9", "1", "0", "2", "0")));
+        query(Map.of("query", "SELECT * REPLACE(x + 1 AS x) FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "pos")))
+                .body("rows[0].f.v", equalTo(List.of("2", "0")));
+        query(Map.of("query", "SELECT * EXCEPT(pos) FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x")));
+    }
+
+    @Test
+    @Order(5)
+    void leftJoinedOffsetStructsKeepNullWholeRecords() {
+        query(Map.of("query", "SELECT item, x, pos FROM"
+                        + " (SELECT ARRAY<STRUCT<x INT64>>[] AS items) source"
+                        + " LEFT JOIN UNNEST(items) item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("rows[0].f[0].v", nullValue())
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void offsetAliasesRemainVisibleInCorrelatedSubqueries() {
+        for (String expression : List.of("(SELECT item.x)", "(SELECT (SELECT item.x))",
+                "(SELECT item.x FROM (SELECT 9 AS unrelated) local)",
+                "(SELECT inner_item.x FROM UNNEST([item]) inner_item)")) {
+            query(Map.of("query", "SELECT " + expression + " AS x FROM"
+                            + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("1"));
+        }
+        for (String from : List.of("(SELECT 2 AS x) item",
+                "(SELECT STRUCT(2 AS x) AS item) local",
+                "UNNEST([STRUCT(2 AS x)]) item",
+                "UNNEST([STRUCT(2 AS x)]) item WITH OFFSET AS inner_pos",
+                "UNNEST([STRUCT(STRUCT(2 AS x) AS item)]) local")) {
+            query(Map.of("query", "SELECT (SELECT item.x FROM " + from + ") AS x FROM"
+                            + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("2"));
+        }
+        query(Map.of("query", "SELECT (SELECT item) AS whole FROM"
+                        + " UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("x")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void nestedAndMixedReplacementStarsHideOffsetHelpers() {
+        for (String projection : List.of("* REPLACE(x + 1 AS x)",
+                "* REPLACE(x + 1 AS x), item AS original")) {
+            String inner = "SELECT " + projection
+                    + " FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos";
+            for (String sql : List.of(inner, "SELECT * FROM (" + inner + ") q",
+                    "WITH q AS (" + inner + ") SELECT * FROM q")) {
+                List<String> names = projection.contains("original")
+                        ? List.of("x", "pos", "original") : List.of("x", "pos");
+                query(Map.of("query", sql, "useLegacySql", false))
+                        .then().log().ifValidationFails().statusCode(200)
+                        .body("schema.fields.name", equalTo(names))
+                        .body("rows[0].f[0].v", equalTo("2"))
+                        .body("rows[0].f[1].v", equalTo("0"));
+            }
+        }
+    }
+
+    @Test
+    @Order(5)
+    void parsedTimestampZonesOverrideTheFallbackZone() {
+        query(Map.of("query", """
+                SELECT
+                  UNIX_SECONDS(PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S%z',
+                    '2024-01-01 00:00:00+0000', 'America/Los_Angeles')) AS explicit_zone,
+                  UNIX_SECONDS(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S%z',
+                    '2024-01-01 00:00:00+0200', 'America/Los_Angeles')) AS safe_zone,
+                  UNIX_SECONDS(PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S',
+                    '2024-01-01 00:00:00', 'America/Los_Angeles')) AS fallback_zone,
+                  UNIX_SECONDS(PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S %Z',
+                    '2024-01-01 00:00:00 UTC', 'America/Los_Angeles')) AS named_zone,
+                  UNIX_SECONDS(PARSE_TIMESTAMP('%Y-%m-%d %%z',
+                    '2024-01-01 %z', 'America/Los_Angeles')) AS escaped_zone,
+                  SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S%z',
+                    'invalid', 'America/Los_Angeles') AS invalid
+                """, "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1704067200"))
+                .body("rows[0].f[1].v", equalTo("1704060000"))
+                .body("rows[0].f[2].v", equalTo("1704096000"))
+                .body("rows[0].f[3].v", equalTo("1704067200"))
+                .body("rows[0].f[4].v", equalTo("1704096000"))
+                .body("rows[0].f[5].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void reviewedStructPivotAndHavingCasesExecuteOnTheDuckSidecar() {
+        query(Map.of("query", "SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+
+        query(Map.of("query", "SELECT [STRUCT(STRUCT(1 AS x) AS child, 2 AS y)][OFFSET(0)].*",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("child", "y")))
+                .body("schema.fields.type", equalTo(List.of("RECORD", "INTEGER")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"));
+
+        query(Map.of("query", """
+                SELECT a.id, p.one
+                FROM (SELECT 1 AS id) a
+                JOIN (SELECT 1 AS id, 'one' AS metric, 7 AS value) PIVOT (
+                  ANY_VALUE(value) FOR metric IN ('one')) p
+                ON a.id = p.id
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "7")));
+
+        query(Map.of("query", "SELECT STRUCT(MAX(x) AS n) AS s FROM UNNEST([1,2]) x"
+                        + " HAVING (SELECT s.n FROM (SELECT STRUCT(0 AS n) AS s)) = 0",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1));
+    }
+
+    @Test
+    @Order(5)
+    void reviewedStarCasesExecuteOnTheDuckSidecar() {
+        query(Map.of("query", "SELECT * EXCEPT(secret) REPLACE(UPPER(name) AS name)"
+                        + " FROM UNNEST([STRUCT('ana' AS name, 'hidden' AS secret, 1 AS id)])",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name", "id")))
+                .body("rows[0].f.v", equalTo(List.of("ANA", "1")));
+
+        query(Map.of("query", "CREATE TABLE shop.reviewed_star_2025 AS SELECT 1 AS id",
+                        "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.reviewed_star_2026 AS SELECT 2 AS id",
+                        "useLegacySql", false))
+                .then().statusCode(200);
+
+        query(Map.of("query", "SELECT d.*, w.* FROM"
+                        + " (SELECT 'derived' AS marker, 'kept' AS _TABLE_SUFFIX) d"
+                        + " CROSS JOIN `shop.reviewed_star_*` w ORDER BY id",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("marker", "_TABLE_SUFFIX", "id")))
+                .body("rows[0].f.v", equalTo(List.of("derived", "kept", "1")));
+
+        query(Map.of("query", "SELECT w.*, d.* FROM `shop.reviewed_star_*` w"
+                        + " CROSS JOIN (SELECT 'derived' AS marker, 'kept' AS _TABLE_SUFFIX) d ORDER BY id",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "marker", "_TABLE_SUFFIX")))
+                .body("rows[0].f.v", equalTo(List.of("1", "derived", "kept")));
+    }
+
+    @Test
+    @Order(5)
+    void reviewedAggregateModifiersExecuteOnTheDuckSidecar() {
+        query(Map.of("query", """
+                SELECT ARRAY_CONCAT_AGG(items ORDER BY id LIMIT 2) AS items
+                FROM UNNEST([
+                  STRUCT(3 AS id, [3] AS items),
+                  STRUCT(1 AS id, [1, 10] AS items),
+                  STRUCT(2 AS id, [2, 20] AS items)])
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "10", "2", "20")));
+
+        query(Map.of("query", "WITH q AS (SELECT APPROX_QUANTILES(x, 2 RESPECT NULLS) AS quantiles"
+                        + " FROM UNNEST([NULL, NULL, 1, 1, 1, 4, 5, 6, 7, 8, 9, 10]) x)"
+                        + " SELECT quantiles[OFFSET(0)] IS NULL, quantiles[OFFSET(1)], quantiles[OFFSET(2)] FROM q",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "4", "10")));
+    }
+
+    @Test
+    @Order(5)
+    void structUnnestAliasPreservesTheWholeRecordWhenAFieldHasTheSameName() {
+        query(Map.of("query", "SELECT al, al.al AS field, al.x"
+                        + " FROM UNNEST([STRUCT(1 AS al, 2 AS x)]) al", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].name", equalTo("al"))
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("al", "x")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("2"));
+        query(Map.of("query", "SELECT al.* FROM UNNEST([STRUCT(1 AS al, 2 AS x)]) al",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("al", "x")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayConcatAggLimitIgnoresNullArraysButCountsEmptyArrays() {
+        query(Map.of("query", """
+                SELECT ARRAY_CONCAT_AGG(items ORDER BY id LIMIT 2) AS items
+                FROM UNNEST([
+                  STRUCT(0 AS id, CAST(NULL AS ARRAY<INT64>) AS items),
+                  STRUCT(1 AS id, [1] AS items), STRUCT(2 AS id, [2] AS items)])
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", """
+                SELECT ARRAY_CONCAT_AGG(items ORDER BY id LIMIT 2) AS items
+                FROM UNNEST([
+                  STRUCT(0 AS id, CAST(NULL AS ARRAY<INT64>) AS items),
+                  STRUCT(1 AS id, ARRAY<INT64>[] AS items),
+                  STRUCT(2 AS id, [2] AS items), STRUCT(3 AS id, [3] AS items)])
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("2")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayConcatAggIsNullWithoutNonNullArraysButKeepsEmptyArrays() {
+        query(Map.of("query", """
+                SELECT ARRAY_CONCAT_AGG(items) IS NULL AS all_null
+                FROM UNNEST([STRUCT(CAST(NULL AS ARRAY<INT64>) AS items),
+                  STRUCT(CAST(NULL AS ARRAY<INT64>) AS items)])
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("true"));
+        query(Map.of("query", """
+                SELECT ARRAY_LENGTH(ARRAY_CONCAT_AGG(items)) AS len
+                FROM UNNEST([STRUCT(ARRAY<INT64>[] AS items), STRUCT(CAST(NULL AS ARRAY<INT64>) AS items)])
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(5)
+    void selectAsStructResolvesOffsetAliasesInLaterClauses() {
+        query(Map.of("query", """
+                SELECT AS STRUCT x FROM UNNEST([STRUCT(1 AS x), STRUCT(2 AS x)]) item WITH OFFSET AS pos
+                WHERE item.x = 2
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.size()", equalTo(1))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void selectAsStructFieldsRewriteNestedQueries() {
+        query(Map.of("query", "SELECT AS STRUCT (SELECT 1 sample) AS child", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+        query(Map.of("query", "SELECT AS STRUCT (SELECT total_x FROM (SELECT 'x' AS k, 5 AS v)"
+                        + " PIVOT(SUM(v) AS total FOR k IN ('x'))) AS child", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("5"));
+    }
+
+    @Test
+    @Order(5)
+    void selectAsStructExpandsIndexedRecordStars() {
+        query(Map.of("query", "SELECT AS STRUCT [STRUCT(1 AS x, 2 AS y)][OFFSET(0)].*",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("x", "y")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
+    void cteColumnsShadowEnclosingOffsetAliases() {
+        query(Map.of("query", "WITH local AS (SELECT STRUCT(2 AS x) AS item)"
+                        + " SELECT (SELECT item.x FROM local) AS x"
+                        + " FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void physicalTableColumnsShadowEnclosingOffsetAliases() {
+        query(Map.of("query", "CREATE TABLE shop.local_record AS SELECT STRUCT(2 AS x) AS item",
+                        "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT (SELECT item.x FROM shop.local_record) AS x"
+                        + " FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", "CREATE VIEW shop.local_record_view AS"
+                        + " SELECT (SELECT item.x FROM shop.local_record) AS x"
+                        + " FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos",
+                        "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT x FROM shop.local_record_view", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void unmatchedLiteralRecordUnnestKeepsTheWholeElementNull() {
+        query(Map.of("query", "SELECT item IS NULL AS missing FROM (SELECT 2 AS id) t"
+                        + " LEFT JOIN UNNEST([STRUCT(1 AS id)]) item ON t.id = item.id",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("true"));
+    }
+
+    @Test
+    @Order(5)
+    void concatOfBytesReturnsBytes() {
+        query(Map.of("query", "SELECT CONCAT(b'AB', b'CD') AS payload", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("BYTES"))
+                .body("rows[0].f[0].v", equalTo("QUJDRA=="));
+    }
+
+    @Test
+    @Order(5)
+    void pivotAggregatePrefixesMatchGoogleSqlColumnNames() {
+        query(Map.of("query", "SELECT total_x, m_y FROM (SELECT 'x' AS k, 1 AS v UNION ALL SELECT 'y', 2)"
+                        + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x', 'y'))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
+    void reviewedTimestampFunctionsExecuteOnTheDuckSidecar() {
+        query(Map.of("query", """
+                SELECT
+                  TIMESTAMP_TRUNC('2024-05-17 12:34:56+00', HOUR) AS truncated_timestamp,
+                  DATETIME_TRUNC('2024-05-17 12:34:56', HOUR) AS truncated_datetime,
+                  TIMESTAMP_TRUNC('2024-01-01 07:34:56+00', DAY, 'America/Los_Angeles') AS zoned_trunc,
+                  DATE_TRUNC('2024-01-01 07:34:56+00', DAY, 'America/Los_Angeles') AS zoned_date_trunc,
+                  SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', '2024-01-01 00:00:00',
+                    'America/Los_Angeles') AS safe_parsed,
+                  PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', '2024-01-01 00:00:00',
+                    'America/Los_Angeles') AS parsed
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of(
+                        "TIMESTAMP", "DATETIME", "TIMESTAMP", "TIMESTAMP", "TIMESTAMP", "TIMESTAMP")))
+                .body("rows[0].f[0].v", equalTo("1715947200"))
+                .body("rows[0].f[1].v", equalTo("2024-05-17T12:00:00"))
+                .body("rows[0].f[2].v", equalTo("1704009600"))
+                .body("rows[0].f[3].v", equalTo("1704009600"))
+                .body("rows[0].f[4].v", equalTo("1704096000"))
+                .body("rows[0].f[5].v", equalTo("1704096000"));
+    }
+
+    @Test
+    @Order(5)
+    void hashesAndToHexExecuteOnTheDuckSidecar() {
+        query(Map.of("query", """
+                SELECT TO_HEX(b'\\x00\\xff') AS raw,
+                       TO_HEX(MD5('abc')) AS md5,
+                       TO_HEX(SHA1('abc')) AS sha1,
+                       TO_HEX(SHA256('abc')) AS sha256
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of(
+                        "00ff",
+                        "900150983cd24fb0d6963f7d28e17f72",
+                        "a9993e364706816aba3e25717850c26c9cd0d89d",
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")));
+    }
+
+    @Test
+    @Order(5)
+    void unnestWithOffsetSupportsOptionalAliases() {
+        query(Map.of("query", """
+                SELECT value, position
+                FROM UNNEST([10, 20]) AS value WITH OFFSET AS position
+                ORDER BY position
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("10", "0"), List.of("20", "1"))));
+
+        query(Map.of("query", """
+                SELECT value, offset
+                FROM UNNEST([10, 20]) AS value WITH OFFSET
+                ORDER BY offset
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("value", "offset")))
+                .body("rows.f.v", equalTo(List.of(List.of("10", "0"), List.of("20", "1"))));
+
+        query(Map.of("query", "SELECT * FROM UNNEST([10, 20]) WITH OFFSET ORDER BY offset",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[1].name", equalTo("offset"))
+                .body("rows.f.v", equalTo(List.of(List.of("10", "0"), List.of("20", "1"))));
+    }
+
+    @Test
+    @Order(5)
+    void unnestAliasesDoNotCaptureDatePartsOrIntervalUnits() {
+        query(Map.of("query", "SELECT DATE_TRUNC(DATE '2024-05-17', MONTH)"
+                        + " FROM UNNEST([1]) month WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2024-05-01"));
+
+        query(Map.of("query", "SELECT DATE '2024-05-17' + INTERVAL 1 DAY"
+                + " FROM UNNEST([1]) day WITH OFFSET AS pos", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2024-05-18T00:00:00"));
+    }
+
+    @Test
+    @Order(5)
+    void nestedBytesRoundTripThroughDuckStaging() {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "nested_bytes"}, "schema": {"fields": [
+                  {"name": "payload", "type": "RECORD", "fields": [
+                    {"name": "content", "type": "BYTES"},
+                    {"name": "attachments", "type": "BYTES", "mode": "REPEATED"}
+                  ]},
+                  {"name": "events", "type": "RECORD", "mode": "REPEATED", "fields": [
+                    {"name": "content", "type": "BYTES"}
+                  ]}
+                ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"rows": [{"json": {
+                  "payload": {"content": "AP8=", "attachments": ["YQ==", "Yg=="]},
+                  "events": [{"content": "AQI="}]
+                }}]}
+                """).when().post(BASE + "/datasets/shop/tables/nested_bytes/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+
+        query(Map.of("query", "SELECT payload, events FROM shop.nested_bytes", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("AP8="))
+                .body("rows[0].f[0].v.f[1].v.v", equalTo(List.of("YQ==", "Yg==")))
+                .body("rows[0].f[1].v.v.f.v", equalTo(List.of(List.of("AQI="))));
+    }
+
+    @Test
+    @Order(5)
+    void correlatedLeftJoinUnnestPreservesRowsForEmptyArrays() {
+        query(Map.of("query", """
+                WITH users AS (
+                  SELECT 1 AS id, ['a', 'b'] AS tags
+                  UNION ALL SELECT 2 AS id, CAST([] AS ARRAY<STRING>) AS tags
+                )
+                SELECT u.id, tag
+                FROM users u LEFT JOIN UNNEST(u.tags) tag
+                ORDER BY u.id, tag
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "tag")))
+                .body("rows", hasSize(3))
+                .body("rows[0].f.v", equalTo(List.of("1", "a")))
+                .body("rows[1].f.v", equalTo(List.of("1", "b")))
+                .body("rows[2].f[0].v", equalTo("2"))
+                .body("rows[2].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void scalarOffsetAliasesDoNotReplaceUsingJoinKeys() {
+        for (String key : List.of("id", "`id`")) {
+            query(Map.of("query", "SELECT t.id, pos FROM"
+                            + " (SELECT 1 AS id UNION ALL SELECT 2 AS id) t LEFT JOIN"
+                            + " UNNEST([1]) id WITH OFFSET AS pos USING(" + key + ") ORDER BY t.id",
+                            "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("rows", hasSize(2))
+                    .body("rows[0].f.v", equalTo(List.of("1", "0")))
+                    .body("rows[1].f[0].v", equalTo("2"))
+                    .body("rows[1].f[1].v", nullValue());
+        }
+    }
+
+    @Test
+    @Order(5)
+    void successivePivotsExecuteAfterTheirSourcesShrink() {
+        query(Map.of("query", "SELECT a.id, a.x, b.y, c.z FROM"
+                        + " (SELECT 1 AS id, 2 AS v, 'x' AS k) PIVOT(SUM(v) FOR k IN ('x')) a"
+                        + " CROSS JOIN (SELECT 3 AS v, 'y' AS k) PIVOT(SUM(v) FOR k IN ('y')) b"
+                        + " CROSS JOIN (SELECT 4 AS v, 'z' AS k) PIVOT(SUM(v) FOR k IN ('z')) c",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "x", "y", "z")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2", "3", "4")));
+    }
+
+    @Test
+    @Order(5)
+    void leftJoinUnnestUsingPreservesMatchesAndUnmatchedRows() {
+        for (String source : List.of("UNNEST([STRUCT(1 AS id)]) item",
+                "UNNEST([STRUCT(1 AS id)])", "UNNEST([STRUCT(1 AS id)]) item WITH OFFSET AS pos",
+                "UNNEST([STRUCT(1 AS id)]) WITH OFFSET", "UNNEST([1]) id")) {
+            query(Map.of("query", "SELECT id FROM (SELECT 1 AS id) t LEFT JOIN " + source + " USING(id)",
+                            "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("id")))
+                    .body("rows[0].f[0].v", equalTo("1"));
+        }
+        query(Map.of("query", "SELECT id, item, pos FROM (SELECT 2 AS id) t LEFT JOIN"
+                        + " UNNEST([STRUCT(1 AS id)]) item WITH OFFSET AS pos USING(id)", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void conditionedJoinUnnestFiltersArrayElements() {
+        query(Map.of("query", """
+                SELECT x
+                FROM UNNEST([1, 2]) x
+                JOIN UNNEST([2, 3]) y ON x = y
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void arrayAggIgnoreNullsOrdersValuesBeforeAggregation() {
+        query(Map.of("query", """
+                WITH source AS (
+                  SELECT 2 AS ordinal, 'second' AS value
+                  UNION ALL SELECT 1, 'first'
+                  UNION ALL SELECT 3, CAST(NULL AS STRING)
+                )
+                SELECT ARRAY_AGG(value IGNORE NULLS ORDER BY ordinal) AS values FROM source
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("first", "second")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayAggSupportsInlineLimit() {
+        query(Map.of("query", """
+                SELECT ARRAY_AGG(value IGNORE NULLS ORDER BY ordinal LIMIT 2) AS values
+                FROM (SELECT 3 AS ordinal, 'third' AS value
+                      UNION ALL SELECT 1, 'first'
+                      UNION ALL SELECT 2, 'second'
+                      UNION ALL SELECT 4, CAST(NULL AS STRING))
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("first", "second")));
+    }
+
+    @Test
+    @Order(5)
+    void arrayOffsetUsesGoogleSqlZeroBasedIndexes() {
+        query(Map.of("query", """
+                SELECT ['zero', 'one'][OFFSET(0)] AS first_value,
+                  ['zero', 'one'][OFFSET(1)] AS second_value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("zero", "one")));
+        query(Map.of("query", "SELECT ['zero'][SAFE_OFFSET(-1)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT ['zero'][OFFSET(1)] AS value", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+        query(Map.of("query", "SELECT CAST(NULL AS ARRAY<INT64>)[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT ['zero'][OFFSET(CAST(NULL AS INT64))] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query(Map.of("query", "SELECT [10, 20][OFFSET([0, 1][OFFSET(0)])] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("10"));
+        query(Map.of("query", "SELECT ARRAY<INT64>[1, 2][OFFSET(0)] AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "SELECT ([1, 2])[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void indexedNestedStructQueriesExecuteAfterTranslation() {
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT 1 AS id)[OFFSET(0)].id AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void arraySubquerySelectAsStructExceptExecutesAfterTranslation() {
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT * EXCEPT(id)"
+                        + " FROM UNNEST([STRUCT('1' AS id, 'example' AS type)]) al)",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("type")))
+                .body("rows[0].f[0].v.v[0].f[0].v", equalTo("example"));
+    }
+
+    @Test
+    @Order(5)
+    void chainedSafeOffsetsRetainTheirStructReceiver() {
+        query(Map.of("query", """
+                SELECT records[SAFE_OFFSET(0)].elements[SAFE_OFFSET(0)].value AS value
+                FROM (SELECT [STRUCT([STRUCT(7 AS value)] AS elements)] AS records)
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
+    }
+
+    @Test
+    @Order(5)
+    void nestedArrayStructsRetainInnerFieldNames() {
+        query(Map.of("query", """
+                SELECT records[OFFSET(1)].child.x AS value
+                FROM (SELECT [STRUCT(STRUCT(1 AS x) AS child),
+                  STRUCT(STRUCT(2 AS x) AS child)] AS records)
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void havingCanDereferenceAnAggregateStructAlias() {
+        query(Map.of("query", """
+                WITH grouped AS (
+                  SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
+                  FROM (
+                    SELECT 'first' AS group_id, TIMESTAMP '2021-01-29 00:00:00+00' AS event_time
+                    UNION ALL SELECT 'first', TIMESTAMP '2021-01-30 00:00:00+00'
+                  )
+                  GROUP BY group_id
+                  HAVING latest_per_group.latest_at <= TIMESTAMP '2021-01-30 00:00:00+00'
+                )
+                SELECT latest_per_group.group_id FROM grouped
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("first"));
+    }
+
+    @Test
+    @Order(5)
+    void timestampSubCoercesStringLiteralsBeforeIntervalArithmetic() {
+        query(Map.of("query", """
+                SELECT TIMESTAMP_SUB('2021-01-30', INTERVAL 3 DAY) AS previous
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("TIMESTAMP")))
+                .body("rows[0].f[0].v", equalTo("1611705600"));
+    }
+
+    @Test
+    @Order(5)
+    void safeParseDateReturnsNullForMalformedInput() {
+        query(Map.of("query", """
+                SELECT SAFE.PARSE_DATE('%Y%m%d', '20230801') AS parsed,
+                  SAFE.PARSE_DATE('%Y%m%d', 'invalid') AS malformed
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("DATE", "DATE")))
+                .body("rows[0].f[0].v", equalTo("2023-08-01"))
+                .body("rows[0].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void dateTruncCoercesStringLiteralsLikeBigQuery() {
+        query(Map.of("query", """
+                SELECT DATE_TRUNC('2024-05-17', MONTH) AS month_start
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("month_start")))
+                .body("schema.fields.type", equalTo(List.of("DATE")))
+                .body("rows[0].f[0].v", equalTo("2024-05-01"));
+    }
+
+    @Test
+    @Order(5)
+    void extractWeekUsesBigQueryWeekdayBoundaries() {
+        query(Map.of("query", """
+                SELECT
+                  EXTRACT(WEEK(TUESDAY) FROM DATE '2024-01-01') AS before_tuesday,
+                  EXTRACT(WEEK(TUESDAY) FROM DATE '2024-01-02') AS first_tuesday,
+                  EXTRACT(WEEK FROM DATE '2024-01-06') AS before_sunday,
+                  EXTRACT(WEEK FROM DATE '2024-01-07') AS first_sunday
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("0", "1", "0", "1")));
+    }
+
+    @Test
+    @Order(5)
+    void starExceptMatchesColumnNamesCaseInsensitively() {
+        query(Map.of("query", "SELECT * EXCEPT(ID) FROM UNNEST([STRUCT(1 AS id, 2 AS value)])",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("value")))
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void concatKeepsAggregatesInTheirQueryScope() {
+        query(Map.of("query", "SELECT CONCAT(COUNT(*), ' rows') AS summary FROM shop.users",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("3 rows"));
+
+        query(Map.of("query", "SELECT CONCAT(7) AS text, CONCAT(CAST(NULL AS INT64)) AS absent",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("STRING", "STRING")))
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void wildcardStarOmitsTheSuffixPseudocolumn() {
+        query(Map.of("query", "CREATE TABLE shop.events_2025 AS SELECT 1 AS id", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.events_2026 AS SELECT 2 AS id", "useLegacySql", false))
+                .then().statusCode(200);
+
+        query(Map.of("query", "SELECT * FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query(Map.of("query", "SELECT id, _TABLE_SUFFIX FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1", "2025"), List.of("2", "2026"))));
+        query(Map.of("query", "SELECT * FROM (SELECT _TABLE_SUFFIX FROM `shop.events_*`)"
+                        + " ORDER BY _TABLE_SUFFIX", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("_TABLE_SUFFIX")))
+                .body("rows.f.v", equalTo(List.of(List.of("2025"), List.of("2026"))));
+
+        query(Map.of("query", "CREATE TABLE shop.people_a AS"
+                        + " SELECT 'Ada' AS first_name, 'Lovelace' AS last_name", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.people_b AS"
+                        + " SELECT 'Hopper' AS last_name, 'Grace' AS first_name", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT first_name, last_name FROM `shop.people_*` ORDER BY first_name",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("Ada", "Lovelace"), List.of("Grace", "Hopper"))));
+
+        query(Map.of("query", "CREATE TABLE shop.people_c AS"
+                        + " SELECT 'Katherine' AS first_name, 'Kay' AS nickname", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT first_name, nickname FROM `shop.people_*` ORDER BY first_name",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("first_name", "nickname")))
+                .body("rows[0].f[0].v", equalTo("Ada"))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[1].f[0].v", equalTo("Grace"))
+                .body("rows[1].f[1].v", nullValue())
+                .body("rows[2].f.v", equalTo(List.of("Katherine", "Kay")));
+
+        query(Map.of("query", "CREATE TABLE shop.people_d AS SELECT 4 AS first_name",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT first_name FROM `shop.people_*`", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        query(Map.of("query", "CREATE TABLE shop.records_a AS SELECT"
+                        + " STRUCT('Ada' AS first_name, 'Lovelace' AS last_name) AS person",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.records_b AS SELECT"
+                        + " STRUCT('Hopper' AS last_name, 'Grace' AS first_name, 'Amazing Grace' AS nickname) AS person",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT person.first_name, person.last_name, person.nickname"
+                        + " FROM `shop.records_*` ORDER BY person.first_name", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("Ada"))
+                .body("rows[0].f[1].v", equalTo("Lovelace"))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[1].f.v", equalTo(List.of("Grace", "Hopper", "Amazing Grace")));
+
+        query(Map.of("query", "CREATE VIEW shop.records_view AS SELECT person FROM shop.records_a",
+                        "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "SELECT person FROM `shop.records_*`", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(5)
+    void indexedArraySubqueryUsesItsCte() {
+        query(Map.of("query", "WITH x AS (SELECT 7 AS id)"
+                        + " SELECT ARRAY(SELECT id FROM x)[OFFSET(0)] AS value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
+
+    }
+
+    @Test
+    @Order(5)
+    void singleValueUnpivotExcludesNullsByDefault() {
+        String sql = """
+                SELECT metric, metric_value FROM (SELECT 1 AS present, CAST(NULL AS INT64) AS absent)
+                UNPIVOT (metric_value FOR metric IN (present, absent))
+                """;
+
+        query(Map.of("query", sql, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("present", "1")));
     }
 
     @Test
@@ -661,6 +1726,18 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(7)
+    void nonEmptyTypedStructArrayLiteralExecutes() {
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(ARRAY<STRUCT<name STRING, value STRING>>[
+                  STRUCT('source' AS name, 'origin' AS value)
+                ]) AS metadata
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("[{\"name\":\"source\",\"value\":\"origin\"}]"));
+    }
+
+    @Test
+    @Order(8)
     void sqlErrorsSurfaceAsInvalidQuery() {
         query("""
                 {"query": "SELECT nope FROM shop.users", "useLegacySql": false}

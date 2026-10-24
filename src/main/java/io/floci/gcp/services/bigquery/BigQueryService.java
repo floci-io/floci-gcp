@@ -1066,6 +1066,11 @@ public class BigQueryService {
             }
 
             @Override
+            public List<Table> listTables(String datasetId) {
+                return BigQueryService.this.listTables(projectId, datasetId);
+            }
+
+            @Override
             public List<Map<String, Object>> rows(String datasetId, String tableId) {
                 // A snapshot for the same reason storedRows takes one: the engines iterate these
                 // rows (to estimate bytes, and to evaluate in mock mode) while insertAll can be

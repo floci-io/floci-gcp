@@ -173,6 +173,15 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void selectAsStructKeepsAliasesVisibleToLaterClauses() {
+        String translated = sql("SELECT AS STRUCT COUNT(*) AS n FROM UNNEST([1, 2]) x HAVING n > 1 ORDER BY n");
+
+        assertTrue(translated.contains("FROM (SELECT  COUNT(*) AS n FROM"), translated);
+        assertTrue(translated.contains("HAVING n > 1 ORDER BY n) AS _floci_struct_row"), translated);
+        assertTrue(translated.startsWith("SELECT struct_pack(*COLUMNS(_floci_struct_row.*))"), translated);
+    }
+
+    @Test
     void mixedStructStarsKeepNestedQueriesVisibleToLaterRewrites() {
         String aliases = sql("SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 sample) t");
         assertTrue(aliases.contains("SELECT 1 AS \"sample\""), aliases);

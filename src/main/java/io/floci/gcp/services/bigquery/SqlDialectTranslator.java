@@ -2199,6 +2199,11 @@ final class SqlDialectTranslator {
             if (items.isEmpty()) {
                 continue;
             }
+            if (structProjectionHasAliasClause(listEnd, parenthesisDepth(select))) {
+                wrapStructProjection(select, marker, struct, listEnd);
+                select = tokens.size();
+                continue;
+            }
             if (items.size() == 1 && isStarProjection(significant(items.getFirst()[0], items.getFirst()[1]))) {
                 int itemStart = items.getFirst()[0];
                 int itemEnd = items.getFirst()[1];
@@ -2260,6 +2265,19 @@ final class SqlDialectTranslator {
             replaceSelectHead(select, modifier, replacement.toString());
             select = tokens.size();
         }
+    }
+
+    /** Clauses that can resolve names assigned by the SELECT list must stay inside the struct wrapper. */
+    private boolean structProjectionHasAliasClause(int start, int depth) {
+        int end = structQueryEnd(start, depth);
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (parenthesisDepth(i) == depth && (token.isKeyword("GROUP") || token.isKeyword("HAVING")
+                    || token.isKeyword("QUALIFY") || token.isKeyword("ORDER"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The head stays recognisable as a SELECT so later clauses can still resolve the query's FROM scope. */

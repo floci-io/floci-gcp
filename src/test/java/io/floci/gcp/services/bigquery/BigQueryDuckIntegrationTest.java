@@ -321,6 +321,18 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void selectAsStructAliasesRemainVisibleToHavingAndOrderBy() {
+        query("""
+                {"query": "SELECT AS STRUCT COUNT(*) AS n FROM UNNEST([1, 2]) x HAVING n > 1 ORDER BY n", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields[0].name", equalTo("n"))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
     void distinctCountIfCountsOnlyDistinctTrueResults() {
         for (String values : List.of("[1, 2, -1, NULL]", "[-1, 0]", "ARRAY<INT64>[NULL]", "ARRAY<INT64>[]")) {
             String expected = values.equals("[1, 2, -1, NULL]") ? "1" : "0";

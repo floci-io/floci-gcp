@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -60,6 +62,7 @@ class CloudRunRuntimeServiceTest {
         when(config.docker().logMaxSize()).thenReturn("10m");
         when(config.docker().logMaxFile()).thenReturn("3");
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.docker().apiTimeout()).thenReturn(Duration.ofSeconds(30));
 
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.isLinuxHost()).thenReturn(false);
@@ -599,6 +602,69 @@ class CloudRunRuntimeServiceTest {
 
         verify(lifecycleManager, never()).forceRemove(anyString(), any());
         assertTrue(store.get(revision).isPresent());
+    }
+
+    @Test
+    void teardownWaitsForAServiceContainerStillStartingAndRemovesIt() throws Exception {
+        when(config.storage().mode()).thenReturn("memory");
+        when(config.services().cloudrun().execution().startupTimeout()).thenReturn(Duration.ofSeconds(30));
+        CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ContainerLifecycleManager.ContainerInfo created = new ContainerLifecycleManager.ContainerInfo(
+                "starting-container", Map.of(8080, new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 1)));
+        when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
+            creating.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return created;
+        });
+        Thread starter = new Thread(() -> {
+            try {
+                runtimeService.start("p1", "us-central1", service(), revision());
+            } catch (RuntimeException expected) {
+                // The readiness wait ends when the test interrupts it.
+            }
+        });
+        starter.start();
+        assertTrue(creating.await(5, TimeUnit.SECONDS));
+
+        Thread teardown = new Thread(runtimeService::stopManagedContainers);
+        teardown.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (teardown.isAlive() && teardown.getState() != Thread.State.TIMED_WAITING
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        release.countDown();
+        teardown.join(15_000);
+
+        // Teardown, not the start's own failure path, removed it: the start is still waiting for readiness.
+        verify(lifecycleManager).forceRemove("starting-container", null);
+        starter.interrupt();
+        starter.join(15_000);
+    }
+
+    @Test
+    void noServiceContainerStartsOnceTeardownBegan() {
+        when(config.storage().mode()).thenReturn("memory");
+        runtimeService.stopManagedContainers();
+
+        GcpException e = assertThrows(GcpException.class,
+                () -> runtimeService.start("p1", "us-central1", service(), revision()));
+
+        assertTrue(e.getMessage().contains("shutting down"), e.getMessage());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    private static Service service() {
+        return Service.newBuilder().setName("projects/p1/locations/us-central1/services/svc").build();
+    }
+
+    private static Revision revision() {
+        return Revision.newBuilder()
+                .setName("projects/p1/locations/us-central1/services/svc/revisions/svc-00001")
+                .setUid("revision-uid")
+                .addContainers(Container.newBuilder().setImage("gcr.io/p1/svc:latest"))
+                .build();
     }
 
     private static com.github.dockerjava.api.model.Container dockerContainer(String id, String resourceName,

@@ -7,8 +7,8 @@ import com.google.cloud.run.v2.Revision;
 import com.google.cloud.run.v2.Volume;
 import com.google.cloud.run.v2.VolumeMount;
 import io.floci.gcp.config.EmulatorConfig;
-import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ContainerTeardown;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
@@ -50,6 +50,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
@@ -73,6 +76,12 @@ public class CloudRunRuntimeService implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final GcsService gcsService;
+    /** Docker calls one start makes under {@code startLock}: create, start, network connect, remove on failure. */
+    private static final int DOCKER_CALLS_PER_START = 4;
+    /** Set when teardown begins with {@code memory} storage; no service container starts after it. */
+    private volatile boolean closed;
+    /** Held shared while a start creates its container and records it; teardown takes it exclusively. */
+    private final ReadWriteLock startLock = new ReentrantReadWriteLock();
 
     @Inject
     public CloudRunRuntimeService(StorageFactory storageFactory,
@@ -127,17 +136,27 @@ public class CloudRunRuntimeService implements ContainerTeardown {
                 gcsVolumeMounts);
         String containerId = null;
         try {
-            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
-            containerId = info.containerId();
-            ContainerLifecycleManager.EndpointInfo endpoint = info.getEndpoint(containerPort);
-            if (endpoint == null) {
-                throw GcpException.internal("Cloud Run runtime did not expose port " + containerPort);
+            ContainerLifecycleManager.EndpointInfo endpoint;
+            CloudRunRuntimeInstance starting;
+            // The container and its record appear together for teardown; see stopManagedContainers.
+            startLock.readLock().lock();
+            try {
+                if (closed) {
+                    throw GcpException.unavailable("Cloud Run runtime not started: the emulator is shutting down");
+                }
+                ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
+                containerId = info.containerId();
+                endpoint = info.getEndpoint(containerPort);
+                if (endpoint == null) {
+                    throw GcpException.internal("Cloud Run runtime did not expose port " + containerPort);
+                }
+                starting = instance(project, location, service, revision, container,
+                        info.containerId(), containerPort, spec.networkMode(), endpoint, "STARTING", null,
+                        gcsVolumeMounts);
+                runtimeStore.put(revision.getName(), starting);
+            } finally {
+                startLock.readLock().unlock();
             }
-
-            CloudRunRuntimeInstance starting = instance(project, location, service, revision, container,
-                    info.containerId(), containerPort, spec.networkMode(), endpoint, "STARTING", null,
-                    gcsVolumeMounts);
-            runtimeStore.put(revision.getName(), starting);
             waitForReady(endpoint, config.services().cloudrun().execution().startupTimeout());
             CloudRunRuntimeInstance ready = starting.withStatus("READY", null);
             runtimeStore.put(revision.getName(), ready);
@@ -185,14 +204,34 @@ public class CloudRunRuntimeService implements ContainerTeardown {
     /**
      * Removes the service revision containers this process started when the runtime records do not outlive it
      * ({@code memory} storage): no later process could re-adopt them through {@link #getReady}. With persistent
-     * storage they keep running for the next process to pick up again.
+     * storage they keep running for the next process to pick up again. Once {@code closed} is set no start creates a
+     * container, and taking {@code startLock} waits for one already creating its container and record, so the
+     * snapshot below includes every container this process started while the Docker daemon answers; past that wait,
+     * teardown logs that a container may be left running.
      */
     @Override
     public void stopManagedContainers() {
         if (config.services().cloudrun().mock() || !"memory".equals(config.storage().mode())) {
             return;
         }
-        stopInstances(runtimeRecords(key -> key.contains("/services/")));
+        closed = true;
+        boolean quiet = false;
+        try {
+            quiet = startLock.writeLock().tryLock(
+                    DOCKER_CALLS_PER_START * config.docker().apiTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!quiet) {
+            LOG.warn("A Cloud Run service container was still starting at shutdown and may be left running");
+        }
+        try {
+            stopInstances(runtimeRecords(key -> key.contains("/services/")));
+        } finally {
+            if (quiet) {
+                startLock.writeLock().unlock();
+            }
+        }
     }
 
     /**

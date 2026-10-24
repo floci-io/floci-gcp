@@ -216,11 +216,35 @@ class ComputeGuestScriptsTest {
                 ComputeGuestScripts.BOOT_GUARD, "/var/lib/google/startup-script", "4242")), any(), any(), any()))
                 .thenReturn(new ContainerExec.Result(ComputeGuestScripts.REBOOTED, "", "", false));
 
+        when(lifecycleManager.exec("c-1", List.of(), List.of("cut", "-d", " ", "-f22", "/proc/1/stat")))
+                .thenReturn(new ContainerLifecycleManager.ExecResult(0, "5151\n", ""));
+
         scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", Map.of("startup-script", "echo hi"), TIMEOUT,
                 port, () -> true, "4242");
 
         assertTrue(messages().contains("startup-script not run: the instance rebooted since this boot."),
                 messages().toString());
+    }
+
+    @Test
+    void aScriptThatItselfExitsWith125InTheSameBootDoesNotStopTheNextScript() {
+        when(gcs.getObjectData("bucket", "boot.sh")).thenReturn("echo url".getBytes(StandardCharsets.UTF_8));
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c",
+                ComputeGuestScripts.BOOT_GUARD, "/var/lib/google/startup-script", "4242")), any(), any(), any()))
+                .thenReturn(new ContainerExec.Result(ComputeGuestScripts.REBOOTED, "", "", false));
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c",
+                ComputeGuestScripts.BOOT_GUARD, "/var/lib/google/startup-script-url", "4242")), any(), any(), any()))
+                .thenReturn(new ContainerExec.Result(0, "", "", false));
+        when(lifecycleManager.exec("c-1", List.of(), List.of("cut", "-d", " ", "-f22", "/proc/1/stat")))
+                .thenReturn(new ContainerLifecycleManager.ExecResult(0, "4242\n", ""));
+        Map<String, String> metadata = new LinkedHashMap<>();
+        metadata.put("startup-script", "exit 125");
+        metadata.put("startup-script-url", "gs://bucket/boot.sh");
+
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, () -> true, "4242");
+
+        assertTrue(messages().contains("startup-script exit status 125"), messages().toString());
+        assertTrue(messages().contains("startup-script-url exit status 0"), messages().toString());
     }
 
     private static ContainerExec.Result print(OutputStream out, String text, int exitCode) throws Exception {

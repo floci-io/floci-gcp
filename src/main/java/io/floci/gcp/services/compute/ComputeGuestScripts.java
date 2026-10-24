@@ -116,7 +116,8 @@ public class ComputeGuestScripts {
                 ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(), command,
                         left, out, out);
                 out.close();
-                if (bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()) {
+                if (bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()
+                        && !bootMark.equals(currentBootMark(containerId))) {
                     port.write(line(instance, key + " not run: the instance rebooted since this boot."));
                     return;
                 }
@@ -129,6 +130,20 @@ public class ComputeGuestScripts {
             }
         }
         port.write(line(instance, "Finished running " + phase.prefix + " scripts."));
+    }
+
+    /**
+     * The start time of the container's PID 1 now, or null when it cannot be read (the container stopped). A script
+     * may exit with {@link #REBOOTED} itself, so that status only means a reboot when this no longer matches.
+     */
+    String currentBootMark(String containerId) {
+        try {
+            ContainerLifecycleManager.ExecResult result = lifecycleManager.exec(containerId, List.of(),
+                    List.of("cut", "-d", " ", "-f22", "/proc/1/stat"));
+            return result != null && result.exitCode() == 0 ? result.stdout().strip() : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** Time left before {@code deadline}, never negative; the whole {@code timeout} when there is no deadline. */

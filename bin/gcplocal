@@ -1,45 +1,71 @@
 #!/usr/bin/env bash
-# gcplocal — configure shell or run a command against the local floci-gcp emulator.
+# gcplocal: configure a shell, or run gcloud, against the local floci-gcp emulator.
 #
 # Usage:
-#   eval $(gcplocal env)           # export emulator env vars into current shell
+#   eval $(gcplocal env)           # export the emulator variables into the current shell
 #   eval $(gcplocal env --unset)   # unset them
-#   gcplocal <any-gcloud-command>  # run gcloud with emulator endpoints
+#   gcplocal <any-gcloud-command>  # run gcloud against the emulator
+#
+# The client libraries read the *_EMULATOR_HOST variables. gcloud ignores those: it needs a
+# per-service CLOUDSDK_API_ENDPOINT_OVERRIDES_* and some access token, which floci-gcp never
+# checks. The overrides are the ones the gcloud compatibility suite exercises
+# (compatibility-tests/sdk-test-gcloud). A variable already set in the caller's environment wins.
 
 _ENDPOINT="${FLOCI_GCP_ENDPOINT:-http://localhost:4588}"
-_HOST="${FLOCI_GCP_HOST:-localhost:4588}"
+_ENDPOINT="${_ENDPOINT%/}"
+_HOST="${FLOCI_GCP_HOST:-${_ENDPOINT#*://}}"
 _PROJECT="${FLOCI_GCP_PROJECT:-floci-local}"
+
+_VARS=(
+    "FLOCI_GCP_ENDPOINT=${_ENDPOINT}"
+    "FLOCI_GCP_PROJECT=${_PROJECT}"
+    "PUBSUB_EMULATOR_HOST=${_HOST}"
+    "FIRESTORE_EMULATOR_HOST=${_HOST}"
+    "DATASTORE_EMULATOR_HOST=${_HOST}"
+    "STORAGE_EMULATOR_HOST=${_ENDPOINT}"
+    "SECRET_MANAGER_EMULATOR_HOST=${_HOST}"
+    "CLOUDSDK_CORE_PROJECT=${_PROJECT}"
+    "CLOUDSDK_AUTH_ACCESS_TOKEN=floci-fake-token"
+    "CLOUDSDK_CORE_DISABLE_PROMPTS=1"
+    "CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE=${_ENDPOINT}/storage/v1/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_SECRETMANAGER=${_ENDPOINT}/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDKMS=${_ENDPOINT}/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_IAM=${_ENDPOINT}/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDSCHEDULER=${_ENDPOINT}/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER=${_ENDPOINT}/container/"
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_SERVICEUSAGE=${_ENDPOINT}/"
+)
+
+# The value to use for NAME: the caller's own, else the default above.
+_value() {
+    local name="${1%%=*}" default="${1#*=}"
+    if [[ -n "${!name+x}" && "${name}" != FLOCI_GCP_* ]]; then
+        printf '%s' "${!name}"
+    else
+        printf '%s' "${default}"
+    fi
+}
 
 if [[ "${1:-}" == "env" ]]; then
     if [[ "${2:-}" == "--unset" ]]; then
-        echo 'unset FLOCI_GCP_ENDPOINT'
-        echo 'unset FLOCI_GCP_PROJECT'
-        echo 'unset PUBSUB_EMULATOR_HOST'
-        echo 'unset FIRESTORE_EMULATOR_HOST'
-        echo 'unset DATASTORE_EMULATOR_HOST'
-        echo 'unset STORAGE_EMULATOR_HOST'
-        echo 'unset SECRET_MANAGER_EMULATOR_HOST'
+        for var in "${_VARS[@]}"; do
+            echo "unset ${var%%=*}"
+        done
         echo '# Run this command to unset floci-gcp env vars:'
         echo '# eval $(gcplocal env --unset)'
     else
-        echo "export FLOCI_GCP_ENDPOINT=\"${_ENDPOINT}\""
-        echo "export FLOCI_GCP_PROJECT=\"${_PROJECT}\""
-        echo "export PUBSUB_EMULATOR_HOST=\"${_HOST}\""
-        echo "export FIRESTORE_EMULATOR_HOST=\"${_HOST}\""
-        echo "export DATASTORE_EMULATOR_HOST=\"${_HOST}\""
-        echo "export STORAGE_EMULATOR_HOST=\"${_ENDPOINT}\""
-        echo "export SECRET_MANAGER_EMULATOR_HOST=\"${_HOST}\""
+        for var in "${_VARS[@]}"; do
+            printf 'export %s=%q\n' "${var%%=*}" "$(_value "${var}")"
+        done
         echo '# Run this command to configure your shell:'
         echo '# eval $(gcplocal env)'
     fi
     exit 0
 fi
 
-export PUBSUB_EMULATOR_HOST="${_HOST}"
-export FIRESTORE_EMULATOR_HOST="${_HOST}"
-export DATASTORE_EMULATOR_HOST="${_HOST}"
-export STORAGE_EMULATOR_HOST="${_ENDPOINT}"
-export SECRET_MANAGER_EMULATOR_HOST="${_HOST}"
-export CLOUDSDK_CORE_PROJECT="${_PROJECT}"
+for var in "${_VARS[@]}"; do
+    export "${var%%=*}=$(_value "${var}")"
+done
 
 exec gcloud "$@"

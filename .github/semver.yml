@@ -17,6 +17,7 @@ on:
       - 'pom.xml'
       - 'docker/Dockerfile.native-package'
       - 'docker/Dockerfile.compat'
+      - 'bin/gcplocal'
       - 'docker-compose.yml'
       - '.releaserc.json'
       - '.github/workflows/semver.yml'

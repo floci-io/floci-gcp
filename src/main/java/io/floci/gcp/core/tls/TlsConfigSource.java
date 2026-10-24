@@ -111,6 +111,9 @@ public class TlsConfigSource implements ConfigSource {
         // TlsProxyServer listens on the public floci-gcp port and routes by protocol.
         properties.put("quarkus.http.insecure-requests", "enabled");
         properties.put("quarkus.http.host", "127.0.0.1");
+        // Quarkus turns on localhost-only Host validation for a loopback bind in prod mode, which would
+        // reject every request the proxy forwards for floci-gcp, localhost.floci.io or any other name.
+        properties.put("quarkus.http.host-validation.require-localhost", "false");
         properties.put("quarkus.http.port", String.valueOf(HTTP_INTERNAL_PORT));
         properties.put("quarkus.http.ssl-port", String.valueOf(HTTPS_INTERNAL_PORT));
 

@@ -107,4 +107,11 @@ class TlsConfigSourceConfigPathTest {
         assertEquals("127.0.0.1", source.getValue("quarkus.http.host"));
         assertEquals("enabled", source.getValue("quarkus.http.insecure-requests"));
     }
+
+    @Test
+    void loopbackBindKeepsAcceptingTheHostNamesTheProxyForwards() {
+        TlsConfigSource source = new TlsConfigSource();
+
+        assertEquals("false", source.getValue("quarkus.http.host-validation.require-localhost"));
+    }
 }

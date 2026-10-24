@@ -637,10 +637,40 @@ class CloudRunRuntimeServiceTest {
         release.countDown();
         teardown.join(15_000);
 
-        // Teardown, not the start's own failure path, removed it: the start is still waiting for readiness.
+        // Removed exactly once: the start sees teardown began and removes its own container before recording it.
         verify(lifecycleManager).forceRemove("starting-container", null);
         starter.interrupt();
         starter.join(15_000);
+    }
+
+    @Test
+    void aStartThatOutlastsTeardownsWaitRemovesItsOwnContainer() throws Exception {
+        when(config.storage().mode()).thenReturn("memory");
+        when(config.docker().apiTimeout()).thenReturn(Duration.ofMillis(1));
+        CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(lifecycleManager.createAndStart(any())).thenAnswer(invocation -> {
+            creating.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return new ContainerLifecycleManager.ContainerInfo("late-container",
+                    Map.of(8080, new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 1)));
+        });
+        Thread starter = new Thread(() -> {
+            try {
+                runtimeService.start("p1", "us-central1", service(), revision());
+            } catch (RuntimeException expected) {
+                // The start fails once it sees teardown began.
+            }
+        });
+        starter.start();
+        assertTrue(creating.await(5, TimeUnit.SECONDS));
+
+        runtimeService.stopManagedContainers();
+        verify(lifecycleManager, never()).forceRemove(any(), any());
+        release.countDown();
+        starter.join(15_000);
+
+        verify(lifecycleManager).forceRemove("late-container", null);
     }
 
     @Test

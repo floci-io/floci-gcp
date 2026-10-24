@@ -146,6 +146,11 @@ public class CloudRunRuntimeService implements ContainerTeardown {
                 }
                 ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
                 containerId = info.containerId();
+                if (closed) {
+                    // Teardown began while this container was being created and may have stopped waiting for
+                    // this start; the failure path below removes it.
+                    throw GcpException.unavailable("Cloud Run runtime not started: the emulator is shutting down");
+                }
                 endpoint = info.getEndpoint(containerPort);
                 if (endpoint == null) {
                     throw GcpException.internal("Cloud Run runtime did not expose port " + containerPort);

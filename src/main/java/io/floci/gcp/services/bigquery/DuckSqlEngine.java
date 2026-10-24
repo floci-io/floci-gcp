@@ -64,8 +64,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 ref -> columnNames(tables, ref));
 
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(), tables,
-                flociEndpoint);
+        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
+                translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         String sql = translation.sql();
         if (request.dryRun()) {
             List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
@@ -149,8 +149,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> columnNames(tables, ref));
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(), tables,
-                flociEndpoint);
+        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
+                translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         DuckClient.ArrowIpc arrow;
         try {
             arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
@@ -181,7 +181,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
-                tables, flociEndpoint);
+                translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         if (request.dryRun()) {
             // EXPLAIN binds the statement against the staged tables without running it, so a missing
             // column or a malformed clause fails the dry run just as it would fail the real one.
@@ -460,20 +460,22 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      */
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs, Tables tables,
                           String flociEndpoint) {
-        return stage(projectId, refs, Set.of(), tables, flociEndpoint);
+        return stage(projectId, refs, Set.of(), false, tables, flociEndpoint);
     }
 
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs,
-                          Set<InformationSchema.Ref> informationSchema, Tables tables, String flociEndpoint) {
+                          Set<InformationSchema.Ref> informationSchema, boolean needsUnicodeCaseFold,
+                          Tables tables, String flociEndpoint) {
         StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
         StringBuilder emptySetup = new StringBuilder("SET TimeZone = 'UTC';\n");
         StringBuilder views = new StringBuilder();
         long[] bytes = {0};
+        boolean[] unicodeCaseFold = {needsUnicodeCaseFold};
         Set<String> schemas = new HashSet<>();
         Set<SqlDialectTranslator.TableRef> staged = new HashSet<>();
         for (SqlDialectTranslator.TableRef ref : refs) {
             stageOne(projectId, ref, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
-                    new LinkedHashSet<>(), bytes);
+                    new LinkedHashSet<>(), unicodeCaseFold, bytes);
         }
         if (!informationSchema.isEmpty()) {
             setup.append("CREATE SCHEMA IF NOT EXISTS ").append(DuckTypes.quoteIdentifier(InformationSchema.SCHEMA))
@@ -494,6 +496,10 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             setup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), empty, url.toString())).append('\n');
             emptySetup.append(stageRows(tableTarget, InformationSchema.columns(ref.view()), true, url.toString())).append('\n');
         }
+        if (unicodeCaseFold[0]) {
+            setup.append(UnicodeCaseFold.setupSql());
+            emptySetup.append(UnicodeCaseFold.setupSql());
+        }
         setup.append(LOCK_EXTERNAL_ACCESS).append(views);
         emptySetup.append(LOCK_EXTERNAL_ACCESS).append(views);
         return new Staging(setup.toString(), emptySetup.toString(), bytes[0]);
@@ -502,7 +508,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private void stageOne(String projectId, SqlDialectTranslator.TableRef ref, Tables tables, String flociEndpoint,
                           StringBuilder setup, StringBuilder emptySetup, StringBuilder views, Set<String> schemas,
                           Set<SqlDialectTranslator.TableRef> staged, Set<SqlDialectTranslator.TableRef> expanding,
-                          long[] bytes) {
+                          boolean[] unicodeCaseFold, long[] bytes) {
         if (staged.contains(ref)) {
             return;
         }
@@ -512,7 +518,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         if (ref.tableId().endsWith("*")) {
             stageWildcard(projectId, ref, tables, flociEndpoint, setup, emptySetup, views, schemas, staged, expanding,
-                    bytes);
+                    unicodeCaseFold, bytes);
             return;
         }
         Table table = tables.table(ref.datasetId(), ref.tableId());
@@ -527,9 +533,10 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
                     ref.datasetId(), SqlDialectTranslator.QueryParameters.none(),
                     dependency -> columnNames(tables, dependency));
+            unicodeCaseFold[0] |= view.needsUnicodeCaseFold();
             for (SqlDialectTranslator.TableRef dependency : view.tables()) {
                 stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
-                        expanding, bytes);
+                        expanding, unicodeCaseFold, bytes);
             }
             // Dependencies are appended first, so views stay in an order DuckDB can create them in.
             views.append("CREATE VIEW ").append(DuckTypes.quoteIdentifier(ref.datasetId())).append('.')
@@ -548,7 +555,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private void stageWildcard(String projectId, SqlDialectTranslator.TableRef wildcard, Tables tables,
                                String flociEndpoint, StringBuilder setup, StringBuilder emptySetup,
                                StringBuilder views, Set<String> schemas, Set<SqlDialectTranslator.TableRef> staged,
-                               Set<SqlDialectTranslator.TableRef> expanding, long[] bytes) {
+                               Set<SqlDialectTranslator.TableRef> expanding, boolean[] unicodeCaseFold,
+                               long[] bytes) {
         String prefix = wildcard.tableId().substring(0, wildcard.tableId().length() - 1);
         List<Table> candidates = tables.listTables(wildcard.datasetId()).stream()
                 .filter(table -> table.getTableReference() != null
@@ -572,7 +580,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         for (Table match : matches) {
             String tableId = match.getTableReference().getTableId();
             stageOne(projectId, new SqlDialectTranslator.TableRef(wildcard.datasetId(), tableId), tables,
-                    flociEndpoint, setup, emptySetup, views, schemas, staged, expanding, bytes);
+                    flociEndpoint, setup, emptySetup, views, schemas, staged, expanding, unicodeCaseFold, bytes);
         }
         String ddl = wildcardView(wildcard, matches);
         setup.append(ddl).append('\n');

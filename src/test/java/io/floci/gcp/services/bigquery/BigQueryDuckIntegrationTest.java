@@ -312,11 +312,11 @@ class BigQueryDuckIntegrationTest {
     @Order(5)
     void containsSubstrExecutesWithBigQueryScalarSemantics() {
         query("""
-                {"query": "SELECT CONTAINS_SUBSTR('A, B', ',') AS contains_comma", "useLegacySql": false}
+                {"query": "SELECT CONTAINS_SUBSTR('A, B', ',') AS contains_comma, CONTAINS_SUBSTR('Ⅸ day', 'IX') AS compatibility, CONTAINS_SUBSTR('Straße', 'STRASSE') AS case_expansion, CONTAINS_SUBSTR('ＡＢＣ', 'abc') AS width, CONTAINS_SUBSTR('é', 'e') AS keeps_accents, CONTAINS_SUBSTR(CAST(NULL AS STRING), 'x') IS NULL AS keeps_null", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
                 .body("schema.fields[0].type", equalTo("BOOLEAN"))
-                .body("rows[0].f[0].v", equalTo("true"));
+                .body("rows[0].f.v", equalTo(List.of("true", "true", "true", "true", "false", "true")));
     }
 
     @Test

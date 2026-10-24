@@ -153,7 +153,7 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - `COUNTIF(DISTINCT condition)` counts distinct `TRUE` results, returning zero for empty,
   false-only, or null-only inputs, following [COUNTIF semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#countif).
 - `PIVOT` sources support implicit column aliases and `HAVING` references to struct select aliases.
-- `CONTAINS_SUBSTR` supports scalar `STRING` inputs with case-insensitive NFC-normalized substring
+- `CONTAINS_SUBSTR` supports scalar `STRING` inputs with NFKC-normalized, case-folded substring
   matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
   emulated.
 - `RAND` returns a uniformly distributed value in the half-open interval `[0, 1)`.

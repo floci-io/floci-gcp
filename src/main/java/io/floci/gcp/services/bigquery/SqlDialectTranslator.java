@@ -40,7 +40,8 @@ final class SqlDialectTranslator {
     /** A dataset-qualified table the query reads. */
     record TableRef(String datasetId, String tableId) {}
 
-    record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema) {}
+    record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
+                       boolean needsUnicodeCaseFold) {}
 
     private record UnnestOffset(String name, int nextToken) {}
 
@@ -117,6 +118,7 @@ final class SqlDialectTranslator {
     private int generatedUnnestAlias;
     private int generatedDerivedTableAlias;
     private int generatedConcatAlias;
+    private boolean needsUnicodeCaseFold;
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -1017,7 +1019,7 @@ final class SqlDialectTranslator {
         if (first.equals("MERGE")) {
             out.append(" RETURNING merge_action");
         }
-        return new Translation(out.toString().trim(), tables, informationSchema);
+        return new Translation(out.toString().trim(), tables, informationSchema, needsUnicodeCaseFold);
     }
 
     /**
@@ -2008,7 +2010,7 @@ final class SqlDialectTranslator {
             rendered = "SELECT *" + replacementStarExclusion + " FROM (" + rendered
                     + ") AS \"_floci_star_replace\"";
         }
-        return new Translation(rendered, tables, informationSchema);
+        return new Translation(rendered, tables, informationSchema, needsUnicodeCaseFold);
     }
 
     /**
@@ -4604,8 +4606,11 @@ final class SqlDialectTranslator {
             // then map them to DOUBLE quantile positions for quantile_disc. BigQuery's
             // APPROX_QUANTILES returns observed/discrete values rather than interpolating.
             case "APPROX_QUANTILES" -> renderApproxQuantiles(a, name);
-            case "CONTAINS_SUBSTR" -> args(a, 2, name, "contains(lower(nfc_normalize(CAST(" + at(a, 0)
-                    + " AS VARCHAR))), lower(nfc_normalize(CAST(" + at(a, 1) + " AS VARCHAR))))");
+            case "CONTAINS_SUBSTR" -> {
+                needsUnicodeCaseFold = true;
+                yield args(a, 2, name, "contains(_floci_nfkc_casefold(" + at(a, 0)
+                        + "), _floci_nfkc_casefold(" + at(a, 1) + "))");
+            }
             // BigQuery emits lowercase hexadecimal text; DuckDB's hex/to_hex emits uppercase.
             case "TO_HEX" -> args(a, 1, name, "lower(hex(" + at(a, 0) + "))");
             // BigQuery's cryptographic hash functions return raw BYTES. DuckDB returns the

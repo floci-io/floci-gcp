@@ -623,7 +623,8 @@ class SqlDialectTranslatorTest {
         String call = sql("SELECT g, ANY_VALUE(s).*, MAX(x) AS m FROM ds.t GROUP BY g");
         assertTrue(call.startsWith("SELECT g, unnest(ANY_VALUE(s)), MAX(x) AS m"), call);
         assertEquals("SELECT s.* FROM \"ds\".\"t\"", sql("SELECT s.* FROM ds.t"), "a bare name keeps its .*");
-        assertEquals("SELECT t.* FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.* FROM ds.t t"));
+        assertEquals("SELECT t.* NOT SIMILAR TO '^(_TABLE_SUFFIX)$' FROM \"ds\".\"t\" AS \"t\"",
+                sql("SELECT t.* FROM ds.t t"));
         assertTrue(assertThrows(GcpException.class, () -> sql("SELECT t.s.* EXCEPT (a) FROM ds.t t"))
                 .getMessage().contains("not supported by the floci BigQuery emulator yet"));
         assertEquals("SELECT unnest(f(x).s) FROM \"ds\".\"t\"", sql("SELECT f(x).s.* FROM ds.t"));
@@ -833,9 +834,12 @@ class SqlDialectTranslatorTest {
 
     @Test
     void containsSubstrNormalizesAndComparesScalarStringsCaseInsensitively() {
-        assertEquals("SELECT contains(lower(nfc_normalize(CAST(name AS VARCHAR))),"
-                        + " lower(nfc_normalize(CAST(',' AS VARCHAR)))) AS has_comma FROM \"ds\".\"t\"",
-                sql("SELECT CONTAINS_SUBSTR(name, ',') AS has_comma FROM ds.t"));
+        SqlDialectTranslator.Translation translated = translate(
+                "SELECT CONTAINS_SUBSTR(name, ',') AS has_comma FROM ds.t");
+
+        assertEquals("SELECT contains(_floci_nfkc_casefold(name), _floci_nfkc_casefold(','))"
+                + " AS has_comma FROM \"ds\".\"t\"", translated.sql());
+        assertTrue(translated.needsUnicodeCaseFold());
     }
 
     @Test

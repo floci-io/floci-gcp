@@ -105,6 +105,8 @@ class ComputeMetadataServerIntegrationTest extends ComputeTestSupport {
         assertEquals("instance/\nproject/\nuniverse/\n", text(""));
         md().redirects().follow(false).get(MD + "instance").then().statusCode(301)
                 .header("Location", endsWith("/computeMetadata/v1/instance/"));
+        md().redirects().follow(false).queryParam("recursive", "true").queryParam("alt", "text").get(MD + "instance")
+                .then().statusCode(301).header("Location", endsWith("/computeMetadata/v1/instance/?recursive=true&alt=text"));
         JsonPath json = md().queryParam("recursive", "true").get(MD + "instance/").then().statusCode(200)
                 .contentType("application/json").extract().jsonPath();
         assertEquals("echo hi", json.getString("attributes.startup-script"));
@@ -162,6 +164,8 @@ class ComputeMetadataServerIntegrationTest extends ComputeTestSupport {
         md().queryParam("wait_for_change", "true").get(MD + "instance/service-accounts/default/token").then().statusCode(400);
         md().queryParam("wait_for_change", "true").get(MD + "instance/attributes/").then().statusCode(400);
         md().queryParam("wait_for_change", "true").queryParam("timeout_sec", "x").get(MD + "instance/name").then().statusCode(400);
+        md().queryParam("wait_for_change", "true").queryParam("timeout_sec", Long.toString(Long.MAX_VALUE))
+                .get(MD + "instance/name").then().statusCode(400);
     }
 
     private static RequestSpecification md() {

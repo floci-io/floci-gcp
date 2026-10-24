@@ -458,6 +458,30 @@ class ComputeInstanceRuntimeTest {
         assertEquals(Optional.empty(), runtime.instanceAt("172.18.0.5"));
     }
 
+    @Test
+    void guestScriptsCanReadTheirMetadataFromBootUntilTheirShutdownScriptsFinish() {
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn("172.18.0.5");
+        for (String container : List.of(CONTAINER, "new-id")) {
+            InspectContainerResponse inspect = docker.inspectContainerCmd(container).exec();
+            when(inspect.getState().getRunning()).thenReturn(true);
+            when(inspect.getNetworkSettings().getNetworks()).thenReturn(Map.of("bridge", network));
+        }
+        List<Optional<ComputeInstanceRuntime.InstanceRef>> seen = new ArrayList<>();
+        doAnswer(invocation -> seen.add(runtime.instanceAt("172.18.0.5")))
+                .when(scripts).run(any(), any(), any(), any(), any(), any(), any(), any());
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+        Container running = container("new-id", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+        runtime.submit("stop", List.of(intent(Kind.STOP)));
+
+        Optional<ComputeInstanceRuntime.InstanceRef> vm =
+                Optional.of(new ComputeInstanceRuntime.InstanceRef("p", "us-central1-a", "vm"));
+        assertEquals(List.of(vm, vm), seen, "startup and shutdown scripts both found their instance");
+        assertEquals(Optional.empty(), runtime.instanceAt("172.18.0.5"));
+    }
+
     private static Intent intent(Kind kind) {
         return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, METADATA);
     }

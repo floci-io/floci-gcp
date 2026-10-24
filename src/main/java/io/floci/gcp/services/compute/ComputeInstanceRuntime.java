@@ -187,7 +187,6 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         synchronized (lock(name)) {
             if (closed) { return; }
             InstanceRef instance = new InstanceRef(intent.project(), intent.zone(), intent.name());
-            addresses.values().removeIf(instance::equals);
             try {
                 step(operationKey, intent, name);
             } finally {
@@ -195,7 +194,10 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     // Teardown began during this step and may have listed containers before it started this one.
                     ownedContainer(name).filter(container -> "running".equals(container.getState()))
                             .ifPresent(container -> stop(container.getId()));
-                } else if (intent.kind() != Kind.STOP && intent.kind() != Kind.REMOVE) {
+                } else if (intent.kind() == Kind.STOP || intent.kind() == Kind.REMOVE) {
+                    // Only now: the shutdown scripts ran inside the step and could still read their metadata.
+                    addresses.values().removeIf(instance::equals);
+                } else {
                     register(name, instance);
                 }
             }
@@ -312,6 +314,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     /** Runs the startup scripts of a boot in the background: the boot's operation does not wait for them, as on GCE. */
     private void boot(Intent intent, String containerId) {
         if (containerId == null) { return; }
+        // Before the scripts are queued, so their first metadata read already finds the instance.
+        register(containerId, new InstanceRef(intent.project(), intent.zone(), intent.name()));
         String key = instanceKey(intent.project(), intent.zone(), intent.name());
         long boot = boots.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
         ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
@@ -386,7 +390,9 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /** Records every network address of the instance's running container. */
+    /** Records the network addresses of the instance's running container, replacing any it had before. */
     private void register(String containerName, InstanceRef instance) {
+        addresses.values().removeIf(instance::equals);
         try {
             InspectContainerResponse inspect = lifecycleManager.runDockerApi("inspect Compute instance " + containerName,
                     () -> lifecycleManager.getDockerClient().inspectContainerCmd(containerName).exec());

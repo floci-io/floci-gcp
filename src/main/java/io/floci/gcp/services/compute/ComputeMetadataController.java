@@ -8,8 +8,11 @@ import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.services.compute.ComputeMetadataTree.Dir;
 import io.floci.gcp.services.compute.ComputeMetadataTree.Leaf;
 import io.floci.gcp.services.compute.ComputeMetadataTree.Node;
+import io.smallrye.common.annotation.Blocking;
+import io.smallrye.mutiny.Uni;
 import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpServerRequest;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -30,6 +33,11 @@ import java.util.HexFormat;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The GCE metadata server, served on the emulator's main port under {@code /computeMetadata/v1}. Instance
@@ -51,6 +59,12 @@ public class ComputeMetadataController {
     private final ComputeService compute;
     private final ComputeInstanceRuntime runtime;
     private final EmulatorConfig config;
+    /** Re-checks waiting wait_for_change requests, so a waiter never holds an HTTP worker. */
+    private final ScheduledExecutorService waits = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "compute-metadata-wait");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     @Inject
     public ComputeMetadataController(ComputeService compute, ComputeInstanceRuntime runtime, EmulatorConfig config) {
@@ -59,30 +73,41 @@ public class ComputeMetadataController {
         this.config = config;
     }
 
+    @PreDestroy
+    void close() {
+        waits.shutdownNow();
+    }
+
     @GET
-    public Response root(@Context HttpHeaders headers, @Context HttpServerRequest request) {
+    @Blocking
+    public Uni<Response> root(@Context HttpHeaders headers, @Context HttpServerRequest request) {
         return get("", headers, request);
     }
 
     @GET
+    @Blocking
     @Path("{path:.*}")
-    public Response get(@PathParam("path") String path, @Context HttpHeaders headers,
-                        @Context HttpServerRequest request) {
+    public Uni<Response> get(@PathParam("path") String path, @Context HttpHeaders headers,
+                             @Context HttpServerRequest request) {
+        return answer(path, headers, request);
+    }
+
+    private Uni<Response> answer(String path, HttpHeaders headers, HttpServerRequest request) {
         if (!config.services().compute().metadataServer().enabled()) {
-            return plain(404, "The metadata server is disabled.");
+            return now(plain(404, "The metadata server is disabled."));
         }
         if (headers.getHeaderString("X-Forwarded-For") != null) {
-            return plain(403, "Request contains an X-Forwarded-For header and was rejected.");
+            return now(plain(403, "Request contains an X-Forwarded-For header and was rejected."));
         }
         if (!"Google".equals(headers.getHeaderString("Metadata-Flavor"))) {
-            return plain(403, "Missing Metadata-Flavor:Google header.");
+            return now(plain(403, "Missing Metadata-Flavor:Google header."));
         }
         // The path parameter loses a trailing slash, which decides between a value and a directory listing.
         boolean slash = path.isEmpty() || request.path().endsWith("/");
         String address = request.remoteAddress() == null ? "" : request.remoteAddress().hostAddress();
         Optional<ComputeInstanceRuntime.InstanceRef> caller = runtime.instanceAt(address);
         if (caller.isEmpty()) {
-            return plain(404, "No Compute instance container has the address " + address + ".");
+            return now(plain(404, "No Compute instance container has the address " + address + "."));
         }
         ComputeInstanceRuntime.InstanceRef instance = caller.get();
         MultiMap query = request.params();
@@ -91,33 +116,63 @@ public class ComputeMetadataController {
         boolean wait = "true".equalsIgnoreCase(query.get("wait_for_change"));
 
         Optional<Rendered> first = render(instance, path, slash, recursive, alt, query.get("audience"),
-                query.get("format"), query.get("licenses"));
-        if (first.isEmpty()) { return plain(404, "Not Found"); }
+                query.get("format"), query.get("licenses"), request.query());
+        if (first.isEmpty()) { return now(plain(404, "Not Found")); }
         Rendered rendered = first.get();
-        if (rendered.response() != null) { return rendered.response(); }
+        if (rendered.response() != null) { return now(rendered.response()); }
         if (wait) {
             if (rendered.generated() || (rendered.directory() && !recursive)) {
-                return plain(400, "Invalid request: wait_for_change is not supported here.");
+                return now(plain(400, "Invalid request: wait_for_change is not supported here."));
             }
             String lastEtag = query.get("last_etag");
             Duration timeout = waitTimeout(query.get("timeout_sec"));
-            if (timeout == null) { return plain(400, "Invalid request: timeout_sec must be a positive integer."); }
+            if (timeout == null) {
+                return now(plain(400, "Invalid request: timeout_sec must be a positive integer."));
+            }
             if (lastEtag == null || lastEtag.equals(rendered.etag())) {
-                long deadline = System.nanoTime() + timeout.toNanos();
-                String baseline = rendered.etag();
-                while (System.nanoTime() < deadline && rendered.etag().equals(baseline)) {
-                    try {
-                        Thread.sleep(POLL_MILLIS);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    Optional<Rendered> next = render(instance, path, slash, recursive, alt, null, null, null);
-                    if (next.isEmpty()) { return plain(404, "Not Found"); }
-                    rendered = next.get();
-                }
+                return waitForChange(instance, path, slash, recursive, alt, rendered.etag(),
+                        System.nanoTime() + timeout.toNanos());
             }
         }
+        return now(ok(rendered));
+    }
+
+    /**
+     * Answers once the value's ETag differs from {@code baseline} or the deadline passes, checking every
+     * {@link #POLL_MILLIS} on the wait scheduler; a caller that disconnects stops the checks.
+     */
+    private Uni<Response> waitForChange(ComputeInstanceRuntime.InstanceRef instance, String path, boolean slash,
+                                        boolean recursive, String alt, String baseline, long deadline) {
+        return Uni.createFrom().emitter(emitter -> {
+            AtomicReference<ScheduledFuture<?>> tick = new AtomicReference<>();
+            tick.set(waits.scheduleWithFixedDelay(() -> {
+                try {
+                    Optional<Rendered> next = render(instance, path, slash, recursive, alt, null, null, null);
+                    if (next.isEmpty()) {
+                        emitter.complete(plain(404, "Not Found"));
+                    } else if (!next.get().etag().equals(baseline) || System.nanoTime() >= deadline) {
+                        emitter.complete(ok(next.get()));
+                    } else {
+                        return;
+                    }
+                } catch (RuntimeException e) {
+                    emitter.fail(e);
+                }
+                ScheduledFuture<?> self = tick.get();
+                if (self != null) { self.cancel(false); }
+            }, POLL_MILLIS, POLL_MILLIS, TimeUnit.MILLISECONDS));
+            emitter.onTermination(() -> {
+                ScheduledFuture<?> self = tick.get();
+                if (self != null) { self.cancel(false); }
+            });
+        });
+    }
+
+    private static Uni<Response> now(Response response) {
+        return Uni.createFrom().item(response);
+    }
+
+    private static Response ok(Rendered rendered) {
         return Response.ok(rendered.body())
                 .header("Metadata-Flavor", "Google")
                 .header("ETag", rendered.etag())
@@ -131,6 +186,11 @@ public class ComputeMetadataController {
 
     private Optional<Rendered> render(ComputeInstanceRuntime.InstanceRef instance, String path, boolean slash, boolean recursive,
                                       String alt, String audience, String format, String licenses) {
+        return render(instance, path, slash, recursive, alt, audience, format, licenses, null);
+    }
+
+    private Optional<Rendered> render(ComputeInstanceRuntime.InstanceRef instance, String path, boolean slash, boolean recursive,
+                                      String alt, String audience, String format, String licenses, String rawQuery) {
         Optional<ComputeService.MetadataView> view = compute.metadataView(instance.project(), instance.zone(), instance.name());
         if (view.isEmpty()) { return Optional.empty(); }
         Dir tree = ComputeMetadataTree.build(instance.project(), instance.zone(), view.get());
@@ -157,7 +217,8 @@ public class ComputeMetadataController {
         if (node instanceof Dir dir) {
             if (!slash) {
                 return Optional.of(new Rendered(null, null, null, true, false,
-                        Response.status(301).location(URI.create("/computeMetadata/v1/" + path + "/"))
+                        Response.status(301).location(URI.create("/computeMetadata/v1/" + path + "/"
+                                + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery)))
                                 .header("Metadata-Flavor", "Google").build()));
             }
             if (recursive) {
@@ -195,7 +256,8 @@ public class ComputeMetadataController {
         if (value == null) { return config.services().compute().metadataServer().defaultWaitTimeout(); }
         try {
             long seconds = Long.parseLong(value);
-            return seconds > 0 ? Duration.ofSeconds(seconds) : null;
+            // An integer in the docs; the bound keeps the deadline arithmetic in range.
+            return seconds > 0 && seconds <= Integer.MAX_VALUE ? Duration.ofSeconds(seconds) : null;
         } catch (NumberFormatException e) {
             return null;
         }

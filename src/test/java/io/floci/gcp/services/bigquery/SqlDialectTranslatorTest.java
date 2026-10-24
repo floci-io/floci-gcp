@@ -279,6 +279,12 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT t.* FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.* FROM ds.t t"));
         assertTrue(assertThrows(GcpException.class, () -> sql("SELECT t.s.* EXCEPT (a) FROM ds.t t"))
                 .getMessage().contains("not supported by the floci BigQuery emulator yet"));
+        assertEquals("SELECT unnest(f(x).s) FROM \"ds\".\"t\"", sql("SELECT f(x).s.* FROM ds.t"));
+        String subscript = sql("SELECT a[OFFSET(0)].s.* FROM ds.t");
+        assertTrue(subscript.startsWith("SELECT unnest(") && subscript.endsWith(".s) FROM \"ds\".\"t\"")
+                && !subscript.contains(".*"), subscript);
+        String difference = sql("SELECT STRUCT(1 AS a).* EXCEPT DISTINCT SELECT 1 AS a");
+        assertTrue(difference.startsWith("SELECT unnest(") && difference.contains(" EXCEPT "), difference);
     }
 
     @Test

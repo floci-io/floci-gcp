@@ -1646,7 +1646,9 @@ final class SqlDialectTranslator {
                 continue;
             }
             int after = nextSignificant(i + 1, tokens.size());
-            if (after >= 0 && (tokens.get(after).isKeyword("EXCEPT") || tokens.get(after).isKeyword("REPLACE"))) {
+            int afterNext = after >= 0 ? nextSignificant(after + 1, tokens.size()) : -1;
+            if (after >= 0 && (tokens.get(after).isKeyword("EXCEPT") || tokens.get(after).isKeyword("REPLACE"))
+                    && afterNext >= 0 && tokens.get(afterNext).isPunct("(")) {
                 throw invalidQuery("Dot-star with " + tokens.get(after).upper() + " on a STRUCT expression is not"
                         + " supported by the floci BigQuery emulator yet.");
             }
@@ -1661,7 +1663,10 @@ final class SqlDialectTranslator {
         }
     }
 
-    /** First token of the value a {@code .*} applies to: a dotted path, a call, a subscript chain or parentheses. */
+    /**
+     * First token of the value a {@code .*} applies to: a dotted path, a call, a subscript chain or parentheses,
+     * and any mix of them such as {@code a[OFFSET(0)].s} or {@code f(x).s}.
+     */
     private int starOperandStart(int last) {
         Token t = tokens.get(last);
         int start = last;
@@ -1683,6 +1688,9 @@ final class SqlDialectTranslator {
         int dot = significantBefore(start);
         while (dot >= 0 && tokens.get(dot).isPunct(".")) {
             int name = significantBefore(dot);
+            if (name >= 0 && (tokens.get(name).isPunct(")") || tokens.get(name).isPunct("]"))) {
+                return starOperandStart(name);
+            }
             if (name < 0 || !(tokens.get(name).kind == Kind.IDENT || tokens.get(name).kind == Kind.QIDENT)) {
                 break;
             }

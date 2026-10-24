@@ -480,6 +480,28 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(Arrays.asList(null, null)));
+        query("""
+                {"query": "SELECT a[OFFSET(0)].s.* FROM (SELECT [STRUCT(STRUCT(1 AS v, 2 AS w) AS s)] a)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("v", "w")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+        query("""
+                {"query": "SELECT ANY_VALUE(STRUCT(STRUCT(1 AS v, 2 AS w) AS s)).s.*, (STRUCT(STRUCT(3 AS x) AS s)).s.* FROM UNNEST([1])", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("v", "w", "x")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2", "3")));
+        query("""
+                {"query": "SELECT STRUCT(2 AS a).* EXCEPT DISTINCT SELECT 1 AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"))));
+        query("""
+                {"query": "SELECT STRUCT(1 AS a).* EXCEPT DISTINCT SELECT 1 AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"));
     }
 
     @Test

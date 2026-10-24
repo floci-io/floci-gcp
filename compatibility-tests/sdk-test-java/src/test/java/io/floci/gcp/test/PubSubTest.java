@@ -34,6 +34,8 @@ import com.google.pubsub.v1.PullRequest;
 import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.PushConfig;
 import com.google.pubsub.v1.ReceivedMessage;
+import com.google.pubsub.v1.SeekRequest;
+import com.google.pubsub.v1.Snapshot;
 import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.Topic;
 import com.google.pubsub.v1.UpdateSubscriptionRequest;
@@ -879,6 +881,65 @@ class PubSubTest {
             topicAdminClient.deleteTopic(topicName);
         } catch (Exception ignored) {
             // Same as above.
+        }
+    }
+
+    @Test
+    @Order(24)
+    void seekToASnapshotRedeliversWhatWasAckedSinceIt() throws Exception {
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TestFixtures.uniqueName("snapshot-topic"));
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("snapshot-sub"));
+        String snapshotName = "projects/" + PROJECT_ID + "/snapshots/" + TestFixtures.uniqueName("snapshot");
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(subName, topicName, PushConfig.getDefaultInstance(), 60);
+        try {
+            publishOne(topicName, "replayed");
+            Snapshot snapshot = subscriptionAdminClient.createSnapshot(snapshotName, subName.toString());
+            assertThat(snapshot.getTopic()).isEqualTo(topicName.toString());
+            assertThat(snapshot.hasExpireTime()).isTrue();
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullRequest pullRequest = PullRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setMaxMessages(10)
+                        .build();
+                PullResponse first = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(first.getReceivedMessagesList()).hasSize(1);
+                subscriberStub.acknowledgeCallable().call(AcknowledgeRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .addAckIds(first.getReceivedMessages(0).getAckId())
+                        .build());
+
+                subscriptionAdminClient.seek(SeekRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setSnapshot(snapshotName)
+                        .build());
+
+                PullResponse replay = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(replay.getReceivedMessagesList()).hasSize(1);
+                assertThat(replay.getReceivedMessages(0).getMessage().getData().toStringUtf8()).isEqualTo("replayed");
+            }
+
+            List<String> topicSnapshots = new ArrayList<>();
+            topicAdminClient.listTopicSnapshots(topicName).iterateAll().forEach(topicSnapshots::add);
+            assertThat(topicSnapshots).contains(snapshotName);
+        } finally {
+            try {
+                subscriptionAdminClient.deleteSnapshot(snapshotName);
+            } catch (Exception ignored) {
+                // Cleanup only; names are unique per run.
+            }
+            try {
+                subscriptionAdminClient.deleteSubscription(subName);
+                topicAdminClient.deleteTopic(topicName);
+            } catch (Exception ignored) {
+                // Same as above.
+            }
         }
     }
 

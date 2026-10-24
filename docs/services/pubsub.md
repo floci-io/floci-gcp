@@ -27,9 +27,9 @@ emulator's setup bypass. The default `disabled` mode leaves operations permissiv
 REST JSON and gRPC topic and subscription data methods check the corresponding
 `pubsub.topics.*` or `pubsub.subscriptions.*` permission. Policy reads and writes
 check the resource's `getIamPolicy` or `setIamPolicy` permission; `testIamPermissions`
-filters its response. The gRPC transport also checks snapshot methods,
-`ListTopicSubscriptions`, `DetachSubscription`, `ModifyPushConfig`,
-`ModifyAckDeadline`, and `StreamingPull`. Topic creation checks
+filters its response. Both transports check the snapshot methods and `Seek`; the
+gRPC transport also checks `ListTopicSubscriptions`, `DetachSubscription`,
+`ModifyPushConfig`, `ModifyAckDeadline`, and `StreamingPull`. Topic creation checks
 `pubsub.topics.create` using the proposed topic name and its inherited project
 policy, so a condition on `resource.name` can scope creation. Subscription creation checks
 `pubsub.subscriptions.create` on the containing project and
@@ -37,7 +37,7 @@ policy, so a condition on `resource.name` can scope creation. Subscription creat
 `pubsub.snapshots.create` on the containing project and
 `pubsub.subscriptions.consume` on its subscription. Seek requires
 `pubsub.subscriptions.consume` and, when seeking to a snapshot,
-`pubsub.snapshots.seek`. `ListTopicSubscriptions` requires
+`pubsub.snapshots.seek`. `ListTopicSubscriptions` and `ListTopicSnapshots` require
 `pubsub.topics.get`; `DetachSubscription` requires
 `pubsub.topics.detachSubscription` on the subscription's topic. `StreamingPull`
 requires `pubsub.subscriptions.consume` on the subscription named in its first
@@ -79,7 +79,7 @@ provider "google" {
 }
 ```
 
-The REST surface supports topic and subscription create/read/list/update/delete, publish, pull, acknowledge, and modifyAckDeadline:
+The REST surface supports topic, subscription and snapshot create/read/list/update/delete, publish, pull, acknowledge, modifyAckDeadline, and seek:
 
 - `PUT /v1/projects/{project}/topics/{topic}`
 - `GET /v1/projects/{project}/topics/{topic}`
@@ -95,6 +95,13 @@ The REST surface supports topic and subscription create/read/list/update/delete,
 - `POST /v1/projects/{project}/subscriptions/{subscription}:pull`
 - `POST /v1/projects/{project}/subscriptions/{subscription}:acknowledge`
 - `POST /v1/projects/{project}/subscriptions/{subscription}:modifyAckDeadline`
+- `POST /v1/projects/{project}/subscriptions/{subscription}:seek`
+- `PUT /v1/projects/{project}/snapshots/{snapshot}`
+- `GET /v1/projects/{project}/snapshots/{snapshot}`
+- `GET /v1/projects/{project}/snapshots`
+- `GET /v1/projects/{project}/topics/{topic}/snapshots`
+- `PATCH /v1/projects/{project}/snapshots/{snapshot}?updateMask=...`
+- `DELETE /v1/projects/{project}/snapshots/{snapshot}`
 
 IAM policy methods are served for topics, subscriptions, and snapshots:
 
@@ -310,6 +317,19 @@ Messages are delivered as HTTP POST requests to the configured endpoint.
 
 ## Snapshots
 
+A snapshot keeps what its subscription had not acknowledged when it was created, plus every message
+published to the topic afterwards. Seeking a subscription on the same topic to it makes exactly those
+messages unacknowledged again, through the seeking subscription's filter; a push subscription gets them
+pushed again. A message still waiting in the subscription keeps its delivery attempt count.
+
+A snapshot expires 7 days after the oldest unacknowledged message it captured (7 days after creation
+when there was none), and `CreateSnapshot` fails with `FAILED_PRECONDITION` when that is less than an
+hour away. Seeking to an expired snapshot returns `NOT_FOUND`, to a snapshot of another topic
+`INVALID_ARGUMENT`, and seeking a detached subscription `FAILED_PRECONDITION`.
+
+The retained messages are kept in memory, like the subscription queues: after a restart a snapshot
+still exists but seeking to it restores nothing.
+
 Create and restore snapshots to replay messages:
 
 ```java
@@ -376,6 +396,8 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `GetTopic`
 - `ListTopics`
 - `ListTopicSubscriptions`
+- `ListTopicSnapshots`
+- `DetachSubscription`
 - `Publish`
 
 **Subscriber:**
@@ -395,7 +417,7 @@ Policy updated = topicAdminClient.setIamPolicy(SetIamPolicyRequest.newBuilder()
 - `ListSnapshots`
 - `UpdateSnapshot`
 - `DeleteSnapshot`
-- `Seek` (a seek to a time only affects unacknowledged messages, because acknowledged messages are not retained here even with `retain_acked_messages`; a seek to a snapshot does not restore its position yet)
+- `Seek` (a seek to a time only affects unacknowledged messages, because acknowledged messages are not retained here even with `retain_acked_messages`; see [Snapshots](#snapshots) for a seek to a snapshot)
 
 **IAM (`google.iam.v1.IAMPolicy` mixin):**
 

@@ -35,6 +35,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1749,7 +1751,7 @@ class PubSubServiceTest {
                 List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("old")).build()));
 
         Timestamp seekTime = Timestamp.newBuilder()
-                .setSeconds(Instant.now().getEpochSecond() + 60)
+                .setSeconds(clock.instant().getEpochSecond() + 60)
                 .build();
         service.seek("projects/p1/subscriptions/s1", null, seekTime);
 
@@ -1767,7 +1769,7 @@ class PubSubServiceTest {
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
 
         Timestamp seekTime = Timestamp.newBuilder()
-                .setSeconds(Instant.now().getEpochSecond() - 60)
+                .setSeconds(clock.instant().getEpochSecond() - 60)
                 .build();
         service.publish("projects/p1/topics/t1",
                 List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("in-flight")).build()));
@@ -1959,6 +1961,220 @@ class PubSubServiceTest {
         assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
     }
 
+    // ── Seek to a snapshot ─────────────────────────────────────────────────────
+
+    private static final String TOPIC = "projects/p1/topics/t1";
+    private static final String SUB = "projects/p1/subscriptions/s1";
+    private static final String SNAPSHOT = "projects/p1/snapshots/snap";
+
+    @Test
+    void seekToSnapshotRestoresMessagesAckedSinceIt() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        publish("a");
+        publish("b");
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        service.acknowledge(SUB, service.pull(SUB, 10).stream().map(ReceivedMessage::getAckId).toList());
+        assertTrue(service.pull(SUB, 10).isEmpty());
+
+        service.seek(SUB, SNAPSHOT, null);
+
+        assertEquals(List.of("a", "b"), dataOf(service.pull(SUB, 10)));
+    }
+
+    @Test
+    void seekToSnapshotIncludesLaterPublishesAndNotMessagesAckedBeforeIt() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        publish("before");
+        service.acknowledge(SUB, List.of(pullOne(SUB).getAckId()));
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        publish("after");
+        service.acknowledge(SUB, List.of(pullOne(SUB).getAckId()));
+
+        service.seek(SUB, SNAPSHOT, null);
+
+        assertEquals(List.of("after"), dataOf(service.pull(SUB, 10)));
+    }
+
+    @Test
+    void seekToSnapshotMakesInFlightMessagesUnackedAndKeepsTheirDeliveryAttempt() {
+        service.createTopic(TOPIC);
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription(SUB, "projects/p1/topics/dlq", 5);
+        publish("msg");
+        assertEquals(1, pullOne(SUB).getDeliveryAttempt());
+        service.createSnapshot(SNAPSHOT, SUB, null);
+
+        service.seek(SUB, SNAPSHOT, null);
+
+        assertEquals(2, pullOne(SUB).getDeliveryAttempt());
+        assertTrue(service.pull(SUB, 10).isEmpty());
+    }
+
+    @Test
+    void seekToSnapshotAppliesTheSeekingSubscriptionsFilter() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        createFilteredSubscription("projects/p1/subscriptions/red", TOPIC, "attributes.color = \"red\"");
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        service.publish(TOPIC, List.of(message("r", "color", "red"), message("b", "color", "blue")));
+        service.acknowledge("projects/p1/subscriptions/red",
+                List.of(pullOne("projects/p1/subscriptions/red").getAckId()));
+
+        service.seek("projects/p1/subscriptions/red", SNAPSHOT, null);
+
+        assertEquals(List.of("r"), dataOf(service.pull("projects/p1/subscriptions/red", 10)));
+    }
+
+    @Test
+    void seekToASnapshotOfAnotherTopicIsRejected() {
+        service.createTopic(TOPIC);
+        service.createTopic("projects/p1/topics/other");
+        service.createSubscription(SUB, TOPIC, 10);
+        service.createSubscription("projects/p1/subscriptions/other", "projects/p1/topics/other", 10);
+        service.createSnapshot(SNAPSHOT, "projects/p1/subscriptions/other", null);
+        publish("kept");
+
+        GcpException e = assertThrows(GcpException.class, () -> service.seek(SUB, SNAPSHOT, null));
+
+        assertEquals("INVALID_ARGUMENT", e.getGcpStatus());
+        assertEquals(List.of("kept"), dataOf(service.pull(SUB, 10)));
+    }
+
+    @Test
+    void seekToAnExpiredOrDeletedSnapshotIsNotFound() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        clock.advance(Duration.ofDays(7).plusSeconds(1));
+        assertEquals("NOT_FOUND",
+                assertThrows(GcpException.class, () -> service.seek(SUB, SNAPSHOT, null)).getGcpStatus());
+
+        service.createSnapshot("projects/p1/snapshots/gone", SUB, null);
+        service.deleteSnapshot("projects/p1/snapshots/gone");
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.seek(SUB, "projects/p1/snapshots/gone", null)).getGcpStatus());
+    }
+
+    @Test
+    void snapshotExpiryFollowsTheOldestUnackedMessage() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        Instant published = clock.instant();
+        publish("old");
+        clock.advance(Duration.ofDays(2));
+
+        service.createSubscription("projects/p1/subscriptions/empty", TOPIC, 10);
+
+        StoredSnapshot snapshot = service.createSnapshot(SNAPSHOT, SUB, null);
+        StoredSnapshot empty = service.createSnapshot("projects/p1/snapshots/empty",
+                "projects/p1/subscriptions/empty", null);
+
+        assertEquals(published.plus(Duration.ofDays(7)), Instant.parse(snapshot.getExpireTime()));
+        assertEquals(clock.instant().plus(Duration.ofDays(7)), Instant.parse(empty.getExpireTime()));
+    }
+
+    @Test
+    void aSnapshotThatWouldExpireWithinTheHourIsRefused() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        publish("ancient");
+        clock.advance(Duration.ofDays(7).minusMinutes(30));
+
+        GcpException e = assertThrows(GcpException.class, () -> service.createSnapshot(SNAPSHOT, SUB, null));
+
+        assertEquals("FAILED_PRECONDITION", e.getGcpStatus());
+        assertTrue(service.listSnapshots("p1").isEmpty());
+    }
+
+    @Test
+    void listTopicSnapshotsNamesTheSnapshotsOnATopic() {
+        service.createTopic(TOPIC);
+        service.createTopic("projects/p1/topics/other");
+        service.createSubscription(SUB, TOPIC, 10);
+        service.createSubscription("projects/p1/subscriptions/other", "projects/p1/topics/other", 10);
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        service.createSnapshot("projects/p1/snapshots/other", "projects/p1/subscriptions/other", null);
+
+        assertEquals(List.of(SNAPSHOT), service.listTopicSnapshots(TOPIC));
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.listTopicSnapshots("projects/p1/topics/missing")).getGcpStatus());
+    }
+
+    @Test
+    void seekNeedsATargetAndAnAttachedSubscription() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        assertEquals("INVALID_ARGUMENT",
+                assertThrows(GcpException.class, () -> service.seek(SUB, null, null)).getGcpStatus());
+
+        service.detachSubscription(SUB);
+        assertEquals("FAILED_PRECONDITION", assertThrows(GcpException.class,
+                () -> service.seek(SUB, null, secondsFromNow(-60))).getGcpStatus());
+    }
+
+    @Test
+    void publishingDuringSnapshotSeeksNeverDuplicatesOrLosesAMessage() throws Exception {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        service.createSnapshot(SNAPSHOT, SUB, null);
+        int count = 300;
+        ExecutorService publisher = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> publishing = publisher.submit(() -> {
+                for (int i = 0; i < count; i++) {
+                    publish("m" + i);
+                }
+            });
+            while (!publishing.isDone()) {
+                service.seek(SUB, SNAPSHOT, null);
+            }
+            publishing.get(10, TimeUnit.SECONDS);
+        } finally {
+            publisher.shutdownNow();
+        }
+
+        List<String> received = dataOf(service.pull(SUB, count * 2));
+        assertEquals(count, received.size(), "every message once");
+        assertEquals(count, received.stream().distinct().count());
+    }
+
+    @Test
+    void seekToSnapshotPushesTheRestoredMessagesToAPushSubscription() throws Exception {
+        List<String> pushed = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch twice = new CountDownLatch(2);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            JsonNode envelope = new ObjectMapper().readTree(exchange.getRequestBody());
+            pushed.add(new String(Base64.getDecoder().decode(
+                    envelope.path("message").path("data").asText()), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+            twice.countDown();
+        });
+        server.start();
+        try {
+            service.createTopic(TOPIC);
+            service.createSubscription(SUB, TOPIC, 10, null, false, null, null,
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/hook",
+                    null, null, null, null, 0, false, false);
+            service.createSnapshot(SNAPSHOT, SUB, null);
+            publish("pushed");
+
+            service.seek(SUB, SNAPSHOT, null);
+
+            assertTrue(twice.await(10, TimeUnit.SECONDS), "pushed on publish and again on seek: " + pushed);
+            assertEquals(List.of("pushed", "pushed"), List.copyOf(pushed));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static List<String> dataOf(List<ReceivedMessage> messages) {
+        return messages.stream().map(m -> m.getMessage().getData().toStringUtf8()).toList();
+    }
+
     private static void awaitSeekDoneOrBlocked(AtomicReference<Thread> seekThread, Future<?> seek) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (!seek.isDone() && !isBlockedInSeek(seekThread.get())) {
@@ -1986,7 +2202,7 @@ class PubSubServiceTest {
         }
     }
 
-    private static Timestamp secondsFromNow(long seconds) {
-        return Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond() + seconds).build();
+    private Timestamp secondsFromNow(long seconds) {
+        return Timestamp.newBuilder().setSeconds(clock.instant().getEpochSecond() + seconds).build();
     }
 }

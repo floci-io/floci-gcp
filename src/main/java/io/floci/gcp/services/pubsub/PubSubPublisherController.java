@@ -6,6 +6,8 @@ import com.google.pubsub.v1.DeleteTopicRequest;
 import com.google.pubsub.v1.DetachSubscriptionRequest;
 import com.google.pubsub.v1.DetachSubscriptionResponse;
 import com.google.pubsub.v1.GetTopicRequest;
+import com.google.pubsub.v1.ListTopicSnapshotsRequest;
+import com.google.pubsub.v1.ListTopicSnapshotsResponse;
 import com.google.pubsub.v1.ListTopicSubscriptionsRequest;
 import com.google.pubsub.v1.ListTopicSubscriptionsResponse;
 import com.google.pubsub.v1.ListTopicsRequest;
@@ -135,6 +137,20 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("listTopicSubscriptions failed: %s", e.getMessage());
+            GcpGrpcController.grpcError(responseObserver, e);
+        }
+    }
+
+    @Override
+    public void listTopicSnapshots(ListTopicSnapshotsRequest request,
+            StreamObserver<ListTopicSnapshotsResponse> responseObserver) {
+        LOG.debugf("listTopicSnapshots topic=%s", request.getTopic());
+        try {
+            List<String> names = service.listTopicSnapshots(request.getTopic());
+            responseObserver.onNext(ListTopicSnapshotsResponse.newBuilder().addAllSnapshots(names).build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            LOG.warnf("listTopicSnapshots failed: %s", e.getMessage());
             GcpGrpcController.grpcError(responseObserver, e);
         }
     }

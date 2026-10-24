@@ -13,6 +13,7 @@ import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.ListSnapshotsRequest;
 import com.google.pubsub.v1.ListSubscriptionsRequest;
+import com.google.pubsub.v1.ListTopicSnapshotsRequest;
 import com.google.pubsub.v1.ListTopicSubscriptionsRequest;
 import com.google.pubsub.v1.ListTopicsRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
@@ -121,7 +122,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
                 ? project + "/subscriptions/" + path.get("subscription") : project;
         String snapshot = path.containsKey("snapshot") ? project + "/snapshots/" + path.get("snapshot") : project;
         return switch (method) {
-            case "createTopic", "getTopic", "updateTopic", "deleteTopic", "publish",
+            case "createTopic", "getTopic", "updateTopic", "deleteTopic", "publish", "listTopicSnapshots",
                     "getTopicIamPolicy", "setTopicIamPolicy", "testTopicIamPermissions" ->
                     new IamOperation(method, topic);
             case "listTopics" -> new IamOperation(method, project);
@@ -132,8 +133,13 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
                     "getSubscriptionIamPolicy", "setSubscriptionIamPolicy",
                     "testSubscriptionIamPermissions" -> new IamOperation(method, subscription);
             case "listSubscriptions" -> new IamOperation(method, project);
-            case "getSnapshotIamPolicy", "setSnapshotIamPolicy", "testSnapshotIamPermissions" ->
+            case "seek" -> new IamOperation(method, subscription, body.path("snapshot").asText());
+            case "createSnapshot" -> new IamOperation(method, snapshot,
+                    required(body.path("subscription").asText(), "subscription"));
+            case "getSnapshot", "updateSnapshot", "deleteSnapshot",
+                    "getSnapshotIamPolicy", "setSnapshotIamPolicy", "testSnapshotIamPermissions" ->
                     new IamOperation(method, snapshot);
+            case "listSnapshots" -> new IamOperation(method, project);
             default -> throw unsupported("REST operation " + method);
         };
     }
@@ -149,6 +155,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             case "DeleteTopic" -> named("deleteTopic", request, "topic");
             case "Publish" -> named("publish", request, "topic");
             case "ListTopicSubscriptions" -> named("listTopicSubscriptions", request, "topic");
+            case "ListTopicSnapshots" -> named("listTopicSnapshots", request, "topic");
             case "DetachSubscription" -> new IamOperation("detachSubscription",
                     required(request.path("subscription").asText(), "subscription"));
             case "CreateSubscription" -> new IamOperation("createSubscription",
@@ -188,6 +195,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             case "DeleteTopic" -> new IamOperation("deleteTopic", required(((DeleteTopicRequest) request).getTopic(), "topic"));
             case "Publish" -> new IamOperation("publish", required(((PublishRequest) request).getTopic(), "topic"));
             case "ListTopicSubscriptions" -> new IamOperation("listTopicSubscriptions", required(((ListTopicSubscriptionsRequest) request).getTopic(), "topic"));
+            case "ListTopicSnapshots" -> new IamOperation("listTopicSnapshots", required(((ListTopicSnapshotsRequest) request).getTopic(), "topic"));
             case "DetachSubscription" -> new IamOperation("detachSubscription", required(((DetachSubscriptionRequest) request).getSubscription(), "subscription"));
             case "CreateSubscription" -> {
                 Subscription subscription = (Subscription) request;
@@ -227,7 +235,7 @@ public class PubSubIamAuthorizationAdapter implements IamAuthorizationAdapter {
             case "updateTopic" -> "pubsub.topics.update";
             case "deleteTopic" -> "pubsub.topics.delete";
             case "publish" -> "pubsub.topics.publish";
-            case "listTopicSubscriptions" -> "pubsub.topics.get";
+            case "listTopicSubscriptions", "listTopicSnapshots" -> "pubsub.topics.get";
             case "createSubscription" -> "pubsub.subscriptions.create";
             case "getSubscription" -> "pubsub.subscriptions.get";
             case "listSubscriptions" -> "pubsub.subscriptions.list";

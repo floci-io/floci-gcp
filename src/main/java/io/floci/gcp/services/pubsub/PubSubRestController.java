@@ -1,6 +1,8 @@
 package io.floci.gcp.services.pubsub;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
@@ -8,6 +10,7 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.services.iam.IamPolicyCodec;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,6 +31,8 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.text.ParseException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -244,6 +249,95 @@ public class PubSubRestController {
         return Response.ok(Map.of()).build();
     }
 
+    @POST
+    @Path("/subscriptions/{subscription}:seek")
+    public Response seek(@PathParam("project") String project,
+                         @PathParam("subscription") String subscriptionId,
+                         Map<String, Object> body) {
+        String time = stringValue(body, "time");
+        String snapshot = stringValue(body, "snapshot");
+        service.seek(subscriptionName(project, subscriptionId),
+                snapshot == null || snapshot.isBlank() ? null : snapshot,
+                time == null || time.isBlank() ? null : timestamp(time, "time"));
+        return Response.ok(Map.of()).build();
+    }
+
+    // ── Snapshots ──────────────────────────────────────────────────────────────
+
+    @PUT
+    @Path("/snapshots/{snapshot}")
+    public Response createSnapshot(@PathParam("project") String project,
+                                   @PathParam("snapshot") String snapshotId,
+                                   Map<String, Object> body) {
+        String subscription = stringValue(body, "subscription");
+        if (subscription == null || subscription.isBlank()) {
+            throw GcpException.invalidArgument("subscription is required");
+        }
+        return Response.ok(snapshotResponse(service.createSnapshot(snapshotName(project, snapshotId),
+                subscription, stringMap(body, "labels")))).build();
+    }
+
+    @GET
+    @Path("/snapshots/{snapshot}")
+    public Response getSnapshot(@PathParam("project") String project,
+                                @PathParam("snapshot") String snapshotId) {
+        return Response.ok(snapshotResponse(service.getSnapshot(snapshotName(project, snapshotId)))).build();
+    }
+
+    @GET
+    @Path("/snapshots")
+    public Response listSnapshots(@PathParam("project") String project,
+                                  @QueryParam("pageSize") @DefaultValue("0") int pageSize,
+                                  @QueryParam("pageToken") String pageToken) {
+        PageToken.Page<StoredSnapshot> page = PageToken.paginate(service.listSnapshots(project), pageSize, pageToken);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("snapshots", page.items().stream().map(PubSubRestController::snapshotResponse).toList());
+        if (page.nextPageToken() != null) {
+            response.put("nextPageToken", page.nextPageToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @PATCH
+    @Path("/snapshots/{snapshot}")
+    public Response updateSnapshot(@PathParam("project") String project,
+                                   @PathParam("snapshot") String snapshotId,
+                                   @QueryParam("updateMask") String updateMask,
+                                   Map<String, Object> body) {
+        Map<String, Object> snapshotBody = updateResource(body, "snapshot");
+        String expireTime = stringValue(snapshotBody, "expireTime");
+        StoredSnapshot snapshot = service.updateSnapshot(snapshotName(project, snapshotId),
+                stringMap(snapshotBody, "labels"),
+                expireTime == null ? null : timestampInstant(expireTime, "expireTime"),
+                updateMaskPaths(updateMask(updateMask, body)));
+        return Response.ok(snapshotResponse(snapshot)).build();
+    }
+
+    @DELETE
+    @Path("/snapshots/{snapshot}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteSnapshot(@PathParam("project") String project,
+                                   @PathParam("snapshot") String snapshotId) {
+        service.deleteSnapshot(snapshotName(project, snapshotId));
+        return Response.ok(Map.of()).build();
+    }
+
+    @GET
+    @Path("/topics/{topic}/snapshots")
+    public Response listTopicSnapshots(@PathParam("project") String project,
+                                       @PathParam("topic") String topicId,
+                                       @QueryParam("pageSize") @DefaultValue("0") int pageSize,
+                                       @QueryParam("pageToken") String pageToken) {
+        PageToken.Page<String> page = PageToken.paginate(
+                service.listTopicSnapshots(topicName(project, topicId)), pageSize, pageToken);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("snapshots", page.items());
+        if (page.nextPageToken() != null) {
+            response.put("nextPageToken", page.nextPageToken());
+        }
+        return Response.ok(response).build();
+    }
+
     // ── IAM policies (google.iam.v1.IAMPolicy mixin) ───────────────────────────
     // More-literal templates win over /topics/{topic} etc. during JAX-RS sorting,
     // the same mechanism the :publish and :pull routes rely on.
@@ -341,6 +435,32 @@ public class PubSubRestController {
 
     private static String subscriptionName(String project, String subscriptionId) {
         return "projects/" + project + "/subscriptions/" + subscriptionId;
+    }
+
+    private static Map<String, Object> snapshotResponse(StoredSnapshot snapshot) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("name", snapshot.getName());
+        response.put("topic", snapshot.getTopic());
+        if (snapshot.getExpireTime() != null) {
+            response.put("expireTime", snapshot.getExpireTime());
+        }
+        if (snapshot.getLabels() != null && !snapshot.getLabels().isEmpty()) {
+            response.put("labels", snapshot.getLabels());
+        }
+        return response;
+    }
+
+    private static Timestamp timestamp(String value, String field) {
+        try {
+            return Timestamps.parse(value);
+        } catch (ParseException e) {
+            throw GcpException.invalidArgument("Invalid " + field + ": " + value);
+        }
+    }
+
+    private static String timestampInstant(String value, String field) {
+        Timestamp parsed = timestamp(value, field);
+        return Instant.ofEpochSecond(parsed.getSeconds(), parsed.getNanos()).toString();
     }
 
     private static Map<String, Object> topicResponse(StoredTopic topic) {

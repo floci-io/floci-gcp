@@ -13,7 +13,9 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
 class PubSubRestIntegrationTest {
@@ -858,5 +860,73 @@ class PubSubRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("permissions", empty());
+    }
+
+    @Test
+    void snapshotsAndSeekWorkOverRest() {
+        String project = "pubsub-rest-snapshot-it";
+        String base = "/v1/projects/" + project;
+        String topicName = "projects/" + project + "/topics/events";
+        String snapshotName = "projects/" + project + "/snapshots/before-ack";
+
+        given().when().put(base + "/topics/events").then().statusCode(200);
+        given().when().put(base + "/topics/other").then().statusCode(200);
+        given().contentType("application/json").body("{\"topic\": \"" + topicName + "\"}")
+                .when().put(base + "/subscriptions/reader").then().statusCode(200);
+        given().contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/other\"}")
+                .when().put(base + "/subscriptions/other-reader").then().statusCode(200);
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"messages\": [{\"data\": \"aGVsbG8=\"}]}")
+                .when().post(base + "/topics/events:publish").then().statusCode(200);
+
+        given().contentType("application/json")
+                .body("{\"subscription\": \"projects/" + project + "/subscriptions/reader\","
+                        + " \"labels\": {\"stage\": \"test\"}}")
+                .when().put(base + "/snapshots/before-ack")
+                .then().statusCode(200)
+                .body("name", equalTo(snapshotName))
+                .body("topic", equalTo(topicName))
+                .body("expireTime", notNullValue())
+                .body("labels.stage", equalTo("test"));
+
+        String ackId = given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"maxMessages\": 10}")
+                .when().post(base + "/subscriptions/reader:pull")
+                .then().statusCode(200).extract().path("receivedMessages[0].ackId");
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"ackIds\": [\"" + ackId + "\"]}")
+                .when().post(base + "/subscriptions/reader:acknowledge").then().statusCode(200);
+
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"snapshot\": \"" + snapshotName + "\"}")
+                .when().post(base + "/subscriptions/reader:seek").then().statusCode(200);
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"maxMessages\": 10}")
+                .when().post(base + "/subscriptions/reader:pull")
+                .then().statusCode(200)
+                .body("receivedMessages", hasSize(1))
+                .body("receivedMessages[0].message.data", equalTo("aGVsbG8="));
+
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"time\": \"2000-01-01T00:00:00Z\"}")
+                .when().post(base + "/subscriptions/reader:seek").then().statusCode(200);
+        given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().post(base + "/subscriptions/reader:seek").then().statusCode(400);
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"snapshot\": \"" + snapshotName + "\"}")
+                .when().post(base + "/subscriptions/other-reader:seek").then().statusCode(400);
+
+        given().when().get(base + "/snapshots").then().statusCode(200)
+                .body("snapshots.name", hasItem(snapshotName));
+        given().when().get(base + "/topics/events/snapshots").then().statusCode(200)
+                .body("snapshots", hasItem(snapshotName));
+        given().contentType("application/json")
+                .body("{\"snapshot\": {\"labels\": {\"stage\": \"patched\"}}, \"updateMask\": \"labels\"}")
+                .when().patch(base + "/snapshots/before-ack").then().statusCode(200)
+                .body("labels.stage", equalTo("patched"));
+
+        given().when().delete(base + "/snapshots/before-ack").then().statusCode(200);
+        given().when().get(base + "/snapshots/before-ack").then().statusCode(404);
     }
 }

@@ -298,9 +298,15 @@ abstract class PubSubIamEnforcementContract {
         if (enforced()) {
             assertEquals(Status.Code.PERMISSION_DENIED, assertThrows(StatusRuntimeException.class,
                     () -> subscriber.seek(request)).getStatus().getCode());
+            given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
+                    .body(Map.of("snapshot", snapshot)).post("/v1/" + subscription + ":seek")
+                    .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
         }
         grant(snapshot, "roles/pubsub.subscriber", null);
         subscriber.seek(request);
+        given().urlEncodingEnabled(false).header("Authorization", credential).contentType("application/json")
+                .body(Map.of("snapshot", snapshot)).post("/v1/" + subscription + ":seek")
+                .then().statusCode(200);
     }
 
     @Test

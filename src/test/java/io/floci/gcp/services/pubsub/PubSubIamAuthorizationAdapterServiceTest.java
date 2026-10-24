@@ -35,11 +35,11 @@ class PubSubIamAuthorizationAdapterServiceTest {
         ObjectMapper mapper = new ObjectMapper();
         Map<String, String> path = Map.of("project", "iam-inventory", "topic", "topic",
                 "subscription", "subscription", "snapshot", "snapshot");
-        ObjectNode body = mapper.createObjectNode().put("topic", TOPIC);
+        ObjectNode body = mapper.createObjectNode().put("topic", TOPIC).put("subscription", SUBSCRIPTION);
 
         Method[] restHandlers = Arrays.stream(PubSubRestController.class.getDeclaredMethods())
                 .filter(method -> method.isAnnotationPresent(Path.class)).toArray(Method[]::new);
-        assertEquals(23, restHandlers.length);
+        assertEquals(30, restHandlers.length);
         for (Method method : restHandlers) {
             IamOperation operation = adapter.restOperation(method.getName(), path, body);
             assertFalse(operation.resource().isBlank(), method.getName());
@@ -85,6 +85,6 @@ class PubSubIamAuthorizationAdapterServiceTest {
                 grpcHandlers++;
             }
         }
-        assertEquals(24, grpcHandlers);
+        assertEquals(25, grpcHandlers);
     }
 }

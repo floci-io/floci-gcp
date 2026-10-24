@@ -58,7 +58,7 @@ class ComputeGuestScriptsTest {
         metadata.put("startup-script-url", "gs://bucket/boot/setup.sh");
         metadata.put("startup-script", "echo hello; echo world");
 
-        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, () -> true);
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, () -> true, null);
 
         List<String> lines = messages();
         assertEquals(List.of("Starting startup scripts.", "Found startup-script in metadata.",
@@ -71,7 +71,7 @@ class ComputeGuestScriptsTest {
 
     @Test
     void everyLineCarriesTheRunnerPrefix() {
-        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, "vm", "c-1", Map.of(), TIMEOUT, port, () -> true);
+        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, "vm", "c-1", Map.of(), TIMEOUT, port, () -> true, null);
 
         String output = port.read(0).contents();
         assertTrue(output.matches("\\d{4}-\\d{2}-\\d{2}T[^ ]+ vm google_metadata_script_runner\\[1]: "
@@ -87,7 +87,7 @@ class ComputeGuestScriptsTest {
         metadata.put("startup-script", "sleep 999");
         metadata.put("startup-script-url", "https://example.com/setup.sh");
 
-        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, () -> true);
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, () -> true, null);
 
         List<String> lines = messages();
         assertTrue(lines.contains("startup-script still running after PT1M; no longer waiting for it."), lines.toString());
@@ -131,7 +131,7 @@ class ComputeGuestScriptsTest {
         metadata.put("shutdown-script", "sleep 999");
         metadata.put("shutdown-script-url", "gs://bucket/stop.sh");
 
-        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, "vm", "c-1", metadata, limit, port, () -> true);
+        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, "vm", "c-1", metadata, limit, port, () -> true, null);
 
         verify(lifecycleManager, never()).execStreaming(eq("c-1"), eq("root"), anyList(),
                 eq(List.of("/bin/sh", "-c", "\"$0\"", "/var/lib/google/shutdown-script-url")), any(), any(), any());
@@ -168,7 +168,7 @@ class ComputeGuestScriptsTest {
         metadata.put("startup-script", "sleep 999");
         metadata.put("startup-script-url", "gs://bucket/boot.sh");
 
-        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, limit, port, () -> true);
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, limit, port, () -> true, null);
 
         verify(lifecycleManager).execStreaming(eq("c-1"), eq("root"), anyList(),
                 eq(List.of("/bin/sh", "-c", "\"$0\"", "/var/lib/google/startup-script-url")), eq(limit), any(), any());
@@ -187,7 +187,7 @@ class ComputeGuestScriptsTest {
         metadata.put("startup-script", "true");
         metadata.put("startup-script-url", "gs://bucket/boot.sh");
 
-        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, current::get);
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", metadata, TIMEOUT, port, current::get, null);
 
         verify(gcs, never()).getObjectData(any(), any());
         verify(lifecycleManager, never()).execStreaming(eq("c-1"), eq("root"), anyList(),
@@ -208,6 +208,19 @@ class ComputeGuestScriptsTest {
         assertEquals(2, lines.size(), lines.size() + " lines");
         assertEquals("s: " + "a".repeat(ComputeGuestScripts.MAX_LINE_BYTES - 1), lines.get(0));
         assertEquals("s: \u00e9b", lines.get(1));
+    }
+
+    @Test
+    void withABootMarkEachScriptRunsBehindTheBootGuard() {
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c",
+                ComputeGuestScripts.BOOT_GUARD, "/var/lib/google/startup-script", "4242")), any(), any(), any()))
+                .thenReturn(new ContainerExec.Result(ComputeGuestScripts.REBOOTED, "", "", false));
+
+        scripts.run(ComputeGuestScripts.Phase.STARTUP, "vm", "c-1", Map.of("startup-script", "echo hi"), TIMEOUT,
+                port, () -> true, "4242");
+
+        assertTrue(messages().contains("startup-script not run: the instance rebooted since this boot."),
+                messages().toString());
     }
 
     private static ContainerExec.Result print(OutputStream out, String text, int exitCode) throws Exception {

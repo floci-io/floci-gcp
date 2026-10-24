@@ -36,6 +36,15 @@ public class ComputeGuestScripts {
     static final String ROOT = "root";
     /** Longest line kept before it is written out unfinished, so output without newlines stays bounded. */
     static final int MAX_LINE_BYTES = 8 * 1024;
+    /** Exit status of the boot guard when the container has restarted since the boot its script belongs to. */
+    static final int REBOOTED = 125;
+    /**
+     * Runs the script ({@code $0}) only while PID 1 still has the start time ({@code $1}) it had at its boot. A stop
+     * and start, or a reset, replace PID 1, so a script queued for an earlier boot never runs in a later one, however
+     * late it gets to exec. Field 22 of /proc/1/stat is the process start time.
+     */
+    static final String BOOT_GUARD = "[ \"$(cut -d ' ' -f22 /proc/1/stat)\" = \"$1\" ] || exit " + REBOOTED
+            + "; exec \"$0\"";
 
     public enum Phase {
         STARTUP("startup"), SHUTDOWN("shutdown");
@@ -59,10 +68,11 @@ public class ComputeGuestScripts {
      * long {@code startup-script} still lets {@code startup-script-url} run after it. The shutdown phase as a whole
      * gets {@code timeout}: preparation and every script share one deadline, so two shutdown scripts cannot take twice
      * the shutdown limit. {@code current} is checked before each step, so a run that belongs to a boot which has
-     * since ended (the instance stopped, reset or was deleted) does nothing more.
+     * since ended (the instance stopped, reset or was deleted) does nothing more, and {@code bootMark} (the start
+     * time of the boot's PID 1, or null when unknown) is checked inside the container as each script starts.
      */
     void run(Phase phase, String instance, String containerId, Map<String, String> metadata, Duration timeout,
-             ComputeSerialPort port, BooleanSupplier current) {
+             ComputeSerialPort port, BooleanSupplier current, String bootMark) {
         Instant deadline = phase == Phase.SHUTDOWN ? Instant.now().plus(timeout) : null;
         List<String> keys = List.of(phase.prefix + "-script", phase.prefix + "-script-url");
         if (keys.stream().noneMatch(metadata::containsKey)) {
@@ -99,9 +109,17 @@ public class ComputeGuestScripts {
                     continue;
                 }
                 LineWriter out = new LineWriter(port, instance, key + ": ");
-                ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(),
-                        List.of("/bin/sh", "-c", "\"$0\"", DIRECTORY + "/" + key), left, out, out);
+                String path = DIRECTORY + "/" + key;
+                List<String> command = bootMark == null
+                        ? List.of("/bin/sh", "-c", "\"$0\"", path)
+                        : List.of("/bin/sh", "-c", BOOT_GUARD, path, bootMark);
+                ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(), command,
+                        left, out, out);
                 out.close();
+                if (bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()) {
+                    port.write(line(instance, key + " not run: the instance rebooted since this boot."));
+                    return;
+                }
                 port.write(line(instance, result.timedOut()
                         ? key + " still running after " + timeout + "; no longer waiting for it."
                         : key + " exit status " + result.exitCode()));

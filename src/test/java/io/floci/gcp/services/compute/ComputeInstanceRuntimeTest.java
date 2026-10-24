@@ -425,14 +425,14 @@ class ComputeInstanceRuntimeTest {
     void everyBootRunsTheStartupScriptsInTheNewContainer() {
         runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
         verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("new-id"), eq(METADATA),
-                eq(Duration.ofMinutes(30)), any(), any());
+                eq(Duration.ofMinutes(30)), any(), any(), any());
 
         Container running = container("c-1", "running", Map.of());
         when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
         runtime.submit("reset", List.of(intent(Kind.RESTART)));
         runtime.submit("start", List.of(intent(Kind.START)));
         verify(scripts, times(2)).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
-                eq(METADATA), any(), any(), any());
+                eq(METADATA), any(), any(), any(), any());
     }
 
     @Test
@@ -441,7 +441,7 @@ class ComputeInstanceRuntimeTest {
 
         runtime.submit("op", List.of(intent(Kind.LAUNCH)));
 
-        verify(scripts, never()).run(any(), any(), any(), any(), any(), any(), any());
+        verify(scripts, never()).run(any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -461,7 +461,7 @@ class ComputeInstanceRuntimeTest {
         queued.forEach(Runnable::run);
 
         ArgumentCaptor<BooleanSupplier> current = ArgumentCaptor.forClass(BooleanSupplier.class);
-        verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), any(), any(), any(), any(), any(), current.capture());
+        verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), any(), any(), any(), any(), any(), current.capture(), any());
         assertFalse(current.getValue().getAsBoolean(), "the stop ended the boot those scripts belong to");
     }
 
@@ -475,7 +475,33 @@ class ComputeInstanceRuntimeTest {
 
         verify(docker.startContainerCmd("c-1")).exec();
         verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
-                eq(Map.of("startup-script", "echo again")), any(), any(), any());
+                eq(Map.of("startup-script", "echo again")), any(), any(), any(), any());
+    }
+
+    @Test
+    void aStopWaitsForShutdownScriptsAtMostTheShutdownTimeout() throws Exception {
+        when(config.services().compute().shutdownScriptTimeout()).thenReturn(Duration.ofMillis(200));
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), any(), any(), any(), any(), any(), any(), any());
+        ExecutorService pool = Executors.newCachedThreadPool();
+        try {
+            ComputeInstanceRuntime stopping = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager,
+                    imageCache, scripts, MoreExecutors.newDirectExecutorService(), pool);
+            Container running = container("c-1", "running", Map.of());
+            when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+
+            long started = System.nanoTime();
+            stopping.submit("stop", List.of(intent(Kind.STOP)));
+
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5), "the stop did not wait for the script");
+            verify(lifecycleManager).runDockerApi(eq("stop Compute instance " + CONTAINER), any());
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -486,11 +512,11 @@ class ComputeInstanceRuntimeTest {
 
         runtime.submit("stop", List.of(intent(Kind.STOP)));
         order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), eq(METADATA),
-                eq(Duration.ofSeconds(90)), any(), any());
+                eq(Duration.ofSeconds(90)), any(), any(), any());
         order.verify(lifecycleManager).runDockerApi(eq("stop Compute instance " + CONTAINER), any());
 
         runtime.submit("delete", List.of(intent(Kind.REMOVE)));
-        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), any(), any(), any(), any());
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), any(), any(), any(), any(), any());
         order.verify(lifecycleManager).forceRemove(eq("c-1"), isNull());
     }
 
@@ -501,7 +527,7 @@ class ComputeInstanceRuntimeTest {
 
         runtime.submit("delete", List.of(intent(Kind.REMOVE)));
 
-        verify(scripts, never()).run(any(), any(), any(), any(), any(), any(), any());
+        verify(scripts, never()).run(any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -509,7 +535,7 @@ class ComputeInstanceRuntimeTest {
         doAnswer(invocation -> {
             invocation.<ComputeSerialPort>getArgument(5).write("hello\n".getBytes());
             return null;
-        }).when(scripts).run(any(), any(), any(), any(), any(), any(), any());
+        }).when(scripts).run(any(), any(), any(), any(), any(), any(), any(), any());
 
         runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
 

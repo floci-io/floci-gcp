@@ -14,23 +14,27 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 
 /**
  * Runs Compute instances as Docker containers when {@code floci-gcp.services.compute.mock} is false.
@@ -297,8 +301,25 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             AtomicLong latest = boots.get(key);
             return latest != null && latest.get() == boot;
         };
+        String mark = bootMark(containerId);
         scriptExecutor.execute(() -> scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId,
-                intent.metadata(), config.services().compute().startupScriptTimeout(), port, current));
+                intent.metadata(), config.services().compute().startupScriptTimeout(), port, current, mark));
+    }
+
+    /**
+     * The start time of the container's PID 1, read while the step still holds the instance's lock, so it names this
+     * boot; null when it cannot be read, and the scripts then run without the in-container boot check.
+     */
+    private String bootMark(String containerId) {
+        try {
+            ContainerLifecycleManager.ExecResult result = lifecycleManager.exec(containerId, List.of(),
+                    List.of("cut", "-d", " ", "-f22", "/proc/1/stat"));
+            String mark = result == null ? "" : result.stdout().strip();
+            return result != null && result.exitCode() == 0 && !mark.isEmpty() ? mark : null;
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the boot of Compute instance container {0}: {1}", containerId, e.getMessage());
+            return null;
+        }
     }
 
     /** Ends the instance's current boot, so startup scripts still queued for it never run. */
@@ -307,12 +328,28 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         if (current != null) { current.incrementAndGet(); }
     }
 
-    /** Runs the shutdown scripts of a running container and waits for them, up to the shutdown script timeout. */
+    /**
+     * Runs the shutdown scripts of a running container and waits for them at most the shutdown script timeout, however
+     * long their preparation takes; the container is stopped after that, which ends anything still running.
+     */
     private void runShutdownScripts(Intent intent, Container container) {
         if (!"running".equals(container.getState())) { return; }
-        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, intent.name(), container.getId(), intent.metadata(),
-                config.services().compute().shutdownScriptTimeout(),
-                serialPort(intent.project(), intent.zone(), intent.name()), () -> true);
+        Duration timeout = config.services().compute().shutdownScriptTimeout();
+        ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
+        Future<?> shutdown = scriptExecutor.submit(() -> scripts.run(ComputeGuestScripts.Phase.SHUTDOWN,
+                intent.name(), container.getId(), intent.metadata(), timeout, port, () -> true, null));
+        try {
+            shutdown.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            shutdown.cancel(true);
+            port.write(ComputeGuestScripts.line(intent.name(),
+                    "Shutdown scripts still running after " + timeout + "; stopping the instance."));
+        } catch (ExecutionException e) {
+            LOG.warnf("Shutdown scripts of Compute instance %s failed: %s", intent.name(), e.getMessage());
+        } catch (InterruptedException e) {
+            shutdown.cancel(true);
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** Serial port output of an instance, empty for an instance that never had a container in this process. */

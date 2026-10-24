@@ -65,3 +65,58 @@ overriding the API endpoint / transport channel and disabling credentials:
   has passed. `PauseJob` stops auto-firing; `ResumeJob` re-enables it.
 - `PubsubTarget.topic_name` must reference an existing Pub/Sub topic in the same emulator.
 - `RetryConfig`/`attempt_deadline` are stored and returned but retries are not yet simulated.
+
+
+## IAM enforcement
+
+With `floci-gcp.services.iam.authorization-mode=enforce`, REST JSON and gRPC
+requests made with emulator-issued service-account credentials evaluate the
+project allow policy before reading, mutating, or dispatching a job. Disabled
+mode preserves credential bypass. Anonymous and external credentials remain
+bootstrap callers, consistent with the shared IAM framework.
+
+| Method | Permission | Authorization target |
+|--------|------------|----------------------|
+| CreateJob | `cloudscheduler.jobs.create` | Location parent |
+| ListJobs | `cloudscheduler.jobs.list` | Location parent |
+| GetJob | `cloudscheduler.jobs.get` | Job |
+| UpdateJob | `cloudscheduler.jobs.update` | Job |
+| DeleteJob | `cloudscheduler.jobs.delete` | Job |
+| PauseJob | `cloudscheduler.jobs.pause` | Job |
+| ResumeJob | `cloudscheduler.jobs.enable` | Job |
+| RunJob | `cloudscheduler.jobs.run` | Job |
+
+Supported predefined-role slices: `roles/cloudscheduler.admin` grants all eight
+permissions above, `roles/cloudscheduler.viewer` grants get/list, and
+`roles/cloudscheduler.jobRunner` grants run. Basic owner/editor roles contribute
+all eight and viewer contributes get/list. These slices cover implemented job
+operations, not every permission in the upstream roles.
+
+The local evaluator supports the shared `resource.name`, `resource.type`, and
+`resource.service` conditions, including name equality and `startsWith`. Job
+names are `projects/{project}/locations/{location}/jobs/{job}` with local type
+`cloudscheduler.googleapis.com/Job`. Create/list evaluate the location parent
+`projects/{project}/locations/{location}` with local type
+`cloudscheduler.googleapis.com/Location`, not the prospective job name. A job
+prefix condition therefore cannot grant create or list. A location grant permits
+creating any job under that location; it does not enforce a job-name prefix.
+Policies are inherited from `projects/{project}`. Job-level policy methods and
+Scheduler `testIamPermissions` are not implemented. Calls to the shared IAM mixin
+on Scheduler jobs fail closed for restricted credentials in enforce mode.
+
+OAuth/OIDC HTTP target configuration and token delivery are not implemented.
+Restricted callers configuring these targets in enforce mode receive
+`FAILED_PRECONDITION` before mutation, rather than an act-as guarantee. Target
+service authorization, background-dispatch identity, `fullView` redaction,
+custom-role evaluation, and organization/folder policy inheritance are outside
+this enforcement surface. REST updates authorize a nonempty body name when supplied,
+before the controller validates agreement with the URL name. Omitted, null, and
+empty names use the URL name. Conflicting names are rejected without mutation in
+both modes. Explicit null OAuth/OIDC fields mean unset, matching protobuf JSON.
+Domain-scoped project identifiers, including a colon, retain their full project
+policy key and condition name.
+
+The local condition attributes are emulator semantics. They do not establish
+that production Cloud Scheduler supports the same condition attributes or
+resource-name restrictions. No real-GCP IAM Conditions or Organization Policy
+behavior is proven by these tests.

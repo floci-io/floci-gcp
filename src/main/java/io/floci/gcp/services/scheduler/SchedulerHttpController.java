@@ -2,6 +2,8 @@ package io.floci.gcp.services.scheduler;
 
 import com.google.cloud.scheduler.v1.Job;
 import com.google.cloud.scheduler.v1.ListJobsResponse;
+import com.google.protobuf.MessageOrBuilder;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.services.scheduler.model.StoredJob;
@@ -78,7 +80,12 @@ public class SchedulerHttpController {
     public Response updateJob(@PathParam("project") String project,
             @PathParam("location") String location, @PathParam("jobId") String jobId,
             @QueryParam("updateMask") String updateMask, String body) {
-        Job job = ProtoJson.merge(body, Job.newBuilder().setName(jobName(project, location, jobId))).build();
+        String name = jobName(project, location, jobId);
+        Job job = ProtoJson.merge(body, Job.newBuilder()).build();
+        if (!job.getName().isEmpty() && !job.getName().equals(name)) {
+            throw GcpException.invalidArgument("Job name must match the request path");
+        }
+        job = job.toBuilder().setName(name).build();
         List<String> mask = (updateMask == null || updateMask.isBlank())
                 ? List.of() : Arrays.asList(updateMask.split(","));
         return json(SchedulerController.toJobProto(service.updateJob(SchedulerController.fromJobProto(job), mask)));
@@ -113,7 +120,7 @@ public class SchedulerHttpController {
         return json(SchedulerController.toJobProto(service.runJob(jobName(project, location, jobId))));
     }
 
-    private static Response json(com.google.protobuf.MessageOrBuilder message) {
+    private static Response json(MessageOrBuilder message) {
         return Response.ok(ProtoJson.print(message), MediaType.APPLICATION_JSON).build();
     }
 

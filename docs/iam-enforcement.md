@@ -7,7 +7,7 @@ The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
-secrets and versions, Pub/Sub, IAM service-account/key management and direct access-token
+secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
 issuance, and GCS bucket/object operations are integrated. IAM policy methods also
 use REST and the shared IAM gRPC mixin; the [IAM inventory](services/iam.md#service-account-enforcement)
 lists exact methods, permission targets, role slices, and local condition limits. Cloud Run
@@ -165,3 +165,21 @@ well as JSON; payload-bearing operations retain their JSON contract. This behavi
 is exercised by the unmodified official SDK request builders above; the shared
 [Google Java request builder](https://github.com/googleapis/google-api-java-client/blob/main/google-api-client/src/main/java/com/google/api/client/googleapis/services/AbstractGoogleClientRequest.java)
 uses empty content for bodyless custom POST methods.
+
+### Cloud Scheduler evidence
+
+- [Scheduler v1 proto](https://github.com/googleapis/googleapis/blob/master/google/cloud/scheduler/v1/cloudscheduler.proto)
+  and [HTTP JSON SDK stub](https://github.com/googleapis/google-cloud-java/blob/main/java-scheduler/google-cloud-scheduler/src/main/java/com/google/cloud/scheduler/v1/stub/HttpJsonCloudSchedulerStub.java).
+- REST [create](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/create),
+  [list](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/list),
+  and [resume](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/resume)
+  define parent targets and the `cloudscheduler.jobs.enable` permission.
+- [Scheduler access control and role permissions](https://docs.cloud.google.com/scheduler/docs/access-control).
+
+`SchedulerIamAuthorizationAdapterServiceTest` inventories all eight handlers and
+RPCs. `SchedulerIamEnforcementTest` uses the official Java client over REST and
+gRPC, with restricted emulator-issued credentials, positive controls, denial state
+assertions, observed Pub/Sub delivery after permitted/denied runs, JSON null
+normalization, domain-scoped project names, and disabled-mode controls. The compatibility workflow includes it
+in the isolated enforcing native run. See the [Scheduler inventory](services/scheduler.md#iam-enforcement)
+for local condition semantics and unsupported targets.

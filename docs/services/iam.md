@@ -24,6 +24,7 @@ which mode is active and the supported service list.
 | GCS buckets | Supported REST bucket metadata, IAM-policy, retention-lock, storage-layout, and notification operations; bucket `testIamPermissions` filters its response |
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
 | Pub/Sub | REST JSON and gRPC topic, subscription, snapshot, and policy methods; `testIamPermissions` filters its response |
+| Cloud Scheduler | REST JSON and gRPC job create/get/list/update/delete/pause/resume/run; project policy inheritance. See [Scheduler IAM enforcement](scheduler.md#iam-enforcement) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `signBlob`, and `signJwt` |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |

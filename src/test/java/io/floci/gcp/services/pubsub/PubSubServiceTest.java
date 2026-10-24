@@ -6,6 +6,8 @@ import com.sun.net.httpserver.HttpServer;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import com.google.pubsub.v1.ListTopicSnapshotsRequest;
+import com.google.pubsub.v1.ListTopicSnapshotsResponse;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.core.common.GcpException;
@@ -16,6 +18,7 @@ import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
+import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -30,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -2115,29 +2119,112 @@ class PubSubServiceTest {
     }
 
     @Test
-    void publishingDuringSnapshotSeeksNeverDuplicatesOrLosesAMessage() throws Exception {
+    void aPublishDuringASnapshotSeekWaitsForItAndIsDeliveredOnce() throws Exception {
         service.createTopic(TOPIC);
         service.createSubscription(SUB, TOPIC, 10);
         service.createSnapshot(SNAPSHOT, SUB, null);
-        int count = 300;
-        ExecutorService publisher = Executors.newSingleThreadExecutor();
-        try {
-            Future<?> publishing = publisher.submit(() -> {
-                for (int i = 0; i < count; i++) {
-                    publish("m" + i);
-                }
-            });
-            while (!publishing.isDone()) {
-                service.seek(SUB, SNAPSHOT, null);
-            }
-            publishing.get(10, TimeUnit.SECONDS);
-        } finally {
-            publisher.shutdownNow();
-        }
+        publish("before");
+        Thread publisher = new Thread(() -> publish("during"));
 
-        List<String> received = dataOf(service.pull(SUB, count * 2));
-        assertEquals(count, received.size(), "every message once");
-        assertEquals(count, received.stream().distinct().count());
+        synchronized (service.topicLock(TOPIC)) {
+            publisher.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (publisher.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(Thread.State.BLOCKED, publisher.getState(), "publish must wait for the topic lock");
+            service.seek(SUB, SNAPSHOT, null);
+        }
+        publisher.join(5_000);
+
+        assertEquals(List.of("before", "during"), dataOf(service.pull(SUB, 10)));
+    }
+
+    @Test
+    void aSnapshotOfAPushSubscriptionCapturesMessagesStillAwaitingAcknowledgement() throws Exception {
+        List<String> pushed = Collections.synchronizedList(new ArrayList<>());
+        AtomicBoolean accept = new AtomicBoolean();
+        CountDownLatch rejected = new CountDownLatch(1);
+        CountDownLatch replayed = new CountDownLatch(2);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            JsonNode envelope = new ObjectMapper().readTree(exchange.getRequestBody());
+            String data = new String(Base64.getDecoder().decode(
+                    envelope.path("message").path("data").asText()), StandardCharsets.UTF_8);
+            if (accept.get()) {
+                pushed.add(data);
+                exchange.sendResponseHeaders(204, -1);
+                replayed.countDown();
+            } else {
+                exchange.sendResponseHeaders(500, -1);
+                rejected.countDown();
+            }
+            exchange.close();
+        });
+        server.start();
+        try {
+            service.createTopic(TOPIC);
+            service.createSubscription(SUB, TOPIC, 10, null, false, null, null,
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/hook",
+                    null, null, null, null, 0, false, false);
+            publish("unacked");
+            assertTrue(rejected.await(10, TimeUnit.SECONDS));
+
+            service.createSnapshot(SNAPSHOT, SUB, null);
+            accept.set(true);
+            service.seek(SUB, SNAPSHOT, null);
+
+            assertTrue(replayed.await(10, TimeUnit.SECONDS), "retried and replayed: " + pushed);
+            assertEquals(List.of("unacked", "unacked"), List.copyOf(pushed));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void aSnapshotTakenBeforeAnyPullAfterARestartCapturesTheQueue() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        PubSubService restarted = new PubSubService(new InMemoryStorage<>(), subStore, new InMemoryStorage<>(),
+                iamService, clock);
+        try {
+            restarted.createTopic(TOPIC);
+            restarted.publish(TOPIC, List.of(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("queued")).build()));
+            restarted.createSnapshot(SNAPSHOT, SUB, null);
+            restarted.acknowledge(SUB, restarted.pull(SUB, 10).stream().map(ReceivedMessage::getAckId).toList());
+
+            restarted.seek(SUB, SNAPSHOT, null);
+
+            assertEquals(List.of("queued"), dataOf(restarted.pull(SUB, 10)));
+        } finally {
+            restarted.shutdownExecutors();
+        }
+    }
+
+    @Test
+    void listTopicSnapshotsOverGrpcPages() {
+        service.createTopic(TOPIC);
+        service.createSubscription(SUB, TOPIC, 10);
+        service.createSnapshot("projects/p1/snapshots/a", SUB, null);
+        service.createSnapshot("projects/p1/snapshots/b", SUB, null);
+        PubSubPublisherController controller = new PubSubPublisherController(service);
+        List<ListTopicSnapshotsResponse> responses = new ArrayList<>();
+        StreamObserver<ListTopicSnapshotsResponse> observer = new StreamObserver<>() {
+            @Override public void onNext(ListTopicSnapshotsResponse value) { responses.add(value); }
+            @Override public void onError(Throwable t) { throw new AssertionError(t); }
+            @Override public void onCompleted() { }
+        };
+
+        controller.listTopicSnapshots(ListTopicSnapshotsRequest.newBuilder().setTopic(TOPIC).setPageSize(1).build(),
+                observer);
+        controller.listTopicSnapshots(ListTopicSnapshotsRequest.newBuilder().setTopic(TOPIC).setPageSize(1)
+                .setPageToken(responses.get(0).getNextPageToken()).build(), observer);
+
+        assertEquals(1, responses.get(0).getSnapshotsCount());
+        assertFalse(responses.get(0).getNextPageToken().isEmpty());
+        assertEquals(1, responses.get(1).getSnapshotsCount());
+        assertNotEquals(responses.get(0).getSnapshots(0), responses.get(1).getSnapshots(0));
     }
 
     @Test

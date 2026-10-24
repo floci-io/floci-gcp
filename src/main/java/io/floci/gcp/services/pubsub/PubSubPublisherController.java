@@ -146,8 +146,14 @@ public class PubSubPublisherController extends PublisherGrpc.PublisherImplBase {
             StreamObserver<ListTopicSnapshotsResponse> responseObserver) {
         LOG.debugf("listTopicSnapshots topic=%s", request.getTopic());
         try {
-            List<String> names = service.listTopicSnapshots(request.getTopic());
-            responseObserver.onNext(ListTopicSnapshotsResponse.newBuilder().addAllSnapshots(names).build());
+            PageToken.Page<String> page = PageToken.paginate(service.listTopicSnapshots(request.getTopic()),
+                    request.getPageSize(), request.getPageToken());
+            ListTopicSnapshotsResponse.Builder response = ListTopicSnapshotsResponse.newBuilder()
+                    .addAllSnapshots(page.items());
+            if (page.nextPageToken() != null) {
+                response.setNextPageToken(page.nextPageToken());
+            }
+            responseObserver.onNext(response.build());
             responseObserver.onCompleted();
         } catch (Exception e) {
             LOG.warnf("listTopicSnapshots failed: %s", e.getMessage());

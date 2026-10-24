@@ -98,6 +98,9 @@ public class PubSubService {
     // message published to its topic since. In memory only, like the queues, so a snapshot that survives a restart
     // keeps its metadata with an empty backlog.
     private final ConcurrentHashMap<String, Backlog> backlogs = new ConcurrentHashMap<>();
+    // Push messages a subscription has not had acknowledged yet (sent or awaiting a retry). They never enter
+    // the queues or leases, but a snapshot of a push subscription captures them like any unacked message.
+    private final ConcurrentHashMap<String, Set<StoredMessage>> pendingPush = new ConcurrentHashMap<>();
     // Publishing a message (backlog appends and queue adds), creating a snapshot and seeking to one all hold the
     // topic's lock, so a message is either captured by them or added after them, never both and never neither.
     // It is taken before a subscription's lease lock, never inside it.
@@ -473,6 +476,7 @@ public class PubSubService {
         queues.remove(name);
         delivered.remove(name);
         listeners.remove(name);
+        pendingPush.remove(name);
     }
 
     public void detachSubscription(String name) {
@@ -484,6 +488,7 @@ public class PubSubService {
         queues.remove(name);
         delivered.remove(name);
         listeners.remove(name);
+        pendingPush.remove(name);
     }
 
     public List<String> listTopicSubscriptions(String topicName) {
@@ -532,7 +537,7 @@ public class PubSubService {
                     if (sub != null && !sub.isDetached() && topicName.equals(sub.getTopic())
                             && matchesFilter(sub, attributes)) {
                         if (sub.getPushEndpoint() != null) {
-                            pushDeliveryExecutor.submit(() -> deliverPushMessage(sub, stored));
+                            submitPush(sub, stored);
                         } else {
                             queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>())
                                     .add(new QueuedMessage(stored, 0));
@@ -586,6 +591,7 @@ public class PubSubService {
                     httpClient.send(request, HttpResponse.BodyHandlers.discarding());
 
             if (Set.of(102, 200, 201, 202, 204).contains(response.statusCode())) {
+                pendingPush(subscription.getName()).remove(message);
                 LOG.debugf("Push delivery succeeded subscription=%s messageId=%s status=%d",
                         subscription.getName(), message.getMessageId(), response.statusCode());
             } else {
@@ -604,6 +610,15 @@ public class PubSubService {
         }
     }
 
+    private void submitPush(StoredSubscription subscription, StoredMessage message) {
+        pendingPush(subscription.getName()).add(message);
+        pushDeliveryExecutor.submit(() -> deliverPushMessage(subscription, message));
+    }
+
+    private Set<StoredMessage> pendingPush(String subscriptionName) {
+        return pendingPush.computeIfAbsent(subscriptionName, key -> ConcurrentHashMap.newKeySet());
+    }
+
     private void schedulePushRetry(StoredSubscription subscription, StoredMessage message) {
         pushRetryExecutor.schedule(() -> {
             Optional<StoredSubscription> current = subStore.get(subscription.getName());
@@ -612,6 +627,7 @@ public class PubSubService {
                     || !Objects.equals(current.get().getCreationId(), subscription.getCreationId())
                     || current.get().isDetached()
                     || current.get().getPushEndpoint() == null) {
+                pendingPush(subscription.getName()).remove(message);
                 return;
             }
 
@@ -816,6 +832,7 @@ public class PubSubService {
         for (Map.Entry<String, ConcurrentHashMap<String, Lease>> entry : delivered.entrySet()) {
             requeueExpiredLeases(entry.getKey(), entry.getValue()).run();
         }
+        dropExpiredBacklogs(clock.instant());
     }
 
     private Runnable requeueExpiredLeases(String subName, ConcurrentHashMap<String, Lease> deliveredMap) {
@@ -1082,8 +1099,13 @@ public class PubSubService {
         LOG.infof("deleteSnapshot name=%s", snapshotName);
         snapshotStore.get(snapshotName)
                 .orElseThrow(() -> GcpException.notFound("Snapshot not found: " + snapshotName));
+        // Read before the metadata goes: a snapshot recreated under this name afterwards has a new backlog,
+        // which this delete must leave alone.
+        Backlog backlog = backlogs.get(snapshotName);
         iamService.deleteResourceAndPolicy(snapshotName, () -> snapshotStore.delete(snapshotName));
-        backlogs.remove(snapshotName);
+        if (backlog != null) {
+            backlogs.remove(snapshotName, backlog);
+        }
     }
 
     public void seek(String subscriptionName, String snapshotName, Timestamp time) {
@@ -1174,24 +1196,27 @@ public class PubSubService {
         }
         LOG.debugf("seek subscription=%s snapshot=%s restored=%d", subscriptionName, snapshotName, restored.size());
         if (queue == null) {
-            restored.forEach(message -> pushDeliveryExecutor.submit(() -> deliverPushMessage(sub, message)));
+            restored.forEach(message -> submitPush(sub, message));
         } else if (!queue.isEmpty()) {
             notifyListeners(subscriptionName);
         }
     }
 
-    /** The subscription's queued and in-flight messages, in publish order. */
+    /** The subscription's queued, in-flight and unacknowledged push messages, in publish order. */
     private List<StoredMessage> unackedMessages(String subscriptionName) {
         List<QueuedMessage> unacked = new ArrayList<>();
-        ConcurrentLinkedDeque<QueuedMessage> queue = queues.get(subscriptionName);
-        ConcurrentHashMap<String, Lease> deliveredMap = delivered.get(subscriptionName);
-        if (deliveredMap == null) {
+        // The lease map is the lock for moving messages between queue and leases, so take it even when no pull
+        // has created it yet; a first pull racing this copy then waits instead of hiding a message.
+        ConcurrentHashMap<String, Lease> deliveredMap =
+                delivered.computeIfAbsent(subscriptionName, k -> new ConcurrentHashMap<>());
+        synchronized (deliveredMap) {
+            ConcurrentLinkedDeque<QueuedMessage> queue = queues.get(subscriptionName);
             if (queue != null) { unacked.addAll(queue); }
-        } else {
-            synchronized (deliveredMap) {
-                if (queue != null) { unacked.addAll(queue); }
-                deliveredMap.values().forEach(lease -> unacked.add(lease.requeued()));
-            }
+            deliveredMap.values().forEach(lease -> unacked.add(lease.requeued()));
+        }
+        Set<StoredMessage> pushing = pendingPush.get(subscriptionName);
+        if (pushing != null) {
+            pushing.forEach(message -> unacked.add(new QueuedMessage(message, 0)));
         }
         unacked.sort(PUBLISH_ORDER);
         Map<String, StoredMessage> byId = new LinkedHashMap<>();
@@ -1201,13 +1226,18 @@ public class PubSubService {
 
     /** Appends a published message to the live backlog of every snapshot on its topic. Holds the topic lock. */
     private void appendToBacklogs(String topicName, StoredMessage message, Instant publishedAt) {
-        backlogs.entrySet().removeIf(entry -> entry.getValue().expiry.isBefore(publishedAt));
+        dropExpiredBacklogs(publishedAt);
         backlogs.values().stream()
                 .filter(backlog -> backlog.topic.equals(topicName))
                 .forEach(backlog -> backlog.messages.add(message));
     }
 
-    private Object topicLock(String topicName) {
+    /** Frees the messages of expired snapshots; runs on publish and with the periodic lease sweep. */
+    private void dropExpiredBacklogs(Instant now) {
+        backlogs.entrySet().removeIf(entry -> entry.getValue().expiry.isBefore(now));
+    }
+
+    Object topicLock(String topicName) {
         return topicLocks.computeIfAbsent(topicName, key -> new Object());
     }
 

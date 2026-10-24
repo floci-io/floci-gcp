@@ -403,6 +403,9 @@ public class GcsService {
             } else if (patch.containsKey("iamConfiguration") && bucketLifecycleService != null) {
                 bucketLifecycleService.validateIamConfiguration(name, null);
             }
+            Map<String, Object> updatedSoftDeletePolicy = patch.get("softDeletePolicy") instanceof Map<?, ?> requested
+                    ? softDeletePolicy((Map<String, Object>) requested, bucket.getSoftDeletePolicy())
+                    : null;
             if (patch.containsKey("labels")) {
                 bucket.setLabels((Map<String, String>) patch.get("labels"));
             }
@@ -420,9 +423,7 @@ public class GcsService {
                         withEffectiveTime((Map<String, Object>) patch.get("retentionPolicy")));
             }
             if (patch.containsKey("softDeletePolicy")) {
-                bucket.setSoftDeletePolicy(patch.get("softDeletePolicy") instanceof Map<?, ?> requested
-                        ? softDeletePolicy((Map<String, Object>) requested, bucket.getSoftDeletePolicy())
-                        : null);
+                bucket.setSoftDeletePolicy(updatedSoftDeletePolicy);
             }
             if (patch.containsKey("iamConfiguration")) {
                 bucket.setIamConfiguration(updatedIamConfiguration);

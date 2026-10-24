@@ -632,6 +632,24 @@ class GcsServiceTest {
     }
 
     @Test
+    void anInvalidSoftDeleteRetentionLeavesTheBucketUnchanged() {
+        GcsBucket created = service.createBucket("rejected-patch", "p1", BASE_URL, Map.of());
+        String metageneration = created.getMetageneration();
+
+        GcpException rejected = assertThrows(GcpException.class, () -> service.updateBucket("rejected-patch",
+                Map.of("versioning", Map.of("enabled", true),
+                        "labels", Map.of("env", "test"),
+                        "softDeletePolicy", Map.of("retentionDurationSeconds", "86400"))));
+
+        assertEquals("INVALID_ARGUMENT", rejected.getGcpStatus());
+        GcsBucket stored = service.getBucket("rejected-patch");
+        assertNull(stored.getVersioning());
+        assertNull(stored.getLabels());
+        assertEquals(metageneration, stored.getMetageneration());
+        assertEquals("604800", stored.getSoftDeletePolicy().get("retentionDurationSeconds"));
+    }
+
+    @Test
     void listingByProjectNumberKeepsProjectsWithCollidingHashesApart() {
         assertEquals("project-an".hashCode(), "project-c0".hashCode());
         service.createBucket("an-bucket", "project-an", BASE_URL, Map.of());

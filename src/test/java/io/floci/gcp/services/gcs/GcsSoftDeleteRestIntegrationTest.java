@@ -172,6 +172,27 @@ class GcsSoftDeleteRestIntegrationTest {
     }
 
     @Test
+    void aPatchWithAnInvalidRetentionChangesNothing() {
+        String bucket = "rejected-patch-soft-delete-bucket";
+        given().contentType("application/json").body(Map.of("name", bucket))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+
+        given().contentType("application/json")
+                .body(Map.of("versioning", Map.of("enabled", true),
+                        "softDeletePolicy", Map.of("retentionDurationSeconds", "86400")))
+                .when().patch("/storage/v1/b/" + bucket)
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalid"));
+
+        given().when().get("/storage/v1/b/" + bucket)
+                .then().statusCode(200)
+                .body("versioning", nullValue())
+                .body("metageneration", equalTo("1"))
+                .body("softDeletePolicy.retentionDurationSeconds", equalTo("604800"));
+    }
+
+    @Test
     void effectiveTimeMovesWhenTheRetentionGrows() {
         String bucket = "effective-time-soft-delete-bucket";
         String created = given().contentType("application/json").body(Map.of("name", bucket))

@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Duration;
 import com.google.protobuf.Timestamp;
 import com.google.storage.v2.Bucket;
 import com.google.storage.v2.ObjectChecksums;
@@ -71,6 +72,17 @@ final class GcsGrpcMapper {
             value.setVersioning(Bucket.Versioning.newBuilder()
                     .setEnabled(Boolean.TRUE.equals(stored.getVersioning().get("enabled"))));
         }
+        if (stored.getSoftDeletePolicy() != null) {
+            Bucket.SoftDeletePolicy.Builder softDelete = Bucket.SoftDeletePolicy.newBuilder();
+            java.lang.Object retention = stored.getSoftDeletePolicy().get("retentionDurationSeconds");
+            if (retention != null) {
+                softDelete.setRetentionDuration(Duration.newBuilder().setSeconds(parseLong(String.valueOf(retention))));
+            }
+            if (stored.getSoftDeletePolicy().get("effectiveTime") instanceof String effectiveTime) {
+                timestamp(effectiveTime).ifPresent(softDelete::setEffectiveTime);
+            }
+            value.setSoftDeletePolicy(softDelete);
+        }
         if (stored.getCanonicalIamConfiguration() != null) {
             Bucket.IamConfig.Builder iamConfig = Bucket.IamConfig.newBuilder();
             if (stored.getCanonicalIamConfiguration().get("uniformBucketLevelAccess")
@@ -113,6 +125,9 @@ final class GcsGrpcMapper {
             body.put("versioning", Map.of("enabled", bucket.getVersioning().getEnabled()));
         }
         iamConfiguration(bucket).ifPresent(iamConfiguration -> body.put("iamConfiguration", iamConfiguration));
+        if (bucket.hasSoftDeletePolicy()) {
+            body.put("softDeletePolicy", softDeletePolicy(bucket));
+        }
         body.put("defaultEventBasedHold", bucket.getDefaultEventBasedHold());
         return body;
     }
@@ -144,6 +159,8 @@ final class GcsGrpcMapper {
                         updateUniformBucketLevelAccessLockTime = true;
                 case "iam_config.public_access_prevention" -> updatePublicAccessPrevention = true;
                 case "storage_class" -> patch.put("storageClass", bucket.getStorageClass());
+                case "soft_delete_policy", "soft_delete_policy.retention_duration" ->
+                        patch.put("softDeletePolicy", softDeletePolicy(bucket));
                 case "default_event_based_hold" ->
                         patch.put("defaultEventBasedHold", bucket.getDefaultEventBasedHold());
                 default -> {
@@ -233,6 +250,14 @@ final class GcsGrpcMapper {
         // submessage. Its presence makes the plain proto3 false value intentional.
         merged.put("enabled", requested.getEnabled());
         return merged;
+    }
+
+    private static Map<String, java.lang.Object> softDeletePolicy(Bucket bucket) {
+        Map<String, java.lang.Object> policy = new LinkedHashMap<>();
+        if (bucket.getSoftDeletePolicy().hasRetentionDuration()) {
+            policy.put("retentionDurationSeconds", bucket.getSoftDeletePolicy().getRetentionDuration().getSeconds());
+        }
+        return policy;
     }
 
     private static Map<String, java.lang.Object> mutableMap(java.lang.Object value) {

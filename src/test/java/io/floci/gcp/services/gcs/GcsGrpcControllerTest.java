@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Duration;
 import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
@@ -95,6 +96,41 @@ class GcsGrpcControllerTest {
                 .build(), updated);
         assertNull(updated.error);
         assertEquals("true", updated.single().getLabelsOrThrow("updated"));
+    }
+
+    @Test
+    void bucketSoftDeletePolicyDefaultsAndUpdatesThroughGrpc() {
+        RecordingObserver<Bucket> created = new RecordingObserver<>();
+        controller.createBucket(CreateBucketRequest.newBuilder()
+                .setParent("projects/_")
+                .setBucketId("grpc-soft-delete")
+                .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
+                .build(), created);
+        assertNull(created.error);
+        assertEquals(604_800L, created.single().getSoftDeletePolicy().getRetentionDuration().getSeconds());
+        assertTrue(created.single().getSoftDeletePolicy().hasEffectiveTime());
+
+        RecordingObserver<Bucket> disabled = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName("grpc-soft-delete"))
+                        .setSoftDeletePolicy(Bucket.SoftDeletePolicy.newBuilder()
+                                .setRetentionDuration(Duration.newBuilder().setSeconds(0))))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("soft_delete_policy.retention_duration"))
+                .build(), disabled);
+        assertNull(disabled.error);
+        assertEquals(0L, disabled.single().getSoftDeletePolicy().getRetentionDuration().getSeconds());
+        assertFalse(service.isSoftDeleteEnabled("grpc-soft-delete"));
+
+        RecordingObserver<Bucket> invalid = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName("grpc-soft-delete"))
+                        .setSoftDeletePolicy(Bucket.SoftDeletePolicy.newBuilder()
+                                .setRetentionDuration(Duration.newBuilder().setSeconds(3600))))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("soft_delete_policy"))
+                .build(), invalid);
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(invalid.error).getCode());
     }
 
     @Test

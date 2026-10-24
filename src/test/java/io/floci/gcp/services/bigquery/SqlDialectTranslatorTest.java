@@ -179,6 +179,10 @@ class SqlDialectTranslatorTest {
         assertTrue(translated.contains("FROM (SELECT  COUNT(*) AS n FROM"), translated);
         assertTrue(translated.contains("HAVING n > 1 ORDER BY n) AS _floci_struct_row"), translated);
         assertTrue(translated.startsWith("SELECT struct_pack(*COLUMNS(_floci_struct_row.*))"), translated);
+
+        String anonymous = sql("SELECT AS STRUCT 1 + 1 ORDER BY 1");
+        assertTrue(anonymous.contains("FROM (SELECT  1 + 1 AS \"_field_1\" ORDER BY 1)"), anonymous);
+        assertFalse(anonymous.contains("$col1"), anonymous);
     }
 
     @Test

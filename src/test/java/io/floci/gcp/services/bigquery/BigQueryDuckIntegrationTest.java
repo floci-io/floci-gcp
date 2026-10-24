@@ -329,6 +329,14 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields[0].type", equalTo("RECORD"))
                 .body("schema.fields[0].fields[0].name", equalTo("n"))
                 .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+
+        query("""
+                {"query": "SELECT AS STRUCT 1 + 1 ORDER BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields[0].name", equalTo("_field_1"))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
     }
 
     @Test

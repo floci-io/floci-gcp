@@ -2200,6 +2200,8 @@ final class SqlDialectTranslator {
                 continue;
             }
             if (structProjectionHasAliasClause(listEnd, parenthesisDepth(select))) {
+                nameAnonymousStructFields(items);
+                listEnd = selectStructListEnd(listStart);
                 wrapStructProjection(select, marker, struct, listEnd);
                 select = tokens.size();
                 continue;
@@ -2278,6 +2280,20 @@ final class SqlDialectTranslator {
             }
         }
         return false;
+    }
+
+    private void nameAnonymousStructFields(List<int[]> items) {
+        for (int n = items.size() - 1; n >= 0; n--) {
+            int[] item = items.get(n);
+            if (!needsGeneratedName(item[0], item[1])) {
+                continue;
+            }
+            int end = item[1];
+            while (tokens.get(end - 1).kind == Kind.SPACE) {
+                end--;
+            }
+            tokens.addAll(end, new Lexer(" AS `_field_" + (n + 1) + "`").tokenize());
+        }
     }
 
     /** The head stays recognisable as a SELECT so later clauses can still resolve the query's FROM scope. */

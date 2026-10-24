@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -291,15 +292,13 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         String key = instanceKey(intent.project(), intent.zone(), intent.name());
         long boot = boots.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
         ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
-        scriptExecutor.execute(() -> {
-            AtomicLong current = boots.get(key);
-            if (current == null || current.get() != boot) {
-                // The instance stopped, reset or was deleted before this boot's scripts got to run.
-                return;
-            }
-            scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
-                    config.services().compute().startupScriptTimeout(), port);
-        });
+        // Checked before every step: the instance may stop, reset or be deleted while this boot's scripts wait or run.
+        BooleanSupplier current = () -> {
+            AtomicLong latest = boots.get(key);
+            return latest != null && latest.get() == boot;
+        };
+        scriptExecutor.execute(() -> scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId,
+                intent.metadata(), config.services().compute().startupScriptTimeout(), port, current));
     }
 
     /** Ends the instance's current boot, so startup scripts still queued for it never run. */
@@ -313,7 +312,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         if (!"running".equals(container.getState())) { return; }
         scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, intent.name(), container.getId(), intent.metadata(),
                 config.services().compute().shutdownScriptTimeout(),
-                serialPort(intent.project(), intent.zone(), intent.name()));
+                serialPort(intent.project(), intent.zone(), intent.name()), () -> true);
     }
 
     /** Serial port output of an instance, empty for an instance that never had a container in this process. */

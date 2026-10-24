@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /**
  * Runs an instance's startup or shutdown scripts inside its container, as the guest environment's
@@ -54,21 +55,25 @@ public class ComputeGuestScripts {
     }
 
     /**
-     * Runs the phase's scripts within {@code timeout} overall: preparation and every script share one deadline, and
-     * each script gets only the time left, so two shutdown scripts cannot take twice the shutdown limit.
+     * Runs the phase's scripts as the guest environment does. Each startup script may run for {@code timeout}, so a
+     * long {@code startup-script} still lets {@code startup-script-url} run after it. The shutdown phase as a whole
+     * gets {@code timeout}: preparation and every script share one deadline, so two shutdown scripts cannot take twice
+     * the shutdown limit. {@code current} is checked before each step, so a run that belongs to a boot which has
+     * since ended (the instance stopped, reset or was deleted) does nothing more.
      */
     void run(Phase phase, String instance, String containerId, Map<String, String> metadata, Duration timeout,
-             ComputeSerialPort port) {
-        Instant deadline = Instant.now().plus(timeout);
+             ComputeSerialPort port, BooleanSupplier current) {
+        Instant deadline = phase == Phase.SHUTDOWN ? Instant.now().plus(timeout) : null;
         List<String> keys = List.of(phase.prefix + "-script", phase.prefix + "-script-url");
         if (keys.stream().noneMatch(metadata::containsKey)) {
             port.write(line(instance, "No " + phase.prefix + " scripts to run."));
             return;
         }
+        if (!current.getAsBoolean()) { return; }
         port.write(line(instance, "Starting " + phase.prefix + " scripts."));
         try {
-            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY), timeout,
-                    OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
+            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY),
+                    remaining(deadline, timeout), OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
         } catch (RuntimeException e) {
             LOG.warnf("Compute instance %s could not prepare %s: %s", instance, DIRECTORY, e.getMessage());
             port.write(line(instance, "Could not prepare " + DIRECTORY + ": " + e.getMessage()));
@@ -77,8 +82,8 @@ public class ComputeGuestScripts {
         for (String key : keys) {
             String value = metadata.get(key);
             if (value == null) { continue; }
-            Duration left = Duration.between(Instant.now(), deadline);
-            if (left.isNegative() || left.isZero()) {
+            if (!current.getAsBoolean()) { return; }
+            if (remaining(deadline, timeout).isZero()) {
                 port.write(line(instance, key + " not run: the " + phase.prefix + " script time limit of " + timeout
                         + " was used up."));
                 continue;
@@ -87,6 +92,12 @@ public class ComputeGuestScripts {
                 byte[] script = key.endsWith("-url") ? fetch(value.strip()) : value.getBytes(StandardCharsets.UTF_8);
                 port.write(line(instance, "Found " + key + " in metadata."));
                 RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, key, script, 0755);
+                Duration left = remaining(deadline, timeout);
+                if (left.isZero()) {
+                    port.write(line(instance, key + " not run: the " + phase.prefix + " script time limit of "
+                            + timeout + " was used up."));
+                    continue;
+                }
                 LineWriter out = new LineWriter(port, instance, key + ": ");
                 ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(),
                         List.of("/bin/sh", "-c", "\"$0\"", DIRECTORY + "/" + key), left, out, out);
@@ -100,6 +111,13 @@ public class ComputeGuestScripts {
             }
         }
         port.write(line(instance, "Finished running " + phase.prefix + " scripts."));
+    }
+
+    /** Time left before {@code deadline}, never negative; the whole {@code timeout} when there is no deadline. */
+    private static Duration remaining(Instant deadline, Duration timeout) {
+        if (deadline == null) { return timeout; }
+        Duration left = Duration.between(Instant.now(), deadline);
+        return left.isNegative() ? Duration.ZERO : left;
     }
 
     /** Reads a Cloud Storage URL from floci-gcp's own GCS. */
@@ -154,8 +172,32 @@ public class ComputeGuestScripts {
                 emit();
             } else {
                 pending.write(b);
-                if (pending.size() >= MAX_LINE_BYTES) { emit(); }
+                if (pending.size() >= MAX_LINE_BYTES) { emitWhole(); }
             }
+        }
+
+        // Writes out an over-long line up to its last complete UTF-8 character and keeps the rest pending.
+        private void emitWhole() {
+            byte[] bytes = pending.toByteArray();
+            int cut = bytes.length;
+            int back = 0;
+            while (back < 3 && cut > 0 && (bytes[cut - 1] & 0xC0) == 0x80) { cut--; back++; }
+            if (cut > 0 && (bytes[cut - 1] & 0x80) != 0 && sequenceLength(bytes[cut - 1]) > back + 1) {
+                cut--;
+            } else {
+                cut = bytes.length;
+            }
+            pending.reset();
+            pending.write(bytes, 0, cut);
+            emit();
+            pending.write(bytes, cut, bytes.length - cut);
+        }
+
+        private static int sequenceLength(byte lead) {
+            if ((lead & 0xE0) == 0xC0) { return 2; }
+            if ((lead & 0xF0) == 0xE0) { return 3; }
+            if ((lead & 0xF8) == 0xF0) { return 4; }
+            return 1;
         }
 
         @Override

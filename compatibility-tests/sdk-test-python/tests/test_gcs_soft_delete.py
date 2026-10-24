@@ -61,8 +61,10 @@ def test_deleted_object_leaves_live_listing_and_can_be_restored(
     assert soft_delete_bucket.blob("restore-me.txt").download_as_bytes() == payload
 
 
-def test_delete_is_permanent_without_a_soft_delete_policy(storage_client, unique_name):
-    bucket = storage_client.create_bucket(storage_client.bucket(f"hard-{unique_name}"))
+def test_delete_is_permanent_with_a_zero_retention(storage_client, unique_name):
+    bucket = storage_client.bucket(f"hard-{unique_name}")
+    bucket.soft_delete_policy.retention_duration_seconds = 0
+    bucket = storage_client.create_bucket(bucket)
     try:
         blob = bucket.blob("gone.txt")
         blob.upload_from_string(b"x")

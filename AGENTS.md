@@ -272,6 +272,12 @@ The Java job additionally starts an isolated native emulator with IAM enforcemen
 under `/results` in a separate `test-results/iam` host directory. The ordinary Java suite
 still runs with enforcement disabled.
 
+A separate `compat-image-gcplocal` job builds the `tools` stage of `docker/Dockerfile.compat` (gcloud,
+the Python client libraries and `bin/gcplocal`) and runs `gcplocal` as the image's user 1001 against the
+same native emulator: storage, Secret Manager and KMS round trips, `bq version`, and checks that
+gcloud runs on `/usr/bin/python3.12`, that `gcplocal env` keeps caller-set variables and that `gsutil`
+is absent.
+
 Source of truth: `.github/workflows/compatibility.yml`. Update this section when you change the network, the results mount, or the endpoint variables.
 
 ### Adding a suite to CI

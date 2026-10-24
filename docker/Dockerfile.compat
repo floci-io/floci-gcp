@@ -7,19 +7,19 @@ ARG VERSION=latest
 ARG BASE_IMAGE=floci/floci-gcp:${VERSION}
 FROM ${BASE_IMAGE} AS native
 
-# Everything that does not depend on the floci-gcp version. CI builds this stage
-# alone (target: tools) to warm the layer cache, so it pulls no floci-gcp image.
+# Everything that does not depend on the floci-gcp version. The compatibility workflow
+# builds this stage alone (target: tools) to test gcplocal, so it pulls no floci-gcp image.
 FROM registry.access.redhat.com/ubi9-minimal:9.7 AS tools
 
 LABEL org.opencontainers.image.title="floci-gcp (compat)" \
-      org.opencontainers.image.description="floci-gcp compatibility image with Python GCP SDK pre-installed" \
+      org.opencontainers.image.description="floci-gcp compatibility image with the gcloud CLI and the Python GCP SDK pre-installed" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Floci"
 
 RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
-    && microdnf install -y --nodocs python3.11 python3.11-pip \
-    && python3.11 -m pip install --upgrade pip \
-    && python3.11 -m pip install --no-cache-dir \
+    && microdnf install -y --nodocs python3.12 python3.12-pip \
+    && python3.12 -m pip install --upgrade pip \
+    && python3.12 -m pip install --no-cache-dir \
          google-cloud-pubsub \
          google-cloud-storage \
          google-cloud-firestore \
@@ -27,10 +27,42 @@ RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
          google-cloud-secret-manager \
     # The system Python keeps pip, setuptools and what the SDKs import; the optimised
     # .pyc variants, lib2to3 and ensurepip (pip is already installed) are build-time extras.
-    && rm -rf /usr/lib64/python3.11/lib2to3 /usr/lib64/python3.11/ensurepip \
-    && python3.11 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.11","/usr/lib/python3.11") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
+    && rm -rf /usr/lib64/python3.12/lib2to3 /usr/lib64/python3.12/ensurepip \
+    && python3.12 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.12","/usr/lib/python3.12") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
+
+# The gcloud CLI from Google's RHEL 9 repository, as documented for Red Hat in "Install the
+# gcloud CLI", trimmed to what gcplocal needs: gcloud runs on the image's python3.12 (the CLI
+# supports Python 3.10 to 3.15), so the bundled interpreter goes; gsutil goes too, since
+# `gcloud storage` covers it; and so do vendored test suites, release notes and .pyc files.
+# bq stays because floci-gcp emulates BigQuery. Skipping the .pyc compilation keeps the layer smaller.
+ENV CLOUDSDK_SKIP_PY_COMPILATION=1 \
+    CLOUDSDK_PYTHON=/usr/bin/python3.12
+RUN case "$(uname -m)" in \
+        x86_64) arch=x86_64 ;; \
+        aarch64) arch=aarch64 ;; \
+        *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && printf '%s\n' \
+         '[google-cloud-cli]' \
+         'name=Google Cloud CLI' \
+         "baseurl=https://packages.cloud.google.com/yum/repos/cloud-sdk-el9-${arch}" \
+         'enabled=1' \
+         'gpgcheck=1' \
+         'repo_gpgcheck=0' \
+         'gpgkey=https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg' \
+         > /etc/yum.repos.d/google-cloud-sdk.repo \
+    && microdnf install -y --nodocs libxcrypt-compat google-cloud-cli \
+    && microdnf clean all \
+    && sdk=/usr/lib64/google-cloud-sdk \
+    && rm -rf "$sdk/platform/bundledpythonunix" "$sdk/platform/gsutil" "$sdk/data/cli/gsutil.json" \
+              /usr/bin/gsutil "$sdk/RELEASE_NOTES" /usr/share/google-cloud-sdk/RELEASE_NOTES \
+    # ubi9-minimal has no find. Only tests directories are removed, and only from the vendored
+    # third_party packages: under lib/surface a directory named test can be a command group,
+    # and a vendored docs package can be imported at run time (botocore.docs by gcloud storage).
+    && python3.12 -c 'import os, shutil, sys; sdk = sys.argv[1]; vendored = os.path.join(sdk, "lib", "third_party"); [shutil.rmtree(os.path.join(d, n)) for d, ds, fs in os.walk(vendored, topdown=False) for n in ds if n == "tests"]; [os.remove(os.path.join(d, f)) for d, ds, fs in os.walk(vendored) for f in fs if f.endswith((".md", ".rst"))]; [shutil.rmtree(os.path.join(d, n)) for d, ds, fs in os.walk(sdk, topdown=False) for n in ds if n == "__pycache__"]; [os.remove(os.path.join(d, f)) for d, ds, fs in os.walk(sdk) for f in fs if f.endswith(".pyc")]' "$sdk" \
+    && rm -rf /var/cache/yum /root/.config/gcloud
 
 COPY --chmod=755 bin/gcplocal /usr/local/bin/gcplocal
 

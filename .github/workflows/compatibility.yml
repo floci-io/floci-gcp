@@ -7,6 +7,8 @@ on:
       - 'pom.xml'
       - 'docker/Dockerfile.native-package'
       - 'docker/entrypoint.sh'
+      - 'docker/Dockerfile.compat'
+      - 'bin/gcplocal'
       - 'compatibility-tests/**'
       - '.github/workflows/compatibility.yml'
 
@@ -79,6 +81,75 @@ jobs:
           name: floci-gcp-native-image
           path: /tmp/floci-gcp-native-image.tar.gz
           retention-days: 1
+
+  # The compat image's tools stage (gcloud, the Python SDKs and gcplocal), against the native
+  # emulator built above. It needs no published floci-gcp image: target tools pulls none.
+  compat-image-gcplocal:
+    name: compat image / gcplocal
+    needs: build-native
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Download native floci-gcp image
+        uses: actions/download-artifact@v8
+        with:
+          name: floci-gcp-native-image
+          path: /tmp
+
+      - name: Load native floci-gcp image
+        run: gunzip -c /tmp/floci-gcp-native-image.tar.gz | docker load
+
+      - name: Start floci-gcp
+        run: |
+          docker network create compat-net
+          docker run -d --name floci-gcp --network compat-net -p 4588:4588 \
+            -e FLOCI_GCP_BASE_URL=http://floci-gcp:4588 \
+            -e FLOCI_GCP_HOSTNAME=floci-gcp \
+            -e FLOCI_GCP_TLS_ENABLED=true \
+            -e FLOCI_GCP_TLS_HTTPS_PORT=0 \
+            floci-gcp:test-native
+          timeout 60 bash -c 'until curl -sf http://localhost:4588/health >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            docker
+            bin
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the compat tools stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.compat
+          target: tools
+          load: true
+          tags: floci-gcp-compat-tools
+
+      - name: Run gcplocal against floci-gcp
+        run: |
+          set -euo pipefail
+          # As the compat image's own user, against the emulator on the shared network. The greps
+          # read all of their input: grep -q would stop early and break the pipe under pipefail.
+          g() { docker run --rm --user 1001 --network compat-net -e FLOCI_GCP_ENDPOINT=http://floci-gcp:4588 "$@"; }
+          g floci-gcp-compat-tools gcplocal --version
+          test "$(g floci-gcp-compat-tools gcplocal info --format='value(basic.python_location)')" = /usr/bin/python3.12
+          g -e CLOUDSDK_AUTH_ACCESS_TOKEN=caller-token floci-gcp-compat-tools gcplocal env | grep -x 'export CLOUDSDK_AUTH_ACCESS_TOKEN=caller-token' >/dev/null
+          g floci-gcp-compat-tools gcplocal storage buckets create gs://compat-smoke
+          g floci-gcp-compat-tools sh -c 'echo hello > /tmp/h.txt && gcplocal storage cp /tmp/h.txt gs://compat-smoke/h.txt'
+          test "$(g floci-gcp-compat-tools gcplocal storage cat gs://compat-smoke/h.txt)" = hello
+          g floci-gcp-compat-tools gcplocal secrets create compat-smoke --replication-policy=automatic
+          g floci-gcp-compat-tools gcplocal secrets list --format='value(name)' | grep -x compat-smoke >/dev/null
+          g floci-gcp-compat-tools gcplocal kms keyrings create compat-smoke --location=global
+          g floci-gcp-compat-tools gcplocal kms keyrings list --location=global --format='value(name)' | grep 'keyRings/compat-smoke$' >/dev/null
+          g floci-gcp-compat-tools bq version
+          ! g floci-gcp-compat-tools sh -c 'command -v gsutil'
+
+      - name: floci-gcp logs on failure
+        if: failure()
+        run: docker logs floci-gcp | tail -n 100
 
   native-compat-test:
     name: native / ${{ matrix.test }}

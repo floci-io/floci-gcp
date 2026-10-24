@@ -35,6 +35,9 @@ import java.util.Map;
  *                      to {@code 127.0.0.1}, for management APIs only the emulator should reach
  * @param nanoCpus CPU limit in units of 1e-9 CPUs (null = no limit)
  * @param securityOpts Docker security options (for example, "seccomp=unconfined")
+ * @param restartPolicy Docker restart policy name: {@code always}, {@code on-failure} or {@code no} (null = Docker's default)
+ * @param tty Whether to allocate a pseudo-TTY
+ * @param stdinOpen Whether to keep STDIN open
  */
 public record ContainerSpec(
         String image,
@@ -59,7 +62,10 @@ public record ContainerSpec(
         List<String> groupAdd,
         List<Integer> loopbackPorts,
         Long nanoCpus,
-        List<String> securityOpts
+        List<String> securityOpts,
+        String restartPolicy,
+        boolean tty,
+        boolean stdinOpen
 ) {
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
@@ -74,6 +80,18 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, exposedPorts, networkMode, mounts, binds,
                 extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd,
                 List.of(), null, List.of());
+    }
+
+    /** No restart policy, TTY or open STDIN, as before those existed. */
+    public ContainerSpec(String image, String name, List<String> env, List<String> cmd, List<String> entrypoint,
+                         Long memoryBytes, Map<Integer, Integer> portBindings, List<Integer> exposedPorts,
+                         String networkMode, List<Mount> mounts, List<Bind> binds, List<String> extraHosts,
+                         Map<String, String> labels, LogConfig logConfig, boolean privileged, String cgroupnsMode,
+                         List<String> dnsServers, String workingDir, String user, List<String> groupAdd,
+                         List<Integer> loopbackPorts, Long nanoCpus, List<String> securityOpts) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, exposedPorts, networkMode, mounts, binds,
+                extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd,
+                loopbackPorts, nanoCpus, securityOpts, null, false, false);
     }
 
     public boolean hasPortBindings() {

@@ -21,6 +21,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -100,6 +101,29 @@ class ContainerLifecycleManagerResourceLimitsTest {
         assertNull(hostConfig.getMemorySwap());
         assertNull(hostConfig.getNanoCPUs());
         verify(dockerClient, never()).infoCmd();
+    }
+
+    @Test
+    void restartPolicyTtyAndOpenStdinReachTheCreateCommand() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(new ContainerSpec("busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(),
+                null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of(),
+                List.of(), null, List.of(), "on-failure", true, true));
+
+        assertEquals("on-failure", capturedHostConfig(createCmd).getRestartPolicy().getName());
+        verify(createCmd).withTty(true);
+        verify(createCmd).withStdinOpen(true);
+    }
+
+    @Test
+    void noRestartPolicyLeavesDockersDefault() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        assertNull(capturedHostConfig(createCmd).getRestartPolicy());
+        verify(createCmd, never()).withTty(any(Boolean.class));
     }
 
     private static ContainerSpec spec(Long memoryBytes, Long nanoCpus) {

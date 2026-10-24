@@ -179,23 +179,33 @@ public class ComputeGuestScripts {
 
     /** One serial console line in the shape of a journald console line: time, host, unit and message. */
     static byte[] line(String instance, String message) {
-        return (prefix(instance) + message + "\n").getBytes(StandardCharsets.UTF_8);
+        return line(instance, RUNNER, message);
     }
 
-    private static String prefix(String instance) {
-        return Instant.now().truncatedTo(ChronoUnit.MILLIS) + " " + instance + " " + RUNNER + "[1]: ";
+    static byte[] line(String instance, String unit, String message) {
+        return (prefix(instance, unit) + message + "\n").getBytes(StandardCharsets.UTF_8);
     }
 
-    /** Writes a script's output to the serial port one line at a time, each line behind the runner prefix. */
+    private static String prefix(String instance, String unit) {
+        return Instant.now().truncatedTo(ChronoUnit.MILLIS) + " " + instance + " " + unit + "[1]: ";
+    }
+
+    /** Writes a program's output to the serial port one line at a time, each line behind its unit's prefix. */
     static final class LineWriter extends OutputStream {
         private final ComputeSerialPort port;
         private final String instance;
+        private final String unit;
         private final String label;
         private final ByteArrayOutputStream pending = new ByteArrayOutputStream();
 
         LineWriter(ComputeSerialPort port, String instance, String label) {
+            this(port, instance, RUNNER, label);
+        }
+
+        LineWriter(ComputeSerialPort port, String instance, String unit, String label) {
             this.port = port;
             this.instance = instance;
+            this.unit = unit;
             this.label = label;
         }
 
@@ -240,7 +250,7 @@ public class ComputeGuestScripts {
 
         private void emit() {
             ByteArrayOutputStream lineBytes = new ByteArrayOutputStream();
-            lineBytes.writeBytes((prefix(instance) + label).getBytes(StandardCharsets.UTF_8));
+            lineBytes.writeBytes((prefix(instance, unit) + label).getBytes(StandardCharsets.UTF_8));
             lineBytes.writeBytes(pending.toByteArray());
             lineBytes.write('\n');
             port.write(lineBytes.toByteArray());

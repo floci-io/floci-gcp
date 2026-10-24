@@ -113,6 +113,9 @@ public class ContainerBuilder {
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> securityOpts = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private String restartPolicy;
+        private boolean tty;
+        private boolean stdinOpen;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -337,6 +340,22 @@ public class ContainerBuilder {
          * fallback resolvers are appended after floci-gcp's IP so the container's own resolver
          * can fall through for public hostnames if the embedded forwarder cannot answer.
          */
+        /** Docker restart policy name: {@code always}, {@code on-failure} or {@code no}. */
+        public Builder withRestartPolicy(String restartPolicy) {
+            this.restartPolicy = restartPolicy;
+            return this;
+        }
+
+        public Builder withTty(boolean tty) {
+            this.tty = tty;
+            return this;
+        }
+
+        public Builder withStdinOpen(boolean stdinOpen) {
+            this.stdinOpen = stdinOpen;
+            return this;
+        }
+
         public Builder withEmbeddedDns() {
             embeddedDnsServer.getServerIp().ifPresent(flociIp -> {
                 dnsServers.add(flociIp);
@@ -375,7 +394,10 @@ public class ContainerBuilder {
                     List.copyOf(groupAdd),
                     List.copyOf(loopbackPorts),
                     nanoCpus,
-                    List.copyOf(securityOpts)
+                    List.copyOf(securityOpts),
+                    restartPolicy,
+                    tty,
+                    stdinOpen
             );
         }
     }

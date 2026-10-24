@@ -1,8 +1,12 @@
 package io.floci.gcp.services.compute;
 
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
@@ -16,6 +20,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -60,6 +66,12 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     static final List<String> IDLE_ENTRYPOINT = List.of("/bin/sh", "-c",
             "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done");
     private static final int STOP_TIMEOUT_SECONDS = 10;
+    /** The unit konlet's lines carry on the serial console, as the container startup agent's systemd unit. */
+    static final String KONLET = "konlet-startup";
+    /** Set to {@link #WORKLOAD} on the container a {@code gce-container-declaration} runs, beside the instance's own. */
+    static final String ROLE_LABEL = "io.floci.compute.role";
+    static final String WORKLOAD = "container";
+    static final String DECLARED_NAME_LABEL = "io.floci.compute.container-name";
     /** Docker calls one start can make under {@code startLock}: create, start, network connect, remove on failure. */
     private static final int DOCKER_CALLS_PER_START = 4;
 
@@ -91,6 +103,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final Map<String, AtomicLong> boots = new ConcurrentHashMap<>();
     /** Container addresses of running instances, so the metadata server knows which instance is asking. */
     private final Map<String, InstanceRef> addresses = new ConcurrentHashMap<>();
+    /** Log streams copying each running declared container's output to serial port 1. */
+    private final Map<String, Closeable> workloadLogs = new ConcurrentHashMap<>();
     private final ExecutorService executor;
     private final ExecutorService scriptExecutor;
     /** Set at teardown: a worker still running after it creates no container. */
@@ -235,6 +249,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             case STOP -> ownedContainer(name).ifPresent(container -> {
                 endBoot(intent);
                 runShutdownScripts(intent, container);
+                removeWorkload(intent.project(), intent.zone(), intent.name());
                 lifecycleManager.runDockerApi("stop Compute instance " + name, () -> {
                     try {
                         lifecycleManager.getDockerClient().stopContainerCmd(container.getId())
@@ -247,6 +262,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             });
             // A reset is a hard reset: no shutdown scripts, then a fresh boot.
             case RESTART -> ownedContainer(name).ifPresent(container -> {
+                // The declared container shares the instance's network, which a restart replaces; the boot starts a new one.
+                removeWorkload(intent.project(), intent.zone(), intent.name());
                 if (bringUp(() -> lifecycleManager.runDockerApi("restart Compute instance " + name, () -> {
                     lifecycleManager.getDockerClient().restartContainerCmd(container.getId())
                             .withTimeout(0).exec();
@@ -261,6 +278,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     runShutdownScripts(intent, container);
                     lifecycleManager.forceRemove(container.getId(), null);
                 });
+                removeWorkload(intent.project(), intent.zone(), intent.name());
                 boots.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
                 serialPorts.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
             }
@@ -298,6 +316,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             Optional<Container> existing = lifecycleManager.findByName(name);
             if (existing.isPresent()) {
                 if (!owned(existing.get(), name)) { return null; }
+                removeWorkload(intent.project(), intent.zone(), intent.name());
                 lifecycleManager.forceRemove(existing.get().getId(), null);
             }
             AtomicReference<String> started = new AtomicReference<>();
@@ -313,7 +332,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         }
     }
 
-    /** Runs the startup scripts of a boot in the background: the boot's operation does not wait for them, as on GCE. */
+    /**
+     * Runs the startup scripts of a boot in the background, then the declared container if the metadata has a
+     * {@code gce-container-declaration}: konlet starts after the startup scripts. The boot's operation waits for
+     * neither, as on GCE.
+     */
     private void boot(Intent intent, String containerId) {
         if (containerId == null) { return; }
         // Before the scripts are queued, so their first metadata read already finds the instance.
@@ -327,8 +350,122 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             return latest != null && latest.get() == boot;
         };
         String mark = bootMark(containerId);
-        scriptExecutor.execute(() -> scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId,
-                intent.metadata(), config.services().compute().startupScriptTimeout(), port, current, mark));
+        scriptExecutor.execute(() -> {
+            scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
+                    config.services().compute().startupScriptTimeout(), port, current, mark);
+            startWorkload(intent, containerId, port, current);
+        });
+    }
+
+    /**
+     * Starts the container a {@code gce-container-declaration} declares, as konlet does at each boot: the declaration
+     * is read now, so a change made with setMetadata applies at the next start or reset. It runs in the instance
+     * container's network, as konlet's runs in the VM's host network, and its output goes to serial port 1.
+     */
+    private void startWorkload(Intent intent, String vmContainerId, ComputeSerialPort port, BooleanSupplier current) {
+        String value = intent.metadata() == null ? null : intent.metadata().get(ComputeContainerDeclaration.KEY);
+        if (value == null) { return; }
+        String instance = intent.name();
+        try {
+            ComputeContainerDeclaration declaration = ComputeContainerDeclaration.parse(value);
+            String workload = workloadName(intent.project(), intent.zone(), intent.name());
+            port.write(ComputeGuestScripts.line(instance, KONLET, "Configured container '" + declaration.name()
+                    + "' will be started with name '" + workload + "'."));
+            for (String skipped : declaration.skipped()) {
+                port.write(ComputeGuestScripts.line(instance, KONLET, "Not mounting " + skipped + "."));
+            }
+            ContainerSpec spec = workloadSpec(intent, declaration, workload, vmContainerId);
+            port.write(ComputeGuestScripts.line(instance, KONLET, "Pulling image: '" + declaration.image() + "'"));
+            // Outside the instance's lock, so a stop is not held up by a slow pull.
+            imageCache.ensureImageExists(spec.image());
+            synchronized (lock(containerName(intent.project(), intent.zone(), intent.name()))) {
+                if (closed || !current.getAsBoolean()) { return; }
+                removeWorkload(intent.project(), intent.zone(), intent.name());
+                AtomicReference<String> started = new AtomicReference<>();
+                if (!bringUp(() -> started.set(lifecycleManager.createAndStart(spec).containerId()))) { return; }
+                port.write(ComputeGuestScripts.line(instance, KONLET, "Started a container with ID: " + started.get()));
+                Closeable logs = followLogs(started.get(), port, instance, declaration.name());
+                if (logs != null) {
+                    workloadLogs.put(instanceKey(intent.project(), intent.zone(), intent.name()), logs);
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnf("Compute instance %s could not start its declared container: %s", instance, e.getMessage());
+            port.write(ComputeGuestScripts.line(instance, KONLET, "Error: Failed to start container: " + e.getMessage()));
+        }
+    }
+
+    ContainerSpec workloadSpec(Intent intent, ComputeContainerDeclaration declaration, String name, String vmContainerId) {
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                SERVICE, intent.name(), intent.project(), intent.zone()));
+        labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
+        labels.put(ROLE_LABEL, WORKLOAD);
+        if (declaration.name() != null) { labels.put(DECLARED_NAME_LABEL, declaration.name()); }
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(declaration.image())
+                .withName(name)
+                .withLabels(labels)
+                .withNetworkMode("container:" + vmContainerId)
+                .withLogRotation()
+                .withRestartPolicy(declaration.restart())
+                .withTty(declaration.tty())
+                .withStdinOpen(declaration.stdin())
+                .withPrivileged(declaration.privileged());
+        if (declaration.command() != null) { builder.withEntrypoint(declaration.command()); }
+        if (declaration.args() != null) { builder.withCmd(declaration.args()); }
+        if (config.services().compute().metadataServer().enabled()) {
+            String host = dockerHost.resolve() + ":" + config.port();
+            builder.withEnv("GCE_METADATA_HOST", host).withEnv("GCE_METADATA_IP", host);
+        }
+        builder.withEnv(declaration.env());
+        for (String path : declaration.tmpfs()) {
+            builder.withMount(new Mount().withType(MountType.TMPFS).withTarget(path));
+        }
+        if (config.services().compute().instanceResourceLimits()) {
+            if (intent.cpus() > 0) { builder.withNanoCpus(intent.cpus() * 1_000_000_000L); }
+            if (intent.memoryMb() > 0) { builder.withMemoryMb(intent.memoryMb()); }
+        }
+        return builder.build();
+    }
+
+    /** Copies a declared container's output to serial port 1, one line at a time, until the container goes away. */
+    private Closeable followLogs(String containerId, ComputeSerialPort port, String instance, String declaredName) {
+        ComputeGuestScripts.LineWriter out = new ComputeGuestScripts.LineWriter(port, instance,
+                declaredName == null ? WORKLOAD : declaredName, "");
+        try {
+            return lifecycleManager.getDockerClient().logContainerCmd(containerId)
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .withFollowStream(true)
+                    .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            for (byte b : frame.getPayload()) { out.write(b); }
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            out.close();
+                            super.onComplete();
+                        }
+                    });
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not follow the output of container {0}: {1}", containerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Removes the instance's declared container, if it has one. */
+    private void removeWorkload(String project, String zone, String instance) {
+        Closeable logs = workloadLogs.remove(instanceKey(project, zone, instance));
+        if (logs != null) {
+            try {
+                logs.close();
+            } catch (IOException | RuntimeException e) {
+                LOG.debugv("Could not close the output stream of Compute instance {0}: {1}", instance, e.getMessage());
+            }
+        }
+        ownedContainer(workloadName(project, zone, instance))
+                .ifPresent(container -> lifecycleManager.forceRemove(container.getId(), null));
     }
 
     /**
@@ -391,7 +528,6 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         return project + "/" + zone + "/" + name;
     }
 
-    /** Records every network address of the instance's running container. */
     /**
      * Records the network addresses of the instance's running container, replacing any it had before. The new
      * addresses go in before the old ones go out, so a guest script reading its metadata meanwhile is never refused.
@@ -446,6 +582,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         return ContainerStorageHelper.dockerName(config, SERVICE + "-" + project + "-" + zone + "-" + instance);
     }
 
+    /** The declared container's name; instance names have no underscore, so it cannot be another instance's. */
+    String workloadName(String project, String zone, String instance) {
+        return containerName(project, zone, instance) + "_klt";
+    }
+
     /**
      * Brings this deployment's instance containers in line with the stored instances after a restart: a RUNNING
      * instance's container is started again, a TERMINATED instance's container is stopped if it still runs (the
@@ -471,7 +612,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 String name = labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL);
                 // Under the instance's lock, so a step submitted meanwhile (a start, a stop) is not undone here.
                 synchronized (lock(containerName(project, zone, name))) {
-                    reconcile(container, project, zone, name, status, metadata);
+                    if (WORKLOAD.equals(labels.get(ROLE_LABEL))) {
+                        reconcileWorkload(container, project, zone, name, status);
+                    } else {
+                        reconcile(container, project, zone, name, status, metadata);
+                    }
                 }
             }
         });
@@ -513,6 +658,23 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 LOG.warnf("Compute instance %s/%s/%s runs without a container: %s", project, zone, name,
                         e.getMessage());
             }
+        }
+    }
+
+    /**
+     * A declared container left from before a restart: removed unless its instance is RUNNING, whose boot replaces it
+     * with one in the instance container's new network.
+     */
+    private void reconcileWorkload(Container container, String project, String zone, String name, StatusLookup status) {
+        String current;
+        try {
+            current = status.apply(project, zone, name);
+        } catch (RuntimeException e) {
+            current = null;
+        }
+        if (!"RUNNING".equals(current)) {
+            LOG.infof("Removing declared container of Compute instance %s/%s/%s", project, zone, name);
+            lifecycleManager.forceRemove(container.getId(), null);
         }
     }
 

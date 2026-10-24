@@ -12,6 +12,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.model.RestartPolicy;
 import io.floci.gcp.config.EmulatorConfig;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -111,6 +112,12 @@ public class ContainerLifecycleManager {
         }
         if (spec.workingDir() != null && !spec.workingDir().isBlank()) {
             createCmd.withWorkingDir(spec.workingDir());
+        }
+        if (spec.tty()) {
+            createCmd.withTty(true);
+        }
+        if (spec.stdinOpen()) {
+            createCmd.withStdinOpen(true);
         }
         if (spec.exposedPorts() != null && !spec.exposedPorts().isEmpty()) {
             ExposedPort[] exposed = spec.exposedPorts().stream()
@@ -494,6 +501,9 @@ public class ContainerLifecycleManager {
         }
         if (spec.hasLogConfig()) {
             hostConfig.withLogConfig(spec.logConfig());
+        }
+        if (spec.restartPolicy() != null && !spec.restartPolicy().isBlank()) {
+            hostConfig.withRestartPolicy(RestartPolicy.parse(spec.restartPolicy()));
         }
         if (spec.dnsServers() != null && !spec.dnsServers().isEmpty()) {
             hostConfig.withDns(spec.dnsServers().toArray(new String[0]));

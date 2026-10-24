@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.MountType;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
@@ -40,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -58,6 +60,30 @@ class ComputeInstanceRuntimeTest {
 
     private static final String CONTAINER = "floci-gcp-compute-p-us-central1-a-vm";
     private static final Map<String, String> METADATA = Map.of("startup-script", "echo hi", "shutdown-script", "echo bye");
+    private static final String WORKLOAD = CONTAINER + "_klt";
+    private static final String DECLARATION = """
+            spec:
+              containers:
+              - name: web
+                image: nginx:1.27
+                command: [/bin/sh]
+                args: [-c, 'echo hi']
+                env:
+                - name: MODE
+                  value: test
+                tty: true
+                stdin: true
+                securityContext:
+                  privileged: true
+                volumeMounts:
+                - name: scratch
+                  mountPath: /scratch
+              volumes:
+              - name: scratch
+                emptyDir:
+                  medium: Memory
+              restartPolicy: OnFailure
+            """;
 
     private EmulatorConfig config;
     private ContainerBuilder containerBuilder;
@@ -630,6 +656,142 @@ class ComputeInstanceRuntimeTest {
         assertEquals("", runtime.serialOutput("p", "us-central1-a", "vm", 2, 0).contents());
         runtime.submit("delete", List.of(intent(Kind.REMOVE)));
         assertEquals("", runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents());
+    }
+
+    @Test
+    void aContainerDeclarationRunsItsContainerInTheInstanceNetworkAfterTheStartupScripts() {
+        when(config.services().compute().metadataServer().enabled()).thenReturn(true);
+        InOrder order = inOrder(scripts, lifecycleManager);
+
+        runtime.submit("launch", List.of(declared(Kind.LAUNCH)));
+
+        order.verify(lifecycleManager).createAndStart(any());
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), any(), any(), any(), any(), any(), any(), any());
+        order.verify(lifecycleManager).createAndStart(any());
+        verify(containerBuilder).newContainer("nginx:1.27");
+        verify(builder).withName(WORKLOAD);
+        verify(builder).withNetworkMode("container:new-id");
+        verify(builder).withEntrypoint(List.of("/bin/sh"));
+        verify(builder).withCmd(List.of("-c", "echo hi"));
+        verify(builder).withEnv(List.of("MODE=test"));
+        verify(builder).withRestartPolicy("on-failure");
+        verify(builder).withTty(true);
+        verify(builder).withStdinOpen(true);
+        verify(builder).withPrivileged(true);
+        verify(builder).withMount(argThat(mount -> mount.getType() == MountType.TMPFS
+                && "/scratch".equals(mount.getTarget())));
+        verify(builder, times(2)).withEnv("GCE_METADATA_HOST", "host.docker.internal:4588");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+        verify(builder, times(2)).withLabels(labels.capture());
+        assertEquals("container", labels.getAllValues().get(1).get("io.floci.compute.role"));
+        assertEquals("web", labels.getAllValues().get(1).get("io.floci.compute.container-name"));
+        assertEquals("vm", labels.getAllValues().get(1).get("io.floci.resource-id"));
+        String serial = runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents();
+        assertTrue(serial.contains(" vm konlet-startup[1]: Configured container 'web' will be started with name '"
+                + WORKLOAD + "'."), serial);
+        assertTrue(serial.contains("konlet-startup[1]: Started a container with ID: new-id"), serial);
+    }
+
+    @Test
+    void anInstanceWithoutADeclarationRunsOnlyItsOwnContainer() {
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        verify(lifecycleManager, times(1)).createAndStart(any());
+        verify(builder, never()).withNetworkMode(anyString());
+    }
+
+    @Test
+    void aDeclarationKonletRefusesIsReportedOnTheSerialPortAndStartsNothing() {
+        Map<String, String> metadata = new HashMap<>(METADATA);
+        metadata.put("gce-container-declaration", "spec:\n  containers: []\n");
+
+        runtime.submit("launch", List.of(new Intent(Kind.LAUNCH, "p", "us-central1-a", "vm", "debian:12", 2, 8192,
+                metadata)));
+
+        verify(lifecycleManager, times(1)).createAndStart(any());
+        assertTrue(runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents().contains(
+                "konlet-startup[1]: Error: Failed to start container: Container declaration should include exactly 1"
+                        + " container, 0 found"));
+    }
+
+    @Test
+    void stopRemovesTheDeclaredContainerAfterTheShutdownScriptsAndBeforeTheInstanceStops() {
+        Container vm = container("c-1", "running", Map.of());
+        Container workload = container("w-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(vm));
+        when(lifecycleManager.findByName(WORKLOAD)).thenReturn(Optional.of(workload));
+        InOrder order = inOrder(scripts, lifecycleManager);
+
+        runtime.submit("stop", List.of(declared(Kind.STOP)));
+
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), any(), any(), any(), any(), any(), any(), any());
+        order.verify(lifecycleManager).forceRemove(eq("w-1"), isNull());
+        order.verify(lifecycleManager).runDockerApi(eq("stop Compute instance " + CONTAINER), any());
+    }
+
+    @Test
+    void resetReplacesTheDeclaredContainerAndDeleteRemovesIt() {
+        Container vm = container("c-1", "running", Map.of());
+        Container workload = container("w-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(vm));
+        when(lifecycleManager.findByName(WORKLOAD)).thenReturn(Optional.of(workload));
+        InOrder order = inOrder(lifecycleManager);
+
+        runtime.submit("reset", List.of(declared(Kind.RESTART)));
+
+        order.verify(lifecycleManager).forceRemove(eq("w-1"), isNull());
+        order.verify(lifecycleManager).runDockerApi(eq("restart Compute instance " + CONTAINER), any());
+        order.verify(lifecycleManager).createAndStart(any());
+        verify(builder).withNetworkMode("container:c-1");
+
+        runtime.submit("delete", List.of(declared(Kind.REMOVE)));
+        order.verify(lifecycleManager).forceRemove(eq("c-1"), isNull());
+        order.verify(lifecycleManager).forceRemove(eq("w-1"), isNull());
+    }
+
+    @Test
+    void aDeclaredContainerQueuedForAnEarlierBootIsNeverStarted() {
+        List<Runnable> queued = new ArrayList<>();
+        ExecutorService deferred = mock(ExecutorService.class);
+        doAnswer(invocation -> queued.add(invocation.getArgument(0))).when(deferred).execute(any());
+        ComputeInstanceRuntime runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager,
+                imageCache, scripts, dockerHost, MoreExecutors.newDirectExecutorService(), deferred);
+        runtime.submit("insert", List.of(declared(Kind.LAUNCH)));
+        Container vm = container("new-id", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(vm));
+        runtime.submit("stop", List.of(declared(Kind.STOP)));
+
+        queued.forEach(Runnable::run);
+
+        verify(lifecycleManager, times(1)).createAndStart(any());
+    }
+
+    @Test
+    void reconcileRemovesDeclaredContainersOfInstancesThatAreNotRunning() {
+        Map<String, String> running = new HashMap<>(identity("vm-running", "4588"));
+        running.put("io.floci.compute.role", "container");
+        Map<String, String> stopped = new HashMap<>(identity("vm-stopped", "4588"));
+        stopped.put("io.floci.compute.role", "container");
+        Map<String, String> deleted = new HashMap<>(identity("vm-gone", "4588"));
+        deleted.put("io.floci.compute.role", "container");
+        List<Container> containers = List.of(container("w-running", "exited", running),
+                container("w-stopped", "running", stopped), container("w-gone", "running", deleted));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(containers);
+        Map<String, String> statuses = Map.of("vm-running", "RUNNING", "vm-stopped", "TERMINATED");
+
+        runtime.reconcile((project, zone, name) -> statuses.get(name));
+
+        verify(lifecycleManager).forceRemove(eq("w-stopped"), isNull());
+        verify(lifecycleManager).forceRemove(eq("w-gone"), isNull());
+        verify(lifecycleManager, never()).forceRemove(eq("w-running"), any());
+        verify(docker, never()).startContainerCmd("w-running");
+    }
+
+    private static Intent declared(Kind kind) {
+        Map<String, String> metadata = new HashMap<>(METADATA);
+        metadata.put("gce-container-declaration", DECLARATION);
+        return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, metadata);
     }
 
     private static Map<String, String> identity(String name, String owner) {

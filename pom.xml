@@ -108,6 +108,11 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-config-yaml</artifactId>
         </dependency>
+        <!-- Compute reads gce-container-declaration; already on the classpath through quarkus-config-yaml. -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
 
         <!-- Quarkus gRPC (provides @GrpcService, HTTP/2 via ALPN on shared port) -->
         <dependency>

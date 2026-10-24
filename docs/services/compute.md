@@ -192,10 +192,63 @@ script still running after `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT`
 instance is `STOPPING`, for up to `FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT`
 (90 seconds). Reset is a hard reset and runs none.
 
+### Container VMs
+
+An instance whose metadata has a `gce-container-declaration` runs the declared
+container, as Container-Optimized OS does with the container startup agent
+(konlet). Terraform's `metadata = { gce-container-declaration = ... }` and
+`gcloud compute instances create-with-container` both set it:
+
+```yaml
+spec:
+  containers:
+  - name: web
+    image: nginx:1.27
+    command: [/docker-entrypoint.sh]
+    args: [nginx, -g, daemon off;]
+    env:
+    - name: MODE
+      value: dev
+    volumeMounts:
+    - name: cache
+      mountPath: /var/cache/nginx
+  volumes:
+  - name: cache
+    emptyDir:
+      medium: Memory
+  restartPolicy: Always
+```
+
+On every boot, after the startup scripts, floci-gcp starts the container as a
+second Docker container named `floci-gcp-compute-<project>-<zone>-<instance>_klt`,
+in the instance container's network (konlet uses the VM's host network), so it
+shares the instance's address and the [metadata server](#metadata-server) knows
+it as that instance. It reads `image`, `command` (the entrypoint), `args` (the
+command), `env`, `stdin`, `tty`, `securityContext.privileged` and `restartPolicy`
+(`Always`, the default, `OnFailure` or `Never`), and mounts `emptyDir` volumes with
+`medium: Memory` as tmpfs. Its output goes to serial port 1, one line each behind
+the container's name, after konlet's own lines:
+
+```text
+2026-10-24T15:20:01.123Z vm konlet-startup[1]: Configured container 'web' will be started with name 'floci-gcp-compute-p-us-central1-a-vm_klt'.
+2026-10-24T15:20:03.456Z vm web[1]: hello
+```
+
+As on Compute Engine, the declaration is read at boot: a change made with
+`setMetadata` applies at the next start or reset. Stop and delete remove the
+container after the shutdown scripts; reset replaces it. A declaration konlet
+would refuse (not exactly one container, an unknown restart policy, a volume
+mount without its volume) is reported on serial port 1 and starts nothing; the
+instance still runs.
+
+**Limitations.** `hostPath` and `gcePersistentDisk` volumes are not mounted (the
+serial port says so), and private registry credentials are not fetched from the
+instance's service account; the image is pulled as any other floci-gcp image is.
+
 ### Serial port output
 
 `instances.getSerialPortOutput` serves serial port 1: the scripts' output and the
-runner's progress, one line each, in this form:
+runner's progress (and a [container VM](#container-vms)'s output), one line each, in this form:
 
 ```text
 2026-10-21T16:20:01.123Z vm google_metadata_script_runner[1]: Starting startup scripts.

@@ -145,7 +145,8 @@ Run do. The API stays the same in both modes; only these behaviours change:
 
 The container runs the boot image's Docker image with an idle init process; the
 guest scripts below and anything you start with `docker exec -it <container> bash`
-run inside it. The metadata server and SSH come in later releases. The
+run inside it, and the [metadata server](#metadata-server) is available to it. SSH
+comes in a later release. The
 container is named `floci-gcp-compute-<project>-<zone>-<instance>` and carries
 the [resource identity labels](../configuration/docker-compose.md#resource-identity-labels)
 with `io.floci.service=compute`. With `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS`
@@ -208,4 +209,49 @@ valid UTF-8 come back as `\xNN`. Ports 2 to 4 are empty, and so is port 1 in moc
 mode. The output is kept in memory: it does not survive an emulator restart, and
 it is dropped when the instance is deleted. Kernel and boot messages are not
 emulated.
+
+### Metadata server
+
+floci-gcp serves the GCE metadata server on its main port under
+`/computeMetadata/v1`. Every instance container gets `GCE_METADATA_HOST` (and
+`GCE_METADATA_IP`) set to the emulator's address, so the Google client libraries
+and `curl -H 'Metadata-Flavor: Google' "http://$GCE_METADATA_HOST/computeMetadata/v1/..."`
+reach it. The server answers for the instance whose container sent the request,
+identified by its container IP address.
+
+| Path | Value |
+|---|---|
+| `instance/id`, `name`, `hostname`, `description` | From the instance; the hostname is `NAME.ZONE.c.PROJECT.internal` |
+| `instance/zone`, `instance/machine-type` | `projects/NUMBER/zones/ZONE`, `projects/NUMBER/machineTypes/TYPE` |
+| `instance/image` | The boot disk's source image, `projects/PROJECT/global/images/NAME` |
+| `instance/tags` | JSON array; `?alt=text` gives one tag per line |
+| `instance/attributes/KEY` | Instance metadata |
+| `instance/network-interfaces/0/...` | `ip`, `network`, `gateway`, `subnetmask`, `mac`, `mtu`, `dns-servers`, `access-configs/0/external-ip` |
+| `instance/disks/N/...` | `device-name`, `index`, `interface`, `mode`, `type` |
+| `instance/service-accounts/{default,EMAIL}/...` | `email`, `aliases`, `scopes`, `token`, `identity?audience=AUD[&format=full]` |
+| `project/project-id`, `project/numeric-project-id` | The project ID and number |
+| `project/attributes/KEY` | Project metadata (`projects.setCommonInstanceMetadata`) |
+| `universe/universe-domain` | `googleapis.com` |
+
+Requests need `Metadata-Flavor: Google` and must not carry `X-Forwarded-For`; such
+requests get 403, and unknown keys get 404. A path ending in `/` lists its entries,
+and a directory requested without the slash redirects to it. `?recursive=true`
+returns JSON with camelCase keys (attribute keys and service account emails keep
+their spelling), and with `alt=text` returns `path value` lines. `?alt=json` returns
+a single value as JSON. `?wait_for_change=true` blocks until the value's `ETag`
+differs from `last_etag`, or for `timeout_sec`
+(`FLOCI_GCP_SERVICES_COMPUTE_METADATA_SERVER_DEFAULT_WAIT_TIMEOUT`, 300 seconds,
+when absent). It is rejected on the token and on a non-recursive directory.
+
+Tokens are stub access tokens: floci-gcp accepts any credential. Identity tokens
+have Google's shape, with the requested `aud` and, with `format=full`, the
+`google.compute_engine` claims, but they are not signed by a Google key, so only
+code that skips signature verification accepts them. An instance created without
+`serviceAccounts` has none, as on GCE.
+
+**Limitations.** `169.254.169.254` and `metadata.google.internal` are not routed;
+use `GCE_METADATA_HOST`. Identifying the caller by address needs the container's
+own IP to reach floci-gcp. That holds when floci-gcp runs in Docker on the same
+network, or directly on a Linux host. With floci-gcp on the host under Docker
+Desktop, requests arrive from a proxy address and get 404.
 

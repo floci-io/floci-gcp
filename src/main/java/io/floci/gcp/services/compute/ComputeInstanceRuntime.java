@@ -1,5 +1,6 @@
 package io.floci.gcp.services.compute;
 
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
 import io.floci.gcp.config.EmulatorConfig;
@@ -8,6 +9,7 @@ import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
+import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.common.docker.ImageCacheService;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -15,11 +17,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -79,11 +83,14 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final ImageCacheService imageCache;
     private final ComputeGuestScripts scripts;
+    private final DockerHostResolver dockerHost;
     private final Map<String, Tracked> operations = new ConcurrentHashMap<>();
     private final Map<String, Object> instanceLocks = new ConcurrentHashMap<>();
     private final Map<String, ComputeSerialPort> serialPorts = new ConcurrentHashMap<>();
     /** Each instance's current boot; stop, reset and delete end it, so a startup task queued for it is dropped. */
     private final Map<String, AtomicLong> boots = new ConcurrentHashMap<>();
+    /** Container addresses of running instances, so the metadata server knows which instance is asking. */
+    private final Map<String, InstanceRef> addresses = new ConcurrentHashMap<>();
     private final ExecutorService executor;
     private final ExecutorService scriptExecutor;
     /** Set at teardown: a worker still running after it creates no container. */
@@ -94,8 +101,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     @Inject
     public ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager, ImageCacheService imageCache,
-                                  ComputeGuestScripts scripts) {
-        this(config, containerBuilder, lifecycleManager, imageCache, scripts,
+                                  ComputeGuestScripts scripts, DockerHostResolver dockerHost) {
+        this(config, containerBuilder, lifecycleManager, imageCache, scripts, dockerHost,
                 Executors.newFixedThreadPool(4, daemonThreads("compute-instance-runtime-")),
                 // Startup scripts may run for minutes; one instance's must not hold back another's.
                 Executors.newCachedThreadPool(daemonThreads("compute-startup-scripts-")));
@@ -103,14 +110,24 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
 
     ComputeInstanceRuntime(EmulatorConfig config, ContainerBuilder containerBuilder,
                            ContainerLifecycleManager lifecycleManager, ImageCacheService imageCache,
-                           ComputeGuestScripts scripts, ExecutorService executor, ExecutorService scriptExecutor) {
+                           ComputeGuestScripts scripts, DockerHostResolver dockerHost, ExecutorService executor,
+                           ExecutorService scriptExecutor) {
         this.config = config;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.imageCache = imageCache;
         this.scripts = scripts;
+        this.dockerHost = dockerHost;
         this.executor = executor;
         this.scriptExecutor = scriptExecutor;
+    }
+
+    /** An instance by project, zone and name. */
+    public record InstanceRef(String project, String zone, String name) {}
+
+    /** The instance whose container has this address, if any. */
+    public Optional<InstanceRef> instanceAt(String address) {
+        return Optional.ofNullable(addresses.get(address));
     }
 
     public boolean enabled() {
@@ -171,6 +188,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         String name = containerName(intent.project(), intent.zone(), intent.name());
         synchronized (lock(name)) {
             if (closed) { return; }
+            InstanceRef instance = new InstanceRef(intent.project(), intent.zone(), intent.name());
             try {
                 step(operationKey, intent, name);
             } finally {
@@ -178,6 +196,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     // Teardown began during this step and may have listed containers before it started this one.
                     ownedContainer(name).filter(container -> "running".equals(container.getState()))
                             .ifPresent(container -> stop(container.getId()));
+                } else if (intent.kind() == Kind.STOP || intent.kind() == Kind.REMOVE) {
+                    // Only now: the shutdown scripts ran inside the step and could still read their metadata.
+                    addresses.values().removeIf(instance::equals);
+                } else {
+                    register(name, instance);
                 }
             }
         }
@@ -293,6 +316,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     /** Runs the startup scripts of a boot in the background: the boot's operation does not wait for them, as on GCE. */
     private void boot(Intent intent, String containerId) {
         if (containerId == null) { return; }
+        // Before the scripts are queued, so their first metadata read already finds the instance.
+        register(containerId, new InstanceRef(intent.project(), intent.zone(), intent.name()));
         String key = instanceKey(intent.project(), intent.zone(), intent.name());
         long boot = boots.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
         ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
@@ -366,6 +391,30 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         return project + "/" + zone + "/" + name;
     }
 
+    /** Records every network address of the instance's running container. */
+    /**
+     * Records the network addresses of the instance's running container, replacing any it had before. The new
+     * addresses go in before the old ones go out, so a guest script reading its metadata meanwhile is never refused.
+     */
+    private void register(String containerName, InstanceRef instance) {
+        try {
+            InspectContainerResponse inspect = lifecycleManager.runDockerApi("inspect Compute instance " + containerName,
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(containerName).exec());
+            Set<String> current = new HashSet<>();
+            if (inspect.getState() != null && Boolean.TRUE.equals(inspect.getState().getRunning())
+                    && inspect.getNetworkSettings() != null && inspect.getNetworkSettings().getNetworks() != null) {
+                inspect.getNetworkSettings().getNetworks().values().stream()
+                        .map(network -> network.getIpAddress())
+                        .filter(ip -> ip != null && !ip.isBlank())
+                        .forEach(current::add);
+            }
+            current.forEach(ip -> addresses.put(ip, instance));
+            addresses.entrySet().removeIf(entry -> entry.getValue().equals(instance) && !current.contains(entry.getKey()));
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the addresses of Compute instance container {0}: {1}", containerName, e.getMessage());
+        }
+    }
+
     ContainerSpec spec(Intent intent, String name) {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                 SERVICE, intent.name(), intent.project(), intent.zone()));
@@ -377,6 +426,10 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 .withDockerNetwork(config.services().compute().dockerNetwork())
                 .withHostDockerInternalOnLinux()
                 .withLogRotation();
+        if (config.services().compute().metadataServer().enabled()) {
+            String host = dockerHost.resolve() + ":" + config.port();
+            builder.withEnv("GCE_METADATA_HOST", host).withEnv("GCE_METADATA_IP", host);
+        }
         if (config.services().compute().instanceResourceLimits()) {
             if (intent.cpus() > 0) { builder.withNanoCpus(intent.cpus() * 1_000_000_000L); }
             if (intent.memoryMb() > 0) { builder.withMemoryMb(intent.memoryMb()); }
@@ -438,7 +491,9 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         } else if (current.equals("TERMINATED") && "running".equals(container.getState())) {
             LOG.infof("Stopping container of stopped Compute instance %s/%s/%s", project, zone, name);
             stop(container.getId());
-        } else if (current.equals("RUNNING") && !"running".equals(container.getState())) {
+        } else if (current.equals("RUNNING") && "running".equals(container.getState())) {
+            register(container.getId(), new InstanceRef(project, zone, name));
+        } else if (current.equals("RUNNING")) {
             LOG.infof("Restarting container of running Compute instance %s/%s/%s", project, zone, name);
             try {
                 boolean started = bringUp(() -> lifecycleManager.runDockerApi("start Compute instance " + name, () -> {
@@ -452,6 +507,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 if (started) {
                     boot(new Intent(Kind.START, project, zone, name, null, 0, 0, metadata.apply(project, zone, name)),
                             container.getId());
+                    register(container.getId(), new InstanceRef(project, zone, name));
                 }
             } catch (RuntimeException e) {
                 LOG.warnf("Compute instance %s/%s/%s runs without a container: %s", project, zone, name,

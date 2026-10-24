@@ -59,9 +59,28 @@ public class ComputeService {
                 .filter(r -> !r.isEmpty() && !locations.isRegion(r))
                 .forEach(r -> LOG.warnf("Ignoring unknown region %s in floci-gcp.services.compute.regions", r)));
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
-                .storageKey("compute").resourceClasses(ComputeController.class)
+                .storageKey("compute").resourceClasses(ComputeController.class, ComputeMetadataController.class)
                 .api("compute.googleapis.com", "Compute Engine API").build());
         runtime.reconcile(this::instanceStatus, this::instanceGuestMetadata);
+    }
+    /** What the metadata server needs about one instance: copies, so callers cannot change stored state. */
+    public record MetadataView(ObjectNode instance, ObjectNode projectMetadata, ObjectNode subnet, String bootImage) {}
+
+    public synchronized Optional<MetadataView> metadataView(String project, String zone, String name) {
+        ComputeProject state = state(project);
+        ObjectNode instance = state.resources.get("zones/" + zone + "/instances/" + name);
+        if (instance == null) { return Optional.empty(); }
+        String subnetwork = instance.path("networkInterfaces").path(0).path("subnetwork").asText("");
+        ObjectNode subnet = subnetwork.isEmpty() ? null : state.resources.get(localPath(project, subnetwork));
+        String bootImage = null;
+        for (JsonNode attachment : instance.path("disks")) {
+            if (!attachment.path("boot").asBoolean()) { continue; }
+            ObjectNode disk = state.resources.get(localPath(project, attachment.path("source").asText()));
+            if (disk != null && disk.has("sourceImage")) { bootImage = disk.path("sourceImage").asText(); }
+        }
+        ObjectNode projectMetadata = state.commonInstanceMetadata == null ? object() : state.commonInstanceMetadata.deepCopy();
+        return Optional.of(new MetadataView(instance.deepCopy(), projectMetadata,
+                subnet == null ? object() : subnet.deepCopy(), bootImage));
     }
     /** The stored status of an instance, or null when it does not exist. */
     synchronized String instanceStatus(String project, String zone, String name) {

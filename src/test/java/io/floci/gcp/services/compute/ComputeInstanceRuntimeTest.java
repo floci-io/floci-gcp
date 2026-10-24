@@ -1,12 +1,15 @@
 package io.floci.gcp.services.compute;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
+import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Intent;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Kind;
@@ -17,15 +20,15 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.time.Duration;
-import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +66,7 @@ class ComputeInstanceRuntimeTest {
     private ImageCacheService imageCache;
     private DockerClient docker;
     private ComputeGuestScripts scripts;
+    private DockerHostResolver dockerHost;
     private ComputeInstanceRuntime runtime;
 
     @BeforeEach
@@ -92,7 +96,9 @@ class ComputeInstanceRuntimeTest {
         ContainerLifecycleManager.ContainerInfo started = mock(ContainerLifecycleManager.ContainerInfo.class);
         when(started.containerId()).thenReturn("new-id");
         when(lifecycleManager.createAndStart(any())).thenReturn(started);
-        runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager, imageCache, scripts,
+        dockerHost = mock(DockerHostResolver.class);
+        when(dockerHost.resolve()).thenReturn("host.docker.internal");
+        runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager, imageCache, scripts, dockerHost,
                 MoreExecutors.newDirectExecutorService(), MoreExecutors.newDirectExecutorService());
     }
 
@@ -228,7 +234,7 @@ class ComputeInstanceRuntimeTest {
 
         when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMillis(-1));
         ComputeInstanceRuntime slow = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class), lifecycleManager,
-                imageCache, scripts, mock(ExecutorService.class), mock(ExecutorService.class));
+                imageCache, scripts, dockerHost, mock(ExecutorService.class), mock(ExecutorService.class));
         slow.submit("stuck", List.of(intent(Kind.LAUNCH)));
         assertTrue(slow.finished("stuck"));
     }
@@ -236,7 +242,7 @@ class ComputeInstanceRuntimeTest {
     @Test
     void forgetDropsTheTrackedOperation() {
         ComputeInstanceRuntime pending = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
-                lifecycleManager, imageCache, scripts, mock(ExecutorService.class),
+                lifecycleManager, imageCache, scripts, dockerHost, mock(ExecutorService.class),
                 mock(ExecutorService.class));
         pending.submit("op", List.of(intent(Kind.LAUNCH)));
         assertEquals(Phase.PROVISIONING, pending.phase("op"));
@@ -284,7 +290,7 @@ class ComputeInstanceRuntimeTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
-                    lifecycleManager, imageCache, scripts, pool, MoreExecutors.newDirectExecutorService());
+                    lifecycleManager, imageCache, scripts, dockerHost, pool, MoreExecutors.newDirectExecutorService());
             concurrent.submit("start", List.of(intent(Kind.LAUNCH)));
             assertTrue(pulling.await(5, TimeUnit.SECONDS));
 
@@ -332,7 +338,7 @@ class ComputeInstanceRuntimeTest {
                 creating.getCount() == 0 ? List.of(created) : List.of());
         ExecutorService pool = Executors.newFixedThreadPool(1);
         ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
-                lifecycleManager, imageCache, scripts, pool, MoreExecutors.newDirectExecutorService());
+                lifecycleManager, imageCache, scripts, dockerHost, pool, MoreExecutors.newDirectExecutorService());
         concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
         assertTrue(creating.await(5, TimeUnit.SECONDS));
 
@@ -375,7 +381,7 @@ class ComputeInstanceRuntimeTest {
             @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return false; }
         };
         ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, containerBuilder,
-                lifecycleManager, imageCache, scripts, impatient, MoreExecutors.newDirectExecutorService());
+                lifecycleManager, imageCache, scripts, dockerHost, impatient, MoreExecutors.newDirectExecutorService());
         concurrent.submit("op", List.of(intent(Kind.LAUNCH)));
         assertTrue(creating.await(5, TimeUnit.SECONDS));
 
@@ -417,6 +423,87 @@ class ComputeInstanceRuntimeTest {
         verify(docker, never()).stopContainerCmd("foreign");
     }
 
+    @Test
+    void containersAreToldWhereTheMetadataServerIs() {
+        when(config.services().compute().metadataServer().enabled()).thenReturn(true);
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(builder).withEnv("GCE_METADATA_HOST", "host.docker.internal:4588");
+        verify(builder).withEnv("GCE_METADATA_IP", "host.docker.internal:4588");
+    }
+
+    @Test
+    void theMetadataServerIsNotAdvertisedWhenItIsOff() {
+        when(config.services().compute().metadataServer().enabled()).thenReturn(false);
+
+        runtime.submit("op", List.of(intent(Kind.LAUNCH)));
+
+        verify(builder, never()).withEnv(eq("GCE_METADATA_HOST"), anyString());
+    }
+
+    @Test
+    void runningContainerAddressesIdentifyTheirInstanceUntilItStops() {
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn("172.18.0.5");
+        InspectContainerResponse inspect = docker.inspectContainerCmd(CONTAINER).exec();
+        when(inspect.getState().getRunning()).thenReturn(true);
+        when(inspect.getNetworkSettings().getNetworks()).thenReturn(Map.of("bridge", network));
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+        assertEquals(Optional.of(new ComputeInstanceRuntime.InstanceRef("p", "us-central1-a", "vm")),
+                runtime.instanceAt("172.18.0.5"));
+
+        runtime.submit("stop", List.of(intent(Kind.STOP)));
+        assertEquals(Optional.empty(), runtime.instanceAt("172.18.0.5"));
+    }
+
+    @Test
+    void guestScriptsCanReadTheirMetadataFromBootUntilTheirShutdownScriptsFinish() {
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn("172.18.0.5");
+        for (String container : List.of(CONTAINER, "new-id")) {
+            InspectContainerResponse inspect = docker.inspectContainerCmd(container).exec();
+            when(inspect.getState().getRunning()).thenReturn(true);
+            when(inspect.getNetworkSettings().getNetworks()).thenReturn(Map.of("bridge", network));
+        }
+        List<Optional<ComputeInstanceRuntime.InstanceRef>> seen = new ArrayList<>();
+        doAnswer(invocation -> seen.add(runtime.instanceAt("172.18.0.5")))
+                .when(scripts).run(any(), any(), any(), any(), any(), any(), any(), any());
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+        Container running = container("new-id", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+        runtime.submit("stop", List.of(intent(Kind.STOP)));
+
+        Optional<ComputeInstanceRuntime.InstanceRef> vm =
+                Optional.of(new ComputeInstanceRuntime.InstanceRef("p", "us-central1-a", "vm"));
+        assertEquals(List.of(vm, vm), seen, "startup and shutdown scripts both found their instance");
+        assertEquals(Optional.empty(), runtime.instanceAt("172.18.0.5"));
+    }
+
+    @Test
+    void reregisteringARunningInstanceNeverHidesItsAddress() {
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn("172.18.0.5");
+        List<Optional<ComputeInstanceRuntime.InstanceRef>> seen = new ArrayList<>();
+        for (String container : List.of(CONTAINER, "new-id")) {
+            InspectContainerResponse inspect = docker.inspectContainerCmd(container).exec();
+            when(inspect.getState().getRunning()).thenReturn(true);
+            when(inspect.getNetworkSettings().getNetworks()).thenAnswer(invocation -> {
+                seen.add(runtime.instanceAt("172.18.0.5"));
+                return Map.of("bridge", network);
+            });
+        }
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        int first = seen.indexOf(Optional.of(new ComputeInstanceRuntime.InstanceRef("p", "us-central1-a", "vm")));
+        assertTrue(first >= 0, "the boot registered the instance: " + seen);
+        assertFalse(seen.subList(first, seen.size()).contains(Optional.empty()),
+                "a later registration hid the address: " + seen);
+    }
+
     private static Intent intent(Kind kind) {
         return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, METADATA);
     }
@@ -450,7 +537,7 @@ class ComputeInstanceRuntimeTest {
         ExecutorService deferred = mock(ExecutorService.class);
         doAnswer(invocation -> queued.add(invocation.getArgument(0))).when(deferred).execute(any());
         ComputeInstanceRuntime runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager,
-                imageCache, scripts, MoreExecutors.newDirectExecutorService(), deferred);
+                imageCache, scripts, dockerHost, MoreExecutors.newDirectExecutorService(), deferred);
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo("c-1", Map.of()));
         runtime.submit("insert", List.of(intent(Kind.LAUNCH)));
@@ -489,7 +576,7 @@ class ComputeInstanceRuntimeTest {
         ExecutorService pool = Executors.newCachedThreadPool();
         try {
             ComputeInstanceRuntime stopping = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager,
-                    imageCache, scripts, MoreExecutors.newDirectExecutorService(), pool);
+                    imageCache, scripts, dockerHost, MoreExecutors.newDirectExecutorService(), pool);
             Container running = container("c-1", "running", Map.of());
             when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
 

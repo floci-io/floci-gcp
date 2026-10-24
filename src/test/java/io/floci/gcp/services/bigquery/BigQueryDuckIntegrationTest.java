@@ -451,6 +451,37 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void anyValueHavingMatchesBigQuery() {
+        String t = "UNNEST([STRUCT('a' AS g, 'x1' AS x, 10 AS y), ('a', 'x2', 30), ('a', 'x3', 20), ('b', 'y1', 5),"
+                + " ('b', CAST(NULL AS STRING), 9), ('c', 'z1', NULL), ('c', 'z2', 4), ('d', 'w1', NULL),"
+                + " ('e', CAST(NULL AS STRING), 1), ('e', CAST(NULL AS STRING), 1)])";
+        query("{\"query\": \"SELECT g, ANY_VALUE(x HAVING MAX y) mx, ANY_VALUE(x HAVING MIN y) mn FROM " + t
+                + " GROUP BY g ORDER BY g\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(
+                        List.of("a", "x2", "x1"),
+                        Arrays.asList("b", null, "y1"),
+                        List.of("c", "z2", "z2"),
+                        Arrays.asList("d", null, null),
+                        Arrays.asList("e", null, null))));
+        query("""
+                {"query": "SELECT ANY_VALUE(x HAVING MAX y) v FROM UNNEST([STRUCT(CAST(NULL AS STRING) AS x, 9 AS y), ('k', 9), ('j', 1)])", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("k"));
+        query("{\"query\": \"SELECT ANY_VALUE(UPPER(x) HAVING MAX y * -1) a, ANY_VALUE(x HAVING MAX IF(y > 15, y, 0)) b,"
+                + " ANY_VALUE(x) IS NOT NULL AS c FROM " + t + " WHERE g = 'a'\", \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("X1", "x2", "true")));
+        query("""
+                {"query": "SELECT ANY_VALUE(x HAVING MAX y) OVER () FROM UNNEST([STRUCT('a' AS x, 1 AS y)])", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("HAVING modifier is not supported on analytic functions"));
+    }
+
+    @Test
+    @Order(5)
     void intervalStepSizeCanBeAnExpression() {
         query("""
                 {"query": "SELECT DATE_ADD(DATE '2024-01-10', INTERVAL -5 DAY) minus, DATE_ADD(DATE '2024-01-10', INTERVAL - 5 DAY) spaced, DATE_ADD(DATE '2024-01-10', INTERVAL 2 * 3 DAY) product, DATE_ADD(DATE '2024-01-10', INTERVAL -x DAY) negated FROM UNNEST([2]) x", "useLegacySql": false}

@@ -2182,6 +2182,55 @@ class PubSubServiceTest {
     }
 
     @Test
+    void aPushMessageStaysCapturedWhileAnotherDeliveryOfItIsInFlight() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        CountDownLatch firstArrived = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch secondDone = new CountDownLatch(1);
+        CountDownLatch thirdArrived = new CountDownLatch(1);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(Executors.newCachedThreadPool());
+        server.createContext("/hook", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            int request = requests.incrementAndGet();
+            if (request == 1) {
+                firstArrived.countDown();
+                await(releaseFirst);
+            }
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+            if (request == 2) {
+                secondDone.countDown();
+            } else if (request == 3) {
+                thirdArrived.countDown();
+            }
+        });
+        server.start();
+        try {
+            service.createTopic(TOPIC);
+            service.createSubscription(SUB, TOPIC, 10, null, false, null, null,
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/hook",
+                    null, null, null, null, 0, false, false);
+            service.createSnapshot(SNAPSHOT, SUB, null);
+            publish("twice");
+            assertTrue(firstArrived.await(10, TimeUnit.SECONDS));
+            // The publish's delivery is held open; the seek pushes the same message again and that one is acked.
+            service.seek(SUB, SNAPSHOT, null);
+            assertTrue(secondDone.await(10, TimeUnit.SECONDS));
+            Thread.sleep(100);
+
+            service.createSnapshot("projects/p1/snapshots/in-flight", SUB, null);
+            releaseFirst.countDown();
+            service.seek(SUB, "projects/p1/snapshots/in-flight", null);
+
+            assertTrue(thirdArrived.await(10, TimeUnit.SECONDS), "the message still in flight was captured");
+        } finally {
+            releaseFirst.countDown();
+            server.stop(0);
+        }
+    }
+
+    @Test
     void aSnapshotTakenBeforeAnyPullAfterARestartCapturesTheQueue() {
         service.createTopic(TOPIC);
         service.createSubscription(SUB, TOPIC, 10);

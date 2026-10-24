@@ -98,9 +98,11 @@ public class PubSubService {
     // message published to its topic since. In memory only, like the queues, so a snapshot that survives a restart
     // keeps its metadata with an empty backlog.
     private final ConcurrentHashMap<String, Backlog> backlogs = new ConcurrentHashMap<>();
-    // Push messages a subscription has not had acknowledged yet (sent or awaiting a retry). They never enter
-    // the queues or leases, but a snapshot of a push subscription captures them like any unacked message.
-    private final ConcurrentHashMap<String, Set<StoredMessage>> pendingPush = new ConcurrentHashMap<>();
+    // Push messages a subscription has not had acknowledged yet (sent or awaiting a retry), with how many
+    // deliveries of each are still in flight (a retry and a seek can push the same message at once). They never
+    // enter the queues or leases, but a snapshot of a push subscription captures them like any unacked message.
+    private final ConcurrentHashMap<String, ConcurrentHashMap<StoredMessage, Integer>> pendingPush =
+            new ConcurrentHashMap<>();
     // Publishing a message (backlog appends and queue adds), creating a snapshot and seeking to one all hold the
     // topic's lock, so a message is either captured by them or added after them, never both and never neither.
     // It is taken before a subscription's lease lock, never inside it.
@@ -591,7 +593,7 @@ public class PubSubService {
                     httpClient.send(request, HttpResponse.BodyHandlers.discarding());
 
             if (Set.of(102, 200, 201, 202, 204).contains(response.statusCode())) {
-                pendingPush(subscription.getName()).remove(message);
+                pushSettled(subscription.getName(), message);
                 LOG.debugf("Push delivery succeeded subscription=%s messageId=%s status=%d",
                         subscription.getName(), message.getMessageId(), response.statusCode());
             } else {
@@ -611,12 +613,17 @@ public class PubSubService {
     }
 
     private void submitPush(StoredSubscription subscription, StoredMessage message) {
-        pendingPush(subscription.getName()).add(message);
+        pendingPush.computeIfAbsent(subscription.getName(), key -> new ConcurrentHashMap<>())
+                .merge(message, 1, Integer::sum);
         pushDeliveryExecutor.submit(() -> deliverPushMessage(subscription, message));
     }
 
-    private Set<StoredMessage> pendingPush(String subscriptionName) {
-        return pendingPush.computeIfAbsent(subscriptionName, key -> ConcurrentHashMap.newKeySet());
+    /** One delivery of {@code message} ended (acknowledged or abandoned); it stays pending while others run. */
+    private void pushSettled(String subscriptionName, StoredMessage message) {
+        ConcurrentHashMap<StoredMessage, Integer> pending = pendingPush.get(subscriptionName);
+        if (pending != null) {
+            pending.computeIfPresent(message, (key, count) -> count > 1 ? count - 1 : null);
+        }
     }
 
     private void schedulePushRetry(StoredSubscription subscription, StoredMessage message) {
@@ -627,7 +634,7 @@ public class PubSubService {
                     || !Objects.equals(current.get().getCreationId(), subscription.getCreationId())
                     || current.get().isDetached()
                     || current.get().getPushEndpoint() == null) {
-                pendingPush(subscription.getName()).remove(message);
+                pushSettled(subscription.getName(), message);
                 return;
             }
 
@@ -1214,9 +1221,9 @@ public class PubSubService {
             if (queue != null) { unacked.addAll(queue); }
             deliveredMap.values().forEach(lease -> unacked.add(lease.requeued()));
         }
-        Set<StoredMessage> pushing = pendingPush.get(subscriptionName);
+        ConcurrentHashMap<StoredMessage, Integer> pushing = pendingPush.get(subscriptionName);
         if (pushing != null) {
-            pushing.forEach(message -> unacked.add(new QueuedMessage(message, 0)));
+            pushing.keySet().forEach(message -> unacked.add(new QueuedMessage(message, 0)));
         }
         unacked.sort(PUBLISH_ORDER);
         Map<String, StoredMessage> byId = new LinkedHashMap<>();

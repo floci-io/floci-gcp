@@ -482,6 +482,28 @@ class ComputeInstanceRuntimeTest {
         assertEquals(Optional.empty(), runtime.instanceAt("172.18.0.5"));
     }
 
+    @Test
+    void reregisteringARunningInstanceNeverHidesItsAddress() {
+        ContainerNetwork network = mock(ContainerNetwork.class);
+        when(network.getIpAddress()).thenReturn("172.18.0.5");
+        List<Optional<ComputeInstanceRuntime.InstanceRef>> seen = new ArrayList<>();
+        for (String container : List.of(CONTAINER, "new-id")) {
+            InspectContainerResponse inspect = docker.inspectContainerCmd(container).exec();
+            when(inspect.getState().getRunning()).thenReturn(true);
+            when(inspect.getNetworkSettings().getNetworks()).thenAnswer(invocation -> {
+                seen.add(runtime.instanceAt("172.18.0.5"));
+                return Map.of("bridge", network);
+            });
+        }
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        int first = seen.indexOf(Optional.of(new ComputeInstanceRuntime.InstanceRef("p", "us-central1-a", "vm")));
+        assertTrue(first >= 0, "the boot registered the instance: " + seen);
+        assertFalse(seen.subList(first, seen.size()).contains(Optional.empty()),
+                "a later registration hid the address: " + seen);
+    }
+
     private static Intent intent(Kind kind) {
         return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, METADATA);
     }

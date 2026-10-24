@@ -17,11 +17,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -390,20 +392,24 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /** Records every network address of the instance's running container. */
-    /** Records the network addresses of the instance's running container, replacing any it had before. */
+    /**
+     * Records the network addresses of the instance's running container, replacing any it had before. The new
+     * addresses go in before the old ones go out, so a guest script reading its metadata meanwhile is never refused.
+     */
     private void register(String containerName, InstanceRef instance) {
-        addresses.values().removeIf(instance::equals);
         try {
             InspectContainerResponse inspect = lifecycleManager.runDockerApi("inspect Compute instance " + containerName,
                     () -> lifecycleManager.getDockerClient().inspectContainerCmd(containerName).exec());
-            if (inspect.getState() == null || !Boolean.TRUE.equals(inspect.getState().getRunning())
-                    || inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
-                return;
+            Set<String> current = new HashSet<>();
+            if (inspect.getState() != null && Boolean.TRUE.equals(inspect.getState().getRunning())
+                    && inspect.getNetworkSettings() != null && inspect.getNetworkSettings().getNetworks() != null) {
+                inspect.getNetworkSettings().getNetworks().values().stream()
+                        .map(network -> network.getIpAddress())
+                        .filter(ip -> ip != null && !ip.isBlank())
+                        .forEach(current::add);
             }
-            inspect.getNetworkSettings().getNetworks().values().stream()
-                    .map(network -> network.getIpAddress())
-                    .filter(ip -> ip != null && !ip.isBlank())
-                    .forEach(ip -> addresses.put(ip, instance));
+            current.forEach(ip -> addresses.put(ip, instance));
+            addresses.entrySet().removeIf(entry -> entry.getValue().equals(instance) && !current.contains(entry.getKey()));
         } catch (RuntimeException e) {
             LOG.debugv("Could not read the addresses of Compute instance container {0}: {1}", containerName, e.getMessage());
         }

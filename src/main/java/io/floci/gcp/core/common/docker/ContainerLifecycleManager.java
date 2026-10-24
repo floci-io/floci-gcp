@@ -593,8 +593,14 @@ public class ContainerLifecycleManager {
      */
     public ContainerExec.Result execStreaming(String containerId, List<String> env, List<String> command,
                                               Duration timeout, OutputStream stdout, OutputStream stderr) {
+        return execStreaming(containerId, null, env, command, timeout, stdout, stderr);
+    }
+
+    /** As {@link #execStreaming(String, List, List, Duration, OutputStream, OutputStream)}, run as {@code user}. */
+    public ContainerExec.Result execStreaming(String containerId, String user, List<String> env, List<String> command,
+                                              Duration timeout, OutputStream stdout, OutputStream stderr) {
         int seconds = (int) Math.min(Integer.MAX_VALUE, Math.max(1L, timeout.toSeconds()));
-        return ContainerExec.run(dockerClient(), containerId, env, command.toArray(new String[0]), seconds,
+        return ContainerExec.run(dockerClient(), containerId, user, env, command.toArray(new String[0]), seconds,
                 stdout, stderr);
     }
 

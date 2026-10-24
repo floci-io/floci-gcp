@@ -86,12 +86,21 @@ public final class ContainerExec {
      */
     public static Result run(DockerClient dockerClient, String containerId, List<String> env, String[] cmd,
                              int timeoutSeconds, OutputStream stdout, OutputStream stderr) {
+        return run(dockerClient, containerId, null, env, cmd, timeoutSeconds, stdout, stderr);
+    }
+
+    /** As above, run as {@code user} (a name or uid) instead of the container's configured user when not null. */
+    public static Result run(DockerClient dockerClient, String containerId, String user, List<String> env,
+                             String[] cmd, int timeoutSeconds, OutputStream stdout, OutputStream stderr) {
         ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
                 .withAttachStderr(true);
         if (env != null && !env.isEmpty()) {
             create.withEnv(env);
+        }
+        if (user != null) {
+            create.withUser(user);
         }
         String execId = create.exec().getId();
         AtomicReference<IOException> writeFailure = new AtomicReference<>();

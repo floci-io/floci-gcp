@@ -14,9 +14,11 @@ import io.floci.gcp.services.compute.ComputeInstanceRuntime.Phase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,9 +42,11 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -223,7 +227,7 @@ class ComputeInstanceRuntimeTest {
 
         when(config.services().compute().launchTimeout()).thenReturn(Duration.ofMillis(-1));
         ComputeInstanceRuntime slow = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class), lifecycleManager,
-                imageCache, scripts, mock(java.util.concurrent.ExecutorService.class), mock(java.util.concurrent.ExecutorService.class));
+                imageCache, scripts, mock(ExecutorService.class), mock(ExecutorService.class));
         slow.submit("stuck", List.of(intent(Kind.LAUNCH)));
         assertTrue(slow.finished("stuck"));
     }
@@ -231,8 +235,8 @@ class ComputeInstanceRuntimeTest {
     @Test
     void forgetDropsTheTrackedOperation() {
         ComputeInstanceRuntime pending = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
-                lifecycleManager, imageCache, scripts, mock(java.util.concurrent.ExecutorService.class),
-                mock(java.util.concurrent.ExecutorService.class));
+                lifecycleManager, imageCache, scripts, mock(ExecutorService.class),
+                mock(ExecutorService.class));
         pending.submit("op", List.of(intent(Kind.LAUNCH)));
         assertEquals(Phase.PROVISIONING, pending.phase("op"));
 
@@ -426,7 +430,7 @@ class ComputeInstanceRuntimeTest {
         when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
         runtime.submit("reset", List.of(intent(Kind.RESTART)));
         runtime.submit("start", List.of(intent(Kind.START)));
-        verify(scripts, org.mockito.Mockito.times(2)).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
+        verify(scripts, times(2)).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
                 eq(METADATA), any(), any());
     }
 
@@ -440,10 +444,42 @@ class ComputeInstanceRuntimeTest {
     }
 
     @Test
+    void aStartupTaskQueuedForAnEarlierBootIsDropped() {
+        List<Runnable> queued = new ArrayList<>();
+        ExecutorService deferred = mock(ExecutorService.class);
+        doAnswer(invocation -> queued.add(invocation.getArgument(0))).when(deferred).execute(any());
+        ComputeInstanceRuntime runtime = new ComputeInstanceRuntime(config, containerBuilder, lifecycleManager,
+                imageCache, scripts, MoreExecutors.newDirectExecutorService(), deferred);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("c-1", Map.of()));
+        runtime.submit("insert", List.of(intent(Kind.LAUNCH)));
+        Container running = container("c-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+        runtime.submit("stop", List.of(intent(Kind.STOP)));
+
+        queued.forEach(Runnable::run);
+
+        verify(scripts, never()).run(eq(ComputeGuestScripts.Phase.STARTUP), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void reconcileRunsTheStartupScriptsOfAContainerItStartsAgain() {
+        Container stopped = container("c-1", "exited", identity("vm", "4588"));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(stopped));
+
+        runtime.reconcile((project, zone, name) -> "RUNNING",
+                (project, zone, name) -> Map.of("startup-script", "echo again"));
+
+        verify(docker.startContainerCmd("c-1")).exec();
+        verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("c-1"),
+                eq(Map.of("startup-script", "echo again")), any(), any());
+    }
+
+    @Test
     void stopAndDeleteRunTheShutdownScriptsOfARunningContainerFirst() {
         Container running = container("c-1", "running", Map.of());
         when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
-        org.mockito.InOrder order = org.mockito.Mockito.inOrder(scripts, lifecycleManager);
+        InOrder order = inOrder(scripts, lifecycleManager);
 
         runtime.submit("stop", List.of(intent(Kind.STOP)));
         order.verify(scripts).run(eq(ComputeGuestScripts.Phase.SHUTDOWN), eq("vm"), eq("c-1"), eq(METADATA),

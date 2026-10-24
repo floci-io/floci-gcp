@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -45,12 +47,12 @@ class ComputeGuestScriptsTest {
     @Test
     void runsTheInlineScriptThenTheUrlScriptAndStreamsTheirLinesToSerialPortOne() {
         when(gcs.getObjectData("bucket", "boot/setup.sh")).thenReturn("echo from gcs".getBytes(StandardCharsets.UTF_8));
-        when(lifecycleManager.execStreaming(eq("c-1"), anyList(), eq(List.of("/bin/sh", "-c", "\"$0\"",
-                "/var/lib/google/startup-script")), eq(TIMEOUT), any(), any()))
-                .thenAnswer(invocation -> print(invocation.getArgument(4), "hello\nworld", 0));
-        when(lifecycleManager.execStreaming(eq("c-1"), anyList(), eq(List.of("/bin/sh", "-c", "\"$0\"",
-                "/var/lib/google/startup-script-url")), eq(TIMEOUT), any(), any()))
-                .thenAnswer(invocation -> print(invocation.getArgument(4), "from gcs\n", 3));
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c", "\"$0\"",
+                "/var/lib/google/startup-script")), any(), any(), any()))
+                .thenAnswer(invocation -> print(invocation.getArgument(5), "hello\nworld", 0));
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c", "\"$0\"",
+                "/var/lib/google/startup-script-url")), any(), any(), any()))
+                .thenAnswer(invocation -> print(invocation.getArgument(5), "from gcs\n", 3));
         Map<String, String> metadata = new LinkedHashMap<>();
         metadata.put("startup-script-url", "gs://bucket/boot/setup.sh");
         metadata.put("startup-script", "echo hello; echo world");
@@ -62,7 +64,8 @@ class ComputeGuestScriptsTest {
                 "startup-script: hello", "startup-script: world", "startup-script exit status 0",
                 "Found startup-script-url in metadata.", "startup-script-url: from gcs",
                 "startup-script-url exit status 3", "Finished running startup scripts."), lines);
-        verify(lifecycleManager).exec("c-1", List.of(), List.of("mkdir", "-p", "/var/lib/google"));
+        verify(lifecycleManager).execStreaming(eq("c-1"), eq("root"), eq(List.of()),
+                eq(List.of("mkdir", "-p", "/var/lib/google")), any(), any(), any());
     }
 
     @Test
@@ -72,12 +75,12 @@ class ComputeGuestScriptsTest {
         String output = port.read(0).contents();
         assertTrue(output.matches("\\d{4}-\\d{2}-\\d{2}T[^ ]+ vm google_metadata_script_runner\\[1]: "
                 + "No shutdown scripts to run\\.\\n"), output);
-        verify(lifecycleManager, never()).execStreaming(any(), anyList(), anyList(), any(), any(), any());
+        verify(lifecycleManager, never()).execStreaming(any(), any(), anyList(), anyList(), any(), any(), any());
     }
 
     @Test
     void timeoutsAndUnsupportedUrlsAreReportedAndTheRunGoesOn() {
-        when(lifecycleManager.execStreaming(eq("c-1"), anyList(), anyList(), eq(TIMEOUT), any(), any()))
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(new ContainerExec.Result(-1, "", "Timed out", true));
         Map<String, String> metadata = new LinkedHashMap<>();
         metadata.put("startup-script", "sleep 999");
@@ -100,7 +103,54 @@ class ComputeGuestScriptsTest {
         scripts.fetch("https://storage.googleapis.com/b/dir/s.sh");
         scripts.fetch("https://storage.cloud.google.com/b/dir/s.sh");
 
-        verify(gcs, org.mockito.Mockito.times(3)).getObjectData("b", "dir/s.sh");
+        verify(gcs, times(3)).getObjectData("b", "dir/s.sh");
+    }
+
+    @Test
+    void httpsUrlsAreDecodedAndGsReferencesAreTakenLiterally() {
+        when(gcs.getObjectData(eq("b"), any())).thenReturn(new byte[] {1});
+
+        scripts.fetch("https://storage.googleapis.com/b/boot/my%20script.sh");
+        scripts.fetch("gs://b/boot/my%20script.sh");
+
+        verify(gcs).getObjectData("b", "boot/my script.sh");
+        verify(gcs).getObjectData("b", "boot/my%20script.sh");
+    }
+
+    @Test
+    void allScriptsOfAPhaseShareOneDeadline() {
+        Duration limit = Duration.ofMillis(300);
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c", "\"$0\"",
+                "/var/lib/google/shutdown-script")), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    Thread.sleep(400);
+                    return new ContainerExec.Result(-1, "", "Timed out", true);
+                });
+        Map<String, String> metadata = new LinkedHashMap<>();
+        metadata.put("shutdown-script", "sleep 999");
+        metadata.put("shutdown-script-url", "gs://bucket/stop.sh");
+
+        scripts.run(ComputeGuestScripts.Phase.SHUTDOWN, "vm", "c-1", metadata, limit, port);
+
+        verify(lifecycleManager, never()).execStreaming(eq("c-1"), eq("root"), anyList(),
+                eq(List.of("/bin/sh", "-c", "\"$0\"", "/var/lib/google/shutdown-script-url")), any(), any(), any());
+        assertTrue(messages().contains("shutdown-script-url not run: the shutdown script time limit of PT0.3S was used up."),
+                messages().toString());
+    }
+
+    @Test
+    void outputWithoutNewlinesIsWrittenInBoundedLines() throws Exception {
+        ComputeGuestScripts.LineWriter out = new ComputeGuestScripts.LineWriter(port, "vm", "startup-script: ");
+        byte[] chunk = new byte[ComputeGuestScripts.MAX_LINE_BYTES * 3];
+        Arrays.fill(chunk, (byte) 'x');
+
+        out.write(chunk);
+        out.close();
+
+        List<String> lines = messages();
+        assertEquals(3, lines.size());
+        assertTrue(lines.stream().allMatch(line -> line.length() == "startup-script: ".length()
+                + ComputeGuestScripts.MAX_LINE_BYTES), lines.toString().length() + " chars");
     }
 
     private static ContainerExec.Result print(OutputStream out, String text, int exitCode) throws Exception {

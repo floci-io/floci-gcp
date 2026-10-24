@@ -10,6 +10,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -30,6 +31,10 @@ public class ComputeGuestScripts {
     private static final Logger LOG = Logger.getLogger(ComputeGuestScripts.class);
     static final String DIRECTORY = "/var/lib/google";
     static final String RUNNER = "google_metadata_script_runner";
+    /** The guest environment runs metadata scripts as root, whatever user the image declares. */
+    static final String ROOT = "root";
+    /** Longest line kept before it is written out unfinished, so output without newlines stays bounded. */
+    static final int MAX_LINE_BYTES = 8 * 1024;
 
     public enum Phase {
         STARTUP("startup"), SHUTDOWN("shutdown");
@@ -48,8 +53,13 @@ public class ComputeGuestScripts {
         this.gcs = gcs;
     }
 
+    /**
+     * Runs the phase's scripts within {@code timeout} overall: preparation and every script share one deadline, and
+     * each script gets only the time left, so two shutdown scripts cannot take twice the shutdown limit.
+     */
     void run(Phase phase, String instance, String containerId, Map<String, String> metadata, Duration timeout,
              ComputeSerialPort port) {
+        Instant deadline = Instant.now().plus(timeout);
         List<String> keys = List.of(phase.prefix + "-script", phase.prefix + "-script-url");
         if (keys.stream().noneMatch(metadata::containsKey)) {
             port.write(line(instance, "No " + phase.prefix + " scripts to run."));
@@ -57,7 +67,8 @@ public class ComputeGuestScripts {
         }
         port.write(line(instance, "Starting " + phase.prefix + " scripts."));
         try {
-            lifecycleManager.exec(containerId, List.of(), List.of("mkdir", "-p", DIRECTORY));
+            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY), timeout,
+                    OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
         } catch (RuntimeException e) {
             LOG.warnf("Compute instance %s could not prepare %s: %s", instance, DIRECTORY, e.getMessage());
             port.write(line(instance, "Could not prepare " + DIRECTORY + ": " + e.getMessage()));
@@ -66,13 +77,19 @@ public class ComputeGuestScripts {
         for (String key : keys) {
             String value = metadata.get(key);
             if (value == null) { continue; }
+            Duration left = Duration.between(Instant.now(), deadline);
+            if (left.isNegative() || left.isZero()) {
+                port.write(line(instance, key + " not run: the " + phase.prefix + " script time limit of " + timeout
+                        + " was used up."));
+                continue;
+            }
             try {
                 byte[] script = key.endsWith("-url") ? fetch(value.strip()) : value.getBytes(StandardCharsets.UTF_8);
                 port.write(line(instance, "Found " + key + " in metadata."));
                 RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, key, script, 0755);
                 LineWriter out = new LineWriter(port, instance, key + ": ");
-                ContainerExec.Result result = lifecycleManager.execStreaming(containerId, List.of(),
-                        List.of("/bin/sh", "-c", "\"$0\"", DIRECTORY + "/" + key), timeout, out, out);
+                ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(),
+                        List.of("/bin/sh", "-c", "\"$0\"", DIRECTORY + "/" + key), left, out, out);
                 out.close();
                 port.write(line(instance, result.timedOut()
                         ? key + " still running after " + timeout + "; no longer waiting for it."
@@ -90,10 +107,15 @@ public class ComputeGuestScripts {
         String path;
         if (url.startsWith("gs://")) {
             path = url.substring(5);
-        } else if (url.startsWith("https://storage.googleapis.com/")) {
-            path = url.substring("https://storage.googleapis.com/".length());
-        } else if (url.startsWith("https://storage.cloud.google.com/")) {
-            path = url.substring("https://storage.cloud.google.com/".length());
+        } else if (url.startsWith("https://storage.googleapis.com/") || url.startsWith("https://storage.cloud.google.com/")) {
+            // An HTTPS URL percent-encodes the object name; a gs:// reference spells it literally.
+            String decoded;
+            try {
+                decoded = URI.create(url).getPath();
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("not a valid URL: " + url, e);
+            }
+            path = decoded == null ? "" : decoded.substring(1);
         } else {
             throw new IllegalArgumentException("only Cloud Storage URLs are supported, not " + url);
         }
@@ -132,6 +154,7 @@ public class ComputeGuestScripts {
                 emit();
             } else {
                 pending.write(b);
+                if (pending.size() >= MAX_LINE_BYTES) { emit(); }
             }
         }
 

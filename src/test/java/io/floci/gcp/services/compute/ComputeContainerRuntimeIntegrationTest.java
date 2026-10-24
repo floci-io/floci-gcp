@@ -8,6 +8,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import static io.restassured.RestAssured.given;
@@ -125,7 +126,7 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         done(root, post(root + "/setCommonInstanceMetadata", Map.of("fingerprint", fingerprint, "items", List.of(
                 Map.of("key", "startup-script", "value", "echo project"),
                 Map.of("key", "shutdown-script", "value", "echo project-shutdown")))));
-        Map<String, Object> vm = new java.util.HashMap<>(vm("vm", null));
+        Map<String, Object> vm = new HashMap<>(vm("vm", null));
         vm.put("metadata", Map.of("items", List.of(Map.of("key", "startup-script", "value", "echo instance"))));
         done(root, post(root + ZONE + "/instances", vm));
 

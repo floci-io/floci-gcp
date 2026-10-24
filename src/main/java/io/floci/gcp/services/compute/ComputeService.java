@@ -61,12 +61,30 @@ public class ComputeService {
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
                 .storageKey("compute").resourceClasses(ComputeController.class)
                 .api("compute.googleapis.com", "Compute Engine API").build());
-        runtime.reconcile(this::instanceStatus);
+        runtime.reconcile(this::instanceStatus, this::instanceGuestMetadata);
     }
     /** The stored status of an instance, or null when it does not exist. */
     synchronized String instanceStatus(String project, String zone, String name) {
         ObjectNode instance = state(project).resources.get("zones/" + zone + "/instances/" + name);
         return instance == null ? null : instance.path("status").asText();
+    }
+    synchronized Map<String, String> instanceGuestMetadata(String project, String zone, String name) {
+        ComputeProject state = state(project);
+        ObjectNode instance = state.resources.get("zones/" + zone + "/instances/" + name);
+        return instance == null ? Map.of() : guestMetadata(state, instance);
+    }
+    /** The metadata a guest sees: project-wide keys, each overridden by the instance key of the same name. */
+    private static Map<String, String> guestMetadata(ComputeProject state, ObjectNode instance) {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        if (state.commonInstanceMetadata != null) {
+            for (JsonNode item : state.commonInstanceMetadata.path("items")) {
+                metadata.put(item.path("key").asText(), item.path("value").asText());
+            }
+        }
+        for (JsonNode item : instance.path("metadata").path("items")) {
+            metadata.put(item.path("key").asText(), item.path("value").asText());
+        }
+        return Map.copyOf(metadata);
     }
     private ComputeProject state(String project) {
         if (project == null || !project.matches("[A-Za-z0-9][A-Za-z0-9:.-]{0,127}")) {
@@ -604,20 +622,7 @@ public class ComputeService {
                 }
             }
             intents.add(new ComputeInstanceRuntime.Intent(kind, project, scope.substring(scope.indexOf('/') + 1),
-                    instance.path("name").asText(), image, cpus, memoryMb, guestMetadata(instance)));
-        }
-        /** The metadata a guest sees: project-wide keys, each overridden by the instance key of the same name. */
-        private Map<String, String> guestMetadata(ObjectNode instance) {
-            Map<String, String> metadata = new LinkedHashMap<>();
-            if (state.commonInstanceMetadata != null) {
-                for (JsonNode item : state.commonInstanceMetadata.path("items")) {
-                    metadata.put(item.path("key").asText(), item.path("value").asText());
-                }
-            }
-            for (JsonNode item : instance.path("metadata").path("items")) {
-                metadata.put(item.path("key").asText(), item.path("value").asText());
-            }
-            return Map.copyOf(metadata);
+                    instance.path("name").asText(), image, cpus, memoryMb, guestMetadata(state, instance)));
         }
         private String bootDockerImage(ObjectNode instance) {
             for (JsonNode attachment : instance.path("disks")) {

@@ -75,6 +75,8 @@ The invocation proxy accepts both generated host-routed URLs and the legacy pref
 
 Deleting a service revision that is the service's `latestReadyRevision` or is named in its `trafficStatuses` fails with `400 FAILED_PRECONDITION` and `Revision "{revision}" cannot be directly deleted because it is actively serving.`. Other revisions are removed and the completed operation returns the revision with `deleteTime` and `expireTime` set. Runtime containers are not touched by revision delete; retired service revisions have no running container.
 
+Service revision containers outlive the emulator process only when the runtime records do too. With persistent storage (`persistent`, `hybrid` or `wal`), a stopped emulator leaves them running and the next start serves requests from a container that is still up. With `memory` storage, floci-gcp removes the service containers it started when it stops. At startup it also removes service containers of this emulator (same `floci_emulator`, `floci_namespace` and `io.floci.owner` labels) that no runtime record references, which covers a process that did not stop cleanly.
+
 ### Security options
 
 Cloud Run lets a container create an unprivileged user namespace (`unshare(CLONE_NEWUSER)`), which rootless sandboxes such as bubblewrap rely on. Docker's default seccomp profile rejects that call with `EPERM`, so floci-gcp workload containers cannot do it by default. Set `FLOCI_GCP_SERVICES_CLOUDRUN_EXECUTION_SECURITY_OPTS` to pass Docker security options to every Cloud Run workload container (services, job tasks, worker pool replicas, and instances), and to no other container floci-gcp starts:

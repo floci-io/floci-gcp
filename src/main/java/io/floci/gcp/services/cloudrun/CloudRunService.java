@@ -164,6 +164,9 @@ public class CloudRunService {
                 .api("run.googleapis.com", "Cloud Run Admin API")
                 .build());
         iamService.registerPolicyResourceResolver("projects/*/locations/*/services/*", this::getService);
+        if (executionEnabled()) {
+            runtimeService.removeLeftoverServiceContainers();
+        }
     }
 
     @PreDestroy

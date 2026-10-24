@@ -547,6 +547,72 @@ class CloudRunRuntimeServiceTest {
                 "READY", createTimeMillis, createTimeMillis, null, 300_000, mounts);
     }
 
+    @Test
+    void startupSweepRemovesOnlyOwnedServiceContainersWithoutARuntimeRecord() {
+        InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
+        String recordedRevision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00002";
+        store.put(recordedRevision, instance(recordedRevision, 8080, "recorded", 1));
+        CloudRunRuntimeService service = new CloudRunRuntimeService(store, containerBuilder(), lifecycleManager,
+                config);
+        String revisions = "projects/p1/locations/us-central1/services/svc/revisions/";
+        String owner = ContainerStorageHelper.ownerIdentity(config);
+        List<com.github.dockerjava.api.model.Container> containers = List.of(
+                dockerContainer("orphan", revisions + "svc-00001", owner),
+                dockerContainer("recorded", recordedRevision, owner),
+                dockerContainer("foreign", revisions + "svc-00003", "other-floci/4588"),
+                dockerContainer("pool", "projects/p1/locations/us-central1/workerPools/pool/revisions/pool-1", owner));
+        when(lifecycleManager.listContainersByLabels(anyString(), anyMap())).thenReturn(containers);
+
+        assertEquals(1, service.removeLeftoverServiceContainers());
+
+        verify(lifecycleManager).forceRemove("orphan", null);
+        verify(lifecycleManager, never()).forceRemove(eq("recorded"), any());
+        verify(lifecycleManager, never()).forceRemove(eq("foreign"), any());
+        verify(lifecycleManager, never()).forceRemove(eq("pool"), any());
+    }
+
+    @Test
+    void shutdownRemovesServiceContainersWhenTheRecordsDoNotOutliveTheProcess() {
+        InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
+        String revision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00001";
+        store.put(revision, instance(revision, 8080, "service-container", 1));
+        CloudRunRuntimeService service = new CloudRunRuntimeService(store, containerBuilder(), lifecycleManager,
+                config);
+        when(config.storage().mode()).thenReturn("memory");
+
+        service.stopManagedContainers();
+
+        verify(lifecycleManager).forceRemove("service-container", null);
+        assertTrue(store.get(revision).isEmpty());
+    }
+
+    @Test
+    void shutdownKeepsServiceContainersForTheNextProcessWithPersistentStorage() {
+        InMemoryStorage<String, CloudRunRuntimeInstance> store = new InMemoryStorage<>();
+        String revision = "projects/p1/locations/us-central1/services/svc/revisions/svc-00001";
+        store.put(revision, instance(revision, 8080, "service-container", 1));
+        CloudRunRuntimeService service = new CloudRunRuntimeService(store, containerBuilder(), lifecycleManager,
+                config);
+        when(config.storage().mode()).thenReturn("persistent");
+
+        service.stopManagedContainers();
+
+        verify(lifecycleManager, never()).forceRemove(anyString(), any());
+        assertTrue(store.get(revision).isPresent());
+    }
+
+    private static com.github.dockerjava.api.model.Container dockerContainer(String id, String resourceName,
+                                                                            String owner) {
+        com.github.dockerjava.api.model.Container container = mock(com.github.dockerjava.api.model.Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getLabels()).thenReturn(Map.of(
+                "floci_emulator", "floci-gcp",
+                ContainerStorageHelper.SERVICE_LABEL, "cloudrun",
+                "io.floci.cloudrun.resource-name", resourceName,
+                ContainerStorageHelper.OWNER_LABEL, owner));
+        return container;
+    }
+
     private ContainerBuilder containerBuilder() {
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.isLinuxHost()).thenReturn(false);

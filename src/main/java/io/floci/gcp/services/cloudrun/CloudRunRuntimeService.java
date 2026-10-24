@@ -8,6 +8,7 @@ import com.google.cloud.run.v2.Volume;
 import com.google.cloud.run.v2.VolumeMount;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerSpec;
@@ -53,7 +54,7 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class CloudRunRuntimeService {
+public class CloudRunRuntimeService implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CloudRunRuntimeService.class);
     private static final String GCS_VOLUME_HELPER_IMAGE = "alpine:3.20";
@@ -179,6 +180,59 @@ public class CloudRunRuntimeService {
 
     public void stopOtherRevisions(String serviceName, String keepRevisionName) {
         stopInstances(serviceInstancesExcept(serviceName, keepRevisionName));
+    }
+
+    /**
+     * Removes the service revision containers this process started when the runtime records do not outlive it
+     * ({@code memory} storage): no later process could re-adopt them through {@link #getReady}. With persistent
+     * storage they keep running for the next process to pick up again.
+     */
+    @Override
+    public void stopManagedContainers() {
+        if (config.services().cloudrun().mock() || !"memory".equals(config.storage().mode())) {
+            return;
+        }
+        stopInstances(runtimeRecords(key -> key.contains("/services/")));
+    }
+
+    /**
+     * Removes the service revision containers of this emulator (same {@code floci_emulator} and
+     * {@code floci_namespace} labels, and owned by this deployment) that no runtime record references, which are
+     * the ones a previous process left behind. A container with a record is kept for {@link #getReady} to
+     * re-adopt. Returns how many were removed.
+     */
+    int removeLeftoverServiceContainers() {
+        Map<String, String> filter = workloadFilter(config);
+        String namespace = filter.get("floci_namespace");
+        Set<String> recorded = new HashSet<>();
+        for (CloudRunRuntimeInstance instance : runtimeRecords(key -> true)) {
+            if (instance.containerId() != null) {
+                recorded.add(instance.containerId());
+            }
+        }
+        List<com.github.dockerjava.api.model.Container> containers;
+        try {
+            containers = lifecycleManager.listContainersByLabels("list Cloud Run service containers", filter);
+        } catch (Exception e) {
+            LOG.warnf(e, "Could not list leftover Cloud Run service containers");
+            return 0;
+        }
+        int removed = 0;
+        for (com.github.dockerjava.api.model.Container container : containers) {
+            Map<String, String> labels = container.getLabels() == null ? Map.of() : container.getLabels();
+            String resource = Objects.requireNonNullElse(workloadResourceName(labels), "");
+            if (!resource.contains("/services/") || recorded.contains(container.getId())
+                    || !Objects.equals(namespace, labels.get("floci_namespace"))
+                    || !ContainerStorageHelper.ownedBy(config, labels)
+                    || !isRemovableWorkload(container.getId(), labels)) {
+                continue;
+            }
+            LOG.infof("Removing Cloud Run service container left by a previous emulator process "
+                    + "container=%s revision=%s", container.getId(), resource);
+            lifecycleManager.forceRemove(container.getId(), null);
+            removed++;
+        }
+        return removed;
     }
 
     public Optional<CloudRunRuntimeInstance> getReady(String revisionName) {

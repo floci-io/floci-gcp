@@ -618,6 +618,14 @@ public class PubSubService {
         pushDeliveryExecutor.submit(() -> deliverPushMessage(subscription, message));
     }
 
+    /** How many push deliveries of a message are still unacknowledged, for tests. */
+    int pendingPushDeliveries(String subscriptionName, String messageId) {
+        ConcurrentHashMap<StoredMessage, Integer> pending = pendingPush.get(subscriptionName);
+        return pending == null ? 0 : pending.entrySet().stream()
+                .filter(entry -> entry.getKey().getMessageId().equals(messageId))
+                .mapToInt(Map.Entry::getValue).sum();
+    }
+
     /** One delivery of {@code message} ended (acknowledged or abandoned); it stays pending while others run. */
     private void pushSettled(String subscriptionName, StoredMessage message) {
         ConcurrentHashMap<StoredMessage, Integer> pending = pendingPush.get(subscriptionName);

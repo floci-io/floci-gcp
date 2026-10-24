@@ -2212,12 +2212,17 @@ class PubSubServiceTest {
                     "http://127.0.0.1:" + server.getAddress().getPort() + "/hook",
                     null, null, null, null, 0, false, false);
             service.createSnapshot(SNAPSHOT, SUB, null);
-            publish("twice");
+            String messageId = service.publish(TOPIC, List.of(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("twice")).build())).getFirst();
             assertTrue(firstArrived.await(10, TimeUnit.SECONDS));
             // The publish's delivery is held open; the seek pushes the same message again and that one is acked.
             service.seek(SUB, SNAPSHOT, null);
             assertTrue(secondDone.await(10, TimeUnit.SECONDS));
-            Thread.sleep(100);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (service.pendingPushDeliveries(SUB, messageId) != 1 && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(1, service.pendingPushDeliveries(SUB, messageId), "only the held delivery is in flight");
 
             service.createSnapshot("projects/p1/snapshots/in-flight", SUB, null);
             releaseFirst.countDown();

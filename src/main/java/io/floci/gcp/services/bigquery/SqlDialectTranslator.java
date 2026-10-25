@@ -118,6 +118,7 @@ final class SqlDialectTranslator {
     private int generatedUnnestAlias;
     private int generatedDerivedTableAlias;
     private int generatedConcatAlias;
+    private int generatedInitcapName;
     private boolean needsUnicodeCaseFold;
 
     private List<Token> tokens;
@@ -4904,19 +4905,24 @@ final class SqlDialectTranslator {
     /**
      * {@code INITCAP(value[, delimiters])}: DuckDB has no equivalent, so walk the characters. A delimiter is
      * kept as is, the character after one (or the first) is upper-cased and every other character lower-cased.
-     * A NULL value or delimiter set yields NULL; an empty delimiter set makes the whole value one word.
+     * A NULL value or delimiter set yields NULL; an empty delimiter set makes the whole value one word. Both
+     * arguments are evaluated once, outside the lambdas (a subquery may not appear inside one), and the lambda
+     * variables get generated names so they cannot hide a column of the query.
      */
-    private static String initcap(List<String> a) {
+    private String initcap(List<String> a) {
         if (a.isEmpty() || a.size() > 2) {
             throw invalidQuery("No matching signature for function INITCAP with " + a.size() + " arguments");
         }
-        String s = "(" + a.get(0) + ")";
         String d = a.size() == 2 ? "(" + a.get(1) + ")" : INITCAP_DELIMITERS;
-        String ch = "substr(" + s + ", __i, 1)";
-        return "(CASE WHEN " + s + " IS NULL OR " + d + " IS NULL THEN NULL ELSE array_to_string(list_transform("
-                + "range(1, length(" + s + ") + 1), lambda __i: CASE WHEN strpos(" + d + ", " + ch + ") > 0 THEN " + ch
-                + " WHEN __i = 1 OR strpos(" + d + ", substr(" + s + ", __i - 1, 1)) > 0 THEN upper(" + ch + ")"
-                + " ELSE lower(" + ch + ") END), '') END)";
+        String v = "_floci_initcap_" + generatedInitcapName++;
+        String i = v + "_i";
+        String s = v + ".s";
+        String ch = "substr(" + s + ", " + i + ", 1)";
+        return "list_extract(list_transform([struct_pack(s := (" + a.get(0) + "), d := " + d + ")], " + v
+                + " -> CASE WHEN " + s + " IS NULL OR " + v + ".d IS NULL THEN NULL ELSE array_to_string(list_transform("
+                + "range(1, length(" + s + ") + 1), " + i + " -> CASE WHEN strpos(" + v + ".d, " + ch + ") > 0 THEN "
+                + ch + " WHEN " + i + " = 1 OR strpos(" + v + ".d, substr(" + s + ", " + i + " - 1, 1)) > 0 THEN upper("
+                + ch + ") ELSE lower(" + ch + ") END), '') END), 1)";
     }
 
     private static String args(List<String> a, int expected, String name, String rendered) {

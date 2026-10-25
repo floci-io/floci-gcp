@@ -1611,6 +1611,16 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[0].v", nullValue())
                 .body("rows[0].f[1].v", nullValue())
                 .body("rows[0].f[2].v", equalTo(""));
+        query("""
+                {"query": "SELECT INITCAP((SELECT 'hELLO wORLD')) a, INITCAP('a1b2c', (SELECT '12')) b", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("Hello World", "A1B2C")));
+        query("""
+                {"query": "SELECT INITCAP(__i) a FROM (SELECT 'hELLO' AS __i) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("Hello"));
     }
 
     @Test

@@ -651,10 +651,14 @@ class SqlDialectTranslatorTest {
     @Test
     void initcapWalksTheCharactersAgainstTheDelimiters() {
         String rendered = sql("SELECT INITCAP(name) AS n FROM ds.t");
-        assertTrue(rendered.startsWith("SELECT (CASE WHEN (name) IS NULL OR (' ' || chr(9)"), rendered);
+        assertTrue(rendered.startsWith("SELECT list_extract(list_transform([struct_pack(s := (name), d := (' ' || chr(9)"),
+                rendered);
         assertTrue(rendered.contains("'[](){}/|\\<>!?@\"^#$&~_,.:;*%+-'"), rendered);
-        assertTrue(rendered.contains("list_transform(range(1, length((name)) + 1), lambda __i:"), rendered);
-        assertTrue(sql("SELECT INITCAP(name, '12') AS n FROM ds.t").contains("strpos(('12'), substr((name), __i, 1))"));
+        assertTrue(rendered.contains("range(1, length(_floci_initcap_0.s) + 1), _floci_initcap_0_i ->"), rendered);
+        String custom = sql("SELECT INITCAP(f(name), g(d)) AS n FROM ds.t");
+        assertEquals(1, custom.split("f\\(name\\)", -1).length - 1, custom);
+        assertEquals(1, custom.split("g\\(d\\)", -1).length - 1, custom);
+        assertFalse(custom.contains("__i"), custom);
         assertEquals("invalidQuery", assertThrows(GcpException.class,
                 () -> sql("SELECT INITCAP() FROM ds.t")).getReason());
         assertEquals("invalidQuery", assertThrows(GcpException.class,

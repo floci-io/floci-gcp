@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -329,7 +330,11 @@ class ComputeGuestScriptsTest {
         Path lock = dir.resolve("lock");
         switch (left) {
             case "empty" -> Files.writeString(lock, "");
-            case "dead" -> Files.writeString(lock, "1 0\n");
+            case "dead" -> {
+                Process exited = new ProcessBuilder("true").start();
+                exited.waitFor();
+                Files.writeString(lock, exited.pid() + " 1\n");
+            }
             default -> Files.createDirectories(lock.resolve("pid"));
         }
 
@@ -356,11 +361,17 @@ class ComputeGuestScriptsTest {
         String script = ComputeGuestScripts.accountsScript(null, 7);
         String functions = script.substring(script.indexOf("owner() {"), script.indexOf("\ntake_lock\n"));
         Files.writeString(dir.resolve("request"), newest + "\n");
+        Path output = Files.createTempFile("lock", ".out");
         Process run = new ProcessBuilder("sh", "-c", "request=7\nmark=" + dir.resolve("request") + "\nlock="
-                + dir.resolve("lock") + "\n" + functions + "\n" + body).redirectErrorStream(true).start();
-        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertEquals(0, run.waitFor(), out);
+                + dir.resolve("lock") + "\n" + functions + "\n" + body).redirectErrorStream(true)
+                .redirectOutput(output.toFile()).start();
+        boolean finished = run.waitFor(30, TimeUnit.SECONDS);
+        run.destroyForcibly();
+        String out = Files.readString(output);
+        assertTrue(finished, "the lock functions did not finish: " + out);
+        assertEquals(0, run.exitValue(), out);
         Files.delete(dir.resolve("request"));
+        Files.delete(output);
         return out;
     }
 

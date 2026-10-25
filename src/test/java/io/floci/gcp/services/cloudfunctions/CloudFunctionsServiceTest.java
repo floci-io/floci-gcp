@@ -4,6 +4,7 @@ import com.google.cloud.functions.v2.Environment;
 import com.google.cloud.functions.v2.Function;
 import com.google.cloud.functions.v2.GenerateUploadUrlResponse;
 import com.google.cloud.functions.v2.ListFunctionsResponse;
+import com.google.cloud.functions.v2.OnDeployUpdatePolicy;
 import com.google.cloud.functions.v2.OperationMetadata;
 import com.google.cloud.functions.v2.OperationType;
 import com.google.iam.v1.Policy;
@@ -11,6 +12,7 @@ import com.google.longrunning.Operation;
 import com.google.protobuf.Any;
 import com.google.protobuf.Message;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gcs.GcsService;
@@ -34,6 +36,7 @@ class CloudFunctionsServiceTest {
     private CloudFunctionsService service;
     private GcsService gcsService;
     private IamService iamService;
+    private InMemoryStorage<String, String> functionStore;
 
     @BeforeEach
     void setUp() {
@@ -58,7 +61,8 @@ class CloudFunctionsServiceTest {
             invocation.getArgument(1, Runnable.class).run();
             return null;
         }).when(iamService).deleteResourceAndPolicy(anyString(), any(Runnable.class));
-        service = new CloudFunctionsService(new InMemoryStorage<>(), operations, gcsService, iamService);
+        functionStore = new InMemoryStorage<>();
+        service = new CloudFunctionsService(functionStore, operations, gcsService, iamService);
     }
 
     @Test
@@ -259,6 +263,41 @@ class CloudFunctionsServiceTest {
         assertEquals(Environment.GEN_2, updated.getEnvironment());
         assertEquals(name + "/revisions/fn-00002", updated.getServiceConfig().getRevision());
         assertEquals("https://us-central1-p1.cloudfunctions.net/fn", updated.getServiceConfig().getUri());
+    }
+
+    @Test
+    void updateWithoutMaskKeepsStoredOutputOnlyValuesUnderAnOmittedMessage() {
+        service.createFunction("p1", "us-central1", "fn",
+                "{\"buildConfig\":{\"runtime\":\"java21\",\"entryPoint\":\"Example\"}}", false);
+        String name = "projects/p1/locations/us-central1/functions/fn";
+        Function stored = service.getFunction(name);
+        functionStore.put(name, ProtoJson.print(stored.toBuilder()
+                .setBuildConfig(stored.getBuildConfig().toBuilder().setBuild("projects/p1/builds/b1"))
+                .build()));
+
+        service.updateFunction(name, "{}", null);
+
+        Function updated = service.getFunction(name);
+        assertEquals("projects/p1/builds/b1", updated.getBuildConfig().getBuild());
+        assertEquals("", updated.getBuildConfig().getRuntime());
+        assertEquals("", updated.getBuildConfig().getEntryPoint());
+        assertFalse(updated.hasEventTrigger());
+    }
+
+    @Test
+    void updateKeepsTheRequestedRuntimeUpdatePolicyOverTheStoredOne() {
+        service.createFunction("p1", "us-central1", "fn",
+                "{\"buildConfig\":{\"runtime\":\"java21\"}}", false);
+        String name = "projects/p1/locations/us-central1/functions/fn";
+        Function stored = service.getFunction(name);
+        functionStore.put(name, ProtoJson.print(stored.toBuilder()
+                .setBuildConfig(stored.getBuildConfig().toBuilder()
+                        .setOnDeployUpdatePolicy(OnDeployUpdatePolicy.newBuilder().setRuntimeVersion("v1")))
+                .build()));
+
+        service.updateFunction(name, "{\"buildConfig\":{\"automaticUpdatePolicy\":{}}}", null);
+
+        assertTrue(service.getFunction(name).getBuildConfig().hasAutomaticUpdatePolicy());
     }
 
     @Test

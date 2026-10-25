@@ -300,7 +300,8 @@ public class CloudFunctionsService {
 
     /**
      * Gives every OUTPUT_ONLY field of {@code target}, in it and in the singular messages it holds,
-     * the value it has in {@code stored}, so a request cannot set them. Read from the proto's
+     * the value it has in {@code stored}, so a request cannot set them. A singular message the
+     * request omits comes back holding only its stored output-only values. Read from the proto's
      * field_behavior annotations, so fields added to the API later are covered too.
      */
     private static void pinOutputOnly(Message.Builder target, Message stored) {
@@ -311,11 +312,24 @@ public class CloudFunctionsService {
                 } else {
                     target.clearField(field);
                 }
-            } else if (field.getJavaType() == Descriptors.FieldDescriptor.JavaType.MESSAGE
-                    && !field.isRepeated() && target.hasField(field)) {
-                pinOutputOnly(target.getFieldBuilder(field), (Message) stored.getField(field));
+            } else if (field.getJavaType() == Descriptors.FieldDescriptor.JavaType.MESSAGE && !field.isRepeated()) {
+                if (target.hasField(field)) {
+                    pinOutputOnly(target.getFieldBuilder(field), (Message) stored.getField(field));
+                } else if (stored.hasField(field) && !oneofTaken(target, field)) {
+                    Message.Builder child = target.newBuilderForField(field);
+                    pinOutputOnly(child, (Message) stored.getField(field));
+                    Message restored = child.build();
+                    if (!restored.equals(restored.getDefaultInstanceForType())) {
+                        target.setField(field, restored);
+                    }
+                }
             }
         }
+    }
+
+    private static boolean oneofTaken(Message.Builder target, Descriptors.FieldDescriptor field) {
+        Descriptors.OneofDescriptor oneof = field.getRealContainingOneof();
+        return oneof != null && target.hasOneof(oneof);
     }
 
     // True when the mask path is, or lies under, an OUTPUT_ONLY field (paths are validated before this).

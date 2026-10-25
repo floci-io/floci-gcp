@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -26,11 +25,11 @@ class PortAllocatorDockerAwareTest {
     @Test
     void aPortAnotherContainerPublishesIsSkipped() {
         DockerClient docker = dockerPublishing(19900);
-        PortAllocator allocator = new PortAllocator(producer(docker));
+        PortAllocator allocator = new HostBlindPortAllocator(producer(docker));
 
         int allocated = allocator.allocate(19900, 19999);
 
-        assertNotEquals(19900, allocated);
+        assertEquals(19901, allocated);
         allocator.release(allocated);
     }
 

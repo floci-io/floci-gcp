@@ -163,6 +163,49 @@ class SecretManagerRestIntegrationTest {
     }
 
     @Test
+    void regionalPathsAreUnimplementedOnEveryMethod() {
+        String base = "/v1/projects/p/locations/us-central1/secrets";
+        String message = "Regional secrets (projects/*/locations/*) are not supported by the floci Secret Manager emulator";
+
+        assertUnimplemented(given().urlEncodingEnabled(false).when().get(base + "/s"), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).when().get(base), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).when().get(base + "/s/versions/latest:access"), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"replication\": {\"automatic\": {}}}").queryParam("secretId", "s")
+                .when().post(base), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).contentType("application/json")
+                .body("{\"payload\":{\"data\":\"dg==\"}}")
+                .when().post(base + "/s:addVersion"), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                .when().patch(base + "/s"), message);
+        assertUnimplemented(given().urlEncodingEnabled(false).when().delete(base + "/s"), message);
+    }
+
+    @Test
+    void regionalCatchAllDoesNotShadowGlobalOrLocationRoutes() {
+        String project = "secret-regional-shadow-it";
+        given().contentType("application/json")
+                .body("{\"replication\": {\"automatic\": {}}}")
+                .queryParam("secretId", "global")
+                .when().post("/v1/projects/" + project + "/secrets")
+                .then().statusCode(200)
+                .body("name", equalTo("projects/" + project + "/secrets/global"));
+        given().when().get("/v1/projects/" + project + "/secrets/global")
+                .then().statusCode(200);
+        given().when().get("/v1/projects/" + project + "/locations")
+                .then().statusCode(200);
+        given().when().get("/v1/projects/" + project + "/locations/us-central1")
+                .then().statusCode(200);
+    }
+
+    private static void assertUnimplemented(Response response, String message) {
+        response.then().statusCode(501)
+                .body("error.code", equalTo(501))
+                .body("error.status", equalTo("UNIMPLEMENTED"))
+                .body("error.message", equalTo(message));
+    }
+
+    @Test
     void latestAliasOnSecretWithoutVersionsIsNotFound() {
         String base = createPayloadSecret();
         String name = base.substring("/v1/".length());

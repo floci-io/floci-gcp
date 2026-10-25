@@ -95,6 +95,21 @@ class SecretManagerGrpcIntegrationTest {
     }
 
     @Test
+    void incompleteRegionalNamesAreInvalidArgument() {
+        assertStatus(Status.Code.INVALID_ARGUMENT, () -> stub.createSecret(createRequest("projects/p/locations", "s")));
+        assertStatus(Status.Code.INVALID_ARGUMENT, () -> stub.listSecrets(ListSecretsRequest.newBuilder()
+                .setParent("projects/p/locations/").build()));
+        assertStatus(Status.Code.INVALID_ARGUMENT,
+                () -> stub.getSecret(GetSecretRequest.newBuilder().setName("projects/p/locations/l").build()));
+        assertStatus(Status.Code.INVALID_ARGUMENT,
+                () -> stub.getSecret(GetSecretRequest.newBuilder().setName("projects/p/locations/l/secrets").build()));
+        assertStatus(Status.Code.INVALID_ARGUMENT,
+                () -> stub.getSecret(GetSecretRequest.newBuilder().setName("projects/p/locations/l/topics/t").build()));
+        assertStatus(Status.Code.INVALID_ARGUMENT, () -> stub.accessSecretVersion(AccessSecretVersionRequest.newBuilder()
+                .setName("projects/p/locations/l/secrets/s").build()));
+    }
+
+    @Test
     void malformedNamesAreInvalidArgument() {
         assertStatus(Status.Code.INVALID_ARGUMENT, () -> stub.createSecret(createRequest("p", "s")));
         assertStatus(Status.Code.INVALID_ARGUMENT, () -> stub.createSecret(createRequest("projects/p/secrets", "s")));

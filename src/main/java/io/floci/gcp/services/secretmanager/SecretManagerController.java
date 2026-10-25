@@ -44,6 +44,9 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
 
     private static final Logger LOG = Logger.getLogger(SecretManagerController.class);
 
+    static final String REGIONAL_UNSUPPORTED =
+            "Regional secrets (projects/*/locations/*) are not supported by the floci Secret Manager emulator";
+
     private final SecretManagerService service;
 
     SecretManagerController(SecretManagerService service) {
@@ -326,42 +329,44 @@ public class SecretManagerController extends SecretManagerServiceGrpc.SecretMana
     }
 
     private static String parentProject(String parent) {
-        String[] segments = splitResourceName(parent, 2, "projects/{project}");
+        String[] segments = splitResourceName(parent, "projects/{project}");
         return segments[1];
     }
 
     private static String secretName(String name) {
-        String[] segments = splitResourceName(name, 4, "projects/{project}/secrets/{secret}");
-        if (!"secrets".equals(segments[2])) {
-            throw invalidResourceName(name, "projects/{project}/secrets/{secret}");
-        }
+        String[] segments = splitResourceName(name, "projects/{project}/secrets/{secret}");
         return GcpResourceNames.secret(segments[1], segments[3]);
     }
 
     private static String secretVersionName(String name) {
-        String expected = "projects/{project}/secrets/{secret}/versions/{version}";
-        String[] segments = splitResourceName(name, 6, expected);
-        if (!"secrets".equals(segments[2]) || !"versions".equals(segments[4])) {
-            throw invalidResourceName(name, expected);
-        }
+        String[] segments = splitResourceName(name, "projects/{project}/secrets/{secret}/versions/{version}");
         return GcpResourceNames.secretVersion(segments[1], segments[3], segments[5]);
     }
 
-    private static String[] splitResourceName(String name, int expectedSegments, String expected) {
+    private static String[] splitResourceName(String name, String expected) {
         String[] segments = name.split("/", -1);
-        if (segments.length >= 3 && "projects".equals(segments[0]) && "locations".equals(segments[2])) {
-            throw GcpException.unimplemented(
-                    "Regional secrets (projects/*/locations/*) are not supported by the floci Secret Manager emulator");
+        if (matchesPattern(segments, expected)) {
+            return segments;
         }
-        if (segments.length != expectedSegments || !"projects".equals(segments[0])) {
-            throw invalidResourceName(name, expected);
+        String regional = "projects/{project}/locations/{location}" + expected.substring("projects/{project}".length());
+        if (matchesPattern(segments, regional)) {
+            throw GcpException.unimplemented(REGIONAL_UNSUPPORTED);
         }
-        for (String segment : segments) {
-            if (segment.isBlank()) {
-                throw invalidResourceName(name, expected);
+        throw invalidResourceName(name, expected);
+    }
+
+    private static boolean matchesPattern(String[] segments, String pattern) {
+        String[] parts = pattern.split("/");
+        if (segments.length != parts.length) {
+            return false;
+        }
+        for (int i = 0; i < parts.length; i++) {
+            boolean variable = parts[i].startsWith("{");
+            if (variable ? segments[i].isBlank() : !parts[i].equals(segments[i])) {
+                return false;
             }
         }
-        return segments;
+        return true;
     }
 
     private static GcpException invalidResourceName(String name, String expected) {

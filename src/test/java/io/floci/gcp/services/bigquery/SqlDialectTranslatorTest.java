@@ -899,6 +899,25 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT cast_to_type(date_trunc('month', CAST('2024-05-17' AS DATE)), CAST('2024-05-17' AS DATE)) AS m",
                 sql("SELECT DATE_TRUNC('2024-05-17', MONTH) AS m"));
         assertEquals("SELECT strftime(ts, '%Y') AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
+        assertEquals("SELECT strftime(d, '%Y-%m-%d %%F %m/%d/%y %H:%M') AS y",
+                sql("SELECT FORMAT_DATE('%F %%F %D %R', d) AS y"));
+        assertEquals("SELECT CAST(strptime(s, '%Y-%m-%d') AS DATE) AS y", sql("SELECT PARSE_DATE('%F', s) AS y"));
+        assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> (lpad(CAST(day(_floci_format_value)"
+                + " AS VARCHAR), 2, ' ') || strftime(_floci_format_value, '/%m ') || CAST(quarter(_floci_format_value)"
+                + " AS VARCHAR))), 1) AS y", sql("SELECT FORMAT_DATE('%e/%m %Q', d) AS y"));
+        String emulated = sql("SELECT FORMAT_DATE('%e/%m %Q', g(d)) AS y");
+        assertEquals(1, emulated.split("g\\(d\\)", -1).length - 1, emulated);
+        assertEquals("SELECT strftime(d, '%%K a%%') AS y", sql("SELECT FORMAT_DATE('%K a%', d) AS y"));
+        assertTrue(sql("SELECT FORMAT_DATE(f, d) AS y").startsWith("SELECT list_extract(list_transform([struct_pack(v := (d),"
+                + " f := (f))], _floci_format_row -> CASE WHEN _floci_format_row.f IS NULL OR _floci_format_row.v IS NULL"
+                + " THEN NULL ELSE array_to_string(list_transform(regexp_extract_all(_floci_format_row.f,"
+                + " '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), _floci_format_element -> CASE _floci_format_element"
+                + " WHEN '%%' THEN strftime(_floci_format_row.v, '%%')"));
+        String perRow = sql("SELECT FORMAT_DATE(h(f), g(d)) AS y");
+        assertEquals(1, perRow.split("g\\(d\\)", -1).length - 1, perRow);
+        assertEquals(1, perRow.split("h\\(f\\)", -1).length - 1, perRow);
+        assertEquals("SELECT CAST(try_strptime(s, '%Y-%m-%d') AS DATE) AS y", sql("SELECT SAFE.PARSE_DATE('%F', s) AS y"));
+        assertTrue(sql("SELECT SAFE.PARSE_TIMESTAMP('%F %R', s) AS y").contains("try_strptime(s, '%Y-%m-%d %H:%M')"));
         assertEquals("SELECT (dayofweek(d) + 1) AS w", sql("SELECT EXTRACT(DAYOFWEEK FROM d) AS w"));
         assertEquals("SELECT regexp_extract(s, 'a(b)', 1) AS x", sql("SELECT REGEXP_EXTRACT(s, r'a(b)') AS x"));
         assertEquals("SELECT regexp_replace(s, 'a', 'b', 'g') AS x", sql("SELECT REGEXP_REPLACE(s, 'a', 'b') AS x"));

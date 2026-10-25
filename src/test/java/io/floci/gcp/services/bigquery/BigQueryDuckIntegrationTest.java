@@ -13,6 +13,7 @@ import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -1888,6 +1889,100 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2024-01-08", "2023-12-10")));
+    }
+
+    @Test
+    @Order(5)
+    void compositeFormatSpecifiersMatchBigQuery() {
+        query("""
+                {"query": "SELECT FORMAT_DATE('%F', DATE '2026-03-05') f, FORMAT_DATE('%D', DATE '2026-03-05') d, FORMAT_TIMESTAMP('%F %R', TIMESTAMP '2026-03-05 07:08:09') fr, FORMAT_TIMESTAMP('%F %T', TIMESTAMP '2026-03-05 07:08:09') ft, FORMAT_DATE('%%F', DATE '2026-03-05') escaped, PARSE_DATE('%F', '2026-03-05') parsed, PARSE_DATE('%D', '03/05/26') parsed_d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2026-03-05", "03/05/26", "2026-03-05 07:08", "2026-03-05 07:08:09",
+                        "%F", "2026-03-05", "2026-03-05")));
+        query("""
+                {"query": "SELECT FORMAT_DATE(@f, DATE '2026-03-05') AS a, FORMAT_TIMESTAMP(@g, TIMESTAMP '2026-03-05 07:08:09') AS b, PARSE_DATE(@f2, '2026-03-05') AS c, FORMAT_DATE(@n, DATE '2026-03-05') AS nul",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [
+                   {"name": "f", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "%F %%F %D"}},
+                   {"name": "g", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "%R"}},
+                   {"name": "f2", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "%F"}},
+                   {"name": "n", "parameterType": {"type": "STRING"}, "parameterValue": {}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2026-03-05 %F 03/05/26"))
+                .body("rows[0].f[1].v", equalTo("07:08"))
+                .body("rows[0].f[2].v", equalTo("2026-03-05"))
+                .body("rows[0].f[3].v", nullValue());
+        query("""
+                {"query": "SELECT FORMAT_DATE('%e/%m %Q', (SELECT DATE '2024-03-05')) a, SAFE.PARSE_DATE('%F', '2024-01-05') b, SAFE.PARSE_DATE('%F', 'nope') c, SAFE.PARSE_DATE('%D', '01/05/24') d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(" 5/03 1", "2024-01-05", null, "2024-01-05")));
+        query("""
+                {"query": "SELECT f, FORMAT_DATE(f, (SELECT DATE '2024-03-05')) a FROM UNNEST(['%F', '%e %Q', '%Y']) f ORDER BY f", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%F", "2024-03-05"), List.of("%Y", "2024"), List.of("%e %Q", " 5 1"))));
+    }
+
+    @Test
+    @Order(5)
+    void everyFormatElementMatchesBigQuery() {
+        List<String> elements = List.of("%A", "%a", "%B", "%b", "%C", "%c", "%D", "%d", "%e", "%F", "%G", "%g", "%H", "%h", "%I", "%j",
+                "%k", "%l", "%M", "%m", "%n", "%P", "%p", "%Q", "%R", "%r", "%S", "%s", "%T", "%t", "%U", "%u",
+                "%V", "%W", "%w", "%X", "%x", "%Y", "%y", "%Z", "%z", "%%", "%Ez", "%E4Y", "%E3S", "%E6S", "%E*S");
+        Map<String, List<String>> constantFormats = Map.of(
+                "2026-03-05 07:08:09.123456", List.of("Thursday", "Thu", "March", "Mar", "20", "Thu Mar  5 07:08:09 2026", "03/05/26", "05", " 5",
+                "2026-03-05", "2026", "26", "07", "Mar", "07", "064", " 7", " 7", "08", "03", "\n", "am", "AM",
+                "1", "07:08", "07:08:09 AM", "09", "1772694489", "07:08:09", "\t", "09", "4", "10", "09", "4",
+                "07:08:09", "03/05/26", "2026", "26", "UTC", "+0000", "%", "+00:00", "2026", "09.123", "09.123456",
+                "09.123456"),
+                "2026-12-31 23:59:59", List.of("Thursday", "Thu", "December", "Dec", "20", "Thu Dec 31 23:59:59 2026", "12/31/26", "31", "31",
+                "2026-12-31", "2026", "26", "23", "Dec", "11", "365", "23", "11", "59", "12", "\n", "pm", "PM",
+                "4", "23:59", "11:59:59 PM", "59", "1798761599", "23:59:59", "\t", "52", "4", "53", "52", "4",
+                "23:59:59", "12/31/26", "2026", "26", "UTC", "+0000", "%", "+00:00", "2026", "59.000", "59.000000",
+                "59"));
+        Map<String, List<String>> perRowFormats = Map.of(
+                "2026-03-05 07:08:09.123456", List.of("Thursday", "Thu", "March", "Mar", "20", "Thu Mar  5 07:08:09 2026", "03/05/26", "05", " 5",
+                "2026-03-05", "2026", "26", "07", "Mar", "07", "064", " 7", " 7", "08", "03", "\n", "am", "AM",
+                "1", "07:08", "07:08:09 AM", "09", "1772694489", "07:08:09", "\t", "09", "4", "10", "09", "4",
+                "07:08:09", "03/05/26", "2026", "26", "UTC", "+0000", "%", "+00:00", "2026", "09.123", "09.123456",
+                "09.123456"),
+                "2021-01-01 00:00:00", List.of("Friday", "Fri", "January", "Jan", "20", "Fri Jan  1 00:00:00 2021", "01/01/21", "01", " 1",
+                "2021-01-01", "2020", "20", "00", "Jan", "12", "001", " 0", "12", "00", "01", "\n", "am", "AM",
+                "1", "00:00", "12:00:00 AM", "00", "1609459200", "00:00:00", "\t", "00", "5", "53", "00", "5",
+                "00:00:00", "01/01/21", "2021", "21", "UTC", "+0000", "%", "+00:00", "2021", "00.000", "00.000000",
+                "00"));
+        for (Map.Entry<String, List<String>> expected : constantFormats.entrySet()) {
+            List<String> columns = new ArrayList<>();
+            for (int i = 0; i < elements.size(); i++) {
+                columns.add("FORMAT_TIMESTAMP('" + elements.get(i) + "', TIMESTAMP '" + expected.getKey() + "') AS c" + i);
+            }
+            query("{\"query\": \"SELECT " + String.join(", ", columns) + "\", \"useLegacySql\": false}")
+                    .then().statusCode(200)
+                    .body("rows[0].f.v", equalTo(expected.getValue()));
+        }
+        for (Map.Entry<String, List<String>> expected : perRowFormats.entrySet()) {
+            List<String> rows = new ArrayList<>();
+            for (int i = 0; i < elements.size(); i++) {
+                rows.add("STRUCT(" + i + " AS o, '" + elements.get(i) + "' AS f)");
+            }
+            query("{\"query\": \"SELECT FORMAT_TIMESTAMP(f, TIMESTAMP '" + expected.getKey() + "') AS v FROM UNNEST(["
+                    + String.join(", ", rows) + "]) ORDER BY o\", \"useLegacySql\": false}")
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v }", equalTo(expected.getValue()));
+        }
+        query("""
+                {"query": "SELECT FORMAT_DATE(f, d) AS v FROM UNNEST([STRUCT(0 AS o, CAST(NULL AS STRING) AS f, DATE '2026-01-02' AS d), STRUCT(1 AS o, '%Y' AS f, CAST(NULL AS DATE) AS d), STRUCT(2 AS o, '%Y/%m/%d' AS f, DATE '2026-03-05' AS d), STRUCT(3 AS o, '%e|%F|%%F|%Q|%C' AS f, DATE '2026-12-31' AS d)]) ORDER BY o", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(Arrays.asList(null, null, "2026/03/05", "31|2026-12-31|%F|4|20")));
+        query("""
+                {"query": "SELECT FORMAT_TIMESTAMP('%E0S', t) AS e0, FORMAT_TIMESTAMP('%E1S', t) AS e1, FORMAT_TIMESTAMP('%E9S', t) AS e9, FORMAT_TIMESTAMP('%E12S', t) AS e12, FORMAT_TIMESTAMP('%K', t) AS unknown, FORMAT_TIMESTAMP('a%', t) AS trailing FROM (SELECT TIMESTAMP '2026-03-05 07:08:09.123456' AS t)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("09", "09.1", "09.123456000", "09.123456000000", "%K", "a%")));
     }
 
     @Test

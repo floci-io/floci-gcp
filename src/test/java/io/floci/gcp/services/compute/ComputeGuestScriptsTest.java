@@ -266,7 +266,7 @@ class ComputeGuestScriptsTest {
         Map<String, List<String>> users = new LinkedHashMap<>();
         users.put("alice", List.of("ssh-ed25519 AAAAC3Nz alice@host", "ssh-rsa AAAAB3Nz it's mine"));
         users.put("carol", List.of("ssh-ed25519 AAAAC3Nzc carol"));
-        String script = ComputeGuestScripts.accountsScript(users, true);
+        String script = ComputeGuestScripts.accountsScript(users);
         Path file = Files.createTempFile("accounts", ".sh");
         Files.writeString(file, script);
         assertEquals(0, new ProcessBuilder("sh", "-n", file.toString()).start().waitFor(), "the script parses");
@@ -283,6 +283,19 @@ class ComputeGuestScriptsTest {
                 [carol][ssh-ed25519 AAAAC3Nzc carol]
                 """, out);
         Files.delete(file);
+    }
+
+    @Test
+    void aFailedAccountStepIsReportedWithTheExitStatus() {
+        ContainerExec.Result failed = mock(ContainerExec.Result.class);
+        when(failed.exitCode()).thenReturn(1L);
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh",
+                "/var/lib/google/floci-guest-accounts.sh")), any(), any(), any())).thenReturn(failed);
+        ComputeSerialPort port = new ComputeSerialPort();
+
+        scripts.accounts("vm", "c-1", Map.of(), port);
+
+        assertTrue(port.read(0).contents().contains("google_guest_agent[1]: Account setup exit status 1"));
     }
 
     @Test

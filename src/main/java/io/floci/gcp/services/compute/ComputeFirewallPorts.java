@@ -45,7 +45,9 @@ final class ComputeFirewallPorts {
                 if (!matches) { continue; }
             }
             for (JsonNode allowed : rule.path("allowed")) {
-                if (!"tcp".equalsIgnoreCase(allowed.path("IPProtocol").asText())) { continue; }
+                // A protocol name or its IP protocol number: 6 is TCP.
+                String protocol = allowed.path("IPProtocol").asText();
+                if (!"tcp".equalsIgnoreCase(protocol) && !"6".equals(protocol)) { continue; }
                 for (JsonNode spec : allowed.path("ports")) { add(ports, spec.asText(), entry.getKey(), instance); }
             }
         }

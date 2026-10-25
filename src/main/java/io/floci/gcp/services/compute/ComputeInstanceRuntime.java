@@ -87,17 +87,16 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
      * One Docker step for one instance. {@code image}, {@code cpus} and {@code memoryMb} matter for LAUNCH and START.
      * {@code metadata} is the guest's effective metadata when the step was recorded: project keys overridden by
      * instance keys. It supplies the startup scripts of a boot and the shutdown scripts of a stop or delete.
-     * {@code sshKeys} are the {@code user:key} lines the guest agent installs (null while OS Login is on, so accounts
-     * are left alone), and {@code ports} the container TCP ports a new container publishes on Docker-assigned host
-     * ports.
+     * {@code ports} are the container TCP ports a new container publishes on Docker-assigned host ports. SSH keys are
+     * not carried here: each account update reads the instance's current keys when it runs.
      */
     public record Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb,
-                         Map<String, String> metadata, List<String> sshKeys, List<Integer> ports) {
+                         Map<String, String> metadata, List<Integer> ports) {
 
-        /** Leaves accounts as they are and publishes no ports, as a boot after an emulator restart does. */
+        /** Publishes no ports, as a boot after an emulator restart does (its container keeps the ones it has). */
         public Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb,
                       Map<String, String> metadata) {
-            this(kind, project, zone, name, image, cpus, memoryMb, metadata, null, List.of());
+            this(kind, project, zone, name, image, cpus, memoryMb, metadata, List.of());
         }
     }
 
@@ -119,6 +118,11 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private final Map<String, AtomicLong> boots = new ConcurrentHashMap<>();
     /** Container addresses of running instances, so the metadata server knows which instance is asking. */
     private final Map<String, InstanceRef> addresses = new ConcurrentHashMap<>();
+    /** The newest account update asked for per instance; an older one still queued is skipped. */
+    private final Map<String, AtomicLong> accountRequests = new ConcurrentHashMap<>();
+    /** One account update at a time per instance, apart from the instance lock so a stop is never held up by one. */
+    private final Map<String, Object> accountLocks = new ConcurrentHashMap<>();
+    private volatile SshKeyLookup sshKeys = (project, zone, name) -> null;
     /** Log streams copying each running declared container's output to serial port 1. */
     private final Map<String, Closeable> workloadLogs = new ConcurrentHashMap<>();
     private final ExecutorService executor;
@@ -289,7 +293,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 }
             });
             case METADATA -> ownedContainer(name).filter(container -> "running".equals(container.getState()))
-                    .ifPresent(container -> applyAccounts(intent, container.getId(), false));
+                    .ifPresent(container -> applyAccounts(intent, container.getId()));
             case REMOVE -> {
                 endBoot(intent);
                 ownedContainer(name).ifPresent(container -> {
@@ -298,6 +302,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                 });
                 removeWorkload(intent.project(), intent.zone(), intent.name());
                 boots.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
+                accountRequests.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
                 serialPorts.remove(instanceKey(intent.project(), intent.zone(), intent.name()));
             }
         }
@@ -370,7 +375,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         String mark = bootMark(containerId);
         reportPorts(intent, containerId, port);
         // Apart from the scripts, as the guest agent runs beside the script runner: a slow sshd install holds back neither.
-        applyAccounts(intent, containerId, true);
+        applyAccounts(intent, containerId);
         scriptExecutor.execute(() -> {
             scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
                     config.services().compute().startupScriptTimeout(), port, current, mark);
@@ -378,13 +383,30 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         });
     }
 
-    /** Applies the intent's SSH keys in the background, installing sshd first at a boot. */
-    private void applyAccounts(Intent intent, String containerId, boolean installSshd) {
-        Map<String, List<String>> users = intent.sshKeys() == null ? null
-                : ComputeSshKeys.users(intent.sshKeys(), Instant.now());
+    /** Supplies the instance's current {@code ssh-keys} lines to each account update; see {@link SshKeyLookup}. */
+    public void sshKeys(SshKeyLookup lookup) {
+        this.sshKeys = lookup;
+    }
+
+    /**
+     * Brings the guest's accounts in line with the instance's current SSH keys, in the background. Updates for one
+     * instance run one at a time and read the keys as they start, so a slow one can never put back keys a newer
+     * metadata change removed; one that a newer request is already queued behind is skipped.
+     */
+    private void applyAccounts(Intent intent, String containerId) {
+        String key = instanceKey(intent.project(), intent.zone(), intent.name());
+        AtomicLong requests = accountRequests.computeIfAbsent(key, k -> new AtomicLong());
+        long request = requests.incrementAndGet();
         ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
         try {
-            scriptExecutor.execute(() -> scripts.accounts(intent.name(), containerId, users, installSshd, port));
+            scriptExecutor.execute(() -> {
+                synchronized (accountLocks.computeIfAbsent(key, k -> new Object())) {
+                    if (requests.get() != request || closed) { return; }
+                    List<String> lines = sshKeys.apply(intent.project(), intent.zone(), intent.name());
+                    Map<String, List<String>> users = lines == null ? null : ComputeSshKeys.users(lines, Instant.now());
+                    scripts.accounts(intent.name(), containerId, users, port);
+                }
+            });
         } catch (RejectedExecutionException e) {
             LOG.debugv("SSH keys of Compute instance {0} not applied: the emulator is shutting down", intent.name());
         }
@@ -777,6 +799,15 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     container.getLabels().get(DECLARED_NAME_LABEL), (int) (System.currentTimeMillis() / 1000));
             if (logs != null) { workloadLogs.put(key, logs); }
         }
+    }
+
+    /**
+     * Answers an instance's {@code ssh-keys} lines (instance then project, as the guest agent combines them), or null
+     * to leave the guest's accounts alone: OS Login is on, or the instance does not exist.
+     */
+    @FunctionalInterface
+    public interface SshKeyLookup {
+        List<String> apply(String project, String zone, String name);
     }
 
     /** Answers an instance's status by project, zone and name; null when the instance does not exist. */

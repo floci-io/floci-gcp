@@ -61,6 +61,7 @@ public class ComputeService {
         registry.register(ServiceDescriptor.builder("compute").enabled(config.services().compute().enabled())
                 .storageKey("compute").resourceClasses(ComputeController.class, ComputeMetadataController.class)
                 .api("compute.googleapis.com", "Compute Engine API").build());
+        runtime.sshKeys(this::instanceSshKeys);
         runtime.reconcile(this::instanceStatus, this::instanceGuestMetadata);
     }
     /** What the metadata server needs about one instance: copies, so callers cannot change stored state. */
@@ -86,6 +87,18 @@ public class ComputeService {
     synchronized String instanceStatus(String project, String zone, String name) {
         ObjectNode instance = state(project).resources.get("zones/" + zone + "/instances/" + name);
         return instance == null ? null : instance.path("status").asText();
+    }
+    /** The guest agent's ssh-keys lines for an instance now, or null with OS Login on or no such instance. */
+    synchronized List<String> instanceSshKeys(String project, String zone, String name) {
+        ComputeProject state = state(project);
+        ObjectNode instance = state.resources.get("zones/" + zone + "/instances/" + name);
+        if (instance == null) { return null; }
+        return ComputeSshKeys.lines(metadataValues(instance.path("metadata")), metadataValues(commonInstanceMetadata(state)));
+    }
+    private static Map<String, String> metadataValues(JsonNode metadata) {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (JsonNode item : metadata.path("items")) { values.put(item.path("key").asText(), item.path("value").asText()); }
+        return values;
     }
     synchronized Map<String, String> instanceGuestMetadata(String project, String zone, String name) {
         ComputeProject state = state(project);
@@ -637,8 +650,6 @@ public class ComputeService {
             String image = null;
             int cpus = 0, memoryMb = 0;
             List<Integer> ports = List.of();
-            boolean boot = kind == ComputeInstanceRuntime.Kind.LAUNCH || kind == ComputeInstanceRuntime.Kind.START
-                    || kind == ComputeInstanceRuntime.Kind.RESTART;
             if (kind == ComputeInstanceRuntime.Kind.LAUNCH || kind == ComputeInstanceRuntime.Kind.START) {
                 ports = ComputeFirewallPorts.forInstance(state, instance);
                 image = bootDockerImage(instance);
@@ -653,16 +664,8 @@ public class ComputeService {
             }
             String zone = instance.path("zone").asText(scope);
             zone = zone.substring(zone.lastIndexOf('/') + 1);
-            List<String> sshKeys = boot || kind == ComputeInstanceRuntime.Kind.METADATA
-                    ? ComputeSshKeys.lines(items(instance.path("metadata")), items(commonInstanceMetadata(state)))
-                    : List.of();
             intents.add(new ComputeInstanceRuntime.Intent(kind, project, zone, instance.path("name").asText(), image,
-                    cpus, memoryMb, guestMetadata(state, instance), sshKeys, ports));
-        }
-        private Map<String, String> items(JsonNode metadata) {
-            Map<String, String> values = new LinkedHashMap<>();
-            for (JsonNode item : metadata.path("items")) { values.put(item.path("key").asText(), item.path("value").asText()); }
-            return values;
+                    cpus, memoryMb, guestMetadata(state, instance), ports));
         }
         private String bootDockerImage(ObjectNode instance) {
             for (JsonNode attachment : instance.path("disks")) {

@@ -4,6 +4,7 @@ import io.floci.gcp.services.compute.ComputeInstanceRuntime.Intent;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Kind;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Phase;
 import io.quarkus.test.InjectMock;
+import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,7 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
     private static final String ZONE = "/zones/us-central1-a";
 
     @InjectMock ComputeInstanceRuntime runtime;
+    @Inject ComputeService compute;
 
     @BeforeEach
     void enableRuntime() {
@@ -60,7 +62,7 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         verify(runtime).submit(eq(key), intents.capture());
         String project = root.substring(root.lastIndexOf('/') + 1);
         assertEquals(List.of(new Intent(Kind.LAUNCH, project, "us-central1-a", "vm", "ubuntu:22.04", 2, 8192, Map.of(),
-                List.of(), List.of(22))), intents.getValue());
+                List.of(22))), intents.getValue());
     }
 
     @Test void lifecycleMethodsRecordTheirContainerSteps() throws Exception {
@@ -174,10 +176,12 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         Intent instanceChange = intents.getAllValues().get(0).getFirst();
         Intent projectChange = intents.getAllValues().get(1).getFirst();
         assertEquals(Kind.METADATA, instanceChange.kind());
-        assertEquals(List.of("alice:ssh-ed25519 AAAAC3Nza alice"), instanceChange.sshKeys());
         assertEquals(Kind.METADATA, projectChange.kind());
         assertEquals("us-central1-a", projectChange.zone());
-        assertEquals(List.of("alice:ssh-ed25519 AAAAC3Nza alice", "bob:ssh-ed25519 AAAAC3Nzb bob"), projectChange.sshKeys());
+        String project = root.substring(root.lastIndexOf('/') + 1);
+        assertEquals(List.of("alice:ssh-ed25519 AAAAC3Nza alice", "bob:ssh-ed25519 AAAAC3Nzb bob"),
+                compute.instanceSshKeys(project, "us-central1-a", "vm"));
+        assertNull(compute.instanceSshKeys(project, "us-central1-a", "missing"));
     }
 
     @Test void serialPortOutputServesTheRuntimeBuffer() throws Exception {

@@ -1,10 +1,10 @@
 package io.floci.gcp.services.compute;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -26,6 +26,7 @@ final class ComputeSshKeys {
             "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com",
             "sk-ecdsa-sha2-nistp256@openssh.com");
     private static final DateTimeFormatter NUMERIC_OFFSET = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssZ");
+    private static final DateTimeFormatter EXPIRY_TIME = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
 
     private ComputeSshKeys() {}
 
@@ -49,7 +50,11 @@ final class ComputeSshKeys {
         return List.copyOf(lines);
     }
 
-    /** The valid, unexpired keys of each user, in metadata order; malformed and expired lines are left out. */
+    /**
+     * The valid, unexpired keys of each user, in metadata order; malformed and expired lines are left out. A key with
+     * a {@code google-ssh} expiry carries OpenSSH's {@code expiry-time} option, so sshd refuses it once it expires
+     * even before the next account update removes it.
+     */
     static Map<String, List<String>> users(List<String> lines, Instant now) {
         Map<String, List<String>> users = new LinkedHashMap<>();
         for (String raw : lines) {
@@ -59,7 +64,8 @@ final class ComputeSshKeys {
             String user = line.substring(0, colon);
             String key = line.substring(colon + 1).strip();
             if (user.chars().anyMatch(Character::isWhitespace) || !validKey(key) || expired(key, now)) { continue; }
-            users.computeIfAbsent(user, u -> new ArrayList<>()).add(key);
+            Instant expiry = expiry(key);
+            users.computeIfAbsent(user, u -> new ArrayList<>()).add(expiry == null ? key : withExpiry(key, expiry));
         }
         users.replaceAll((user, keys) -> List.copyOf(keys));
         return users;
@@ -77,18 +83,30 @@ final class ComputeSshKeys {
 
     /** A {@code google-ssh {"expireOn":...}} comment whose time has passed, or that cannot be read, expires the key. */
     private static boolean expired(String key, Instant now) {
+        if (!key.contains(" google-ssh")) { return false; }
+        Instant expiry = expiry(key);
+        return expiry == null || expiry.isBefore(now);
+    }
+
+    /** The time a {@code google-ssh} comment gives, or null when the key has none or it cannot be read. */
+    private static Instant expiry(String key) {
         int marker = key.indexOf(" google-ssh");
-        if (marker < 0) { return false; }
+        if (marker < 0) { return null; }
         String comment = key.substring(marker + 1);
         int space = comment.indexOf(' ');
-        if (space < 0) { return true; }
+        if (space < 0) { return null; }
         try {
-            JsonNode expiration = JSON.readTree(comment.substring(space + 1));
-            String expireOn = expiration.path("expireOn").asText("");
-            return expireOn(expireOn).isBefore(now);
+            return expireOn(JSON.readTree(comment.substring(space + 1)).path("expireOn").asText(""));
         } catch (Exception e) {
-            return true;
+            return null;
         }
+    }
+
+    /** Prefixes OpenSSH's {@code expiry-time} option, joining any options the key already has. */
+    static String withExpiry(String key, Instant expiry) {
+        String option = "expiry-time=\"" + EXPIRY_TIME.format(expiry) + "Z\"";
+        String first = key.split("\\s+", 2)[0];
+        return KEY_TYPES.contains(first) ? option + " " + key : option + "," + key;
     }
 
     private static Instant expireOn(String value) {

@@ -24,11 +24,13 @@ class ComputeFirewallPortsTest {
         rule(state, "other-net", "{\"network\":\"global/networks/elsewhere\",\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[\"1\"]}]}");
         rule(state, "egress", "{\"network\":\"global/networks/net\",\"direction\":\"EGRESS\","
                 + "\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[\"2\"]}]}");
+        rule(state, "numeric", "{\"network\":\"global/networks/net\",\"allowed\":[{\"IPProtocol\":\"6\",\"ports\":[\"9090\"]},"
+                + "{\"IPProtocol\":\"17\",\"ports\":[\"53\"]}]}");
         rule(state, "disabled", "{\"network\":\"global/networks/net\",\"disabled\":true,"
                 + "\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[\"3\"]}]}");
 
-        assertEquals(List.of(22, 443, 8000, 8001, 8002), ComputeFirewallPorts.forInstance(state, instance("web")));
-        assertEquals(List.of(22, 443), ComputeFirewallPorts.forInstance(state, instance("api")));
+        assertEquals(List.of(22, 443, 8000, 8001, 8002, 9090), ComputeFirewallPorts.forInstance(state, instance("web")));
+        assertEquals(List.of(22, 443, 9090), ComputeFirewallPorts.forInstance(state, instance("api")));
     }
 
     @Test

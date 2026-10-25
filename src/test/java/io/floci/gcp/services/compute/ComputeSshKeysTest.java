@@ -28,6 +28,12 @@ class ComputeSshKeysTest {
     }
 
     @Test
+    void anExpiryJoinsOptionsAKeyAlreadyHas() {
+        assertEquals("expiry-time=\"20261026000000Z\",command=\"ls\" ssh-rsa AAAA",
+                ComputeSshKeys.withExpiry("command=\"ls\" ssh-rsa AAAA", Instant.parse("2026-10-26T00:00:00Z")));
+    }
+
+    @Test
     void osLoginLeavesAccountsAloneWithTheInstanceValueWinning() {
         assertNull(ComputeSshKeys.lines(Map.of("ssh-keys", ALICE), Map.of("enable-oslogin", "true")));
         assertEquals(List.of(ALICE), ComputeSshKeys.lines(Map.of("ssh-keys", ALICE, "enable-oslogin", "false"),
@@ -44,6 +50,8 @@ class ComputeSshKeysTest {
                 "alice:ssh-rsa AAAAB3NzaC1yc2E second"), now);
 
         assertEquals(List.of("alice", "erin", "carol"), List.copyOf(users.keySet()));
+        assertEquals(List.of("expiry-time=\"20261026000000Z\" ssh-ed25519 AAAAC3Nz google-ssh {\"userName\":\"carol\","
+                + "\"expireOn\":\"2026-10-26T00:00:00+0000\"}"), users.get("carol"), "sshd enforces the expiry itself");
         assertEquals(List.of("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA alice@host", "ssh-rsa AAAAB3NzaC1yc2E second"),
                 users.get("alice"));
     }

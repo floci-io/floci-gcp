@@ -1652,6 +1652,11 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(400)
                 .body("error.message", containsString("HAVING modifier is not supported on analytic functions"));
+        query("""
+                {"query": "SELECT ANY_VALUE(x HAVING MAX (SELECT 1) * y) v FROM UNNEST([STRUCT('a' AS x, 1 AS y), ('b', 2)])", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("b"));
     }
 
     @Test

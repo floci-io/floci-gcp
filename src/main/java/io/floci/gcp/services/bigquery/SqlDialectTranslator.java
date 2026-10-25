@@ -119,6 +119,7 @@ final class SqlDialectTranslator {
     private int generatedDerivedTableAlias;
     private int generatedConcatAlias;
     private int generatedInitcapName;
+    private int generatedAnyValueName;
     private boolean needsUnicodeCaseFold;
 
     private List<Token> tokens;
@@ -5461,8 +5462,9 @@ final class SqlDialectTranslator {
     /**
      * {@code ANY_VALUE(x HAVING MAX|MIN y)}: x from the rows whose y is the group's maximum (minimum). Rows with a
      * NULL y never qualify, and among tied rows a non-NULL x wins, but a NULL x on the extreme row is not replaced
-     * by another row's value. DuckDB's arg_max_null/arg_min_null keep that NULL; ordering by (y, x is non-NULL)
-     * breaks ties toward a value. Returns null when there is no HAVING modifier, so plain ANY_VALUE passes through.
+     * by another row's value. Each row becomes one struct (y, x is non-NULL, x), or NULL when y is NULL, and the
+     * max (min) of those structs is taken, so x and y are evaluated once per row. Returns null when there is no
+     * HAVING modifier, so plain ANY_VALUE passes through.
      */
     private String renderAnyValueHaving(int open, int close) {
         int having = -1;
@@ -5491,8 +5493,10 @@ final class SqlDialectTranslator {
         }
         String value = render(open + 1, having).strip();
         String key = render(bound + 1, close).strip();
-        return (max ? "arg_max_null(" : "arg_min_null(") + value + ", row(" + key + ", (" + value + ") IS "
-                + (max ? "NOT NULL" : "NULL") + ")) FILTER (WHERE (" + key + ") IS NOT NULL)";
+        String row = "_floci_any_value_" + generatedAnyValueName++;
+        return "struct_extract(" + (max ? "max" : "min") + "(list_extract(list_transform([struct_pack(k := (" + key
+                + "), v := (" + value + "))], " + row + " -> CASE WHEN " + row + ".k IS NULL THEN NULL ELSE struct_pack(k := "
+                + row + ".k, n := " + row + ".v IS " + (max ? "NOT NULL" : "NULL") + ", v := " + row + ".v) END), 1)), 'v')";
     }
 
     private int matchingParen(int open) {

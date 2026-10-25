@@ -667,10 +667,14 @@ class SqlDialectTranslatorTest {
 
     @Test
     void anyValueHavingBecomesArgMaxOrArgMin() {
-        assertEquals("SELECT g, arg_max_null(x, row(y, (x) IS NOT NULL)) FILTER (WHERE (y) IS NOT NULL) AS v"
-                + " FROM \"ds\".\"t\" GROUP BY g", sql("SELECT g, ANY_VALUE(x HAVING MAX y) AS v FROM ds.t GROUP BY g"));
-        assertEquals("SELECT arg_min_null(x, row(f(y, 1), (x) IS NULL)) FILTER (WHERE (f(y, 1)) IS NOT NULL) AS v"
-                + " FROM \"ds\".\"t\"", sql("SELECT ANY_VALUE(x HAVING MIN f(y, 1)) AS v FROM ds.t"));
+        assertEquals("SELECT g, struct_extract(max(list_extract(list_transform([struct_pack(k := (y), v := (x))],"
+                + " _floci_any_value_0 -> CASE WHEN _floci_any_value_0.k IS NULL THEN NULL ELSE struct_pack(k :="
+                + " _floci_any_value_0.k, n := _floci_any_value_0.v IS NOT NULL, v := _floci_any_value_0.v) END), 1)), 'v')"
+                + " AS v FROM \"ds\".\"t\" GROUP BY g", sql("SELECT g, ANY_VALUE(x HAVING MAX y) AS v FROM ds.t GROUP BY g"));
+        String min = sql("SELECT ANY_VALUE(g(x) HAVING MIN f(y, 1)) AS v FROM ds.t");
+        assertTrue(min.startsWith("SELECT struct_extract(min(") && min.contains(".v IS NULL, v := "), min);
+        assertEquals(1, min.split("g\\(x\\)", -1).length - 1, min);
+        assertEquals(1, min.split("f\\(y, 1\\)", -1).length - 1, min);
         assertEquals("SELECT ANY_VALUE(x) AS v FROM \"ds\".\"t\"", sql("SELECT ANY_VALUE(x) AS v FROM ds.t"));
         assertEquals("invalidQuery", assertThrows(GcpException.class,
                 () -> sql("SELECT ANY_VALUE(x HAVING y) FROM ds.t")).getReason());

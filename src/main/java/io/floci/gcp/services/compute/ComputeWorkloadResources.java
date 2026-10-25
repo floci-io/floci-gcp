@@ -172,7 +172,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                 if (field.equals("tags")) { for (JsonNode tag : body.path("items")) { name(tag.asText()); } }
                 if (field.equals("metadata")) { objectArray(body, "items"); }
                 ObjectNode replacement = body.deepCopy(); replacement.put("fingerprint", fingerprint()); r.set(field, replacement);
-                if (field.equals("metadata") && "RUNNING".equals(r.path("status").asText())) {
+                if (field.equals("metadata") && ComputeService.STARTED.contains(r.path("status").asText())) {
                     c.runtime(ComputeInstanceRuntime.Kind.METADATA, r);
                 }
             }

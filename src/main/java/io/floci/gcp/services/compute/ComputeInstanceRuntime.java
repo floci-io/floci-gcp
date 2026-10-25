@@ -396,7 +396,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     private void applyAccounts(Intent intent, String containerId) {
         String key = instanceKey(intent.project(), intent.zone(), intent.name());
         AtomicLong requests = accountRequests.computeIfAbsent(key, k -> new AtomicLong());
-        long request = requests.incrementAndGet();
+        // Time-based, so a request after an emulator restart still outranks those its guest saw before.
+        long request = requests.updateAndGet(previous -> Math.max(previous + 1, System.currentTimeMillis()));
         ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
         try {
             scriptExecutor.execute(() -> {
@@ -404,7 +405,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     if (requests.get() != request || closed) { return; }
                     List<String> lines = sshKeys.apply(intent.project(), intent.zone(), intent.name());
                     Map<String, List<String>> users = lines == null ? null : ComputeSshKeys.users(lines, Instant.now());
-                    scripts.accounts(intent.name(), containerId, users, port);
+                    scripts.accounts(intent.name(), containerId, users, request, port);
                 }
             });
         } catch (RejectedExecutionException e) {

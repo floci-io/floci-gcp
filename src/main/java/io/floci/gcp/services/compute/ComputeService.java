@@ -39,6 +39,8 @@ public class ComputeService {
     private final ServiceRegistry registry;
     private final Instance<ComputeResourceHandler> handlers;
     private final LocationCatalog locations;
+    /** Instance statuses whose guest is up or coming up, so a metadata change must reach it. */
+    static final Set<String> STARTED = Set.of("PROVISIONING", "STAGING", "RUNNING");
     private final ComputeInstanceRuntime runtime;
     private final ComputeImageCatalog images;
 
@@ -384,10 +386,11 @@ public class ComputeService {
         if (body.has("items")) { replacement.set("items", body.get("items")); }
         c.state.commonInstanceMetadata = replacement;
         if (c.state.creationTimestamp == null) { c.state.creationTimestamp = Instant.now().toString(); }
-        // Project ssh-keys reach every running guest, whose agent applies them as they change.
+        // Project ssh-keys reach every running guest, whose agent applies them as they change, and every guest still
+        // starting, whose boot may already have read the old keys.
         for (Map.Entry<String, ObjectNode> entry : c.state.resources.entrySet()) {
             if (entry.getKey().matches("zones/[^/]+/instances/[^/]+")
-                    && "RUNNING".equals(entry.getValue().path("status").asText())) {
+                    && STARTED.contains(entry.getValue().path("status").asText())) {
                 c.runtime(ComputeInstanceRuntime.Kind.METADATA, entry.getValue());
             }
         }

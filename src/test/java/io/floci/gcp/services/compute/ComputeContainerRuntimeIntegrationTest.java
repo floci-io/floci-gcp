@@ -4,8 +4,8 @@ import io.floci.gcp.services.compute.ComputeInstanceRuntime.Intent;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Kind;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Phase;
 import io.quarkus.test.InjectMock;
-import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -182,6 +182,23 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         assertEquals(List.of("alice:ssh-ed25519 AAAAC3Nza alice", "bob:ssh-ed25519 AAAAC3Nzb bob"),
                 compute.instanceSshKeys(project, "us-central1-a", "vm"));
         assertNull(compute.instanceSshKeys(project, "us-central1-a", "missing"));
+    }
+
+    @Test void projectKeyChangesAlsoReachInstancesStillStarting() throws Exception {
+        String root = network();
+        when(runtime.phase(anyString())).thenReturn(Phase.PROVISIONING);
+        post(root + ZONE + "/instances", vm("vm", null)).then().statusCode(200);
+        clearInvocations(runtime);
+        String projectFingerprint = given().get(root).jsonPath().getString("commonInstanceMetadata.fingerprint");
+
+        post(root + "/setCommonInstanceMetadata", Map.of("fingerprint", projectFingerprint, "items",
+                List.of(Map.of("key", "ssh-keys", "value", "bob:ssh-ed25519 AAAAC3Nzb bob")))).then().statusCode(200);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Intent>> intents = ArgumentCaptor.forClass(List.class);
+        verify(runtime).submit(anyString(), intents.capture());
+        assertEquals(Kind.METADATA, intents.getValue().getFirst().kind());
+        when(runtime.phase(anyString())).thenReturn(Phase.DONE);
     }
 
     @Test void serialPortOutputServesTheRuntimeBuffer() throws Exception {

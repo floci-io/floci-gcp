@@ -36,7 +36,11 @@ public class ComputeGuestScripts {
     static final String AGENT = "google_guest_agent";
     /** Users the agent created, so a user whose keys leave metadata loses them again (the agent's google_users). */
     static final String GOOGLE_USERS = DIRECTORY + "/google_users";
-    static final String ACCOUNTS_SCRIPT = "floci-guest-accounts.sh";
+    static final String ACCOUNTS_SCRIPT = "floci-guest-accounts-";
+    /** The newest account update that started in the guest; an older one still running stops before writing keys. */
+    static final String ACCOUNTS_REQUEST = DIRECTORY + "/floci-accounts.request";
+    /** Held while one update changes accounts. */
+    static final String ACCOUNTS_LOCK = DIRECTORY + "/floci-accounts.lock";
     /** Longest the account step waits, an sshd package install included. */
     static final Duration ACCOUNTS_TIMEOUT = Duration.ofMinutes(5);
     /** The guest agent's default extra groups for the users it creates ({@code cfg.go}: groups). */
@@ -150,16 +154,18 @@ public class ComputeGuestScripts {
      * package manager first. {@code users} null leaves accounts alone (OS Login). A step that fails says so on serial
      * port 1, and so does a nonzero exit status.
      */
-    void accounts(String instance, String containerId, Map<String, List<String>> users, ComputeSerialPort port) {
-        String script = accountsScript(users);
+    void accounts(String instance, String containerId, Map<String, List<String>> users, long request,
+                  ComputeSerialPort port) {
+        String script = accountsScript(users, request);
+        String name = ACCOUNTS_SCRIPT + request + ".sh";
         try {
             lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY),
                     Duration.ofSeconds(30), OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
-            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, ACCOUNTS_SCRIPT,
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, name,
                     script.getBytes(StandardCharsets.UTF_8), 0700);
             LineWriter out = new LineWriter(port, instance, AGENT, "");
             ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(),
-                    List.of("/bin/sh", DIRECTORY + "/" + ACCOUNTS_SCRIPT), ACCOUNTS_TIMEOUT, out, out);
+                    List.of("/bin/sh", DIRECTORY + "/" + name), ACCOUNTS_TIMEOUT, out, out);
             out.close();
             if (result.timedOut()) {
                 port.write(line(instance, AGENT, "Account setup still running after " + ACCOUNTS_TIMEOUT + "."));
@@ -172,9 +178,23 @@ public class ComputeGuestScripts {
         }
     }
 
-    static String accountsScript(Map<String, List<String>> users) {
+    /**
+     * The account update numbered {@code request}: later requests have higher numbers, across emulator restarts too.
+     * It records itself as the newest update as it starts, and changes accounts only while holding the guest-side
+     * lock and only while it still is the newest, so an update the emulator stopped waiting for never overlaps or
+     * outlasts a newer one.
+     */
+    static String accountsScript(Map<String, List<String>> users, long request) {
         StringBuilder sh = new StringBuilder("""
                 status=0
+                request=REQUEST
+                mark=REQUEST_FILE
+                lock=LOCK_DIR
+                cleanup() { rm -f "$0"; [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lock"; }
+                trap cleanup EXIT
+                newest="$(cat "$mark" 2>/dev/null || echo 0)"
+                [ "$newest" -gt "$request" ] 2>/dev/null && exit 0
+                echo "$request" > "$mark"
                 failed() { echo "$1"; status=1; }
                 has() { command -v "$1" >/dev/null 2>&1; }
                 sshd_bin() { for b in /usr/sbin/sshd /usr/local/sbin/sshd /sbin/sshd "$(command -v sshd 2>/dev/null)"; do [ -n "$b" ] && [ -x "$b" ] && { echo "$b"; return; }; done; }
@@ -188,7 +208,18 @@ public class ComputeGuestScripts {
                   fi
                   [ -n "$(sshd_bin)" ] || failed "Could not install openssh-server: no supported package manager or no network."
                 fi
-                """);
+                take_lock() {
+                  while ! mkdir "$lock" 2>/dev/null; do
+                    holder="$(cat "$lock/pid" 2>/dev/null)"
+                    if [ -n "$holder" ] && [ ! -d "/proc/$holder" ]; then rm -rf "$lock"; continue; fi
+                    sleep 1
+                  done
+                  echo "$$" > "$lock/pid"
+                }
+                take_lock
+                [ "$(cat "$mark" 2>/dev/null)" = "$request" ] || exit 0
+                """.replace("REQUEST_FILE", ACCOUNTS_REQUEST).replace("LOCK_DIR", ACCOUNTS_LOCK)
+                .replace("REQUEST", Long.toString(request)));
         if (users != null) {
             sh.append("""
                     in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\\n' | grep -qx "$2"; }

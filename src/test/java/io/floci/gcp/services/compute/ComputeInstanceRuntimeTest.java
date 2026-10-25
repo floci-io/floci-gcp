@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -854,7 +855,7 @@ class ComputeInstanceRuntimeTest {
         verify(builder).withDynamicPort(22);
         verify(builder).withDynamicPort(80);
         verify(scripts).accounts(eq("vm"), eq("new-id"), eq(Map.of("alice", List.of("ssh-ed25519 AAAAC3Nz alice"))),
-                any());
+                anyLong(), any());
         assertTrue(runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents()
                 .contains("floci-gcp[1]: Published ports: 22/tcp -> localhost:32768, 80/tcp -> localhost:32769"));
     }
@@ -867,7 +868,7 @@ class ComputeInstanceRuntimeTest {
 
         runtime.submit("metadata", List.of(new Intent(Kind.METADATA, "p", "us-central1-a", "vm", null, 0, 0, METADATA)));
 
-        verify(scripts).accounts(eq("vm"), eq("c-1"), eq(Map.of()), any());
+        verify(scripts).accounts(eq("vm"), eq("c-1"), eq(Map.of()), anyLong(), any());
         verify(lifecycleManager, never()).createAndStart(any());
     }
 
@@ -889,8 +890,8 @@ class ComputeInstanceRuntimeTest {
         runtime.submit("second", List.of(change));
         queued.forEach(Runnable::run);
 
-        verify(scripts, times(1)).accounts(any(), any(), any(), any());
-        verify(scripts).accounts(eq("vm"), eq("c-1"), eq(Map.of()), any());
+        verify(scripts, times(1)).accounts(any(), any(), any(), anyLong(), any());
+        verify(scripts).accounts(eq("vm"), eq("c-1"), eq(Map.of()), anyLong(), any());
     }
 
     @Test
@@ -901,7 +902,7 @@ class ComputeInstanceRuntimeTest {
 
         runtime.reconcile((project, zone, name) -> "RUNNING");
 
-        verify(scripts).accounts(eq("vm"), eq("vm-c"), eq(Map.of("bob", List.of("ssh-ed25519 AAAAC3Nz bob"))), any());
+        verify(scripts).accounts(eq("vm"), eq("vm-c"), eq(Map.of("bob", List.of("ssh-ed25519 AAAAC3Nz bob"))), anyLong(), any());
     }
 
     @Test
@@ -910,7 +911,7 @@ class ComputeInstanceRuntimeTest {
 
         runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
 
-        verify(scripts).accounts(eq("vm"), eq("new-id"), isNull(), any());
+        verify(scripts).accounts(eq("vm"), eq("new-id"), isNull(), anyLong(), any());
     }
 
     private static Map<String, String> identity(String name, String owner) {

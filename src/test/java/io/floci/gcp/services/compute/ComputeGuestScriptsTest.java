@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -266,7 +267,7 @@ class ComputeGuestScriptsTest {
         Map<String, List<String>> users = new LinkedHashMap<>();
         users.put("alice", List.of("ssh-ed25519 AAAAC3Nz alice@host", "ssh-rsa AAAAB3Nz it's mine"));
         users.put("carol", List.of("ssh-ed25519 AAAAC3Nzc carol"));
-        String script = ComputeGuestScripts.accountsScript(users);
+        String script = ComputeGuestScripts.accountsScript(users, 42);
         Path file = Files.createTempFile("accounts", ".sh");
         Files.writeString(file, script);
         assertEquals(0, new ProcessBuilder("sh", "-n", file.toString()).start().waitFor(), "the script parses");
@@ -290,12 +291,31 @@ class ComputeGuestScriptsTest {
         ContainerExec.Result failed = mock(ContainerExec.Result.class);
         when(failed.exitCode()).thenReturn(1L);
         when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh",
-                "/var/lib/google/floci-guest-accounts.sh")), any(), any(), any())).thenReturn(failed);
+                "/var/lib/google/floci-guest-accounts-42.sh")), any(), any(), any())).thenReturn(failed);
         ComputeSerialPort port = new ComputeSerialPort();
 
-        scripts.accounts("vm", "c-1", Map.of(), port);
+        scripts.accounts("vm", "c-1", Map.of(), 42, port);
 
         assertTrue(port.read(0).contents().contains("google_guest_agent[1]: Account setup exit status 1"));
+    }
+
+    @Test
+    void anOlderAccountUpdateStopsBeforeTouchingAccountsWhileANewerOneRecordedItself() throws Exception {
+        Path dir = Files.createTempDirectory("accounts");
+        String script = ComputeGuestScripts.accountsScript(Map.of("alice", List.of("ssh-ed25519 AAAAC3Nz alice")), 5)
+                .replace(ComputeGuestScripts.ACCOUNTS_REQUEST, dir.resolve("request").toString())
+                .replace(ComputeGuestScripts.ACCOUNTS_LOCK, dir.resolve("lock").toString());
+        Files.writeString(dir.resolve("request"), "7\n");
+        Path file = dir.resolve("run.sh");
+        Files.writeString(file, script);
+
+        Process run = new ProcessBuilder("sh", file.toString()).redirectErrorStream(true).start();
+        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        assertEquals(0, run.waitFor(), out);
+        assertEquals("", out, "stopped before installing or creating anything");
+        assertEquals("7", Files.readString(dir.resolve("request")).strip(), "the newer request stays recorded");
+        assertFalse(Files.exists(file), "the script removes itself");
     }
 
     @Test

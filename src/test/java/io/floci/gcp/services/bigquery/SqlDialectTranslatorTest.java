@@ -667,12 +667,16 @@ class SqlDialectTranslatorTest {
 
     @Test
     void anyValueHavingBecomesArgMaxOrArgMin() {
-        assertEquals("SELECT g, struct_extract(max(list_extract(list_transform([struct_pack(k := (y), v := (x))],"
-                + " _floci_any_value_0 -> CASE WHEN _floci_any_value_0.k IS NULL THEN NULL ELSE struct_pack(k :="
-                + " _floci_any_value_0.k, n := _floci_any_value_0.v IS NOT NULL, v := _floci_any_value_0.v) END), 1)), 'v')"
-                + " AS v FROM \"ds\".\"t\" GROUP BY g", sql("SELECT g, ANY_VALUE(x HAVING MAX y) AS v FROM ds.t GROUP BY g"));
+        String max = sql("SELECT g, ANY_VALUE(x HAVING MAX y) AS v FROM ds.t GROUP BY g");
+        assertTrue(max.startsWith("SELECT g, list_extract(list_transform([max(list_extract(list_transform([struct_pack(k :="
+                + " (y), v := (x))], _floci_any_value_0 -> CASE WHEN _floci_any_value_0.k IS NULL THEN NULL ELSE"
+                + " struct_pack(z := (typeof(_floci_any_value_0.k) IN ('DOUBLE', 'FLOAT') AND isnan("), max);
+        assertTrue(max.contains(", n := _floci_any_value_0.v IS NOT NULL, v := _floci_any_value_0.v) END), 1))],"
+                + " _floci_any_value_0_m -> CASE WHEN _floci_any_value_0_m.z THEN NULL ELSE _floci_any_value_0_m.v END), 1)"
+                + " AS v FROM \"ds\".\"t\" GROUP BY g"), max);
         String min = sql("SELECT ANY_VALUE(g(x) HAVING MIN f(y, 1)) AS v FROM ds.t");
-        assertTrue(min.startsWith("SELECT struct_extract(min(") && min.contains(".v IS NULL, v := "), min);
+        assertTrue(min.contains("[min(") && min.contains("struct_pack(z := NOT (typeof(") && min.contains(".v IS NULL, v := ")
+                && min.contains("CASE WHEN NOT _floci_any_value_0_m.z THEN NULL"), min);
         assertEquals(1, min.split("g\\(x\\)", -1).length - 1, min);
         assertEquals(1, min.split("f\\(y, 1\\)", -1).length - 1, min);
         assertEquals("SELECT ANY_VALUE(x) AS v FROM \"ds\".\"t\"", sql("SELECT ANY_VALUE(x) AS v FROM ds.t"));

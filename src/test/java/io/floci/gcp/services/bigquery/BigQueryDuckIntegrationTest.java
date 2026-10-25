@@ -1657,6 +1657,11 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("b"));
+        query("""
+                {"query": "SELECT g, ANY_VALUE(x HAVING MAX y) mx, ANY_VALUE(x HAVING MIN y) mn FROM UNNEST([STRUCT('p' AS g, 'a' AS x, CAST('NaN' AS FLOAT64) AS y), ('p', 'b', 1.0), ('q', 'c', 5.0), ('q', 'd', 7.0)]) GROUP BY g ORDER BY g", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(Arrays.asList("p", null, null), List.of("q", "d", "c"))));
     }
 
     @Test

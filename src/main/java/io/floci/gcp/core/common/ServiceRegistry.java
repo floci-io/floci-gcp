@@ -29,6 +29,10 @@ public class ServiceRegistry {
         }
     }
 
+    List<ServiceDescriptor> descriptors() {
+        return List.copyOf(descriptors);
+    }
+
     public Optional<ServiceDescriptor> byResourceClass(Class<?> clazz) {
         return Optional.ofNullable(byResourceClass.get(clazz));
     }

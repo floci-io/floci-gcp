@@ -365,6 +365,30 @@ When adding functionality:
 7. Add tests
 8. Update documentation
 
+### Tenancy touchpoints
+
+`ServiceRegistryConsistencyTest` fails until a new service does each of these, or adds an
+entry with a one-line reason to the matching exemption map in that test:
+
+- Name the API on the descriptor: `.api("<svc>.googleapis.com", "<API title>")`. Without it
+  Service Usage enforcement never gates the service (`NO_API_NAME`).
+- List every JAX-RS resource and every gRPC controller in `.resourceClasses(...)`. REST
+  resources gated only by Service Usage go in `.api(name, title, extra...)`.
+  `GrpcServerManager.bind` and `ServiceEnabledFilter` look classes up in the registry, so a
+  missing class is served ungated (`UNREGISTERED_ENDPOINTS`).
+- Register a `ServiceUsageAdapter` when a gRPC request names its project in a field the
+  generic resolution does not read (anything but an annotated resource name of the API, the
+  request's `name`, `parent`, `resource`, `project`, `project_id`, a repeated string, or a field
+  its `google.api.http` path binds to `projects/...`, which SDKs send as `x-goog-request-params`),
+  or the default project is gated instead (`GRPC_PROJECT_RESOLUTION`).
+- Check locations through `LocationCatalog.requireLocation`, `requireListLocation` or
+  `requireParentLocation` when the service serves `projects/*/locations/*` resources, so
+  `floci-gcp.locations.strict` applies (`NO_LOCATION_CHECK`).
+- Keep an `IamAuthorizationAdapter`'s `restControllers()` and `grpcServices()` in step with the
+  registered controllers.
+
+An exemption that no longer applies also fails the test, so remove it when the gap is fixed.
+
 ### Services with container sidecars
 
 If the service launches real Docker containers (sidecars / data planes), it

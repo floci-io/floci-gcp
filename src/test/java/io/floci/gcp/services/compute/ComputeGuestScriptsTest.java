@@ -6,6 +6,10 @@ import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.services.gcs.GcsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -316,6 +320,48 @@ class ComputeGuestScriptsTest {
         assertEquals("", out, "stopped before installing or creating anything");
         assertEquals("7", Files.readString(dir.resolve("request")).strip(), "the newer request stays recorded");
         assertFalse(Files.exists(file), "the script removes itself");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"empty", "dead", "directory"})
+    void anAbandonedAccountLockIsTakenOver(String left) throws Exception {
+        Path dir = Files.createTempDirectory("accounts");
+        Path lock = dir.resolve("lock");
+        switch (left) {
+            case "empty" -> Files.writeString(lock, "");
+            case "dead" -> Files.writeString(lock, "1 0\n");
+            default -> Files.createDirectories(lock.resolve("pid"));
+        }
+
+        String out = runLock(dir, "7", "take_lock; cat \"$lock\"; [ \"$(cat \"$lock\")\" = \"$me\" ] && echo owned");
+
+        assertTrue(out.endsWith("owned\n"), out);
+        try (var files = Files.list(dir)) {
+            assertEquals(List.of(lock), files.toList(), "no temporary lock file is left behind");
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void aWaitingAccountUpdateGivesUpOnceANewerOneIsRecorded() throws Exception {
+        Path dir = Files.createTempDirectory("accounts");
+
+        String out = runLock(dir, "8", "echo \"$me\" > \"$lock\"; take_lock; echo took");
+
+        assertEquals("", out, "left the live holder's lock alone");
+    }
+
+    /** Runs the accounts script's lock functions for request 7 with the newest request {@code newest}. */
+    private static String runLock(Path dir, String newest, String body) throws Exception {
+        String script = ComputeGuestScripts.accountsScript(null, 7);
+        String functions = script.substring(script.indexOf("owner() {"), script.indexOf("\ntake_lock\n"));
+        Files.writeString(dir.resolve("request"), newest + "\n");
+        Process run = new ProcessBuilder("sh", "-c", "request=7\nmark=" + dir.resolve("request") + "\nlock="
+                + dir.resolve("lock") + "\n" + functions + "\n" + body).redirectErrorStream(true).start();
+        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertEquals(0, run.waitFor(), out);
+        Files.delete(dir.resolve("request"));
+        return out;
     }
 
     @Test

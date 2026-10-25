@@ -182,7 +182,8 @@ public class ComputeGuestScripts {
      * The account update numbered {@code request}: later requests have higher numbers, across emulator restarts too.
      * It records itself as the newest update as it starts, and changes accounts only while holding the guest-side
      * lock and only while it still is the newest, so an update the emulator stopped waiting for never overlaps or
-     * outlasts a newer one.
+     * outlasts a newer one. The lock is created with its owner's pid and start time in one step, so a lock left by a
+     * process that died, in this boot or an earlier one, is recognised and taken over.
      */
     static String accountsScript(Map<String, List<String>> users, long request) {
         StringBuilder sh = new StringBuilder("""
@@ -190,7 +191,7 @@ public class ComputeGuestScripts {
                 request=REQUEST
                 mark=REQUEST_FILE
                 lock=LOCK_DIR
-                cleanup() { rm -f "$0"; [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lock"; }
+                cleanup() { rm -f "$0" "$lock.$$"; [ -n "$me" ] && [ "$(cat "$lock" 2>/dev/null)" = "$me" ] && rm -f "$lock"; }
                 trap cleanup EXIT
                 newest="$(cat "$mark" 2>/dev/null || echo 0)"
                 [ "$newest" -gt "$request" ] 2>/dev/null && exit 0
@@ -208,13 +209,18 @@ public class ComputeGuestScripts {
                   fi
                   [ -n "$(sshd_bin)" ] || failed "Could not install openssh-server: no supported package manager or no network."
                 fi
+                owner() { s="$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20)"; [ -n "$s" ] && echo "$1 $s"; }
+                me="$(owner $$)"
                 take_lock() {
-                  while ! mkdir "$lock" 2>/dev/null; do
-                    holder="$(cat "$lock/pid" 2>/dev/null)"
-                    if [ -n "$holder" ] && [ ! -d "/proc/$holder" ]; then rm -rf "$lock"; continue; fi
+                  echo "$me" > "$lock.$$"
+                  [ -d "$lock" ] && rm -rf "$lock"
+                  until ln "$lock.$$" "$lock" 2>/dev/null; do
+                    [ "$(cat "$mark" 2>/dev/null)" = "$request" ] || exit 0
+                    holder="$(cat "$lock" 2>/dev/null)"
+                    if [ -z "$holder" ] || [ "$(owner "${holder%% *}")" != "$holder" ]; then rm -rf "$lock"; continue; fi
                     sleep 1
                   done
-                  echo "$$" > "$lock/pid"
+                  rm -f "$lock.$$"
                 }
                 take_lock
                 [ "$(cat "$mark" 2>/dev/null)" = "$request" ] || exit 0

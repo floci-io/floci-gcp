@@ -27,8 +27,9 @@ which mode is active and the supported service list.
 | Cloud Scheduler | REST JSON and gRPC job create/get/list/update/delete/pause/resume/run; project policy inheritance. See [Scheduler IAM enforcement](scheduler.md#iam-enforcement) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `signBlob`, and `signJwt` |
+| IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
-| IAM custom roles, IAM Credentials `generateIdToken`, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
+| IAM Credentials `generateIdToken`, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
 Valid **Floci-issued service-account tokens** activate IAM evaluation on every
 supported surface. Mint one through the existing IAM Credentials
@@ -219,16 +220,144 @@ keys, and policies unchanged; denied credential requests must not issue a token
 or signing response. The existing filters do not hold policy locks across the
 subsequent mutation, so they provide no atomic policy-revocation guarantee.
 
-IAM custom-role management is not implemented by this API surface. Custom-role
-creation, update, deletion, and effective permissions defined by custom roles
-remain unsupported. Service-account enable, disable, undelete, key upload,
+Service-account enable, disable, undelete, key upload,
 enable/disable, IAM v1 signJwt, and Credentials generateIdToken
-are also unimplemented. Only the shared IAM policy gRPC mixin is exposed;
+are unimplemented. Only the shared IAM policy gRPC mixin is exposed;
 IAM admin and IAM Credentials gRPC services are not implemented. Non-empty
 credential delegation chains fail with `FAILED_PRECONDITION` for evaluated
 callers; disabled and bypass callers retain the existing permissive behavior.
 IAM permissions alone do not define a fixed list of roles a caller may grant;
 Organization Policy constraints for limiting grants are unsupported.
+
+### Custom roles
+
+The IAM v1 [`projects.roles`](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.roles)
+and [`organizations.roles`](https://docs.cloud.google.com/iam/docs/reference/rest/v1/organizations.roles)
+REST methods create, read, and manage custom roles. `R` is
+`projects/{project}/roles/{role}` or `organizations/{organization}/roles/{role}`; `P` is
+its parent.
+
+| Method | Required permission | Authorization target | Implemented transport |
+|---|---|---|---|
+| create | `iam.roles.create` | P | REST POST `/v1/{P}/roles` |
+| list | `iam.roles.list` | P | REST GET `/v1/{P}/roles` |
+| get | `iam.roles.get` | R | REST GET `/v1/{R}` |
+| patch | `iam.roles.update` | R | REST PATCH `/v1/{R}` |
+| delete | `iam.roles.delete` | R | REST DELETE `/v1/{R}` |
+| undelete | `iam.roles.undelete` | R | REST POST `/v1/{R}:undelete` |
+
+Role targets evaluate their parent's allow policy. The local evaluator exposes
+`resource.type = 'iam.googleapis.com/Role'` and the role name for conditions; create and
+list use the parent's attributes. Organization targets read the policy stored under
+`organizations/{organization}`. Resource Manager organization policy methods are not
+implemented, so evaluated callers are denied organization-role management unless an
+organization policy was stored through the shared IAM policy gRPC mixin, which accepts
+organization names only from anonymous and external callers.
+
+The [Google IAM roles and permissions reference](https://docs.cloud.google.com/iam/docs/roles-permissions/iam)
+defines these slices:
+
+| Role | Supported permission slice |
+|---|---|
+| `roles/iam.roleAdmin`, `roles/iam.organizationRoleAdmin` | `iam.roles.create`, `delete`, `get`, `list`, `undelete`, `update`; `resourcemanager.projects.get`, `getIamPolicy` |
+| `roles/iam.roleViewer`, `roles/iam.organizationRoleViewer` | `iam.roles.get`, `list`; `resourcemanager.projects.get`, `getIamPolicy` |
+
+`roles/owner` also holds all six `iam.roles.*` permissions; `roles/editor` and
+`roles/viewer` hold `iam.roles.get` and `iam.roles.list`, matching
+`gcloud iam roles describe`.
+
+#### Role definitions
+
+Roles are persisted with the configured storage mode under their full resource name.
+Create takes the `roleId` and `role` fields of the request. Limits and validation follow
+GCP:
+
+- Role IDs are 3 to 64 letters, digits, underscores, or periods.
+- The title is limited to 100 UTF-8 bytes, the description to 300, and the role to 3,000
+  permissions, counting duplicates.
+- Permissions containing `*` are rejected. Other permissions are stored as sent: GCP
+  also rejects unknown and organization-only permissions with
+  `400 INVALID_ARGUMENT` `Permission X is not valid.`, which Floci cannot check without a
+  full permission catalog.
+- `stage` defaults to `ALPHA`, which responses omit. `includedPermissions` also accepts a
+  single string.
+
+List returns the `BASIC` view without `includedPermissions` unless `view=FULL`, hides
+deleted roles unless `showDeleted=true`, and pages 300 roles by default; a `pageSize`
+above 1,000 or below zero is rejected. Patch applies `updateMask` (`title`,
+`description`, `includedPermissions`, `stage`) or, without a mask, replaces all four and
+clears the fields absent from the request. A `name` in the patch body must equal the
+path. Delete marks the role `deleted` and undelete restores it; deleted roles are never
+purged, so their IDs stay reserved.
+
+Error codes: duplicate IDs return `ALREADY_EXISTS`; reusing a deleted role's ID, updating
+or deleting a deleted role, and undeleting an active one return `FAILED_PRECONDITION`;
+unknown roles return `NOT_FOUND`; a mismatched `etag` on update, delete, or undelete
+returns `ABORTED`. On a deleted role, update reports the stale etag first and delete
+reports the deleted state first; undelete reports an active role before a stale etag.
+These codes and messages, including those for malformed or non-string etags,
+out-of-range page sizes, invalid update masks and role names, and fields of the wrong
+JSON type, were checked against GCP. Two cases were not observed: a non-string
+`includedPermissions` entry reuses `Permission X is not valid.`, and a malformed etag in
+a patch body reuses the malformed-etag message. Denial messages use the shared enforcement text, not GCP's
+per-method wording. Predefined `GET /v1/roles` and the IAM admin gRPC role methods are
+not implemented.
+
+#### Effective permissions
+
+A binding to a custom role grants exactly the role's stored `includedPermissions`, under
+the same conditions as any other binding, for every operation an enforcing adapter
+checks. Defining a role does not implement an operation.
+
+- A project role grants only through allow policies stored on that project or on
+  resources whose names are under `projects/{project}/`.
+- An organization role grants through policies of projects whose recorded Resource
+  Manager parent is that organization (`parent.type` `organization`). Its own
+  organization policy is evaluated only for organization-role management; organization
+  policies do not inherit to projects.
+- GCS bucket policies have no project in their resource name, so custom-role bindings in
+  bucket policies grant nothing. Bindings on the owning project's policy still apply to
+  its buckets.
+- Missing, `DISABLED`, and deleted roles grant nothing. Edits, disabling, deletion, and
+  undeletion apply to the next authorization decision for existing bindings and
+  credentials, and survive restarts with persistent storage. GCP applied each of these
+  within about a second in live checks.
+
+#### Project identity and ancestry
+
+- Role names and policy keys keep the project segment as sent, so a project number and
+  its project ID name different stored roles and different policies, as for every other
+  resource keyed by its path. A role under `projects/{number}` grants only through
+  policies keyed by that number, and organization roles grant only through policies
+  keyed by a project ID.
+- Organization role requests name no project, so Service Usage gates them on the
+  request's project context, which is the default project unless the request names one.
+- Folder and organization ancestry is modelled only as a project's direct parent.
+  Projects without a parent, projects under a folder, and unknown projects grant
+  nothing for organization roles, although GCP lets projects under a folder use their
+  organization's roles.
+- The recorded parent is set by Resource Manager update, which checks only
+  `resourcemanager.projects.update` on the project, and by a create that adopts a project
+  first registered implicitly, which checks only `resourcemanager.projects.create`.
+  Neither checks a permission on the destination, so moving a project under an
+  organization activates that organization's roles in bindings the project already holds.
+- A project in `DELETE_REQUESTED` keeps its custom roles: they can still be managed and
+  still grant, and its recorded parent still scopes organization roles.
+
+#### Policy writes
+
+Setting a policy does not check custom roles. GCP rejects a binding to a missing role,
+or to another project's role, with `INVALID_ARGUMENT`
+`Role (NAME) does not exist in the resource's hierarchy.`, and a new binding to a
+deleted role with `INVALID_ARGUMENT` `Cannot add new grants to deleted role (NAME).`
+Existing bindings to a deleted role are kept. Floci stores all such bindings, and they
+grant nothing.
+
+A binding to a missing, deleted, or disabled custom role is skipped without checking its
+condition. Creating, undeleting, or enabling that role makes the binding apply, and an
+unsupported condition on it then fails the member's evaluated requests on that policy
+with `INVALID_ARGUMENT` until the binding is removed by a caller that bypasses
+evaluation or the role is disabled again.
 
 OAuth `/token`, STS exchanges, and metadata credentials retain their existing
 emulator behavior. OAuth's stub exchange does not authenticate a service-account
@@ -251,7 +380,7 @@ not a Google-managed production credential.
   partially clear UBLA while conditional bindings remain configured. The full UBLA
   lifecycle is not implemented.
 - Organization/folder inheritance, deny policies, principal access boundaries,
-  custom roles, group/domain membership expansion, workforce/workload identities,
+  group/domain membership expansion, workforce/workload identities,
   and organization policy constraints are not implemented.
 - Service-account address aliases resolve to canonical email policy names. Other
   resource names are evaluated as requested. Project ID/number aliases are not
@@ -377,6 +506,8 @@ The signing key is not returned by `ListServiceAccountKeys` (real IAM lists it a
 - `SetIamPolicy`
 - `TestIamPermissions`
 - `SignBlob`
+- `CreateRole`, `GetRole`, `ListRoles`, `UpdateRole`, `DeleteRole`, `UndeleteRole` for
+  project and organization custom roles
 
 ## Related: Service Account Impersonation
 

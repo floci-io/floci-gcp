@@ -36,7 +36,7 @@ public class IamPolicyEvaluator {
             }
             for (IamBinding binding : policy.bindings()) {
                 if (isValidForEvaluation(policy, binding) && matchesPrincipal(principal, binding)
-                        && roleCatalog.grants(binding.role(), permission)
+                        && roleCatalog.grants(binding.role(), permission, policyResource)
                         && (binding.condition() == null || conditionEvaluator.matches(binding.condition(), resource))) {
                     return true;
                 }

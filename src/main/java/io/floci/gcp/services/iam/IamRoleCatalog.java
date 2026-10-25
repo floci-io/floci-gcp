@@ -11,7 +11,10 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/** Finite predefined-role catalog with service-owned permission contributions. */
+/**
+ * Finite predefined-role catalog with service-owned permission contributions, plus the stored
+ * custom roles that apply to the policy being evaluated.
+ */
 @ApplicationScoped
 public class IamRoleCatalog {
 
@@ -41,6 +44,7 @@ public class IamRoleCatalog {
             "storage.objects.delete", "storage.objects.update", "storage.objects.move", "storage.objects.restore");
 
     private final Map<String, Set<String>> permissionsByRole;
+    private final IamRoleService customRoles;
 
     public IamRoleCatalog() {
         this(Map.of(
@@ -51,8 +55,13 @@ public class IamRoleCatalog {
                 "roles/storage.admin", STORAGE_ADMIN));
     }
 
-    @Inject
     public IamRoleCatalog(IamAuthorizationRegistry registry) {
+        this(registry, null);
+    }
+
+    @Inject
+    public IamRoleCatalog(IamAuthorizationRegistry registry, IamRoleService customRoles) {
+        this.customRoles = customRoles;
         Map<String, Set<String>> permissions = new LinkedHashMap<>(new IamRoleCatalog().permissionsByRole);
         for (IamAuthorizationAdapter adapter : registry.adapters()) {
             adapter.roles().forEach((role, grants) -> {
@@ -69,17 +78,31 @@ public class IamRoleCatalog {
         permissionsByRole = Map.copyOf(permissions);
     }
 
-    public boolean contains(String role) {
+    boolean contains(String role) {
         return permissionsByRole.containsKey(role);
     }
 
+    /** Whether a binding of {@code role} in the policy stored under {@code policyResource} can grant. */
+    public boolean contains(String role, String policyResource) {
+        return contains(role) || (customRoles != null && customRoles.applies(role, policyResource));
+    }
+
     IamRoleCatalog(Map<String, Set<String>> permissionsByRole) {
+        this.customRoles = null;
         Map<String, Set<String>> copiedPermissions = new LinkedHashMap<>();
         permissionsByRole.forEach((role, permissions) -> copiedPermissions.put(role, Set.copyOf(permissions)));
         this.permissionsByRole = Map.copyOf(copiedPermissions);
     }
 
+    /** Predefined roles only; evaluation uses the overload that also resolves custom roles. */
     public boolean grants(String role, String permission) {
         return permissionsByRole.getOrDefault(role, Set.of()).contains(permission);
+    }
+
+    public boolean grants(String role, String permission, String policyResource) {
+        if (permissionsByRole.containsKey(role)) {
+            return grants(role, permission);
+        }
+        return customRoles != null && customRoles.grantedPermissions(role, policyResource).contains(permission);
     }
 }

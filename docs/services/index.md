@@ -14,7 +14,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 | [Secret Manager](secret-manager.md) | gRPC + REST JSON | `google.cloud.secretmanager.v1.SecretManagerService`, `/v1/projects/{project}/secrets` |
 | [Cloud Logging](logging.md) | gRPC + REST JSON | `google.logging.v2.LoggingServiceV2`, sink methods of `ConfigServiceV2`, `/v2/entries:write`, `/v2/entries:list`, `/v2/{parent}/sinks`; filtered GCS JSON export |
 | [Cloud KMS](kms.md) | gRPC + REST JSON | `google.cloud.kms.v1.KeyManagementService`, `/v1/projects/{project}/locations/{location}/keyRings` |
-| [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts` |
+| [IAM](iam.md) | REST JSON | `/v1/projects/{project}/serviceAccounts`, `/v1/projects/{project}/roles`, `/v1/organizations/{organization}/roles` |
 | [IAM Credentials](iam-credentials.md) | REST JSON | `/v1/projects/-/serviceAccounts/{sa}:generateAccessToken`, `:signBlob`, `:signJwt` |
 | [Security Token Service (STS)](sts.md) | REST JSON | `/v1/token` |
 | [Managed Kafka](managed-kafka.md) | REST JSON | `/v1/projects/{project}/locations/{location}/clusters` |

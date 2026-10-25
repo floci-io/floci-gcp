@@ -232,7 +232,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Secret Manager** | gRPC + REST JSON | Secrets, versioning, access, `versions/latest` alias, disable/enable/destroy, IAM bindings |
 | **Cloud Logging** | gRPC + REST JSON | Structured log ingestion (`WriteLogEntries`), read-back (`ListLogEntries`) with a practical filter subset (logName, severity, resource.type, timestamp, labels), `ListLogs`, `DeleteLog`; text/JSON payloads; sink configuration CRUD for project, organization, folder, and billing-account parents; filtered GCS JSON export with writer IAM checks |
 | **Cloud KMS** | gRPC + REST JSON | Key rings, crypto keys, key versions, symmetric encrypt/decrypt (AES-256-GCM), asymmetric sign (EC P-256, RSA PKCS1) and decrypt (RSA-OAEP), HMAC `MacSign`/`MacVerify`, `GetPublicKey`, `GenerateRandomBytes`, CRC32C integrity fields |
-| **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs) |
+| **IAM** | REST JSON | Service accounts, RSA-2048 key pairs (JSON key file format), policy bindings, `SignBlob` (V4 signed URLs), project and organization custom roles |
 | **IAM Service Account Credentials** | REST JSON | `generateAccessToken` (`iamcredentials.googleapis.com` v1) for service-account impersonation with scopes and lifetime, where tokens are opaque emulator stubs; RSA-signed `signBlob` and `signJwt` |
 | **Security Token Service (STS)** | REST JSON | OAuth 2.0 token exchange at `/v1/token`, including downscoped tokens with GCS Credential Access Boundaries |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups; Redpanda-backed or mock mode |
@@ -677,12 +677,17 @@ IAM policies are stored without enforcement by default. For local permission tes
 set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
 service-account tokens. This enforces Resource Manager v1 project metadata/policies,
 Cloud Run v2 service and revision REST operations and service policies, Secret
-Manager REST and gRPC operations, and supported GCS REST bucket and object operations
-through one shared evaluator. Project and Cloud Run service policies also use the
-shared IAM gRPC API. Resource Manager, Cloud Run, and Secret Manager bypass
-anonymous/external credentials; GCS evaluates them as anonymous so `allUsers`
-bindings work. Pub/Sub, Cloud Run jobs, worker pools, instances, invocation and
-operations, GCS ACLs, GCS gRPC, and all other services remain unenforced. Read the
+Manager REST and gRPC operations, Pub/Sub REST and gRPC operations, Cloud Scheduler job
+REST and gRPC operations, IAM service-account, key, credential, and custom-role
+management, and supported GCS REST
+bucket and object operations through one shared evaluator. Bindings to API-created
+custom roles grant their stored permissions within the role's project or organization;
+custom-role bindings in GCS bucket policies grant nothing. Project and Cloud Run service policies
+also use the shared IAM gRPC API. Resource Manager, Cloud Run, Secret Manager,
+Pub/Sub, Cloud Scheduler, and IAM bypass anonymous/external credentials; GCS evaluates them as
+anonymous so `allUsers` bindings work. Cloud Run jobs, worker pools, instances,
+invocation and operations, GCS ACLs, GCS gRPC, and all other services remain
+unenforced. Read the
 [coverage and limitations](docs/services/iam.md#opt-in-enforcement) before treating a
 green test as evidence of least privilege.
 

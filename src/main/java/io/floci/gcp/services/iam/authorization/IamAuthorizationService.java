@@ -68,7 +68,9 @@ public class IamAuthorizationService {
                         + "Enforce mode covers IAM service-account/key REST operations and IAM Credentials "
                         + "generateAccessToken/signBlob/signJwt and service-account policies over REST/shared IAM gRPC, Cloud Run v2 service/revision REST and shared IAM gRPC, "
                         + "Cloud Scheduler job REST/gRPC, Pub/Sub REST/gRPC, Secret Manager REST/gRPC, Resource Manager REST/project IAM gRPC, "
-                        + "and supported GCS REST bucket/object operations. IAM custom roles, Cloud Run "
+                        + "IAM project/organization custom-role REST management, and supported GCS REST "
+                        + "bucket/object operations. Custom-role bindings grant their stored permissions except in GCS "
+                        + "bucket policies. Cloud Run "
                         + "jobs/instances/worker pools/invocation, GCS ACLs and GCS gRPC are NOT enforced. "
                         + "GCS Credential Access Boundary checks remain active.",
                 config.services().iam().authorizationMode(), registry.adapters().stream()
@@ -207,7 +209,7 @@ public class IamAuthorizationService {
                 if (!IamPolicyEvaluator.matchesPrincipal(principal, binding)) {
                     continue;
                 }
-                if (!roles.contains(binding.role())) {
+                if (!roles.contains(binding.role(), key)) {
                     continue;
                 }
                 if (binding.condition() != null) {

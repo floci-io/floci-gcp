@@ -8,7 +8,9 @@ An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
 secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
-issuance, and GCS bucket/object operations are integrated. IAM policy methods also
+issuance, IAM project and organization custom-role management, and GCS bucket/object
+operations are integrated. Bindings to stored custom roles grant their `includedPermissions`
+through every adapter except in GCS bucket policies; see [Custom roles](services/iam.md#custom-roles). IAM policy methods also
 use REST and the shared IAM gRPC mixin; the [IAM inventory](services/iam.md#service-account-enforcement)
 lists exact methods, permission targets, role slices, and local condition limits. Cloud Run
 service-policy methods use REST and the shared IAM gRPC API. Secret Manager secret
@@ -40,7 +42,8 @@ bypass; sink management caller authorization is a separate integration.
 6. Contribute a finite predefined role map and exact `basicRoles` slices. Basic-role
    permissions are explicitly contributed by each service, never inferred by the
    shared catalog. Do not use wildcard permission grants. Bindings with roles outside
-   the finite catalog are skipped as complete, non-granting bindings before condition
+   the finite catalog that are not active custom roles applying to the policy's project or
+   organization are skipped as complete, non-granting bindings before condition
    validation; they must not block grants from known bindings or policy recovery.
 7. Reuse `IamService` policy storage and its existing resource-existence resolvers.
    `testPermissions` routes registered resources through the evaluator. Override
@@ -106,6 +109,13 @@ Cloud Logging holds its sink lock before acquiring the ordered destination polic
 and GCS bucket/object locks, serializing delivery with sink configuration changes.
 Secret Manager holds the secret lock before the ordered project and secret policy
 locks across authorization and the secret or version operation.
+Custom-role definitions are serialized among themselves but not with these policy
+locks, and evaluation reads them without a lock. Each read sees the latest stored
+definition, so a role edit, disable, delete, or undelete applies to reads after it is
+stored, and one decision that overlaps the change can observe both versions. A role
+activated between those reads has its condition evaluated without prior validation; an
+unsupported condition then fails closed in the evaluator rather than with
+`INVALID_ARGUMENT`.
 
 ## Upstream evidence
 
@@ -158,6 +168,46 @@ Credentials HTTP JSON, and generated shared IAM policy gRPC clients in both mode
 The compatibility workflow runs it against its isolated enforcing native server.
 Local evidence does not establish production IAM condition or Organization Policy
 compatibility.
+
+### IAM custom-role evidence
+
+- [IAM admin proto](https://github.com/googleapis/googleapis/blob/master/google/iam/admin/v1/iam.proto)
+  `Role`, `RoleView`, `Role.RoleLaunchStage`, and the create, get, list, update, delete, and
+  undelete request messages and HTTP bindings, and the
+  [IAM v1 discovery document](https://iam.googleapis.com/$discovery/rest?version=v1).
+- Method permissions on [projects.roles](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.roles)
+  and [organizations.roles](https://docs.cloud.google.com/iam/docs/reference/rest/v1/organizations.roles),
+  and the role slices in [IAM roles and permissions](https://docs.cloud.google.com/iam/docs/roles-permissions/iam).
+- [Understanding custom roles](https://docs.cloud.google.com/iam/docs/understanding-custom-roles) and
+  [creating custom roles](https://docs.cloud.google.com/iam/docs/creating-custom-roles) for scope,
+  limits, disabled and deleted behavior, and role ID reuse.
+- [IAM REST Java SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-iam/v1/2.0.0/com/google/api/services/iam/v1/Iam.java)
+  `Projects.Roles` and `Organizations.Roles` request builders.
+
+`IamRoleAuthorizationServiceTest` inventories the role handlers and permission targets.
+`IamCustomRoleEnforceIntegrationTest` and `IamCustomRoleDisabledIntegrationTest` share one
+contract covering management denials without mutation, conditions, Pub/Sub REST and gRPC
+grants, filtered `testIamPermissions`, cross-project and cross-organization bindings, and
+revocation. `IamCustomRoleIamEnforcementTest` repeats the management, Pub/Sub grant, filtering,
+boundary, and revocation paths with the official IAM, Resource Manager, and Pub/Sub
+REST clients and the generated Pub/Sub gRPC client. It also covers resource-name
+conditions on project and organization role management and on custom-role grants over
+Pub/Sub REST and gRPC, including unchanged resources after denied mutations and the
+same requests with enforcement disabled.
+
+The following were checked against live GCP (IAM v1 REST, one organization and one
+project under a folder): basic-role
+`iam.roles.*` membership from `gcloud iam roles describe`; error codes and messages for
+duplicate IDs, reused deleted IDs, stale etags, deleted-role updates and deletes,
+undeleting an active role, invalid role IDs, titles, descriptions, stages, views, update
+masks, role names, page sizes, permission counts, and wrongly typed fields; malformed and
+non-string etags; byte-based length limits; error precedence for stale etags on deleted
+roles; unmasked patch replacement; per-method permissions and targets for a caller holding
+`roles/iam.roleViewer`; exact custom-role grants and `testIamPermissions` filtering on a
+Pub/Sub topic; revocation timing; organization-role management permissions and targets
+with and without `roles/iam.organizationRoleViewer`; and policy-write rejection of
+another project's role and of new grants to deleted roles. GCP also allowed an
+organization role in a project under a folder, which Floci does not model.
 
 The IAM v1 Java REST client sends an empty form content type for bodyless policy
 reads and deletes. The matching IAM REST handlers accept that empty-body path as

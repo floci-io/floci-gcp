@@ -45,7 +45,6 @@ public class ContainerLifecycleManager {
 
     private final DockerClientProducer dockerClients;
     private final ContainerDetector containerDetector;
-    private final PortAllocator portAllocator;
     private final ImageCacheService imageCacheService;
     private final EmulatorConfig config;
     private final ExecutorService dockerApiExecutor = Executors.newCachedThreadPool(r -> {
@@ -57,12 +56,10 @@ public class ContainerLifecycleManager {
     @Inject
     public ContainerLifecycleManager(DockerClientProducer dockerClients,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator,
                                      ImageCacheService imageCacheService,
                                      EmulatorConfig config) {
         this.dockerClients = dockerClients;
         this.containerDetector = containerDetector;
-        this.portAllocator = portAllocator;
         this.imageCacheService = imageCacheService;
         this.config = config;
     }
@@ -478,12 +475,15 @@ public class ContainerLifecycleManager {
             for (Map.Entry<Integer, Integer> entry : spec.portBindings().entrySet()) {
                 int containerPort = entry.getKey();
                 int hostPort = entry.getValue();
+                boolean loopback = spec.loopbackPorts().contains(containerPort);
+                Ports.Binding binding;
                 if (hostPort == 0) {
-                    hostPort = portAllocator.allocateAny();
+                    // Docker picks a free host port as it binds; the port is read back after start.
+                    binding = loopback ? Ports.Binding.bindIp("127.0.0.1") : Ports.Binding.empty();
+                } else {
+                    binding = loopback ? Ports.Binding.bindIpAndPort("127.0.0.1", hostPort) : Ports.Binding.bindPort(hostPort);
                 }
-                ports.bind(ExposedPort.tcp(containerPort), spec.loopbackPorts().contains(containerPort)
-                        ? Ports.Binding.bindIpAndPort("127.0.0.1", hostPort)
-                        : Ports.Binding.bindPort(hostPort));
+                ports.bind(ExposedPort.tcp(containerPort), binding);
             }
             hostConfig.withPortBindings(ports);
         }

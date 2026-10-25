@@ -41,8 +41,6 @@ class ContainerLifecycleManagerResourceLimitsTest {
     @Mock
     ContainerDetector containerDetector;
 
-    @Mock
-    PortAllocator portAllocator;
 
     @Mock
     ImageCacheService imageCacheService;
@@ -135,7 +133,7 @@ class ContainerLifecycleManagerResourceLimitsTest {
     private ContainerLifecycleManager manager() {
         when(dockerClients.client()).thenReturn(dockerClient);
         when(dockerClients.apiTimeout()).thenReturn(Duration.ofSeconds(5));
-        return new ContainerLifecycleManager(dockerClients, containerDetector, portAllocator, imageCacheService, config);
+        return new ContainerLifecycleManager(dockerClients, containerDetector, imageCacheService, config);
     }
 
     private void stubHostCpus(int ncpu) {

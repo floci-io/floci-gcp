@@ -30,7 +30,7 @@ import static org.mockito.Mockito.when;
 /**
  * Host port bindings as {@link ContainerLifecycleManager#create} hands them to Docker: ports listed
  * in {@code loopbackPorts} are published on {@code 127.0.0.1} only, every other port on all host
- * interfaces as before.
+ * interfaces; a dynamic port leaves the host port for Docker to pick, a fixed one is sent as is.
  */
 @ExtendWith(MockitoExtension.class)
 class ContainerLifecycleManagerPortBindingTest {
@@ -44,8 +44,6 @@ class ContainerLifecycleManagerPortBindingTest {
     @Mock
     ContainerDetector containerDetector;
 
-    @Mock
-    PortAllocator portAllocator;
 
     @Mock
     ImageCacheService imageCacheService;
@@ -65,7 +63,6 @@ class ContainerLifecycleManagerPortBindingTest {
     @Test
     void aLoopbackPortIsPublishedOnLoopbackOnlyAndOtherPortsOnAllInterfaces() {
         CreateContainerCmd createCmd = stubCreateContainer();
-        when(portAllocator.allocateAny()).thenReturn(40001, 40002);
         ContainerSpec spec = new ContainerBuilder(config, null, null)
                 .newContainer("busybox:stable")
                 .withDynamicPort(9092)
@@ -80,10 +77,42 @@ class ContainerLifecycleManagerPortBindingTest {
         assertEquals(List.of(8083), spec.loopbackPorts());
     }
 
+    @Test
+    void aDynamicPortLeavesTheHostPortToDocker() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = new ContainerBuilder(config, null, null)
+                .newContainer("busybox:stable")
+                .withDynamicPort(9092)
+                .withLoopbackDynamicPort(8083)
+                .build();
+
+        manager().create(spec);
+
+        Map<ExposedPort, Ports.Binding[]> bindings = capturedHostConfig(createCmd).getPortBindings().getBindings();
+        assertNull(bindings.get(ExposedPort.tcp(9092))[0].getHostPortSpec());
+        assertNull(bindings.get(ExposedPort.tcp(8083))[0].getHostPortSpec());
+    }
+
+    @Test
+    void aFixedHostPortIsSentAsIs() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = new ContainerBuilder(config, null, null)
+                .newContainer("busybox:stable")
+                .withPortBinding(6443, 16443)
+                .build();
+
+        manager().create(spec);
+
+        Ports.Binding binding = capturedHostConfig(createCmd).getPortBindings().getBindings()
+                .get(ExposedPort.tcp(6443))[0];
+        assertEquals("16443", binding.getHostPortSpec());
+        assertNull(binding.getHostIp());
+    }
+
     private ContainerLifecycleManager manager() {
         when(dockerClients.client()).thenReturn(dockerClient);
         when(dockerClients.apiTimeout()).thenReturn(Duration.ofSeconds(5));
-        return new ContainerLifecycleManager(dockerClients, containerDetector, portAllocator, imageCacheService, config);
+        return new ContainerLifecycleManager(dockerClients, containerDetector, imageCacheService, config);
     }
 
     private CreateContainerCmd stubCreateContainer() {

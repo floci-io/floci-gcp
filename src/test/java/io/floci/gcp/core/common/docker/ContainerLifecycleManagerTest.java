@@ -38,8 +38,6 @@ class ContainerLifecycleManagerTest {
     @Mock
     ContainerDetector containerDetector;
 
-    @Mock
-    PortAllocator portAllocator;
 
     @Mock
     ImageCacheService imageCacheService;
@@ -134,6 +132,6 @@ class ContainerLifecycleManagerTest {
     private ContainerLifecycleManager manager(Duration apiTimeout) {
         when(dockerClients.client()).thenReturn(dockerClient);
         when(dockerClients.apiTimeout()).thenReturn(apiTimeout);
-        return new ContainerLifecycleManager(dockerClients, containerDetector, portAllocator, imageCacheService, config);
+        return new ContainerLifecycleManager(dockerClients, containerDetector, imageCacheService, config);
     }
 }

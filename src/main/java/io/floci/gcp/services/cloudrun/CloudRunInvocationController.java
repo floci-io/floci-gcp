@@ -2,6 +2,11 @@ package io.floci.gcp.services.cloudrun;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudrun.model.CloudRunRuntimeInstance;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.HttpVersion;
+import io.vertx.ext.web.RoutingContext;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -20,9 +25,12 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -31,6 +39,11 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 @Path("/run/v2/projects/{project}/locations/{location}/services/{serviceId}")
 @ApplicationScoped
@@ -51,17 +64,30 @@ public class CloudRunInvocationController {
             "content-length");
 
     private final CloudRunService cloudRunService;
+    private final Supplier<RoutingContext> currentRequest;
     private final HttpClient httpClient;
+    /** Cuts off response bodies still streaming when their request timeout runs out. */
+    private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1, runnable -> {
+        Thread thread = new Thread(runnable, "cloudrun-invocation-deadline");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     @Context
     ContainerRequestContext requestContext;
 
     @Inject
-    public CloudRunInvocationController(CloudRunService cloudRunService) {
+    public CloudRunInvocationController(CloudRunService cloudRunService, CurrentVertxRequest currentRequest) {
+        this(cloudRunService, currentRequest::getCurrent);
+    }
+
+    CloudRunInvocationController(CloudRunService cloudRunService, Supplier<RoutingContext> currentRequest) {
         this.cloudRunService = cloudRunService;
+        this.currentRequest = currentRequest;
         this.httpClient = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
+        this.deadlines.setRemoveOnCancelPolicy(true);
     }
 
     @GET
@@ -191,17 +217,20 @@ public class CloudRunInvocationController {
     }
 
     /**
-     * Proxies one request to a ready Cloud Run runtime container. Shared by the Services and Instances
-     * invocation routes; {@code resourceName} only appears in error messages.
+     * Proxies one request to a ready Cloud Run runtime container and streams the response back as the runtime
+     * writes it. Shared by the Services and Instances invocation routes; {@code resourceName} only appears in
+     * error messages. The request timeout bounds the whole request: headers not received in time fail with 504,
+     * and a body still streaming at the deadline is cut off.
      */
     Response forward(String method, String resourceName, CloudRunRuntimeInstance instance, String pathAndQuery,
                      byte[] body, HttpHeaders headers, UriInfo uriInfo) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(instance.requestTimeoutMillis());
         String target = instance.endpointUri(pathAndQuery);
         HttpRequest request = buildRequest(method, target, body, headers, uriInfo, instance.requestTimeoutMillis(),
                 instance.ingressH2c());
         try {
-            HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-            return toResponse(response);
+            HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            return toResponse(response, currentRequest.get(), deadlineNanos, resourceName);
         } catch (HttpTimeoutException e) {
             throw GcpException.deadlineExceeded("Cloud Run runtime request timed out: " + resourceName);
         } catch (IOException e) {
@@ -233,15 +262,82 @@ public class CloudRunInvocationController {
         return builder.build();
     }
 
-    private Response toResponse(HttpResponse<byte[]> upstream) {
+    private Response toResponse(HttpResponse<InputStream> upstream, RoutingContext caller, long deadlineNanos,
+                                String resourceName) {
+        StreamingOutput body = output -> copyUntilDeadline(upstream.body(), output, caller, deadlineNanos,
+                resourceName);
         Response.ResponseBuilder builder = Response.status(upstream.statusCode())
-                .entity(upstream.body());
+                .entity(body);
         upstream.headers().map().forEach((name, values) -> {
             if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
                 values.forEach(value -> builder.header(name, value));
             }
         });
         return builder.build();
+    }
+
+    /**
+     * Copies the runtime's response as it arrives, flushing each chunk so streamed responses (server-sent events,
+     * NDJSON) reach the caller as they are written. Like Cloud Run, which closes the connection of a request that
+     * outlives its timeout, a body still open at the deadline is cut off (see {@link #abort}). A caller that
+     * disconnects closes the upstream stream straight away, even while the runtime is idle between events.
+     */
+    private void copyUntilDeadline(InputStream input, OutputStream output, RoutingContext caller, long deadlineNanos,
+                                   String resourceName) throws IOException {
+        AtomicBoolean expired = new AtomicBoolean();
+        caller.addEndHandler(ended -> closeQuietly(input));
+        ScheduledFuture<?> cutoff = deadlines.schedule(() -> {
+            expired.set(true);
+            abort(caller, input);
+        }, Math.max(0, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS);
+        try (input) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+                output.flush();
+            }
+        } catch (IOException e) {
+            if (expired.get()) {
+                throw new IOException("Cloud Run runtime request timed out: " + resourceName, e);
+            }
+            throw e;
+        } finally {
+            cutoff.cancel(false);
+        }
+        // Closing the stream from the deadline task can end the read with -1 instead of an exception.
+        if (expired.get()) {
+            throw new IOException("Cloud Run runtime request timed out: " + resourceName);
+        }
+    }
+
+    /**
+     * Aborts the caller's response so it reads as incomplete rather than ended: an HTTP/2 stream is reset, an
+     * HTTP/1.x connection is closed. This also releases a write blocked on a caller that stopped reading. The
+     * upstream stream is closed only after the HTTP/1.x connection is, because the failing copy makes the server end
+     * the response, and that end must not reach the caller first.
+     */
+    private static void abort(RoutingContext caller, InputStream input) {
+        HttpServerRequest request = caller.request();
+        if (request.version() == HttpVersion.HTTP_2) {
+            caller.response().reset();
+            closeQuietly(input);
+        } else {
+            request.connection().close().onComplete(closed -> closeQuietly(input));
+        }
+    }
+
+    private static void closeQuietly(InputStream input) {
+        try {
+            input.close();
+        } catch (IOException ignored) {
+            // The copy loop reports the timeout.
+        }
+    }
+
+    @PreDestroy
+    void shutdown() {
+        deadlines.shutdownNow();
     }
 
     private static HttpRequest.BodyPublisher requestBody(byte[] body) {

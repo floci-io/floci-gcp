@@ -7,6 +7,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.HttpMethod;
 import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -15,6 +16,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.ext.Provider;
 
 import java.net.URI;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
@@ -48,6 +50,8 @@ import java.util.regex.Pattern;
 public class ServiceRoutingFilter implements ContainerRequestFilter {
 
     private static final Pattern VERSIONED_PATH = Pattern.compile("^/v\\d+[a-z0-9]*/");
+    private static final String METHOD_OVERRIDE_HEADER = "X-HTTP-Method-Override";
+    private static final String CONTROL_PLANE_PREFIX = "/_floci";
 
     private final ServiceRegistry serviceRegistry;
 
@@ -58,19 +62,12 @@ public class ServiceRoutingFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
-        String methodOverride = ctx.getHeaderString("X-HTTP-Method-Override");
-        if (methodOverride == null || methodOverride.isBlank()) {
-            methodOverride = ctx.getUriInfo().getQueryParameters().getFirst("$method");
-        }
-        if (methodOverride != null && !methodOverride.isBlank()) {
-            ctx.setMethod(methodOverride.toUpperCase());
-        }
-
         URI original = ctx.getUriInfo().getRequestUri();
         String path = original.getRawPath();
         if (path == null) {
             return;
         }
+        applyMethodOverride(ctx, path);
 
         for (ServiceDescriptor route : serviceRegistry.getRoutableServices()) {
             String prefix = route.pathPrefix();
@@ -92,6 +89,21 @@ public class ServiceRoutingFilter implements ContainerRequestFilter {
                 mapVersion(ctx, original, route, newPath);
                 return;
             }
+        }
+    }
+
+    /**
+     * Google clients that cannot send PATCH (gax-httpjson, google-http-client on
+     * HttpURLConnection) send POST with {@code X-HTTP-Method-Override}. Only that shape is
+     * honoured, and never on the control plane, so a GET can never become a state change.
+     */
+    private static void applyMethodOverride(ContainerRequestContext ctx, String path) {
+        if (!HttpMethod.POST.equals(ctx.getMethod()) || path.startsWith(CONTROL_PLANE_PREFIX)) {
+            return;
+        }
+        String methodOverride = ctx.getHeaderString(METHOD_OVERRIDE_HEADER);
+        if (methodOverride != null && !methodOverride.isBlank()) {
+            ctx.setMethod(methodOverride.trim().toUpperCase(Locale.ROOT));
         }
     }
 

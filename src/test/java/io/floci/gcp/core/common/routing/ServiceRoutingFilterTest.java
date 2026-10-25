@@ -8,6 +8,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -123,5 +124,91 @@ class ServiceRoutingFilterTest {
         .then()
             .statusCode(200)
             .body("accounts", notNullValue());
+    }
+
+    @Test
+    void getWithMethodQueryParamDoesNotResetState() {
+        String topic = createTopic("override-query-param");
+
+        given()
+        .when()
+            .get("/_floci-gcp/state/reset?$method=POST")
+        .then()
+            .statusCode(anyOf(equalTo(404), equalTo(405)));
+
+        assertTopicExists(topic);
+    }
+
+    @Test
+    void getWithMethodOverrideHeaderDoesNotResetState() {
+        String topic = createTopic("override-header-get");
+
+        given()
+            .header("X-HTTP-Method-Override", "POST")
+        .when()
+            .get("/_floci-gcp/state/reset")
+        .then()
+            .statusCode(anyOf(equalTo(404), equalTo(405)));
+
+        assertTopicExists(topic);
+    }
+
+    @Test
+    void postWithMethodOverrideIsIgnoredOnTheControlPlane() {
+        given()
+            .header("X-HTTP-Method-Override", "GET")
+        .when()
+            .post("/_floci-gcp/health")
+        .then()
+            .statusCode(405);
+    }
+
+    @Test
+    void getWithMethodOverrideHeaderDoesNotDeleteApiResources() {
+        String topic = createTopic("override-get-delete");
+
+        given()
+            .header("X-HTTP-Method-Override", "DELETE")
+        .when()
+            .get(topic)
+        .then()
+            .statusCode(200);
+
+        assertTopicExists(topic);
+    }
+
+    @Test
+    void postWithMethodOverridePatchUpdatesApiResource() {
+        String topic = createTopic("override-post-patch");
+
+        given()
+            .header("X-HTTP-Method-Override", "PATCH")
+            .contentType("application/json")
+            .body(Map.of("topic", Map.of("labels", Map.of("env", "patched")), "updateMask", "labels"))
+        .when()
+            .post(topic)
+        .then()
+            .statusCode(200)
+            .body("labels.env", equalTo("patched"));
+    }
+
+    private static String createTopic(String name) {
+        String path = "/v1/projects/routing-override/topics/" + name;
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .put(path)
+        .then()
+            .statusCode(200);
+        return path;
+    }
+
+    private static void assertTopicExists(String path) {
+        given()
+        .when()
+            .get(path)
+        .then()
+            .statusCode(200);
     }
 }

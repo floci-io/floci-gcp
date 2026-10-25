@@ -1,5 +1,6 @@
 package io.floci.gcp.core.common;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -9,6 +10,9 @@ import java.util.Set;
  * @param apiResourceClasses extra REST resources gated only by Service Usage enforcement,
  *                           not by the {@code enabled} flag
  * @param usageAdapter service-owned project resolution and denial rendering for that enforcement
+ * @param apiVersions API versions served under {@code pathPrefix}, the one the controllers mount
+ *                    first; the routing filter rewrites the others onto it and answers any other
+ *                    version with a 404. Empty means no check.
  */
 public record ServiceDescriptor(
         String name,
@@ -23,7 +27,8 @@ public record ServiceDescriptor(
         String apiName,
         String apiTitle,
         Set<Class<?>> apiResourceClasses,
-        ServiceUsageAdapter usageAdapter
+        ServiceUsageAdapter usageAdapter,
+        List<String> apiVersions
 ) {
 
     public static Builder builder(String name) {
@@ -44,6 +49,7 @@ public record ServiceDescriptor(
         private String apiTitle;
         private Set<Class<?>> apiResourceClasses = Set.of();
         private ServiceUsageAdapter usageAdapter = ServiceUsageAdapter.GENERIC;
+        private List<String> apiVersions = List.of();
 
         private Builder(String name) {
             this.name = name;
@@ -57,6 +63,7 @@ public record ServiceDescriptor(
         public Builder resourceClasses(Class<?>... classes) { this.resourceClasses = Set.of(classes); return this; }
         public Builder hostToken(String hostToken) { this.hostToken = hostToken; return this; }
         public Builder pathPrefix(String pathPrefix) { this.pathPrefix = pathPrefix; return this; }
+        public Builder apiVersions(String... versions) { this.apiVersions = List.of(versions); return this; }
 
         public Builder api(String apiName, String apiTitle, Class<?>... extraResourceClasses) {
             this.apiName = apiName;
@@ -70,7 +77,7 @@ public record ServiceDescriptor(
         public ServiceDescriptor build() {
             return new ServiceDescriptor(name, enabled, storageKey, storageMode,
                     storageFlushIntervalMs, protocol, resourceClasses, hostToken, pathPrefix,
-                    apiName, apiTitle, apiResourceClasses, usageAdapter);
+                    apiName, apiTitle, apiResourceClasses, usageAdapter, apiVersions);
         }
     }
 }

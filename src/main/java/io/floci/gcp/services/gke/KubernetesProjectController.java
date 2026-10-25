@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gke;
 
+import io.floci.gcp.core.common.GcpException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -32,5 +33,12 @@ public class KubernetesProjectController {
             @PathParam("project") String project) {
 
         return Response.ok(gkeService.listUsableSubnetworks(project)).build();
+    }
+
+    /** {@code ListLocations} exists only in {@code v1beta1}, which the routing filter maps onto this path. */
+    @GET
+    @Path("/locations")
+    public Response listLocations(@PathParam("project") String project) {
+        throw GcpException.unimplemented("ListLocations is not implemented by the emulator");
     }
 }

@@ -33,6 +33,24 @@ everything on one port, where that path also belongs to Managed Kafka, so GKE mo
 - **Path mode (gcloud / direct):** call the `/container/v1/...` prefix directly, or set a
   custom endpoint base of `<endpoint>/container/v1/`.
 
+### API versions
+
+GKE is served under both `v1` and `v1beta1`, which declare the same HTTP bindings, so either
+mode above works with either version (`/v1beta1/...` on a `container.*` host, or
+`/container/v1beta1/...`). The `google-beta` Terraform provider and Pulumi gcp (bridged from it)
+always call `v1beta1`; point them at the same host mode endpoint
+(`container_custom_endpoint = "http://container.localhost:4588/"`).
+
+- Both versions share the same handlers and the same store: a cluster created on one is visible
+  on the other.
+- Fields that only `v1beta1` defines (for example `workloadAltsConfig`, `protectConfig`,
+  `nodeConfig.hostMaintenancePolicy`) are accepted and ignored, like any field the emulator does
+  not model. Set to a non-default value, they are named in a DEBUG log line.
+- `selfLink` always uses `/container/v1/`.
+- The v1beta1-only `ListLocations` method returns `501 UNIMPLEMENTED`.
+- Any other API version (`/v2/...` on a `container.*` host, or `/container/v2/...`) returns a
+  JSON `404 NOT_FOUND` naming the path.
+
 !!! warning "Terraform/OpenTofu must use host mode, not path mode"
     The `hashicorp/google` provider's GKE client resolves its base URL through a
     `RemoveBasePathVersion` helper that strips the *last path segment* of any custom endpoint,

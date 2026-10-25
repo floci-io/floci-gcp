@@ -120,6 +120,7 @@ public class GkeService {
                 .protocol(ServiceProtocol.REST)
                 .hostToken("container")
                 .pathPrefix("/container")
+                .apiVersions("v1", "v1beta1")
                 .resourceClasses(KubernetesController.class, KubernetesProjectController.class)
                 .api("container.googleapis.com", "Kubernetes Engine API")
                 .build());
@@ -241,6 +242,7 @@ public class GkeService {
             throw GcpException.invalidArgument(
                     "Invalid cluster name: '" + name + "'. Must match " + VALID_CLUSTER_NAME.pattern());
         }
+        logIgnoredBetaFields("cluster " + name, GkeBetaFields.setOnCluster(clusterMap));
         String key = clusterKey(project, location, name);
         if (clusterStore.get(key).isPresent()) {
             throw GcpException.alreadyExists("Already exists: cluster " + name);
@@ -643,6 +645,7 @@ public class GkeService {
                                           Map<String, Object> nodePoolMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         StoredNodePool pool = createNodePoolInternal(project, location, clusterId, nodePoolMap);
+        logIgnoredBetaFields("node pool " + pool.getName(), GkeBetaFields.setOnNodePool(nodePoolMap));
         refreshCurrentNodeVersion(project, location, clusterId, cluster);
         return operationService.createNodePoolOperation(
                 project, location, clusterId, pool.getName(), OperationType.CREATE_NODE_POOL);
@@ -1020,6 +1023,12 @@ public class GkeService {
 
     private static String nodePoolKey(String project, String location, String clusterId, String nodePoolId) {
         return clusterKey(project, location, clusterId) + "/nodePools/" + nodePoolId;
+    }
+
+    private static void logIgnoredBetaFields(String resource, List<String> fields) {
+        if (!fields.isEmpty()) {
+            LOG.debugv("Ignoring v1beta1 fields not modelled by the emulator on {0}: {1}", resource, fields);
+        }
     }
 
     private String clusterSelfLink(String project, String location, String name) {

@@ -6,13 +6,15 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Verifies the single-port routing of GKE ({@code container} hostToken, {@code /container} prefix):
- * host mode routes canonical {@code /v1/...} requests, path mode routes prefixed requests, and
- * neither hijacks IAM's canonical {@code /v1/projects} surface.
+ * host mode routes versioned {@code /v1/...} and {@code /v1beta1/...} requests, path mode routes
+ * prefixed requests, unserved GKE paths get a GKE 404, and neither hijacks IAM's canonical
+ * {@code /v1/projects} surface.
  */
 @QuarkusTest
 class ServiceRoutingFilterTest {
@@ -73,6 +75,43 @@ class ServiceRoutingFilterTest {
             .get(CANONICAL_CLUSTERS + "/" + name)
         .then()
             .statusCode(404);
+    }
+
+    @Test
+    void hostModeRoutesV1beta1PathToGke() {
+        given()
+            .header("Host", "container.localhost")
+        .when()
+            .get("/v1beta1/projects/test-project/locations/us-central1/clusters")
+        .then()
+            .statusCode(200)
+            .body("clusters", notNullValue());
+    }
+
+    @Test
+    void unservedVersionOnContainerHostIsAGkeNotFound() {
+        given()
+            .header("Host", "container.localhost")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/v2/projects/test-project/locations/us-central1/clusters")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("application/json"))
+            .body("error.status", equalTo("NOT_FOUND"))
+            .body("error.message", containsString("/container/v2/projects/test-project"));
+    }
+
+    @Test
+    void unservedPrefixedPathIsAGkeNotFound() {
+        given()
+        .when()
+            .get("/container/v1beta2/projects/test-project/locations/us-central1/clusters")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("application/json"))
+            .body("error.status", equalTo("NOT_FOUND"));
     }
 
     @Test

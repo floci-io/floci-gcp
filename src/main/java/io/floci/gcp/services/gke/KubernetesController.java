@@ -24,9 +24,12 @@ import java.util.Map;
  * prefix to avoid colliding with the canonical {@code /v1/projects} path owned by other
  * services. The {@code ServiceRoutingFilter} rewrites canonical SDK/CLI requests
  * (Host {@code container.*}) to this prefix; Terraform/gcloud reach it directly via a
- * {@code /container/v1/} custom endpoint.
+ * {@code /container/v1/} (or {@code /container/v1beta1/}) custom endpoint.
  *
  * <p>Shapes mirror {@code google.container.v1.Cluster} / {@code NodePool} / {@code Operation}.
+ * {@code v1beta1} declares the same HTTP bindings; the routing filter rewrites it onto these
+ * handlers, and its beta-only fields are accepted and ignored, like any field this emulator does
+ * not model.
  * Path params that precede a GCP "custom method" colon suffix (e.g. {@code :setNetworkPolicy})
  * are regex-constrained to exclude {@code :} so JAX-RS does not swallow the suffix into the
  * param value — the same pattern GCS/Cloud Run/Datastore already use here for wildcard segments.

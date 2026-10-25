@@ -18,7 +18,7 @@ floci-gcp serves its emulated GCP APIs on a single port (`4588`) using real GCP 
 | [IAM Credentials](iam-credentials.md) | REST JSON | `/v1/projects/-/serviceAccounts/{sa}:generateAccessToken`, `:signBlob`, `:signJwt` |
 | [Security Token Service (STS)](sts.md) | REST JSON | `/v1/token` |
 | [Managed Kafka](managed-kafka.md) | REST JSON | `/v1/projects/{project}/locations/{location}/clusters` |
-| [GKE (Kubernetes Engine)](gke.md) | REST JSON | `container.*` host or `/container/v1/projects/{project}/locations/{location}/clusters` |
+| [GKE (Kubernetes Engine)](gke.md) | REST JSON | `container.*` host or `/container/{v1,v1beta1}/projects/{project}/locations/{location}/clusters` |
 | [Cloud SQL (PostgreSQL, MySQL)](cloud-sql-postgres.md) | REST JSON | `/v1/projects/{project}/instances` |
 | [Cloud Run](cloud-run.md) | REST JSON | `/v2/projects/{project}/locations/{location}/{services,jobs,workerPools,instances}` |
 | [Cloud Functions](cloud-functions.md) | REST JSON | `/v2/projects/{project}/locations/{location}/functions` |

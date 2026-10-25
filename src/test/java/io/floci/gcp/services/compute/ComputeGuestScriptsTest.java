@@ -9,12 +9,15 @@ import org.junit.jupiter.api.Test;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -256,5 +259,34 @@ class ComputeGuestScriptsTest {
     private List<String> messages() {
         return port.read(0).contents().lines()
                 .map(line -> line.substring(line.indexOf("google_metadata_script_runner[1]: ") + 34)).toList();
+    }
+
+    @Test
+    void theAccountsScriptParsesAndHandsEachUserExactlyItsKeys() throws Exception {
+        Map<String, List<String>> users = new LinkedHashMap<>();
+        users.put("alice", List.of("ssh-ed25519 AAAAC3Nz alice@host", "ssh-rsa AAAAB3Nz it's mine"));
+        users.put("carol", List.of("ssh-ed25519 AAAAC3Nzc carol"));
+        String script = ComputeGuestScripts.accountsScript(users, true);
+        Path file = Files.createTempFile("accounts", ".sh");
+        Files.writeString(file, script);
+        assertEquals(0, new ProcessBuilder("sh", "-n", file.toString()).start().waitFor(), "the script parses");
+
+        String userLines = script.lines().filter(line -> line.startsWith("ensure_user ")).collect(Collectors.joining("\n"));
+        Process run = new ProcessBuilder("sh", "-c", "ensure_user() { :; }; write_keys() { printf '[%s]' \"$@\"; echo; }\n"
+                + userLines).redirectErrorStream(true).start();
+        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertEquals(0, run.waitFor(), out);
+        assertEquals("""
+                Updating keys for user alice.
+                [alice][ssh-ed25519 AAAAC3Nz alice@host][ssh-rsa AAAAB3Nz it's mine]
+                Updating keys for user carol.
+                [carol][ssh-ed25519 AAAAC3Nzc carol]
+                """, out);
+        Files.delete(file);
+    }
+
+    @Test
+    void quoteMakesOneShellWordOfAnything() {
+        assertEquals("'it'\\''s'", ComputeGuestScripts.quote("it's"));
     }
 }

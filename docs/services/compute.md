@@ -145,8 +145,8 @@ Run do. The API stays the same in both modes; only these behaviours change:
 
 The container runs the boot image's Docker image with an idle init process; the
 guest scripts below and anything you start with `docker exec -it <container> bash`
-run inside it, and the [metadata server](#metadata-server) is available to it. SSH
-comes in a later release. The
+run inside it, and the [metadata server](#metadata-server) is available to it, as
+is [SSH](#ssh-and-published-ports). The
 container is named `floci-gcp-compute-<project>-<zone>-<instance>` and carries
 the [resource identity labels](../configuration/docker-compose.md#resource-identity-labels)
 with `io.floci.service=compute`. With `FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS`
@@ -191,6 +191,49 @@ script still running after `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT`
 `shutdown-script` and `shutdown-script-url` run on stop and delete while the
 instance is `STOPPING`, for up to `FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT`
 (90 seconds). Reset is a hard reset and runs none.
+
+### SSH and published ports
+
+A new instance container publishes port 22 and every TCP port an enabled ingress
+firewall rule on the instance's network allows (a rule with `targetTags` only
+when the instance has one of those tags), each on a host port Docker picks, up to
+64 ports. The ports are reported in the log and on serial port 1:
+
+```text
+2026-10-25T05:01:18.361Z vm floci-gcp[1]: Published ports: 22/tcp -> localhost:32770, 8080/tcp -> localhost:32771
+```
+
+`docker port <container> 22` gives the same answer. Ports are chosen when the
+container is created (insert, or the first start after `setMachineType`); a
+firewall rule added later applies from then on. Source ranges, deny rules and
+priorities are not enforced: a published port is reachable from the Docker host.
+`networkIP` and `natIP` keep their Compute Engine values.
+
+On every boot the instance applies `ssh-keys` as the Linux guest agent does:
+
+- Instance keys, then project keys from `setCommonInstanceMetadata`, unless the
+  instance sets `block-project-ssh-keys` to true or still uses the legacy `sshKeys`
+  key. Lines are `USERNAME:KEY`, optionally ending in
+  `google-ssh {"userName":"USERNAME","expireOn":"TIME"}`; expired and malformed
+  lines are skipped.
+- Each user is created with a home directory and no password, joins the agent's
+  groups that exist in the image (`adm`, `dip`, `docker`, `lxd`, `plugdev`,
+  `video`) and `google-sudoers`, which may `sudo` without a password. Its keys go
+  into `~/.ssh/authorized_keys` after a `# Added by Google` line each; lines the
+  user added stay.
+- A user whose keys leave metadata keeps its account but loses those keys and
+  `google-sudoers`.
+- With `enable-oslogin` true (the instance value overriding the project's),
+  accounts are left alone.
+
+`setMetadata` and `setCommonInstanceMetadata` apply the keys again on running
+instances at once. If the image has no sshd, the first boot installs
+`openssh-server` with its package manager (`apt-get`, `apk`, `dnf`, `microdnf` or
+`yum`), which needs network access from the container; then sshd is started. The
+agent's progress goes to serial port 1 as `google_guest_agent` lines. Connect with
+`ssh -p <host port> USERNAME@localhost`. OS Login, `gcloud compute ssh` key
+pushing through OS Login, and SSH host keys in guest attributes are not
+emulated.
 
 ### Container VMs
 

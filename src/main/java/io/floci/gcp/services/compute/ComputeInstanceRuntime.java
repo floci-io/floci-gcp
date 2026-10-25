@@ -25,6 +25,7 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -47,6 +49,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 
 /**
  * Runs Compute instances as Docker containers when {@code floci-gcp.services.compute.mock} is false.
@@ -77,15 +80,26 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     /** Docker calls one start can make under {@code startLock}: create, start, network connect, remove on failure. */
     private static final int DOCKER_CALLS_PER_START = 4;
 
-    public enum Kind { LAUNCH, START, STOP, RESTART, REMOVE }
+    /** METADATA re-applies the guest's SSH keys after a metadata change, as the guest agent does on its own. */
+    public enum Kind { LAUNCH, START, STOP, RESTART, REMOVE, METADATA }
 
     /**
      * One Docker step for one instance. {@code image}, {@code cpus} and {@code memoryMb} matter for LAUNCH and START.
      * {@code metadata} is the guest's effective metadata when the step was recorded: project keys overridden by
      * instance keys. It supplies the startup scripts of a boot and the shutdown scripts of a stop or delete.
+     * {@code sshKeys} are the {@code user:key} lines the guest agent installs (null while OS Login is on, so accounts
+     * are left alone), and {@code ports} the container TCP ports a new container publishes on Docker-assigned host
+     * ports.
      */
     public record Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb,
-                         Map<String, String> metadata) {}
+                         Map<String, String> metadata, List<String> sshKeys, List<Integer> ports) {
+
+        /** Leaves accounts as they are and publishes no ports, as a boot after an emulator restart does. */
+        public Intent(Kind kind, String project, String zone, String name, String image, int cpus, int memoryMb,
+                      Map<String, String> metadata) {
+            this(kind, project, zone, name, image, cpus, memoryMb, metadata, null, List.of());
+        }
+    }
 
     /** Progress of one operation's intents. PROVISIONING covers the image pull, STAGING the container create and start. */
     public enum Phase { PROVISIONING, STAGING, DONE }
@@ -274,6 +288,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
                     boot(intent, container.getId());
                 }
             });
+            case METADATA -> ownedContainer(name).filter(container -> "running".equals(container.getState()))
+                    .ifPresent(container -> applyAccounts(intent, container.getId(), false));
             case REMOVE -> {
                 endBoot(intent);
                 ownedContainer(name).ifPresent(container -> {
@@ -352,11 +368,59 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             return latest != null && latest.get() == boot;
         };
         String mark = bootMark(containerId);
+        reportPorts(intent, containerId, port);
+        // Apart from the scripts, as the guest agent runs beside the script runner: a slow sshd install holds back neither.
+        applyAccounts(intent, containerId, true);
         scriptExecutor.execute(() -> {
             scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
                     config.services().compute().startupScriptTimeout(), port, current, mark);
             startWorkload(intent, containerId, port, current);
         });
+    }
+
+    /** Applies the intent's SSH keys in the background, installing sshd first at a boot. */
+    private void applyAccounts(Intent intent, String containerId, boolean installSshd) {
+        Map<String, List<String>> users = intent.sshKeys() == null ? null
+                : ComputeSshKeys.users(intent.sshKeys(), Instant.now());
+        ComputeSerialPort port = serialPort(intent.project(), intent.zone(), intent.name());
+        try {
+            scriptExecutor.execute(() -> scripts.accounts(intent.name(), containerId, users, installSshd, port));
+        } catch (RejectedExecutionException e) {
+            LOG.debugv("SSH keys of Compute instance {0} not applied: the emulator is shutting down", intent.name());
+        }
+    }
+
+    /** Logs and writes to serial port 1 the host port Docker gave each published container port. */
+    private void reportPorts(Intent intent, String containerId, ComputeSerialPort port) {
+        Map<Integer, Integer> published = publishedPorts(containerId);
+        if (published.isEmpty()) { return; }
+        String list = published.entrySet().stream()
+                .map(entry -> entry.getKey() + "/tcp -> localhost:" + entry.getValue())
+                .collect(Collectors.joining(", "));
+        LOG.infof("Compute instance %s/%s/%s ports: %s", intent.project(), intent.zone(), intent.name(), list);
+        port.write(ComputeGuestScripts.line(intent.name(), "floci-gcp", "Published ports: " + list));
+    }
+
+    /** Container TCP port to the host port Docker bound it to, for the instance's running container. */
+    Map<Integer, Integer> publishedPorts(String containerId) {
+        Map<Integer, Integer> published = new TreeMap<>();
+        try {
+            InspectContainerResponse inspect = lifecycleManager.runDockerApi("inspect Compute instance " + containerId,
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec());
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getPorts() == null) { return published; }
+            inspect.getNetworkSettings().getPorts().getBindings().forEach((exposed, bindings) -> {
+                if (bindings == null || bindings.length == 0 || bindings[0].getHostPortSpec() == null) { return; }
+                try {
+                    published.put(exposed.getPort(), Integer.parseInt(bindings[0].getHostPortSpec()));
+                } catch (NumberFormatException ignored) {
+                    LOG.debugv("Unreadable host port {0} on container {1}", bindings[0].getHostPortSpec(), containerId);
+                }
+            });
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the published ports of Compute instance container {0}: {1}", containerId,
+                    e.getMessage());
+        }
+        return published;
     }
 
     /**
@@ -600,6 +664,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
             if (intent.cpus() > 0) { builder.withNanoCpus(intent.cpus() * 1_000_000_000L); }
             if (intent.memoryMb() > 0) { builder.withMemoryMb(intent.memoryMb()); }
         }
+        for (int port : intent.ports()) { builder.withDynamicPort(port); }
         return builder.build();
     }
 

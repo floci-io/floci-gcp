@@ -4,7 +4,9 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.MountType;
+import com.github.dockerjava.api.model.Ports;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
@@ -835,6 +837,47 @@ class ComputeInstanceRuntimeTest {
         Map<String, String> metadata = new HashMap<>(METADATA);
         metadata.put("gce-container-declaration", DECLARATION);
         return new Intent(kind, "p", "us-central1-a", "vm", "debian:12", 2, 8192, metadata);
+    }
+
+    @Test
+    void aBootPublishesTheIntentPortsReportsThemAndAppliesTheSshKeys() {
+        Intent launch = new Intent(Kind.LAUNCH, "p", "us-central1-a", "vm", "debian:12", 2, 8192, METADATA,
+                List.of("alice:ssh-ed25519 AAAAC3Nz alice"), List.of(22, 80));
+        Ports bindings = new Ports();
+        bindings.bind(ExposedPort.tcp(22), Ports.Binding.bindPort(32768));
+        bindings.bind(ExposedPort.tcp(80), Ports.Binding.bindPort(32769));
+        when(docker.inspectContainerCmd("new-id").exec().getNetworkSettings().getPorts()).thenReturn(bindings);
+
+        runtime.submit("launch", List.of(launch));
+
+        verify(builder).withDynamicPort(22);
+        verify(builder).withDynamicPort(80);
+        verify(scripts).accounts(eq("vm"), eq("new-id"), eq(Map.of("alice", List.of("ssh-ed25519 AAAAC3Nz alice"))),
+                eq(true), any());
+        assertTrue(runtime.serialOutput("p", "us-central1-a", "vm", 1, 0).contents()
+                .contains("floci-gcp[1]: Published ports: 22/tcp -> localhost:32768, 80/tcp -> localhost:32769"));
+    }
+
+    @Test
+    void aMetadataChangeReappliesKeysInTheRunningContainerWithoutInstalling() {
+        Container running = container("c-1", "running", Map.of());
+        when(lifecycleManager.findByName(CONTAINER)).thenReturn(Optional.of(running));
+
+        runtime.submit("metadata", List.of(new Intent(Kind.METADATA, "p", "us-central1-a", "vm", null, 0, 0, METADATA,
+                List.of(), List.of())));
+
+        verify(scripts).accounts(eq("vm"), eq("c-1"), eq(Map.of()), eq(false), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void aBootAfterAnEmulatorRestartStartsSshdButLeavesAccountsAlone() {
+        Container stopped = container("vm-c", "exited", identity("vm", "4588"));
+        when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(stopped));
+
+        runtime.reconcile((project, zone, name) -> "RUNNING");
+
+        verify(scripts).accounts(eq("vm"), eq("vm-c"), isNull(), eq(true), any());
     }
 
     private static Map<String, String> identity(String name, String owner) {

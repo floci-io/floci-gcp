@@ -376,6 +376,104 @@ class ComputeGuestScriptsTest {
     }
 
     @Test
+    void theCloudInitScriptRunsTheStagesInOrderAndExitsWithTheCloudInitStatus() throws Exception {
+        Path dir = Files.createTempDirectory("cloud-init");
+        Path bin = Files.createDirectories(dir.resolve("bin"));
+        Path fake = bin.resolve("cloud-init");
+        Files.writeString(fake, "#!/bin/sh\necho \"[$*]\"\n[ \"$1\" = status ] && exit 2\nexit 0\n");
+        fake.toFile().setExecutable(true);
+        Path sem = Files.createDirectories(dir.resolve("lib/instances/7/sem"));
+        for (String name : List.of("config_runcmd", "config_write_files", "config_ssh")) {
+            Files.writeString(sem.resolve(name), "");
+        }
+
+        String out = runCloudInitScript(dir, true);
+
+        assertEquals("""
+                [init --local]
+                [init]
+                [modules --mode=config]
+                [modules --mode=final]
+                [status]
+                exit 2
+                """, out);
+        assertTrue(Files.readString(dir.resolve("etc/cloud.cfg.d/90_floci.cfg")).contains("datasource_list: [NoCloud, None]"));
+        try (var files = Files.list(sem)) {
+            assertEquals(List.of(sem.resolve("config_ssh")), files.toList(),
+                    "write_files and runcmd rerun on every boot; other modules still run once");
+        }
+    }
+
+    @Test
+    void onAPerInstanceImageCloudInitKeepsItsOncePerInstanceRecord() throws Exception {
+        Path dir = Files.createTempDirectory("cloud-init");
+        Path bin = Files.createDirectories(dir.resolve("bin"));
+        Files.writeString(bin.resolve("cloud-init"), "#!/bin/sh\nexit 0\n");
+        bin.resolve("cloud-init").toFile().setExecutable(true);
+        Path runcmd = Files.createDirectories(dir.resolve("lib/instances/7/sem")).resolve("config_runcmd");
+        Files.writeString(runcmd, "");
+
+        assertEquals("exit 0\n", runCloudInitScript(dir, false));
+        assertTrue(Files.exists(runcmd));
+    }
+
+    /** Runs the cloud-init script against {@code dir} instead of /etc/cloud and /var/lib/cloud, with dir/bin first on PATH. */
+    private static String runCloudInitScript(Path dir, boolean everyBoot) throws Exception {
+        String script = ComputeGuestScripts.cloudInitScript(everyBoot)
+                .replace("/etc/cloud", dir.resolve("etc").toString())
+                .replace("/var/lib/cloud", dir.resolve("lib").toString());
+        Path file = dir.resolve("run.sh");
+        Files.writeString(file, script);
+        ProcessBuilder builder = new ProcessBuilder("sh", "-c", "sh \"$0\"; echo \"exit $?\"", file.toString())
+                .redirectErrorStream(true);
+        builder.environment().put("PATH", dir.resolve("bin") + ":" + System.getenv("PATH"));
+        Process run = builder.start();
+        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertEquals(0, run.waitFor(), out);
+        return out;
+    }
+
+    @Test
+    void cloudInitRunsItsScriptUnderTheBootGuardAndReportsAFailedStatus() {
+        ComputeGuestScripts.CloudInit seed = new ComputeGuestScripts.CloudInit("7", "vm", "#cloud-config\n", null, false);
+        when(lifecycleManager.execStreaming(eq("c-1"), eq("root"), anyList(), eq(List.of("/bin/sh", "-c",
+                ComputeGuestScripts.BOOT_GUARD, "/var/lib/google/floci-cloud-init.sh", "4242")), any(), any(), any()))
+                .thenAnswer(inv -> print(inv.getArgument(5), "status: error\n", 1));
+
+        scripts.cloudInit("vm", "c-1", seed, TIMEOUT, port, () -> true, "4242");
+
+        assertEquals(List.of("status: error", "cloud-init exit status 1"), unitMessages(ComputeGuestScripts.CLOUD_INIT));
+    }
+
+    @Test
+    void invalidBase64UserDataIsReportedAndCloudInitDoesNotRun() {
+        ComputeGuestScripts.CloudInit seed = new ComputeGuestScripts.CloudInit("7", "vm", "Q", "base64", false);
+
+        scripts.cloudInit("vm", "c-1", seed, TIMEOUT, port, () -> true, "4242");
+
+        assertTrue(unitMessages(ComputeGuestScripts.CLOUD_INIT).getFirst().startsWith("Could not decode base64 user-data"),
+                port.read(0).contents());
+        verify(lifecycleManager, never()).execStreaming(any(), any(), anyList(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void userDataIsDecodedOnlyWhenItsEncodingIsBase64AndMetaDataIsQuoted() {
+        assertEquals("#cloud-config\n", new String(ComputeGuestScripts.userData(new ComputeGuestScripts.CloudInit(
+                "7", "vm", "I2Nsb3VkLWNvbmZpZwo=", "base64", false)), StandardCharsets.UTF_8));
+        assertEquals("I2Nsb3Vk", new String(ComputeGuestScripts.userData(new ComputeGuestScripts.CloudInit(
+                "7", "vm", "I2Nsb3Vk", "gzip", false)), StandardCharsets.UTF_8));
+        assertEquals("instance-id: '7'\nlocal-hostname: 'it''s'\n",
+                ComputeGuestScripts.metaData(new ComputeGuestScripts.CloudInit("7", "it's", "", null, false)));
+    }
+
+    /** The serial lines of one unit, without their time, host and unit prefix. */
+    private List<String> unitMessages(String unit) {
+        String prefix = " " + unit + "[1]: ";
+        return port.read(0).contents().lines().filter(line -> line.contains(prefix))
+                .map(line -> line.substring(line.indexOf(prefix) + prefix.length())).toList();
+    }
+
+    @Test
     void quoteMakesOneShellWordOfAnything() {
         assertEquals("'it'\\''s'", ComputeGuestScripts.quote("it's"));
     }

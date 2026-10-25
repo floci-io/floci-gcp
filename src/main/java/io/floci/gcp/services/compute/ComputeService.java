@@ -64,6 +64,7 @@ public class ComputeService {
                 .storageKey("compute").resourceClasses(ComputeController.class, ComputeMetadataController.class)
                 .api("compute.googleapis.com", "Compute Engine API").build());
         runtime.sshKeys(this::instanceSshKeys);
+        runtime.cloudInit(this::instanceCloudInit);
         runtime.reconcile(this::instanceStatus, this::instanceGuestMetadata);
     }
     /** What the metadata server needs about one instance: copies, so callers cannot change stored state. */
@@ -96,6 +97,36 @@ public class ComputeService {
         ObjectNode instance = state.resources.get("zones/" + zone + "/instances/" + name);
         if (instance == null) { return null; }
         return ComputeSshKeys.lines(metadataValues(instance.path("metadata")), metadataValues(commonInstanceMetadata(state)));
+    }
+    /**
+     * What cloud-init needs for an instance's boot now, or null when it does not run: no such instance, a boot image
+     * that does not ship cloud-init, or no instance {@code user-data} (project user-data is never read).
+     */
+    synchronized ComputeGuestScripts.CloudInit instanceCloudInit(String project, String zone, String name) {
+        ComputeProject state = state(project);
+        ObjectNode instance = state.resources.get("zones/" + zone + "/instances/" + name);
+        if (instance == null) { return null; }
+        Map<String, String> attributes = metadataValues(instance.path("metadata"));
+        if (!attributes.containsKey("user-data")) { return null; }
+        ObjectNode image = bootImage(state, project, instance);
+        ComputeImageCatalog.CloudInit mode = image == null ? ComputeImageCatalog.CloudInit.NONE
+                : images.cloudInit(image.path("name").asText(null), image.path("family").asText(null));
+        if (mode == ComputeImageCatalog.CloudInit.NONE) { return null; }
+        return new ComputeGuestScripts.CloudInit(instance.path("id").asText(), name, attributes.get("user-data"),
+                attributes.get("user-data-encoding"), mode == ComputeImageCatalog.CloudInit.EVERY_BOOT);
+    }
+    /** The image an instance's boot disk was created from, public or the project's own; null when unknown. */
+    private static ObjectNode bootImage(ComputeProject state, String project, ObjectNode instance) {
+        for (JsonNode attachment : instance.path("disks")) {
+            if (!attachment.path("boot").asBoolean()) { continue; }
+            ObjectNode disk = state.resources.get(localPath(project, attachment.path("source").asText()));
+            String sourceImage = disk == null ? "" : disk.path("sourceImage").asText();
+            if (sourceImage.isEmpty()) { return null; }
+            return ComputePublicImages.isPublicReference(sourceImage)
+                    ? ComputePublicImages.resolve(sourceImage).orElse(null)
+                    : state.resources.get(localPath(project, sourceImage));
+        }
+        return null;
     }
     private static Map<String, String> metadataValues(JsonNode metadata) {
         Map<String, String> values = new LinkedHashMap<>();
@@ -671,19 +702,9 @@ public class ComputeService {
                     cpus, memoryMb, guestMetadata(state, instance), ports));
         }
         private String bootDockerImage(ObjectNode instance) {
-            for (JsonNode attachment : instance.path("disks")) {
-                if (!attachment.path("boot").asBoolean()) { continue; }
-                ObjectNode disk = state.resources.get(path(attachment.path("source").asText()));
-                String sourceImage = disk == null ? "" : disk.path("sourceImage").asText();
-                ObjectNode image = sourceImage.isEmpty() ? null
-                        : ComputePublicImages.isPublicReference(sourceImage)
-                                ? ComputePublicImages.resolve(sourceImage).orElse(null)
-                                : state.resources.get(path(sourceImage));
-                if (image != null) {
-                    return images.dockerImage(image.path("name").asText(null), image.path("family").asText(null));
-                }
-            }
-            return images.dockerImage(null, null);
+            ObjectNode image = bootImage(state, project, instance);
+            return image == null ? images.dockerImage(null, null)
+                    : images.dockerImage(image.path("name").asText(null), image.path("family").asText(null));
         }
         public void transition(ObjectNode resource, String initial, String terminal) {
             resource.put("status", initial);

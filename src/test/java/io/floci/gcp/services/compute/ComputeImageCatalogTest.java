@@ -1,5 +1,6 @@
 package io.floci.gcp.services.compute;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -9,6 +10,8 @@ import java.nio.file.Path;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -42,6 +45,26 @@ class ComputeImageCatalogTest {
 
         assertEquals("registry.local/golden:1", catalog.dockerImage("gold-v2", null));
         assertEquals("alpine:3.21", catalog.dockerImage("debian-12-bookworm", "debian-12"));
+    }
+
+    @Test
+    void ubuntuRunsCloudInitOncePerInstanceAndCosOnEveryBoot() {
+        ComputeImageCatalog catalog = new ComputeImageCatalog(config(Optional.empty()));
+
+        assertEquals(ComputeImageCatalog.CloudInit.PER_INSTANCE, catalog.cloudInit("ubuntu-2204-jammy-v20261001", null));
+        assertEquals(ComputeImageCatalog.CloudInit.EVERY_BOOT, catalog.cloudInit("cos-stable-117", "cos-stable"));
+        assertEquals(ComputeImageCatalog.CloudInit.NONE, catalog.cloudInit("debian-12-bookworm", "debian-12"));
+        assertEquals(ComputeImageCatalog.CloudInit.NONE, catalog.cloudInit("windows-2022", null));
+    }
+
+    @Test
+    void aCatalogEntryWithAnUnknownCloudInitModeIsRejected() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> ComputeImageCatalog.parse(
+                new ObjectMapper().readTree("""
+                        {"images": [{"family": "golden", "dockerImage": "golden:1", "cloudInit": "sometimes"}]}
+                        """)));
+
+        assertTrue(error.getMessage().contains("per-instance or every-boot"), error.getMessage());
     }
 
     @Test

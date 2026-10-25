@@ -18,14 +18,22 @@ import java.util.Optional;
 /**
  * Maps a Compute image to the Docker image an instance container runs. An entry matches an image whose
  * {@code family} equals its family, or whose name starts with one of its prefixes; an unmatched image runs
- * {@code floci-gcp.services.compute.default-image}. {@code image-catalog-path} replaces the bundled catalog.
+ * {@code floci-gcp.services.compute.default-image}. An entry's optional {@code cloudInit} ({@code per-instance} or
+ * {@code every-boot}) marks images that run cloud-init with the instance's {@code user-data}.
+ * {@code image-catalog-path} replaces the bundled catalog.
  */
 @ApplicationScoped
 public class ComputeImageCatalog {
     private static final Logger LOG = Logger.getLogger(ComputeImageCatalog.class);
     private static final String BUNDLED = "compute/image-catalog.json";
 
-    record Entry(String family, List<String> prefixes, String dockerImage) {}
+    /**
+     * Whether an image runs cloud-init at boot, as the public images that ship it do: once per instance for its
+     * per-instance modules, or with write_files and runcmd on every boot as on Container-Optimized OS.
+     */
+    public enum CloudInit { NONE, PER_INSTANCE, EVERY_BOOT }
+
+    record Entry(String family, List<String> prefixes, String dockerImage, CloudInit cloudInit) {}
 
     private final EmulatorConfig config;
     private volatile List<Entry> entries;
@@ -37,19 +45,30 @@ public class ComputeImageCatalog {
 
     /** The Docker image for an image resource with this name and family; either may be null. */
     public String dockerImage(String imageName, String family) {
+        Optional<Entry> entry = match(imageName, family);
+        if (entry.isPresent()) { return entry.get().dockerImage(); }
+        String fallback = config.services().compute().defaultImage();
+        LOG.warnf("No Docker image mapped for Compute image name=%s family=%s; using %s", imageName, family, fallback);
+        return fallback;
+    }
+
+    /** Whether an image with this name and family runs cloud-init; an unmapped image does not. */
+    public CloudInit cloudInit(String imageName, String family) {
+        return match(imageName, family).map(Entry::cloudInit).orElse(CloudInit.NONE);
+    }
+
+    private Optional<Entry> match(String imageName, String family) {
         for (Entry entry : entries()) {
-            if (family != null && family.equals(entry.family())) { return entry.dockerImage(); }
+            if (family != null && family.equals(entry.family())) { return Optional.of(entry); }
         }
         if (imageName != null) {
             for (Entry entry : entries()) {
                 for (String prefix : entry.prefixes()) {
-                    if (imageName.startsWith(prefix)) { return entry.dockerImage(); }
+                    if (imageName.startsWith(prefix)) { return Optional.of(entry); }
                 }
             }
         }
-        String fallback = config.services().compute().defaultImage();
-        LOG.warnf("No Docker image mapped for Compute image name=%s family=%s; using %s", imageName, family, fallback);
-        return fallback;
+        return Optional.empty();
     }
 
     private List<Entry> entries() {
@@ -90,7 +109,15 @@ public class ComputeImageCatalog {
             if (dockerImage == null || dockerImage.isBlank()) {
                 throw new IllegalArgumentException("Image catalog entry without dockerImage: " + image);
             }
-            result.add(new Entry(family, List.copyOf(prefixes), dockerImage));
+            String cloudInit = image.path("cloudInit").asText("");
+            CloudInit mode = switch (cloudInit) {
+                case "" -> CloudInit.NONE;
+                case "per-instance" -> CloudInit.PER_INSTANCE;
+                case "every-boot" -> CloudInit.EVERY_BOOT;
+                default -> throw new IllegalArgumentException("Image catalog entry with cloudInit other than "
+                        + "per-instance or every-boot: " + image);
+            };
+            result.add(new Entry(family, List.copyOf(prefixes), dockerImage, mode));
         }
         return List.copyOf(result);
     }

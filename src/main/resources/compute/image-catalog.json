@@ -3,13 +3,13 @@
     { "family": "debian-13", "prefixes": ["debian-13"], "dockerImage": "debian:13" },
     { "family": "debian-12", "prefixes": ["debian-12"], "dockerImage": "debian:12" },
     { "family": "debian-11", "prefixes": ["debian-11"], "dockerImage": "debian:11" },
-    { "family": "ubuntu-2404-lts-amd64", "prefixes": ["ubuntu-2404"], "dockerImage": "ubuntu:24.04" },
-    { "family": "ubuntu-2404-lts-arm64", "prefixes": [], "dockerImage": "ubuntu:24.04" },
-    { "family": "ubuntu-2204-lts", "prefixes": ["ubuntu-2204"], "dockerImage": "ubuntu:22.04" },
-    { "family": "ubuntu-2204-lts-arm64", "prefixes": [], "dockerImage": "ubuntu:22.04" },
+    { "family": "ubuntu-2404-lts-amd64", "prefixes": ["ubuntu-2404"], "dockerImage": "ubuntu:24.04", "cloudInit": "per-instance" },
+    { "family": "ubuntu-2404-lts-arm64", "prefixes": [], "dockerImage": "ubuntu:24.04", "cloudInit": "per-instance" },
+    { "family": "ubuntu-2204-lts", "prefixes": ["ubuntu-2204"], "dockerImage": "ubuntu:22.04", "cloudInit": "per-instance" },
+    { "family": "ubuntu-2204-lts-arm64", "prefixes": [], "dockerImage": "ubuntu:22.04", "cloudInit": "per-instance" },
     { "family": "rocky-linux-9", "prefixes": ["rocky-linux-9"], "dockerImage": "rockylinux:9" },
     { "family": "rocky-linux-8", "prefixes": ["rocky-linux-8"], "dockerImage": "rockylinux:8" },
     { "family": "centos-stream-9", "prefixes": ["centos-stream-9"], "dockerImage": "quay.io/centos/centos:stream9" },
-    { "family": "cos-stable", "prefixes": ["cos-stable", "cos-1"], "dockerImage": "debian:12" }
+    { "family": "cos-stable", "prefixes": ["cos-stable", "cos-1"], "dockerImage": "debian:12", "cloudInit": "every-boot" }
   ]
 }

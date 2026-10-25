@@ -552,6 +552,29 @@ class ComputeInstanceRuntimeTest {
     }
 
     @Test
+    void aBootRunsCloudInitBeforeTheStartupScriptsWhenItsImageShipsIt() {
+        ComputeGuestScripts.CloudInit seed = new ComputeGuestScripts.CloudInit("7", "vm", "#cloud-config", null, false);
+        runtime.cloudInit((project, zone, name) -> "vm".equals(name) ? seed : null);
+
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        InOrder order = inOrder(scripts);
+        order.verify(scripts).cloudInit(eq("vm"), eq("new-id"), eq(seed), eq(Duration.ofMinutes(30)), any(), any(),
+                any());
+        order.verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("new-id"), eq(METADATA),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void aBootWithoutACloudInitSeedRunsOnlyTheStartupScripts() {
+        runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
+
+        verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("new-id"), eq(METADATA), any(), any(),
+                any(), any());
+        verify(scripts, never()).cloudInit(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void aBootWithoutAContainerRunsNoScripts() {
         doThrow(new RuntimeException("pull denied")).when(imageCache).ensureImageExists("debian:12");
 

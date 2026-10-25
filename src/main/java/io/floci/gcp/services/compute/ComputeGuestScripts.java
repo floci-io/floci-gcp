@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
@@ -58,6 +59,19 @@ public class ComputeGuestScripts {
      */
     static final String BOOT_GUARD = "[ \"$(cut -d ' ' -f22 /proc/1/stat)\" = \"$1\" ] || exit " + REBOOTED
             + "; exec \"$0\"";
+
+    /** The unit cloud-init's lines carry on the serial console. */
+    static final String CLOUD_INIT = "cloud-init";
+    /** The NoCloud seed directory cloud-init reads user-data and meta-data from. */
+    static final String CLOUD_INIT_SEED = "/var/lib/cloud/seed/nocloud";
+    static final String CLOUD_INIT_SCRIPT = "floci-cloud-init.sh";
+
+    /**
+     * What cloud-init needs for one boot: the instance's id (cloud-init's instance-id), its name, its own
+     * {@code user-data} and {@code user-data-encoding} attributes (cloud-init's GCE source reads no project
+     * user-data), and whether write_files and runcmd run on every boot, as on Container-Optimized OS.
+     */
+    public record CloudInit(String instanceId, String hostname, String userData, String encoding, boolean everyBoot) {}
 
     public enum Phase {
         STARTUP("startup"), SHUTDOWN("shutdown");
@@ -201,7 +215,7 @@ public class ComputeGuestScripts {
                 sshd_bin() { for b in /usr/sbin/sshd /usr/local/sbin/sshd /sbin/sshd "$(command -v sshd 2>/dev/null)"; do [ -n "$b" ] && [ -x "$b" ] && { echo "$b"; return; }; done; }
                 if [ -z "$(sshd_bin)" ]; then
                   echo "Installing openssh-server."
-                  if has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server sudo >/dev/null 2>&1
+                  if has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq openssh-server sudo >/dev/null 2>&1
                   elif has apk; then apk add --no-cache openssh-server shadow sudo >/dev/null 2>&1
                   elif has dnf; then dnf install -y -q openssh-server sudo shadow-utils >/dev/null 2>&1
                   elif has microdnf; then microdnf install -y openssh-server sudo shadow-utils >/dev/null 2>&1
@@ -298,6 +312,115 @@ public class ComputeGuestScripts {
     /** One shell word: single quotes around the value, each embedded single quote closed, escaped and reopened. */
     static String quote(String value) {
         return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    /**
+     * Runs cloud-init with the instance's {@code user-data}, as the images that ship it do at boot. The guest gets
+     * cloud-init from its package manager the first time; the user-data and meta-data are seeded for the NoCloud data
+     * source (cloud-init's GCE source only runs on Google hardware), and the four stages run in order, their output
+     * going to serial port 1. Per-instance modules run once per instance, keyed by its id, unless
+     * {@link CloudInit#everyBoot()} reruns write_files and runcmd. A step that fails, and a nonzero cloud-init status,
+     * are reported on serial port 1.
+     */
+    void cloudInit(String instance, String containerId, CloudInit seed, Duration timeout, ComputeSerialPort port,
+                   BooleanSupplier current, String bootMark) {
+        byte[] userData;
+        try {
+            userData = userData(seed);
+        } catch (IllegalArgumentException e) {
+            port.write(line(instance, CLOUD_INIT, "Could not decode base64 user-data: " + e.getMessage()));
+            return;
+        }
+        if (!current.getAsBoolean()) { return; }
+        try {
+            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY, CLOUD_INIT_SEED),
+                    Duration.ofSeconds(30), OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, CLOUD_INIT_SEED, "user-data",
+                    userData, 0600);
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, CLOUD_INIT_SEED, "meta-data",
+                    metaData(seed).getBytes(StandardCharsets.UTF_8), 0600);
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, CLOUD_INIT_SCRIPT,
+                    cloudInitScript(seed.everyBoot()).getBytes(StandardCharsets.UTF_8), 0700);
+            if (!current.getAsBoolean()) { return; }
+            LineWriter out = new LineWriter(port, instance, CLOUD_INIT, "");
+            String path = DIRECTORY + "/" + CLOUD_INIT_SCRIPT;
+            List<String> command = bootMark == null
+                    ? List.of("/bin/sh", "-c", "\"$0\"", path)
+                    : List.of("/bin/sh", "-c", BOOT_GUARD, path, bootMark);
+            ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(), command, timeout,
+                    out, out);
+            out.close();
+            if (bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()
+                    && !bootMark.equals(currentBootMark(containerId))) {
+                port.write(line(instance, CLOUD_INIT, "cloud-init not run: the instance rebooted since this boot."));
+            } else if (result.timedOut()) {
+                port.write(line(instance, CLOUD_INIT, "cloud-init still running after " + timeout
+                        + "; no longer waiting for it."));
+            } else if (result.exitCode() != 0) {
+                port.write(line(instance, CLOUD_INIT, "cloud-init exit status " + result.exitCode()));
+            }
+        } catch (RuntimeException e) {
+            LOG.warnf("Compute instance %s could not run cloud-init: %s", instance, e.getMessage());
+            port.write(line(instance, CLOUD_INIT, "Could not run cloud-init: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * The user-data bytes: base64-decoded when {@code user-data-encoding} is {@code base64}, as cloud-init's GCE source
+     * does (other encodings are used as they are); throws IllegalArgumentException on invalid base64.
+     */
+    static byte[] userData(CloudInit seed) {
+        return "base64".equals(seed.encoding()) ? Base64.getMimeDecoder().decode(seed.userData())
+                : seed.userData().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** NoCloud meta-data: the instance id keys per-instance modules, and the name is the local hostname. */
+    static String metaData(CloudInit seed) {
+        return "instance-id: " + yamlString(seed.instanceId()) + "\nlocal-hostname: " + yamlString(seed.hostname()) + "\n";
+    }
+
+    private static String yamlString(String value) {
+        return "'" + value.replace("'", "''") + "'";
+    }
+
+    /**
+     * Installs cloud-init when missing, points it at the NoCloud seed only, leaves the container's network and hostname
+     * alone (Docker owns both), and runs the stages systemd would; exits with {@code cloud-init status}, which is 1
+     * on errors and 2 when degraded.
+     */
+    static String cloudInitScript(boolean everyBoot) {
+        return """
+                #!/bin/sh
+                has() { command -v "$1" >/dev/null 2>&1; }
+                if ! has cloud-init; then
+                  echo "Installing cloud-init."
+                  if has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends cloud-init >/dev/null 2>&1
+                  elif has dnf; then dnf install -y -q cloud-init >/dev/null 2>&1
+                  elif has microdnf; then microdnf install -y cloud-init >/dev/null 2>&1
+                  elif has yum; then yum install -y -q cloud-init >/dev/null 2>&1
+                  elif has apk; then apk add --no-cache cloud-init >/dev/null 2>&1
+                  fi
+                  has cloud-init || { echo "Could not install cloud-init: no supported package manager or no network."; exit 1; }
+                fi
+                mkdir -p /etc/cloud/cloud.cfg.d
+                cat > /etc/cloud/cloud.cfg.d/90_floci.cfg <<'EOF'
+                datasource_list: [NoCloud, None]
+                network:
+                  config: disabled
+                preserve_hostname: true
+                ssh_deletekeys: false
+                EOF
+                """ + (everyBoot ? """
+                for sem in config_write_files config_write_files_deferred config_runcmd config_scripts_user; do
+                  rm -f /var/lib/cloud/instances/*/sem/"$sem"
+                done
+                """ : "") + """
+                cloud-init init --local
+                cloud-init init
+                cloud-init modules --mode=config
+                cloud-init modules --mode=final
+                cloud-init status
+                """;
     }
 
     /**

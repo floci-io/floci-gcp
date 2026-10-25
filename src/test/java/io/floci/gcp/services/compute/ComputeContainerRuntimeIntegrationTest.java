@@ -184,6 +184,36 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         assertNull(compute.instanceSshKeys(project, "us-central1-a", "missing"));
     }
 
+    @Test void cloudInitReadsOnlyInstanceUserDataAndOnlyOnImagesThatShipIt() throws Exception {
+        String root = network();
+        String fingerprint = given().get(root).jsonPath().getString("commonInstanceMetadata.fingerprint");
+        done(root, post(root + "/setCommonInstanceMetadata", Map.of("fingerprint", fingerprint, "items",
+                List.of(Map.of("key", "user-data", "value", "#cloud-config\nproject: true")))));
+        List<Map<String, String>> userData = List.of(Map.of("key", "user-data", "value", "I2Nsb3VkLWNvbmZpZwo="),
+                Map.of("key", "user-data-encoding", "value", "base64"));
+        String ubuntu = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64";
+        done(root, post(root + ZONE + "/instances", withMetadata(vm("ubuntu", ubuntu), userData)));
+        done(root, post(root + ZONE + "/instances", withMetadata(vm("cos", "projects/cos-cloud/global/images/family/cos-stable"), userData)));
+        done(root, post(root + ZONE + "/instances", withMetadata(vm("debian", "projects/debian-cloud/global/images/family/debian-12"), userData)));
+        done(root, post(root + ZONE + "/instances", vm("project-only", ubuntu)));
+        String project = root.substring(root.lastIndexOf('/') + 1);
+
+        ComputeGuestScripts.CloudInit seed = compute.instanceCloudInit(project, "us-central1-a", "ubuntu");
+        assertEquals(new ComputeGuestScripts.CloudInit(
+                given().get(root + ZONE + "/instances/ubuntu").jsonPath().getString("id"), "ubuntu",
+                "I2Nsb3VkLWNvbmZpZwo=", "base64", false), seed);
+        assertTrue(compute.instanceCloudInit(project, "us-central1-a", "cos").everyBoot());
+        assertNull(compute.instanceCloudInit(project, "us-central1-a", "debian"), "Debian images ship no cloud-init");
+        assertNull(compute.instanceCloudInit(project, "us-central1-a", "project-only"), "project user-data is not read");
+        assertNull(compute.instanceCloudInit(project, "us-central1-a", "missing"));
+    }
+
+    private static Map<String, Object> withMetadata(Map<String, Object> vm, List<Map<String, String>> items) {
+        Map<String, Object> copy = new HashMap<>(vm);
+        copy.put("metadata", Map.of("items", items));
+        return copy;
+    }
+
     @Test void projectKeyChangesAlsoReachInstancesStillStarting() throws Exception {
         String root = network();
         when(runtime.phase(anyString())).thenReturn(Phase.PROVISIONING);

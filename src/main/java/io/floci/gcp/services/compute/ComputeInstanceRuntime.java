@@ -123,6 +123,7 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     /** One account update at a time per instance, apart from the instance lock so a stop is never held up by one. */
     private final Map<String, Object> accountLocks = new ConcurrentHashMap<>();
     private volatile SshKeyLookup sshKeys = (project, zone, name) -> null;
+    private volatile CloudInitLookup cloudInit = (project, zone, name) -> null;
     /** Log streams copying each running declared container's output to serial port 1. */
     private final Map<String, Closeable> workloadLogs = new ConcurrentHashMap<>();
     private final ExecutorService executor;
@@ -356,7 +357,8 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     }
 
     /**
-     * Runs the startup scripts of a boot in the background, then the declared container if the metadata has a
+     * Runs cloud-init (when the image ships it) and the startup scripts of a boot in the background, then the declared
+     * container if the metadata has a
      * {@code gce-container-declaration}: konlet starts after the startup scripts. The boot's operation waits for
      * neither, as on GCE.
      */
@@ -377,10 +379,34 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         // Apart from the scripts, as the guest agent runs beside the script runner: a slow sshd install holds back neither.
         applyAccounts(intent, containerId);
         scriptExecutor.execute(() -> {
+            runCloudInit(intent, containerId, port, current, mark);
             scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
                     config.services().compute().startupScriptTimeout(), port, current, mark);
             startWorkload(intent, containerId, port, current);
         });
+    }
+
+    /**
+     * Runs cloud-init for a boot whose image ships it and whose instance has {@code user-data}, before the startup
+     * scripts, as cloud-init runs before google-startup-scripts on such images. The seed is read as the boot starts.
+     */
+    private void runCloudInit(Intent intent, String containerId, ComputeSerialPort port, BooleanSupplier current,
+                              String mark) {
+        ComputeGuestScripts.CloudInit seed;
+        try {
+            seed = cloudInit.apply(intent.project(), intent.zone(), intent.name());
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not read the cloud-init seed of Compute instance {0}: {1}", intent.name(), e.getMessage());
+            return;
+        }
+        if (seed == null || !current.getAsBoolean()) { return; }
+        scripts.cloudInit(intent.name(), containerId, seed, config.services().compute().startupScriptTimeout(), port,
+                current, mark);
+    }
+
+    /** Supplies what cloud-init needs for each boot; see {@link CloudInitLookup}. */
+    public void cloudInit(CloudInitLookup lookup) {
+        this.cloudInit = lookup;
     }
 
     /** Supplies the instance's current {@code ssh-keys} lines to each account update; see {@link SshKeyLookup}. */
@@ -809,6 +835,15 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
     @FunctionalInterface
     public interface SshKeyLookup {
         List<String> apply(String project, String zone, String name);
+    }
+
+    /**
+     * Answers what cloud-init needs for an instance's boot, or null when cloud-init does not run: the boot image does
+     * not ship it, the instance has no {@code user-data}, or the instance does not exist.
+     */
+    @FunctionalInterface
+    public interface CloudInitLookup {
+        ComputeGuestScripts.CloudInit apply(String project, String zone, String name);
     }
 
     /** Answers an instance's status by project, zone and name; null when the instance does not exist. */

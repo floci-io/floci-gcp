@@ -36,7 +36,9 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -48,6 +50,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
@@ -55,6 +58,18 @@ import java.util.stream.Stream;
 public class FirestoreService {
 
     private static final Logger LOG = Logger.getLogger(FirestoreService.class);
+    private static final String NAME_FIELD = "__name__";
+    private static final Set<StructuredQuery.FieldFilter.Operator> INEQUALITY_OPERATORS = EnumSet.of(
+            StructuredQuery.FieldFilter.Operator.LESS_THAN,
+            StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL,
+            StructuredQuery.FieldFilter.Operator.GREATER_THAN,
+            StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL,
+            StructuredQuery.FieldFilter.Operator.NOT_EQUAL,
+            StructuredQuery.FieldFilter.Operator.NOT_IN);
+    /** Unary filters that, like an inequality, require their field first in the order (query.proto). */
+    private static final Set<StructuredQuery.UnaryFilter.Operator> UNARY_INEQUALITY_OPERATORS = EnumSet.of(
+            StructuredQuery.UnaryFilter.Operator.IS_NOT_NAN,
+            StructuredQuery.UnaryFilter.Operator.IS_NOT_NULL);
 
     private final StorageBackend<String, StoredDocument> documentStore;
     private final ServiceRegistry serviceRegistry;
@@ -341,19 +356,48 @@ public class FirestoreService {
         }
 
         // Firestore order of operations: where → order by → cursors → offset → limit
-        results = sortByOrderBy(results, query);
-        results = applyCursors(results, query);
+        List<StructuredQuery.Order> orders = normalizedOrderBy(query.getOrderByList(),
+                query.hasWhere() ? query.getWhere() : null);
+        results = withOrderedFields(results, query.getOrderByList());
+        results = sortByOrderBy(results, orders);
+        results = applyCursors(results, query, orders);
         return applyLimitAndOffset(results, query);
+    }
+
+    /**
+     * Lists the documents ListDocuments returns before paging: the collection's direct children,
+     * or those of every collection under {@code parent} when {@code collectionId} is empty,
+     * ordered by the string {@code order_by} ({@code __name__ ASC} when absent).
+     */
+    public List<StoredDocument> listDocuments(String parent, String collectionId, String orderBy) {
+        LOG.debugf("listDocuments parent=%s collection=%s", parent, collectionId);
+        List<StructuredQuery.Order> explicit = parseOrderBy(orderBy);
+        List<StoredDocument> docs = documentStore.scan(inCollection(parent,
+                StructuredQuery.CollectionSelector.newBuilder().setCollectionId(collectionId).build()));
+        return sortByOrderBy(withOrderedFields(docs, explicit), normalizedOrderBy(explicit, null));
     }
 
     static Predicate<String> inCollection(String parent,
             StructuredQuery.CollectionSelector from) {
         String collectionId = from.getCollectionId();
         if (!from.getAllDescendants()) {
+            if (collectionId.isEmpty()) {
+                String parentPrefix = parent + "/";
+                return name -> {
+                    if (!name.startsWith(parentPrefix)) {
+                        return false;
+                    }
+                    int slash = name.indexOf('/', parentPrefix.length());
+                    return slash > parentPrefix.length() && name.indexOf('/', slash + 1) < 0;
+                };
+            }
             String prefix = parent + "/" + collectionId + "/";
             return name -> name.startsWith(prefix) && name.indexOf('/', prefix.length()) < 0;
         }
         String prefix = parent + "/";
+        if (collectionId.isEmpty()) {
+            return name -> name.startsWith(prefix);
+        }
         return name -> {
             if (!name.startsWith(prefix)) {
                 return false;
@@ -367,21 +411,131 @@ public class FirestoreService {
     }
 
     /**
-     * Sorts results by the query's {@code orderBy} clauses. Only sorts when an explicit
-     * orderBy is present (preserving prior behavior for unordered queries), or when cursors
-     * are used without an explicit orderBy — in which case Firestore implicitly orders by
-     * document name.
+     * Completes the order as Standard edition does (google/firestore/v1/query.proto
+     * {@code StructuredQuery.order_by}): inequality-filtered fields not already ordered are
+     * appended in field path order, then {@code __name__}, all in the last explicit direction.
      */
-    private List<StoredDocument> sortByOrderBy(List<StoredDocument> docs, StructuredQuery query) {
-        List<StructuredQuery.Order> orders = query.getOrderByList();
-        if (orders.isEmpty()) {
-            if (!query.hasStartAt() && !query.hasEndAt()) {
-                return docs;
-            }
-            return docs.stream()
-                    .sorted((a, b) -> FirestoreValueOrder.compareResourceNames(a.getName(), b.getName()))
-                    .toList();
+    private static List<StructuredQuery.Order> normalizedOrderBy(List<StructuredQuery.Order> explicit,
+            StructuredQuery.Filter where) {
+        List<StructuredQuery.Order> orders = new ArrayList<>(explicit);
+        Set<String> ordered = new HashSet<>();
+        explicit.forEach(order -> ordered.add(order.getField().getFieldPath()));
+        StructuredQuery.Direction direction = explicit.isEmpty()
+                ? StructuredQuery.Direction.ASCENDING
+                : explicit.getLast().getDirection();
+
+        TreeSet<String> inequalityFields = new TreeSet<>(FirestoreService::compareFieldPaths);
+        if (where != null) {
+            collectInequalityFields(where, inequalityFields);
         }
+        for (String field : inequalityFields) {
+            if (!ordered.contains(field) && !NAME_FIELD.equals(field)) {
+                orders.add(order(field, direction));
+            }
+        }
+        if (!ordered.contains(NAME_FIELD)) {
+            orders.add(order(NAME_FIELD, direction));
+        }
+        return orders;
+    }
+
+    private static StructuredQuery.Order order(String fieldPath, StructuredQuery.Direction direction) {
+        return StructuredQuery.Order.newBuilder()
+                .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath(fieldPath))
+                .setDirection(direction)
+                .build();
+    }
+
+    private static void collectInequalityFields(StructuredQuery.Filter filter, Set<String> fields) {
+        if (filter.hasCompositeFilter()) {
+            filter.getCompositeFilter().getFiltersList().forEach(f -> collectInequalityFields(f, fields));
+        } else if (filter.hasFieldFilter()
+                && INEQUALITY_OPERATORS.contains(filter.getFieldFilter().getOp())) {
+            fields.add(filter.getFieldFilter().getField().getFieldPath());
+        } else if (filter.hasUnaryFilter()
+                && UNARY_INEQUALITY_OPERATORS.contains(filter.getUnaryFilter().getOp())) {
+            fields.add(filter.getUnaryFilter().getField().getFieldPath());
+        }
+    }
+
+    private static int compareFieldPaths(String left, String right) {
+        List<String> a = splitFieldPath(left);
+        List<String> b = splitFieldPath(right);
+        for (int i = 0; i < Math.min(a.size(), b.size()); i++) {
+            int c = a.get(i).compareTo(b.get(i));
+            if (c != 0) {
+                return c;
+            }
+        }
+        return Integer.compare(a.size(), b.size());
+    }
+
+    /** An explicit order on a field also filters out documents that lack that field. */
+    private List<StoredDocument> withOrderedFields(List<StoredDocument> docs,
+            List<StructuredQuery.Order> explicit) {
+        List<String> paths = explicit.stream()
+                .map(order -> order.getField().getFieldPath())
+                .filter(path -> !NAME_FIELD.equals(path))
+                .toList();
+        if (paths.isEmpty()) {
+            return docs;
+        }
+        return docs.stream()
+                .filter(doc -> paths.stream().allMatch(path -> resolveFieldPath(doc, path) != null))
+                .toList();
+    }
+
+    /** Parses ListDocuments {@code order_by}, such as {@code priority desc, __name__ desc}. */
+    static List<StructuredQuery.Order> parseOrderBy(String orderBy) {
+        List<StructuredQuery.Order> orders = new ArrayList<>();
+        if (orderBy.isBlank()) {
+            return orders;
+        }
+        for (String term : splitOutsideBackticks(orderBy, c -> c == ',')) {
+            List<String> tokens = splitOutsideBackticks(term, Character::isWhitespace).stream()
+                    .filter(token -> !token.isEmpty())
+                    .toList();
+            StructuredQuery.Direction direction;
+            if (tokens.size() == 1) {
+                direction = StructuredQuery.Direction.ASCENDING;
+            } else if (tokens.size() == 2 && "asc".equalsIgnoreCase(tokens.get(1))) {
+                direction = StructuredQuery.Direction.ASCENDING;
+            } else if (tokens.size() == 2 && "desc".equalsIgnoreCase(tokens.get(1))) {
+                direction = StructuredQuery.Direction.DESCENDING;
+            } else {
+                throw GcpException.invalidArgument("Invalid order_by: " + orderBy);
+            }
+            splitFieldPath(tokens.getFirst());
+            orders.add(order(tokens.getFirst(), direction));
+        }
+        return orders;
+    }
+
+    private static List<String> splitOutsideBackticks(String text, IntPredicate separator) {
+        List<String> parts = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (quoted && c == '\\' && i + 1 < text.length()) {
+                current.append(c).append(text.charAt(++i));
+                continue;
+            }
+            if (c == '`') {
+                quoted = !quoted;
+            }
+            if (!quoted && separator.test(c)) {
+                parts.add(current.toString());
+                current.setLength(0);
+                continue;
+            }
+            current.append(c);
+        }
+        parts.add(current.toString());
+        return parts;
+    }
+
+    private List<StoredDocument> sortByOrderBy(List<StoredDocument> docs, List<StructuredQuery.Order> orders) {
         Comparator<StoredDocument> comparator = null;
         for (StructuredQuery.Order order : orders) {
             String path = order.getField().getFieldPath();
@@ -395,7 +549,7 @@ public class FirestoreService {
     }
 
     private int compareDocsByField(StoredDocument a, StoredDocument b, String path) {
-        if ("__name__".equals(path)) {
+        if (NAME_FIELD.equals(path)) {
             return FirestoreValueOrder.compareResourceNames(a.getName(), b.getName());
         }
         StoredValue va = resolveFieldPath(a, path);
@@ -418,11 +572,11 @@ public class FirestoreService {
      * before=false is exclusive (startAfter); end_at before=false is inclusive (endAt) and
      * before=true is exclusive (endBefore).
      */
-    private List<StoredDocument> applyCursors(List<StoredDocument> docs, StructuredQuery query) {
+    private List<StoredDocument> applyCursors(List<StoredDocument> docs, StructuredQuery query,
+            List<StructuredQuery.Order> orders) {
         if (!query.hasStartAt() && !query.hasEndAt()) {
             return docs;
         }
-        List<StructuredQuery.Order> orders = query.getOrderByList();
         Stream<StoredDocument> stream = docs.stream();
         if (query.hasStartAt()) {
             Cursor start = query.getStartAt();
@@ -460,7 +614,7 @@ public class FirestoreService {
     }
 
     private int compareDocFieldToValue(StoredDocument doc, String path, Value value) {
-        if ("__name__".equals(path)) {
+        if (NAME_FIELD.equals(path)) {
             String target = value.hasReferenceValue() ? value.getReferenceValue() : value.getStringValue();
             return FirestoreValueOrder.compareResourceNames(doc.getName(), target);
         }

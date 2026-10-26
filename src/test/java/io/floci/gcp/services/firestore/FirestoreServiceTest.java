@@ -1035,6 +1035,159 @@ class FirestoreServiceTest {
     }
 
     @Test
+    void kindlessAllDescendantsQueryReturnsEveryDescendantOfTheParent() {
+        writeCollectionGroupFixture();
+
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setAllDescendants(true))
+                .build();
+
+        List<String> names = service.runQuery(DB + "/documents/p/1", query)
+                .stream().map(StoredDocument::getName).toList();
+
+        assertEquals(List.of(
+                DB + "/documents/p/1/sub/s1",
+                DB + "/documents/p/1/sub/s1/deeper/d1",
+                DB + "/documents/p/1/sub/s1/deeper/d1/sub/s3"), names);
+    }
+
+    @Test
+    void unorderedQueryReturnsDocumentsByName() {
+        service.applyWrite(topLevelValueDocument("c", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(1)), Instant.now());
+
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setCollectionId("customers"))
+                .build();
+
+        assertEquals(List.of("a", "b", "c"), ids(service.runQuery(DB + "/documents", query)));
+    }
+
+    @Test
+    void tiesOnTheOrderedFieldBreakByNameInTheLastDirection() {
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "v", intValue(2)), Instant.now());
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("d", "v", intValue(2)), Instant.now());
+
+        assertEquals(List.of("a", "b", "c", "d"),
+                ids(runOrder("v", StructuredQuery.Direction.ASCENDING, null)));
+        assertEquals(List.of("d", "c", "b", "a"),
+                ids(runOrder("v", StructuredQuery.Direction.DESCENDING, null)));
+    }
+
+    @Test
+    void cursorPastTheOrderedFieldUsesTheImplicitNameOrder() {
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "v", intValue(1)), Instant.now());
+
+        Cursor startAfterA = Cursor.newBuilder()
+                .addValues(intValue(1))
+                .addValues(Value.newBuilder().setReferenceValue(DB + "/documents/customers/a"))
+                .setBefore(false)
+                .build();
+
+        assertEquals(List.of("b", "c"), ids(runOrder("v", StructuredQuery.Direction.ASCENDING, startAfterA)));
+    }
+
+    @Test
+    void nameCursorWithoutOrderByPositionsByName() {
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(1)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "v", intValue(1)), Instant.now());
+
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setCollectionId("customers"))
+                .setStartAt(Cursor.newBuilder()
+                        .addValues(Value.newBuilder().setReferenceValue(DB + "/documents/customers/b"))
+                        .setBefore(true))
+                .build();
+
+        assertEquals(List.of("b", "c"), ids(service.runQuery(DB + "/documents", query)));
+    }
+
+    @Test
+    void inequalityFilterWithoutOrderBySortsByTheFilteredField() {
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(5)), Instant.now());
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(2)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "v", intValue(3)), Instant.now());
+        service.applyWrite(topLevelValueDocument("d", "v", intValue(1)), Instant.now());
+
+        assertEquals(List.of("b", "c", "a"), ids(runTopLevelFilter("v",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN, intValue(1))));
+    }
+
+    @Test
+    void isNotNullFilterWithoutOrderBySortsByTheFilteredField() {
+        service.applyWrite(topLevelValueDocument("a", "v", intValue(5)), Instant.now());
+        service.applyWrite(topLevelValueDocument("b", "v", intValue(2)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "v", Value.newBuilder()
+                .setNullValue(NullValue.NULL_VALUE).build()), Instant.now());
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setCollectionId("customers").build())
+                .setWhere(StructuredQuery.Filter.newBuilder()
+                        .setUnaryFilter(StructuredQuery.UnaryFilter.newBuilder()
+                                .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("v"))
+                                .setOp(StructuredQuery.UnaryFilter.Operator.IS_NOT_NULL)))
+                .build();
+
+        assertEquals(List.of("b", "a"), ids(service.runQuery(DB + "/documents", query)));
+    }
+
+    @Test
+    void orderByReturnsOnlyDocumentsThatHaveTheOrderedField() {
+        service.applyWrite(topLevelValueDocument("young", "age", intValue(20)), Instant.now());
+        service.applyWrite(topLevelValueDocument("old", "age", intValue(70)), Instant.now());
+        service.applyWrite(topLevelValueDocument("unknown", "name", Value.newBuilder()
+                .setStringValue("x").build()), Instant.now());
+        service.applyWrite(topLevelValueDocument("nulled", "age", Value.newBuilder()
+                .setNullValue(NullValue.NULL_VALUE).build()), Instant.now());
+
+        assertEquals(List.of("nulled", "young", "old"),
+                ids(runOrder("age", StructuredQuery.Direction.ASCENDING, null)));
+        assertEquals(List.of("old", "young", "nulled"),
+                ids(runOrder("age", StructuredQuery.Direction.DESCENDING, null)));
+    }
+
+    @Test
+    void listDocumentsDefaultsToNameOrderAndHonoursOrderBy() {
+        service.applyWrite(topLevelValueDocument("b", "age", intValue(30)), Instant.now());
+        service.applyWrite(topLevelValueDocument("c", "age", intValue(10)), Instant.now());
+        service.applyWrite(topLevelValueDocument("a", "age", intValue(20)), Instant.now());
+        service.applyWrite(topLevelValueDocument("d", "name", Value.newBuilder()
+                .setStringValue("x").build()), Instant.now());
+
+        assertEquals(List.of("a", "b", "c", "d"),
+                ids(service.listDocuments(DB + "/documents", "customers", "")));
+        assertEquals(List.of("b", "a", "c"),
+                ids(service.listDocuments(DB + "/documents", "customers", "age desc")));
+        assertEquals(List.of("d", "c", "b", "a"),
+                ids(service.listDocuments(DB + "/documents", "customers", "__name__ DESC")));
+    }
+
+    @Test
+    void listDocumentsWithoutCollectionIdListsDirectChildrenOfEveryCollection() {
+        writeCollectionGroupFixture();
+
+        List<String> names = service.listDocuments(DB + "/documents/p/2", "", "")
+                .stream().map(StoredDocument::getName).toList();
+
+        assertEquals(List.of(
+                DB + "/documents/p/2/other/o1",
+                DB + "/documents/p/2/sub/s2",
+                DB + "/documents/p/2/subway/w1"), names);
+    }
+
+    @Test
+    void listDocumentsRejectsMalformedOrderBy() {
+        GcpException e = assertThrows(GcpException.class,
+                () -> service.listDocuments(DB + "/documents", "customers", "age sideways"));
+        assertEquals(Status.Code.INVALID_ARGUMENT, e.getGrpcCode());
+    }
+
+    @Test
     void beginTransactionReturnsByteArray() {
         byte[] txn = service.beginTransaction();
         assertNotNull(txn);

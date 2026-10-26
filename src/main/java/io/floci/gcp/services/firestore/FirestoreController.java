@@ -39,6 +39,7 @@ import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
 import com.google.rpc.Status;
 import io.floci.gcp.core.common.GcpGrpcController;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.firestore.model.StoredDocument;
 import io.floci.gcp.services.firestore.model.StoredValue;
 import io.grpc.stub.StreamObserver;
@@ -213,15 +214,15 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
     public void listDocuments(ListDocumentsRequest request, StreamObserver<ListDocumentsResponse> responseObserver) {
         LOG.debugf("listDocuments parent=%s collection=%s", request.getParent(), request.getCollectionId());
         try {
-            String prefix = request.getParent() + "/" + request.getCollectionId() + "/";
-            List<StoredDocument> docs = service.runQuery(request.getParent(),
-                    StructuredQuery.newBuilder()
-                            .addFrom(StructuredQuery.CollectionSelector.newBuilder()
-                                    .setCollectionId(request.getCollectionId())
-                                    .build())
-                            .build());
+            List<StoredDocument> docs = service.listDocuments(request.getParent(),
+                    request.getCollectionId(), request.getOrderBy());
+            PageToken.Page<StoredDocument> page = PageToken.paginate(docs,
+                    request.getPageSize(), request.getPageToken());
             ListDocumentsResponse.Builder resp = ListDocumentsResponse.newBuilder();
-            docs.forEach(d -> resp.addDocuments(toProto(d)));
+            page.items().forEach(d -> resp.addDocuments(toProto(d)));
+            if (page.nextPageToken() != null) {
+                resp.setNextPageToken(page.nextPageToken());
+            }
             responseObserver.onNext(resp.build());
             responseObserver.onCompleted();
         } catch (Exception e) {

@@ -2,6 +2,8 @@ package io.floci.gcp.services.firestore;
 
 import com.google.firestore.v1.Document;
 import com.google.firestore.v1.DocumentMask;
+import com.google.firestore.v1.ListDocumentsRequest;
+import com.google.firestore.v1.ListDocumentsResponse;
 import com.google.firestore.v1.RunAggregationQueryRequest;
 import com.google.firestore.v1.RunAggregationQueryResponse;
 import com.google.firestore.v1.RunQueryRequest;
@@ -113,6 +115,54 @@ class FirestoreControllerTest {
 
         assertTrue(observer.messages.get(1).getDone());
         assertTrue(observer.messages.get(1).getTransaction().isEmpty());
+    }
+
+    @Test
+    void listDocumentsPagesInNameOrderWithPageTokens() {
+        for (String id : List.of("e", "c", "a", "d", "b")) {
+            seedDocument(PARENT + "/col/" + id);
+        }
+
+        List<String> seen = new ArrayList<>();
+        List<Integer> pageSizes = new ArrayList<>();
+        String token = "";
+        do {
+            CapturingObserver<ListDocumentsResponse> observer = new CapturingObserver<>();
+            controller.listDocuments(ListDocumentsRequest.newBuilder()
+                    .setParent(PARENT)
+                    .setCollectionId("col")
+                    .setPageSize(2)
+                    .setPageToken(token)
+                    .build(), observer);
+            assertNull(observer.error);
+            ListDocumentsResponse page = observer.messages.get(0);
+            pageSizes.add(page.getDocumentsCount());
+            page.getDocumentsList().forEach(d -> seen.add(d.getName().substring(d.getName().lastIndexOf('/') + 1)));
+            token = page.getNextPageToken();
+        } while (!token.isEmpty());
+
+        assertEquals(List.of("a", "b", "c", "d", "e"), seen);
+        assertEquals(List.of(2, 2, 1), pageSizes);
+    }
+
+    @Test
+    void listDocumentsWithoutPageSizeReturnsEverythingInOnePage() {
+        for (String id : List.of("b", "a", "c")) {
+            seedDocument(PARENT + "/col/" + id);
+        }
+        CapturingObserver<ListDocumentsResponse> observer = new CapturingObserver<>();
+
+        controller.listDocuments(ListDocumentsRequest.newBuilder()
+                .setParent(PARENT)
+                .setCollectionId("col")
+                .setOrderBy("__name__ desc")
+                .build(), observer);
+
+        assertNull(observer.error);
+        ListDocumentsResponse page = observer.messages.get(0);
+        assertEquals(List.of(PARENT + "/col/c", PARENT + "/col/b", PARENT + "/col/a"),
+                page.getDocumentsList().stream().map(Document::getName).toList());
+        assertTrue(page.getNextPageToken().isEmpty());
     }
 
     @Test

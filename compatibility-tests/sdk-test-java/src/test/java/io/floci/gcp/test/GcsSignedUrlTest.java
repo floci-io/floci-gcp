@@ -264,6 +264,30 @@ class GcsSignedUrlTest {
         }
     }
 
+    @Test
+    @Order(8)
+    void missingResourcesThroughSdkSignedUrlsReturnXmlErrors() throws Exception {
+        for (String bucket : new String[] {BUCKET_NAME, BUCKET_NAME + "-missing"}) {
+            BlobInfo object = BlobInfo.newBuilder(BlobId.of(bucket, "missing-object")).build();
+            URL signed = storage.signUrl(object, 1, TimeUnit.HOURS,
+                    SignUrlOption.withV4Signature(), SignUrlOption.signWith(fakeSigner),
+                    SignUrlOption.withHostName(emulatorHost));
+            HttpURLConnection connection = openConnection(signed, "GET");
+            try {
+                assertThat(connection.getResponseCode()).isEqualTo(404);
+                assertThat(connection.getContentType()).startsWith("application/xml");
+                try (InputStream input = connection.getErrorStream()) {
+                    String error = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+                    String code = bucket.equals(BUCKET_NAME) ? "NoSuchKey" : "NoSuchBucket";
+                    assertThat(error).contains("<Error>", "<Code>" + code + "</Code>")
+                            .doesNotContain("\"error\"");
+                }
+            } finally {
+                connection.disconnect();
+            }
+        }
+    }
+
     // SDK defaults to https:// — rewrite to http:// for the plaintext emulator
     private static URL toHttp(URL url) throws Exception {
         String s = url.toString();

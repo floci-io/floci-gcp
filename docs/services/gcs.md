@@ -443,3 +443,42 @@ Eventarc finalization events. The event and stored generation agree on the opaqu
 ETag, CRC32C, content metadata and absence of MD5. Ordinary uploads continue to
 include their MD5. Object publication and multipart-session removal still use
 separate checkpoints; crash-atomic multipart completion is not guaranteed.
+
+## XML API error responses
+
+Failures from supported XML object transfers, listings, and multipart operations use
+`application/xml` with an `Error` root, a machine-readable `Code`, and a `Message`.
+This does not depend on the request's `Accept` header. Missing buckets, objects
+(including generations), and multipart uploads return distinct `NoSuchBucket`,
+`NoSuchKey`, and `NoSuchUpload` codes with HTTP 404. Multipart receipt and checksum
+errors retain their specific codes. Signed URL errors retain their optional
+`Details` and `ParameterName` fields.
+
+Anonymous permission denial returns HTTP 403 `AccessDenied`. A denied request
+whose credentials resolve as external or unsupported returns HTTP 401
+`AuthenticationRequired`. Unknown Floci tokens also return `AuthenticationRequired`;
+expired Floci tokens return `InvalidAuthentication` on every retry. HTTP 401 XML
+responses include a `WWW-Authenticate: Bearer` challenge. These failures use a
+fixed message and a separate `Details` element for the failure explanation.
+Valid credentials rejected by IAM or their Credential Access Boundary return
+HTTP 403 `AccessDenied`.
+
+The emulator still accepts external credentials when an operation is allowed by
+its configured authorization mode and policies. This remains an intentional
+emulator behavior, rather than cryptographic validation of external credentials.
+Expired Floci credential records are retained until credential state is cleared,
+so repeated lookups can distinguish expiry from an unknown token; they never
+authorize a request.
+
+Unexpected storage and backend failures return a sanitized HTTP 500
+`InternalError`. Their diagnostic exceptions are logged on the server. GCS JSON
+and gRPC errors keep their existing contracts.
+
+This mapping covers failures raised while executing the selected XML resource.
+Pre-resource routing, filters that abort a request, and response serialization
+failures remain separate framework boundaries. Service Usage retains its existing
+XML denial response. Exact messages for all upstream failures have not been
+validated against live GCS; the status and code mappings follow the
+[Cloud Storage XML status reference](https://docs.cloud.google.com/storage/docs/xml-api/reference-status),
+and credential distinctions follow the live observations recorded in
+[issue #282](https://github.com/floci-io/floci-gcp/issues/282).

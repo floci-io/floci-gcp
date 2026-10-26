@@ -28,6 +28,11 @@ public class GcpException extends RuntimeException {
         this.plainText = plainText;
     }
 
+    /** Preserves the transport contracts when a service adds typed failure context. */
+    protected GcpException(GcpException error) {
+        this(error.httpStatus, error.gcpStatus, error.grpcCode, error.getMessage(), error.reason, error.plainText);
+    }
+
     public int getHttpStatus() {
         return httpStatus;
     }

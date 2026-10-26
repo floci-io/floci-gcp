@@ -334,7 +334,8 @@ public class GcsService {
         LOG.debugf("getBucket name=%s", name);
         return bucketStore.get(name)
                 .map(this::withProjectDefaults)
-                .orElseThrow(() -> GcpException.notFound("Bucket not found: " + name));
+                .orElseThrow(() -> new GcsResourceException(GcsResourceException.Failure.BUCKET_NOT_FOUND,
+                        GcpException.notFound("Bucket not found: " + name)));
     }
 
     // Buckets persisted before projectId was stored belong to the default project.
@@ -701,7 +702,8 @@ public class GcsService {
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
             LOG.warnf("putObject failed: bucket not found bucket=%s", bucket);
-            throw GcpException.notFound("Bucket not found: " + bucket);
+            throw new GcsResourceException(GcsResourceException.Failure.BUCKET_NOT_FOUND,
+                    GcpException.notFound("Bucket not found: " + bucket));
         }
         String key = objectKey(bucket, objectName);
         String now = nowTimestamp();
@@ -828,10 +830,30 @@ public class GcsService {
         }
     }
 
+    private GcpException objectNotFound(String bucket, String message) {
+        GcsResourceException.Failure failure = bucketStore.get(bucket).isEmpty()
+                ? GcsResourceException.Failure.BUCKET_NOT_FOUND : GcsResourceException.Failure.OBJECT_NOT_FOUND;
+        return new GcsResourceException(failure, GcpException.notFound(message));
+    }
+
+    /** Deletes an addressed object, reporting the missing resource under the existing mutation locks. */
+    public void deleteObjectOrThrow(String bucket, String objectName, String generation) {
+        synchronized (bucketLock(bucket)) {
+            synchronized (objectLock(bucket, objectName)) {
+                getBucket(bucket);
+                if (generation != null && !generation.isBlank()) {
+                    deleteObjectVersionLocked(bucket, objectName, generation, GcsObjectPreconditions.NONE);
+                } else if (!deleteObjectLocked(bucket, objectName)) {
+                    throw objectNotFound(bucket, "Object not found: " + objectName);
+                }
+            }
+        }
+    }
+
     public GcsObjectMeta getObjectMeta(String bucket, String objectName) {
         LOG.debugf("getObjectMeta bucket=%s name=%s", bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
-                .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+                .orElseThrow(() -> objectNotFound(bucket, "Object not found: " + objectName));
         return meta;
     }
 
@@ -841,13 +863,13 @@ public class GcsService {
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
             if (!isReadableLiveObject(liveKey, live)) {
-                throw GcpException.notFound("Object not found: " + objectName);
+                throw objectNotFound(bucket, "Object not found: " + objectName);
             }
             return live;
         }
         String archiveKey = liveKey + "\0" + generation;
         return objectMetaStore.get(archiveKey)
-                .orElseThrow(() -> GcpException.notFound(
+                .orElseThrow(() -> objectNotFound(bucket,
                         "Object version not found: " + objectName + "@" + generation));
     }
 
@@ -855,12 +877,12 @@ public class GcsService {
         LOG.debugf("getObjectData bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
-                .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+                .orElseThrow(() -> objectNotFound(bucket, "Object not found: " + objectName));
         checkCustomerEncryption(meta, customerEncryption);
         byte[] data = objectDataStore.get(key).orElse(null);
         if (data == null) {
             LOG.warnf("getObjectData failed: object not found bucket=%s name=%s", bucket, objectName);
-            throw GcpException.notFound("Object not found: " + objectName);
+            throw objectNotFound(bucket, "Object not found: " + objectName);
         }
         return data;
     }
@@ -876,7 +898,7 @@ public class GcsService {
         GcsObjectMeta live = objectMetaStore.get(liveKey).orElse(null);
         if (live != null && generation.equals(live.getGeneration())) {
             if (!isReadableLiveObject(liveKey, live)) {
-                throw GcpException.notFound("Object not found: " + objectName);
+                throw objectNotFound(bucket, "Object not found: " + objectName);
             }
             checkCustomerEncryption(live, customerEncryption);
             byte[] data = objectDataStore.get(liveKey).orElse(null);
@@ -888,7 +910,7 @@ public class GcsService {
         checkCustomerEncryption(objectMetaStore.get(archiveKey).orElse(null), customerEncryption);
         byte[] data = objectDataStore.get(archiveKey).orElse(null);
         if (data == null) {
-            throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
+            throw objectNotFound(bucket, "Object version not found: " + objectName + "@" + generation);
         }
         return data;
     }
@@ -914,7 +936,10 @@ public class GcsService {
         }
         String expected = meta.getCustomerEncryption().get("keySha256");
         if (!expected.equals(customerEncryption.keySha256())) {
-            throw GcpException.permissionDenied("Missing or invalid customer-supplied encryption key");
+            throw new GcsResourceException(customerEncryption.keySha256() == null
+                    ? GcsResourceException.Failure.ENCRYPTION_KEY_MISSING
+                    : GcsResourceException.Failure.ENCRYPTION_KEY_INCORRECT,
+                    GcpException.permissionDenied("Missing or invalid customer-supplied encryption key"));
         }
     }
 
@@ -1247,7 +1272,7 @@ public class GcsService {
         String archiveKey = liveKey + "\0" + generation;
         Optional<GcsObjectMeta> archived = objectMetaStore.get(archiveKey);
         if (archived.isEmpty()) {
-            throw GcpException.notFound("Object version not found: " + objectName + "@" + generation);
+            throw objectNotFound(bucket, "Object version not found: " + objectName + "@" + generation);
         }
         checkPreconditions(archived, preconditions);
         softDelete(bucket, objectName, archived.get(), archiveKey);
@@ -1277,7 +1302,7 @@ public class GcsService {
         LOG.debugf("patchObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta meta = getLiveObjectMeta(bucket, objectName)
-                .orElseThrow(() -> GcpException.notFound("Object not found: " + objectName));
+                .orElseThrow(() -> objectNotFound(bucket, "Object not found: " + objectName));
         Map<String, Object> patch = objectPatch.fields();
 
         // GCS never removes a custom time, so a null here leaves the field alone.
@@ -1691,7 +1716,8 @@ public class GcsService {
         LOG.debugf("listObjects bucket=%s", bucket);
         if (bucketStore.get(bucket).isEmpty()) {
             LOG.warnf("listObjects failed: bucket not found bucket=%s", bucket);
-            throw GcpException.notFound("Bucket not found: " + bucket);
+            throw new GcsResourceException(GcsResourceException.Failure.BUCKET_NOT_FOUND,
+                    GcpException.notFound("Bucket not found: " + bucket));
         }
         String prefix = bucket + "\0";
         List<GcsObjectMeta> objects = new ArrayList<>();
@@ -2223,20 +2249,20 @@ public class GcsService {
 
     private void checkObjectMutable(GcsObjectMeta meta) {
         if (Boolean.TRUE.equals(meta.getTemporaryHold())) {
-            throw GcpException.permissionDenied(
-                    "Object '" + meta.getName() + "' is under a temporary hold.");
+            throw new GcsResourceException(GcsResourceException.Failure.OBJECT_HELD, GcpException.permissionDenied(
+                    "Object '" + meta.getName() + "' is under a temporary hold."));
         }
         if (Boolean.TRUE.equals(meta.getEventBasedHold())) {
-            throw GcpException.permissionDenied(
-                    "Object '" + meta.getName() + "' is under an event-based hold.");
+            throw new GcsResourceException(GcsResourceException.Failure.OBJECT_HELD, GcpException.permissionDenied(
+                    "Object '" + meta.getName() + "' is under an event-based hold."));
         }
         if (meta.getRetentionExpirationTime() != null) {
             Instant expiry = Instant.parse(meta.getRetentionExpirationTime());
             if (Instant.now().isBefore(expiry)) {
-                throw GcpException.permissionDenied(
+                throw new GcsResourceException(GcsResourceException.Failure.RETENTION_POLICY, GcpException.permissionDenied(
                         "Object '" + meta.getName() + "' is subject to the bucket's retention policy "
                         + "and cannot be deleted or overwritten until "
-                        + meta.getRetentionExpirationTime());
+                        + meta.getRetentionExpirationTime()));
             }
         }
     }

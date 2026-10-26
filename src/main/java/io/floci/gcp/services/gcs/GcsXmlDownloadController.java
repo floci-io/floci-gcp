@@ -21,12 +21,12 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,7 +37,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 /**
  * Handles GCS XML API requests: GET on a bucket (list objects) and GET/PUT/DELETE on an object.
@@ -48,6 +47,7 @@ import java.util.function.Supplier;
 @Path("/{bucket: [a-z0-9._-]+}")
 public class GcsXmlDownloadController {
 
+    private final GcsXmlAuthorization xmlAuthorization;
     private final GcsService service;
     private final EmulatorConfig config;
     private final GcsXmlMultipartHandler multipart;
@@ -55,7 +55,9 @@ public class GcsXmlDownloadController {
 
     @Inject
     public GcsXmlDownloadController(GcsService service, EmulatorConfig config,
-            GcsXmlMultipartHandler multipart, GcsIamAuthorizationService iamAuthorizationService) {
+            GcsXmlMultipartHandler multipart, GcsIamAuthorizationService iamAuthorizationService,
+            GcsXmlAuthorization xmlAuthorization) {
+        this.xmlAuthorization = xmlAuthorization;
         this.multipart = multipart;
         this.service = service;
         this.config = config;
@@ -91,12 +93,12 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             @QueryParam("generation") String generation,
             @HeaderParam("x-goog-encryption-key-sha256") String customerEncryptionKeySha256,
-			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
+            @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
             @HeaderParam("Range") String rangeHeader,
             @HeaderParam("Accept-Encoding") String acceptEncoding) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath));
+        xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectRead(authorization, bucket, objectPath));
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.withResponseOverrides(
@@ -106,7 +108,6 @@ public class GcsXmlDownloadController {
 
     @PUT
     @Consumes(MediaType.WILDCARD)
-    @Produces(MediaType.APPLICATION_JSON)
     @Path("/{object: .+}")
     public Response upload(
             @PathParam("bucket") String bucket,
@@ -123,10 +124,10 @@ public class GcsXmlDownloadController {
                     bucket, objectPath, contentType, body != null ? body : new byte[0],
                     GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), null,
                     GcsObjectPreconditions.NONE, baseUrl, overwriteAuthorization::require);
-            return Response.ok(meta).build();
+            return Response.ok(meta, MediaType.APPLICATION_JSON).build();
         };
         String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        return authorize(() -> iamAuthorizationService.authorizeObjectCreate(
+        return xmlAuthorization.call(authorization, () -> iamAuthorizationService.authorizeObjectCreate(
                 authorization, bucket, objectPath, upload));
     }
 
@@ -142,15 +143,11 @@ public class GcsXmlDownloadController {
             @Context UriInfo uriInfo,
             @Context HttpHeaders headers,
             @QueryParam("generation") String generation,
-			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+            @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("DELETE", bucket, objectPath, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath));
-        if (generation != null && !generation.isBlank()) {
-            service.deleteObjectVersion(bucket, objectPath, generation);
-        } else if (!service.deleteObject(bucket, objectPath)) {
-            throw io.floci.gcp.core.common.GcpException.notFound("Object not found: " + objectPath);
-        }
+        xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectDelete(authorization, bucket, objectPath));
+        service.deleteObjectOrThrow(bucket, objectPath, generation);
         return Response.noContent().build();
     }
 
@@ -170,10 +167,10 @@ public class GcsXmlDownloadController {
             @QueryParam("delimiter") String delimiter,
             @QueryParam("max-keys") Integer maxKeys,
             @QueryParam("marker") String marker,
-			@HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
+            @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        authorize(() -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix));
+        xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix));
         service.getBucket(bucket);
 
         // "The object name after which you want to start listing objects. Objects whose names
@@ -263,22 +260,14 @@ public class GcsXmlDownloadController {
         xml.append('<').append(tag).append('>').append(escapeXml(value)).append("</").append(tag).append('>');
     }
 
-    private static void authorize(Runnable authorizationCheck) {
-        authorize(() -> {
-            authorizationCheck.run();
-            return null;
-        });
+    @ServerExceptionMapper
+    Response mapDomainFailure(GcpException error) {
+        return GcsXmlErrorResponse.from(error);
     }
 
-    private static <T> T authorize(Supplier<T> authorizationCheck) {
-        try {
-            return authorizationCheck.get();
-        } catch (GcpException error) {
-            if (!GcsXmlErrorResponse.handlesAuthentication(error)) {
-                throw error;
-            }
-            throw new WebApplicationException(GcsXmlErrorResponse.authentication(error));
-        }
+    @ServerExceptionMapper
+    Response mapUnexpectedFailure(Exception error) {
+        return GcsXmlErrorResponse.from(error);
     }
 
     private static String escapeXml(String value) {

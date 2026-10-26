@@ -115,10 +115,12 @@ public class CredentialTokenService {
         }
 
         StoredCredentialToken token = tokenStore.get(bearerToken)
-                .orElseThrow(() -> GcpException.unauthenticated("Unknown Floci credential token"));
+                .orElseThrow(() -> new CredentialAuthenticationException(
+                        CredentialAuthenticationException.Failure.UNKNOWN, "Unknown Floci credential token"));
         if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
-            tokenStore.delete(bearerToken);
-            throw GcpException.unauthenticated(EXPIRED_TOKEN_MESSAGE);
+            // Keep the record so retries report the same expired-credential outcome.
+            throw new CredentialAuthenticationException(
+                    CredentialAuthenticationException.Failure.EXPIRED, EXPIRED_TOKEN_MESSAGE);
         }
         return Optional.of(token);
     }

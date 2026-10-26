@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -34,7 +35,8 @@ class GcsXmlErrorResponseTest {
     @Test
     void expiredCredentialIsInvalidAuthentication() {
         Response response = GcsXmlErrorResponse.authentication(
-                GcpException.unauthenticated(CredentialTokenService.EXPIRED_TOKEN_MESSAGE));
+                new CredentialAuthenticationException(CredentialAuthenticationException.Failure.EXPIRED,
+                        CredentialTokenService.EXPIRED_TOKEN_MESSAGE));
 
         assertEquals(401, response.getStatus());
         assertTrue(response.getEntity().toString().contains("<Code>InvalidAuthentication</Code>"));

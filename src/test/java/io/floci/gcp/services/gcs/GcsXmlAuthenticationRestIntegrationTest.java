@@ -2,6 +2,7 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.services.credentials.CredentialAccessBoundaryRule;
 import io.floci.gcp.services.credentials.CredentialTokenService;
+import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +72,21 @@ class GcsXmlAuthenticationRestIntegrationTest {
     }
 
     @Test
+    void expiredCredentialsKeepTheirXmlCodeOnRetry() {
+        StoredCredentialToken token = tokenService.mintDownscopedToken("source-token", List.of(
+                new CredentialAccessBoundaryRule(bucket, "", List.of(READER)))).token();
+        token.setExpireTime(Instant.EPOCH);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            for (String path : new String[] {"/" + bucket + "/object", "/" + bucket + "?uploads"}) {
+                given().header("Authorization", "Bearer " + token.getTokenValue()).get(path).then()
+                        .statusCode(401).contentType(containsString("application/xml"))
+                        .header("WWW-Authenticate", containsString("Bearer"))
+                        .body("Error.Code", equalTo("InvalidAuthentication"));
+            }
+        }
+    }
+
+    @Test
     void insufficientCredentialReturnsXmlAccessDenied() {
         String token = tokenService.mintDownscopedToken("source-token", List.of(
                         new CredentialAccessBoundaryRule(bucket, "allowed/", List.of(READER))))
@@ -94,7 +111,7 @@ class GcsXmlAuthenticationRestIntegrationTest {
     }
 
     @Test
-    void nonAuthenticationPermissionDenialRetainsForbiddenStatus() throws Exception {
+    void missingEncryptionKeyUsesItsXmlContract() throws Exception {
         byte[] key = "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8);
         String encodedKey = Base64.getEncoder().encodeToString(key);
         String keySha256 = Base64.getEncoder().encodeToString(
@@ -110,6 +127,8 @@ class GcsXmlAuthenticationRestIntegrationTest {
 
         given()
                 .when().get("/{bucket}/encrypted.txt", bucket)
-                .then().statusCode(403);
+                .then().statusCode(400)
+                .contentType(containsString("application/xml"))
+                .body("Error.Code", equalTo("ResourceIsEncryptedWithCustomerEncryptionKey"));
     }
 }

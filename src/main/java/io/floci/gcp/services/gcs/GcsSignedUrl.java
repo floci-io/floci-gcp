@@ -1,6 +1,5 @@
 package io.floci.gcp.services.gcs;
 
-import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
@@ -46,7 +45,7 @@ final class GcsSignedUrl {
 
         expiresAt = expiresAt.plusSeconds(ttlSeconds);
         if (Instant.now().isAfter(expiresAt)) {
-            throw new WebApplicationException(GcsXmlErrorResponse.of(
+            throw new GcsXmlException(GcsXmlErrorResponse.of(
                     Response.Status.BAD_REQUEST.getStatusCode(),
                     "ExpiredToken", "The provided token has expired."));
         }
@@ -61,8 +60,8 @@ final class GcsSignedUrl {
         return null;
     }
 
-    private static WebApplicationException malformedSecurityHeader(String details, String parameterName) {
-        return new WebApplicationException(GcsXmlErrorResponse.of(
+    private static GcsXmlException malformedSecurityHeader(String details, String parameterName) {
+        return new GcsXmlException(GcsXmlErrorResponse.of(
                 Response.Status.BAD_REQUEST.getStatusCode(),
                 "MalformedSecurityHeader", "Your request has a malformed header.", details, parameterName));
     }

@@ -61,24 +61,24 @@ class GcsAuthorizationTest {
 		assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
 	}
 
-	@Test
-	void expiredFlociTokenIsUnauthenticated() {
-		StoredCredentialToken expired = new StoredCredentialToken(
-				CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "expired",
-				StoredCredentialToken.TokenKind.DOWNSCOPED,
-				NOW.minusSeconds(1),
-				"source-token",
-				null,
-				List.of(rule("bucket", "allowed/", READER)));
-		store.put(expired.getTokenValue(), expired);
+    @Test
+    void expiredFlociTokenIsUnauthenticated() {
+        StoredCredentialToken expired = new StoredCredentialToken(
+                CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "expired",
+                StoredCredentialToken.TokenKind.DOWNSCOPED,
+                NOW.minusSeconds(1),
+                "source-token",
+                null,
+                List.of(rule("bucket", "allowed/", READER)));
+        store.put(expired.getTokenValue(), expired);
 
-		GcpException ex = assertThrows(GcpException.class,
-				() -> authorizationService.requireObjectRead(
-						"Bearer " + expired.getTokenValue(), "bucket", "allowed/file.txt"));
+        GcpException ex = assertThrows(GcpException.class,
+                () -> authorizationService.requireObjectRead(
+                        "Bearer " + expired.getTokenValue(), "bucket", "allowed/file.txt"));
 
-		assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
-		assertTrue(store.get(expired.getTokenValue()).isEmpty());
-	}
+        assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
+        assertTrue(store.get(expired.getTokenValue()).isPresent());
+    }
 
 	@Test
 	void allowedPrefixAndPermissionsSucceed() {

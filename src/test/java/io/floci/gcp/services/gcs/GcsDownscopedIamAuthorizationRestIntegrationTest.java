@@ -98,6 +98,27 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
                 .body("Error.Code", equalTo("AccessDenied"));
     }
 
+    @Test
+    void xmlDistinguishesAnonymousAndUnrecognizedCredentialsOnDenial() {
+        for (String path : new String[] {"/" + bucket + "/allowed/report.csv", "/" + bucket + "?uploads"}) {
+            given().get(path).then().statusCode(403).contentType(containsString("application/xml"))
+                    .body("Error.Code", equalTo("AccessDenied"))
+                    .body("Error.Message", equalTo("Access denied."));
+            for (String credentials : new String[] {"Bearer ya29.bogus", "Bearer", "Bearer ", "Basic bogus"}) {
+                given().header("Authorization", credentials).get(path).then()
+                        .statusCode(401).contentType(containsString("application/xml"))
+                        .header("WWW-Authenticate", containsString("Bearer"))
+                        .body("Error.Code", equalTo("AuthenticationRequired"))
+                        .body("Error.Message", equalTo("Authentication required."));
+            }
+        }
+        // The JSON API continues to treat external credentials as anonymous.
+        given().header("Authorization", "Bearer ya29.bogus")
+                .get("/storage/v1/b/" + bucket + "/o/allowed%2Freport.csv").then()
+                .statusCode(403).contentType("application/json")
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
     private String downscopedTokenFor(String serviceAccount) {
         String sourceToken = given()
                 .urlEncodingEnabled(false)

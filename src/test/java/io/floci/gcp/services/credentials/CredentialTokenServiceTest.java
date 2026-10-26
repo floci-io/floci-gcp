@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -92,7 +91,7 @@ class CredentialTokenServiceTest {
     }
 
     @Test
-    void expiredTokenIsRejectedAndRemoved() {
+    void expiredTokenIsRejectedConsistentlyOnEveryLookup() {
         StoredCredentialToken expired = new StoredCredentialToken(
                 CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX + "expired",
                 StoredCredentialToken.TokenKind.DOWNSCOPED,
@@ -107,7 +106,10 @@ class CredentialTokenServiceTest {
 
         assertEquals("UNAUTHENTICATED", ex.getGcpStatus());
         assertEquals(CredentialTokenService.EXPIRED_TOKEN_MESSAGE, ex.getMessage());
-        assertFalse(store.get(expired.getTokenValue()).isPresent());
+        CredentialAuthenticationException retry = assertThrows(CredentialAuthenticationException.class,
+                () -> service.lookupBearerToken(expired.getTokenValue()));
+        assertEquals(CredentialAuthenticationException.Failure.EXPIRED, retry.failure());
+        assertEquals(ex.getMessage(), retry.getMessage());
     }
 
     @Test

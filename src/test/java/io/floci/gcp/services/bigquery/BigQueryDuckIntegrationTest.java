@@ -1611,6 +1611,18 @@ class BigQueryDuckIntegrationTest {
                 + " ORDER BY a NULLS FIRST, b NULLS FIRST\", \"useLegacySql\": false}")
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("same"), List.of("diff"), List.of("same"), List.of("diff"))));
+        query("""
+                {"query": "SELECT (SELECT AS STRUCT 1 IS DISTINCT FROM 2 AS d, 1 IS NOT DISTINCT FROM 1 AS e) s", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("d", "e")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("true", "true")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT x IS DISTINCT FROM 2 AS d, x FROM UNNEST([1, 2]) x ORDER BY x) a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("d", "x")))
+                .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("true", "1"), List.of("false", "2"))));
     }
 
     @Test

@@ -2657,7 +2657,7 @@ final class SqlDialectTranslator {
             } else if (angles > 0 && (t.isPunct(">") || t.isPunct(">>"))) {
                 angles = Math.max(0, angles - (t.isPunct(">>") ? 2 : 1));
             } else if (parens == 0 && brackets == 0 && angles == 0 && t.kind == Kind.IDENT
-                    && (t.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(t.upper()))
+                    && ((t.isKeyword("FROM") && !isDistinctFromOperator(i)) || CLAUSE_END_KEYWORDS.contains(t.upper()))
                     && !(t.isKeyword("EXCEPT") && followsStar(i))) {
                 return i;
             }

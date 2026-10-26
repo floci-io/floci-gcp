@@ -1063,6 +1063,8 @@ class SqlDialectTranslatorTest {
                         + " JOIN \"ds\".\"u\" AS \"t2\" ON t1.a IS NOT DISTINCT FROM t2.a",
                 sql("SELECT CASE WHEN a IS DISTINCT FROM b THEN 1 END AS k FROM ds.t t1 JOIN ds.u t2"
                         + " ON t1.a IS NOT DISTINCT FROM t2.a"));
+        assertEquals("SELECT ARRAY(SELECT {'d': x IS DISTINCT FROM 2, 'x': x} FROM UNNEST([1, 2]) AS \"_unnest_x\"(\"x\")) AS \"a\"",
+                sql("SELECT ARRAY(SELECT AS STRUCT x IS DISTINCT FROM 2 AS d, x FROM UNNEST([1, 2]) x) a"));
     }
 
     @Test

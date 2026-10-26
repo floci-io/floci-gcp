@@ -6,10 +6,11 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Verifies the single-port routing of GKE ({@code container} hostToken, {@code /container} prefix):
@@ -190,6 +191,25 @@ class ServiceRoutingFilterTest {
         .then()
             .statusCode(200)
             .body("labels.env", equalTo("patched"));
+    }
+
+    @Test
+    void postWithMethodQueryParamDoesNotPatchApiResource() {
+        String topic = createTopic("override-query-patch");
+
+        given()
+            .queryParam("$method", "PATCH")
+            .contentType("application/json")
+            .body(Map.of("topic", Map.of("labels", Map.of("env", "patched")), "updateMask", "labels"))
+        .when()
+            .post(topic);
+
+        given()
+        .when()
+            .get(topic)
+        .then()
+            .statusCode(200)
+            .body("labels.env", nullValue());
     }
 
     private static String createTopic(String name) {

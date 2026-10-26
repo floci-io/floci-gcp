@@ -146,6 +146,32 @@ class FirestoreControllerTest {
     }
 
     @Test
+    void pageTokenWithoutPageSizeReturnsTheRestOfTheListing() {
+        for (String id : List.of("d", "c", "a", "b")) {
+            seedDocument(PARENT + "/col/" + id);
+        }
+        CapturingObserver<ListDocumentsResponse> first = new CapturingObserver<>();
+        controller.listDocuments(ListDocumentsRequest.newBuilder()
+                .setParent(PARENT)
+                .setCollectionId("col")
+                .setPageSize(2)
+                .build(), first);
+        CapturingObserver<ListDocumentsResponse> rest = new CapturingObserver<>();
+
+        controller.listDocuments(ListDocumentsRequest.newBuilder()
+                .setParent(PARENT)
+                .setCollectionId("col")
+                .setPageToken(first.messages.get(0).getNextPageToken())
+                .build(), rest);
+
+        assertNull(rest.error);
+        ListDocumentsResponse page = rest.messages.get(0);
+        assertEquals(List.of(PARENT + "/col/c", PARENT + "/col/d"),
+                page.getDocumentsList().stream().map(Document::getName).toList());
+        assertTrue(page.getNextPageToken().isEmpty());
+    }
+
+    @Test
     void listDocumentsWithoutPageSizeReturnsEverythingInOnePage() {
         for (String id : List.of("b", "a", "c")) {
             seedDocument(PARENT + "/col/" + id);

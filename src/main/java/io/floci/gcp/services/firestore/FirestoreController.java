@@ -216,8 +216,8 @@ public class FirestoreController extends FirestoreGrpc.FirestoreImplBase {
         try {
             List<StoredDocument> docs = service.listDocuments(request.getParent(),
                     request.getCollectionId(), request.getOrderBy());
-            PageToken.Page<StoredDocument> page = PageToken.paginate(docs,
-                    request.getPageSize(), request.getPageToken());
+            int pageSize = request.getPageSize() > 0 ? request.getPageSize() : Math.max(docs.size(), 1);
+            PageToken.Page<StoredDocument> page = PageToken.paginate(docs, pageSize, request.getPageToken());
             ListDocumentsResponse.Builder resp = ListDocumentsResponse.newBuilder();
             page.items().forEach(d -> resp.addDocuments(toProto(d)));
             if (page.nextPageToken() != null) {

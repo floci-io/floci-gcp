@@ -358,7 +358,7 @@ public class FirestoreService {
         // Firestore order of operations: where → order by → cursors → offset → limit
         List<StructuredQuery.Order> orders = normalizedOrderBy(query.getOrderByList(),
                 query.hasWhere() ? query.getWhere() : null);
-        results = withOrderedFields(results, query.getOrderByList());
+        results = withOrderedFields(results, orders);
         results = sortByOrderBy(results, orders);
         results = applyCursors(results, query, orders);
         return applyLimitAndOffset(results, query);
@@ -370,7 +370,6 @@ public class FirestoreService {
      * ordered by the string {@code order_by} ({@code __name__ ASC} when absent).
      */
     public List<StoredDocument> listDocuments(String parent, String collectionId, String orderBy) {
-        LOG.debugf("listDocuments parent=%s collection=%s", parent, collectionId);
         List<StructuredQuery.Order> explicit = parseOrderBy(orderBy);
         List<StoredDocument> docs = documentStore.scan(inCollection(parent,
                 StructuredQuery.CollectionSelector.newBuilder().setCollectionId(collectionId).build()));
@@ -418,8 +417,8 @@ public class FirestoreService {
     private static List<StructuredQuery.Order> normalizedOrderBy(List<StructuredQuery.Order> explicit,
             StructuredQuery.Filter where) {
         List<StructuredQuery.Order> orders = new ArrayList<>(explicit);
-        Set<String> ordered = new HashSet<>();
-        explicit.forEach(order -> ordered.add(order.getField().getFieldPath()));
+        Set<List<String>> ordered = new HashSet<>();
+        explicit.forEach(order -> ordered.add(splitFieldPath(order.getField().getFieldPath())));
         StructuredQuery.Direction direction = explicit.isEmpty()
                 ? StructuredQuery.Direction.ASCENDING
                 : explicit.getLast().getDirection();
@@ -428,12 +427,14 @@ public class FirestoreService {
         if (where != null) {
             collectInequalityFields(where, inequalityFields);
         }
+        List<String> name = List.of(NAME_FIELD);
         for (String field : inequalityFields) {
-            if (!ordered.contains(field) && !NAME_FIELD.equals(field)) {
+            List<String> segments = splitFieldPath(field);
+            if (!name.equals(segments) && ordered.add(segments)) {
                 orders.add(order(field, direction));
             }
         }
-        if (!ordered.contains(NAME_FIELD)) {
+        if (!ordered.contains(name)) {
             orders.add(order(NAME_FIELD, direction));
         }
         return orders;
@@ -470,10 +471,10 @@ public class FirestoreService {
         return Integer.compare(a.size(), b.size());
     }
 
-    /** An explicit order on a field also filters out documents that lack that field. */
+    /** An order on a field, explicit or implicit, also filters out documents that lack that field. */
     private List<StoredDocument> withOrderedFields(List<StoredDocument> docs,
-            List<StructuredQuery.Order> explicit) {
-        List<String> paths = explicit.stream()
+            List<StructuredQuery.Order> orders) {
+        List<String> paths = orders.stream()
                 .map(order -> order.getField().getFieldPath())
                 .filter(path -> !NAME_FIELD.equals(path))
                 .toList();

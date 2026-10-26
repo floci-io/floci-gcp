@@ -224,6 +224,23 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
                 "cloud-init is on the disk, not in the image record");
     }
 
+    @Test void deletingAnInstanceDropsTheImageRecordOfItsAutoDeletedDisks() throws Exception {
+        String root = network();
+        done(root, post(root + ZONE + "/disks", Map.of("name", "seed", "sizeGb", "10")));
+        done(root, post(root + "/global/images", Map.of("name", "golden-v3", "family", "ubuntu-2404-lts-amd64",
+                "sourceDisk", "zones/us-central1-a/disks/seed")));
+        Map<String, Object> vm = new HashMap<>(vm("vm", "global/images/golden-v3"));
+        vm.put("disks", List.of(Map.of("boot", true, "autoDelete", true,
+                "initializeParams", Map.of("diskSizeGb", "20", "sourceImage", "global/images/golden-v3"))));
+        done(root, post(root + ZONE + "/instances", vm));
+        String project = root.substring(root.lastIndexOf('/') + 1);
+        assertFalse(compute.recordedDiskImages(project).isEmpty());
+
+        done(root, given().delete(root + ZONE + "/instances/vm"));
+
+        assertTrue(compute.recordedDiskImages(project).isEmpty(), "auto-deleted disks keep no image record");
+    }
+
     private static Map<String, Object> withMetadata(Map<String, Object> vm, List<Map<String, String>> items) {
         Map<String, Object> copy = new HashMap<>(vm);
         copy.put("metadata", Map.of("items", items));

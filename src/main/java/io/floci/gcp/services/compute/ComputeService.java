@@ -115,6 +115,10 @@ public class ComputeService {
         return new ComputeGuestScripts.CloudInit(instance.path("id").asText(), name, attributes.get("user-data"),
                 attributes.get("user-data-encoding"), mode == ComputeImageCatalog.CloudInit.EVERY_BOOT);
     }
+    /** The disk keys whose project image is recorded; for tests. */
+    synchronized Set<String> recordedDiskImages(String project) {
+        return Set.copyOf(state(project).diskImages.keySet());
+    }
     /**
      * The image an instance's boot disk was created from, public or the project's own; a project image deleted since
      * is the name and family the disk recorded. Null when unknown.

@@ -223,7 +223,11 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
         if (r.path("deletionProtection").asBoolean()) { throw GcpException.failedPrecondition("Deletion protection is enabled"); }
         for (JsonNode disk : r.path("disks")) {
             detach(c, r, (ObjectNode) disk);
-            if (disk.path("autoDelete").asBoolean()) { c.state.resources.remove(c.path(disk.path("source").asText())); }
+            if (disk.path("autoDelete").asBoolean()) {
+                String diskKey = c.path(disk.path("source").asText());
+                c.state.resources.remove(diskKey);
+                c.state.diskImages.remove(diskKey);
+            }
         }
         for (JsonNode nic : r.path("networkInterfaces")) {
             for (JsonNode access : nic.path("accessConfigs")) { release(c, access.path("natIP").asText(), r.path("selfLink").asText()); }

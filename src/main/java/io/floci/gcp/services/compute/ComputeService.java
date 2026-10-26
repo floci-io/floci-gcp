@@ -115,16 +115,20 @@ public class ComputeService {
         return new ComputeGuestScripts.CloudInit(instance.path("id").asText(), name, attributes.get("user-data"),
                 attributes.get("user-data-encoding"), mode == ComputeImageCatalog.CloudInit.EVERY_BOOT);
     }
-    /** The image an instance's boot disk was created from, public or the project's own; null when unknown. */
+    /**
+     * The image an instance's boot disk was created from, public or the project's own; a project image deleted since
+     * is the name and family the disk recorded. Null when unknown.
+     */
     private static ObjectNode bootImage(ComputeProject state, String project, ObjectNode instance) {
         for (JsonNode attachment : instance.path("disks")) {
             if (!attachment.path("boot").asBoolean()) { continue; }
-            ObjectNode disk = state.resources.get(localPath(project, attachment.path("source").asText()));
+            String diskKey = localPath(project, attachment.path("source").asText());
+            ObjectNode disk = state.resources.get(diskKey);
             String sourceImage = disk == null ? "" : disk.path("sourceImage").asText();
             if (sourceImage.isEmpty()) { return null; }
-            return ComputePublicImages.isPublicReference(sourceImage)
-                    ? ComputePublicImages.resolve(sourceImage).orElse(null)
-                    : state.resources.get(localPath(project, sourceImage));
+            if (ComputePublicImages.isPublicReference(sourceImage)) { return ComputePublicImages.resolve(sourceImage).orElse(null); }
+            ObjectNode image = state.resources.get(localPath(project, sourceImage));
+            return image != null ? image : state.diskImages.get(diskKey);
         }
         return null;
     }
@@ -373,6 +377,7 @@ public class ComputeService {
                 handler.delete(c, resource);
                 c.noReferences(resource.path("selfLink").asText(), c.key());
                 c.state.resources.remove(c.key());
+                c.state.diskImages.remove(c.key());
                 operationType = "delete";
             } else if (verb.equals("POST") && "setLabels".equals(c.action) && LABELLED.contains(c.collection())) {
                 checkFingerprint(resource, body, "labelFingerprint");

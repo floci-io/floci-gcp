@@ -552,9 +552,10 @@ class ComputeInstanceRuntimeTest {
     }
 
     @Test
-    void aBootRunsCloudInitBeforeTheStartupScriptsWhenItsImageShipsIt() {
+    void aBootRunsCloudInitsEarlyStagesBeforeTheStartupScriptsAndItsFinalStageAfter() {
         ComputeGuestScripts.CloudInit seed = new ComputeGuestScripts.CloudInit("7", "vm", "#cloud-config", null, false);
         runtime.cloudInit((project, zone, name) -> "vm".equals(name) ? seed : null);
+        when(scripts.cloudInit(any(), any(), any(), any(), any(), any(), any())).thenReturn("/stage");
 
         runtime.submit("launch", List.of(intent(Kind.LAUNCH)));
 
@@ -563,6 +564,8 @@ class ComputeInstanceRuntimeTest {
                 any());
         order.verify(scripts).run(eq(ComputeGuestScripts.Phase.STARTUP), eq("vm"), eq("new-id"), eq(METADATA),
                 any(), any(), any(), any());
+        order.verify(scripts).cloudInitFinal(eq("vm"), eq("new-id"), eq("/stage"), eq(Duration.ofMinutes(30)), any(),
+                any(), any());
     }
 
     @Test

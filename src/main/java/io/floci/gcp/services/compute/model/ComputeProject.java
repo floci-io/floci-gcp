@@ -15,4 +15,9 @@ public class ComputeProject {
     public Map<String, String> requests = new LinkedHashMap<>();
     public String creationTimestamp;
     public ObjectNode commonInstanceMetadata;
+    /**
+     * The name and family of the project image each disk was created from, by disk key: what the image put on the disk
+     * (its container image, whether it ships cloud-init) stays with the disk after the image is deleted.
+     */
+    public Map<String, ObjectNode> diskImages = new LinkedHashMap<>();
 }

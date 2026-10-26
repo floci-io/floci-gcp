@@ -379,29 +379,33 @@ public class ComputeInstanceRuntime implements ContainerTeardown {
         // Apart from the scripts, as the guest agent runs beside the script runner: a slow sshd install holds back neither.
         applyAccounts(intent, containerId);
         scriptExecutor.execute(() -> {
-            runCloudInit(intent, containerId, port, current, mark);
-            scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(),
-                    config.services().compute().startupScriptTimeout(), port, current, mark);
+            Duration timeout = config.services().compute().startupScriptTimeout();
+            String cloudInitStage = runCloudInit(intent, containerId, port, current, mark);
+            scripts.run(ComputeGuestScripts.Phase.STARTUP, intent.name(), containerId, intent.metadata(), timeout, port,
+                    current, mark);
             startWorkload(intent, containerId, port, current);
+            scripts.cloudInitFinal(intent.name(), containerId, cloudInitStage, timeout, port, current, mark);
         });
     }
 
     /**
-     * Runs cloud-init for a boot whose image ships it and whose instance has {@code user-data}, before the startup
-     * scripts, as cloud-init runs before google-startup-scripts on such images. The seed is read as the boot starts.
+     * Runs cloud-init's early stages for a boot whose image ships it and whose instance has {@code user-data}, before
+     * the startup scripts; its final stage runs after them, as cloud-final.service orders itself after
+     * multi-user.target. The seed is read as the boot starts. Returns the boot's cloud-init staging directory, or
+     * null when cloud-init does not run.
      */
-    private void runCloudInit(Intent intent, String containerId, ComputeSerialPort port, BooleanSupplier current,
-                              String mark) {
+    private String runCloudInit(Intent intent, String containerId, ComputeSerialPort port, BooleanSupplier current,
+                                String mark) {
         ComputeGuestScripts.CloudInit seed;
         try {
             seed = cloudInit.apply(intent.project(), intent.zone(), intent.name());
         } catch (RuntimeException e) {
             LOG.debugv("Could not read the cloud-init seed of Compute instance {0}: {1}", intent.name(), e.getMessage());
-            return;
+            return null;
         }
-        if (seed == null || !current.getAsBoolean()) { return; }
-        scripts.cloudInit(intent.name(), containerId, seed, config.services().compute().startupScriptTimeout(), port,
-                current, mark);
+        if (seed == null || !current.getAsBoolean()) { return null; }
+        return scripts.cloudInit(intent.name(), containerId, seed, config.services().compute().startupScriptTimeout(),
+                port, current, mark);
     }
 
     /** Supplies what cloud-init needs for each boot; see {@link CloudInitLookup}. */

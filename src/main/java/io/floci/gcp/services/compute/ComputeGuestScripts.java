@@ -18,6 +18,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -64,7 +65,13 @@ public class ComputeGuestScripts {
     static final String CLOUD_INIT = "cloud-init";
     /** The NoCloud seed directory cloud-init reads user-data and meta-data from. */
     static final String CLOUD_INIT_SEED = "/var/lib/cloud/seed/nocloud";
-    static final String CLOUD_INIT_SCRIPT = "floci-cloud-init.sh";
+    /**
+     * Each boot stages its seed and scripts in a directory of its own, which only its own script, past the boot guard,
+     * copies into the seed directory: a superseded boot still uploading can never overwrite a later boot's seed.
+     */
+    static final String CLOUD_INIT_STAGE = DIRECTORY + "/floci-cloud-init-";
+    static final String CLOUD_INIT_EARLY = "early.sh";
+    static final String CLOUD_INIT_FINAL = "final.sh";
 
     /**
      * What cloud-init needs for one boot: the instance's id (cloud-init's instance-id), its name, its own
@@ -315,46 +322,74 @@ public class ComputeGuestScripts {
     }
 
     /**
-     * Runs cloud-init with the instance's {@code user-data}, as the images that ship it do at boot. The guest gets
-     * cloud-init from its package manager the first time; the user-data and meta-data are seeded for the NoCloud data
-     * source (cloud-init's GCE source only runs on Google hardware), and the four stages run in order, their output
-     * going to serial port 1. Per-instance modules run once per instance, keyed by its id, unless
-     * {@link CloudInit#everyBoot()} reruns write_files and runcmd. A step that fails, and a nonzero cloud-init status,
-     * are reported on serial port 1.
+     * Runs cloud-init's early stages with the instance's {@code user-data}, as the images that ship it do at boot: the
+     * local, network and config stages run before google-startup-scripts, while the final stage (packages, runcmd,
+     * user scripts) waits for multi-user.target, which the startup scripts are part of; {@link #cloudInitFinal} runs it.
+     * The guest gets cloud-init from its package manager the first time; the user-data and meta-data are seeded for
+     * the NoCloud data source (cloud-init's GCE source only runs on Google hardware), and the output goes to serial
+     * port 1. Per-instance modules run once per instance, keyed by its id, unless {@link CloudInit#everyBoot()} reruns
+     * write_files and runcmd. A step that fails is reported on serial port 1.
+     *
+     * @return this boot's staging directory, for {@link #cloudInitFinal}; null when cloud-init did not start
      */
-    void cloudInit(String instance, String containerId, CloudInit seed, Duration timeout, ComputeSerialPort port,
-                   BooleanSupplier current, String bootMark) {
+    String cloudInit(String instance, String containerId, CloudInit seed, Duration timeout, ComputeSerialPort port,
+                     BooleanSupplier current, String bootMark) {
         byte[] userData;
         try {
             userData = userData(seed);
         } catch (IllegalArgumentException e) {
             port.write(line(instance, CLOUD_INIT, "Could not decode base64 user-data: " + e.getMessage()));
-            return;
+            return null;
         }
-        if (!current.getAsBoolean()) { return; }
+        if (!current.getAsBoolean()) { return null; }
+        String stage = CLOUD_INIT_STAGE + UUID.randomUUID().toString().replace("-", "");
         try {
-            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", DIRECTORY, CLOUD_INIT_SEED),
+            lifecycleManager.execStreaming(containerId, ROOT, List.of(), List.of("mkdir", "-p", stage),
                     Duration.ofSeconds(30), OutputStream.nullOutputStream(), OutputStream.nullOutputStream());
-            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, CLOUD_INIT_SEED, "user-data",
-                    userData, 0600);
-            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, CLOUD_INIT_SEED, "meta-data",
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, stage, "user-data", userData, 0600);
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, stage, "meta-data",
                     metaData(seed).getBytes(StandardCharsets.UTF_8), 0600);
-            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, DIRECTORY, CLOUD_INIT_SCRIPT,
-                    cloudInitScript(seed.everyBoot()).getBytes(StandardCharsets.UTF_8), 0700);
-            if (!current.getAsBoolean()) { return; }
-            LineWriter out = new LineWriter(port, instance, CLOUD_INIT, "");
-            String path = DIRECTORY + "/" + CLOUD_INIT_SCRIPT;
-            List<String> command = bootMark == null
-                    ? List.of("/bin/sh", "-c", "\"$0\"", path)
-                    : List.of("/bin/sh", "-c", BOOT_GUARD, path, bootMark);
-            ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(), command, timeout,
-                    out, out);
-            out.close();
-            if (bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()
-                    && !bootMark.equals(currentBootMark(containerId))) {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, stage, CLOUD_INIT_EARLY,
+                    cloudInitEarlyScript(seed.everyBoot(), stage).getBytes(StandardCharsets.UTF_8), 0700);
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, stage, CLOUD_INIT_FINAL,
+                    cloudInitFinalScript(stage).getBytes(StandardCharsets.UTF_8), 0700);
+            if (!current.getAsBoolean()) { return null; }
+            ContainerExec.Result result = runCloudInitStage(containerId, stage + "/" + CLOUD_INIT_EARLY, timeout, port,
+                    instance, bootMark);
+            if (rebooted(containerId, bootMark, result)) {
                 port.write(line(instance, CLOUD_INIT, "cloud-init not run: the instance rebooted since this boot."));
-            } else if (result.timedOut()) {
+                return null;
+            }
+            if (result.timedOut()) {
                 port.write(line(instance, CLOUD_INIT, "cloud-init still running after " + timeout
+                        + "; no longer waiting for it. Its final stage runs once it is done."));
+            } else if (result.exitCode() != 0) {
+                port.write(line(instance, CLOUD_INIT, "cloud-init exit status " + result.exitCode()));
+            }
+            return stage;
+        } catch (RuntimeException e) {
+            LOG.warnf("Compute instance %s could not run cloud-init: %s", instance, e.getMessage());
+            port.write(line(instance, CLOUD_INIT, "Could not run cloud-init: " + e.getMessage()));
+            return null;
+        }
+    }
+
+    /**
+     * Runs cloud-init's final stage for a boot whose early stages {@link #cloudInit} started, after the startup
+     * scripts; it waits for the early stages first, should they still be running. A nonzero {@code cloud-init status}
+     * is reported on serial port 1.
+     */
+    void cloudInitFinal(String instance, String containerId, String stage, Duration timeout, ComputeSerialPort port,
+                        BooleanSupplier current, String bootMark) {
+        if (stage == null || !current.getAsBoolean()) { return; }
+        try {
+            ContainerExec.Result result = runCloudInitStage(containerId, stage + "/" + CLOUD_INIT_FINAL, timeout, port,
+                    instance, bootMark);
+            if (rebooted(containerId, bootMark, result)) {
+                return;
+            }
+            if (result.timedOut()) {
+                port.write(line(instance, CLOUD_INIT, "cloud-init final stage still running after " + timeout
                         + "; no longer waiting for it."));
             } else if (result.exitCode() != 0) {
                 port.write(line(instance, CLOUD_INIT, "cloud-init exit status " + result.exitCode()));
@@ -363,6 +398,23 @@ public class ComputeGuestScripts {
             LOG.warnf("Compute instance %s could not run cloud-init: %s", instance, e.getMessage());
             port.write(line(instance, CLOUD_INIT, "Could not run cloud-init: " + e.getMessage()));
         }
+    }
+
+    private ContainerExec.Result runCloudInitStage(String containerId, String path, Duration timeout,
+                                                   ComputeSerialPort port, String instance, String bootMark) {
+        LineWriter out = new LineWriter(port, instance, CLOUD_INIT, "");
+        List<String> command = bootMark == null
+                ? List.of("/bin/sh", "-c", "\"$0\"", path)
+                : List.of("/bin/sh", "-c", BOOT_GUARD, path, bootMark);
+        ContainerExec.Result result = lifecycleManager.execStreaming(containerId, ROOT, List.of(), command, timeout,
+                out, out);
+        out.close();
+        return result;
+    }
+
+    private boolean rebooted(String containerId, String bootMark, ContainerExec.Result result) {
+        return bootMark != null && result.exitCode() == REBOOTED && !result.timedOut()
+                && !bootMark.equals(currentBootMark(containerId));
     }
 
     /**
@@ -384,13 +436,18 @@ public class ComputeGuestScripts {
     }
 
     /**
-     * Installs cloud-init when missing, points it at the NoCloud seed only, leaves the container's network and hostname
-     * alone (Docker owns both), and runs the stages systemd would; exits with {@code cloud-init status}, which is 1
-     * on errors and 2 when degraded.
+     * The early stages for the boot staged in {@code stage}: installs cloud-init when missing, points it at the NoCloud
+     * seed only, leaves the container's network and hostname alone (Docker owns both), moves this boot's seed into
+     * place, drops what earlier boots staged, and runs the local, network and config stages systemd would. Marks the
+     * stage {@code early.done} when it ends, however it ends, for the final stage to wait on.
      */
-    static String cloudInitScript(boolean everyBoot) {
+    static String cloudInitEarlyScript(boolean everyBoot, String stage) {
+        String staged = stage.substring(0, stage.lastIndexOf('-') + 1);
         return """
                 #!/bin/sh
+                stage=STAGE
+                trap 'touch "$stage/early.done"' EXIT
+                for old in STAGED*; do [ "$old" = "$stage" ] || rm -rf "$old"; done
                 has() { command -v "$1" >/dev/null 2>&1; }
                 if ! has cloud-init; then
                   echo "Installing cloud-init."
@@ -402,7 +459,7 @@ public class ComputeGuestScripts {
                   fi
                   has cloud-init || { echo "Could not install cloud-init: no supported package manager or no network."; exit 1; }
                 fi
-                mkdir -p /etc/cloud/cloud.cfg.d
+                mkdir -p /etc/cloud/cloud.cfg.d SEED
                 cat > /etc/cloud/cloud.cfg.d/90_floci.cfg <<'EOF'
                 datasource_list: [NoCloud, None]
                 network:
@@ -410,7 +467,9 @@ public class ComputeGuestScripts {
                 preserve_hostname: true
                 ssh_deletekeys: false
                 EOF
-                """ + (everyBoot ? """
+                cp "$stage/user-data" "$stage/meta-data" SEED/
+                """.replace("STAGED", quote(staged)).replace("STAGE", quote(stage)).replace("SEED", CLOUD_INIT_SEED)
+                + (everyBoot ? """
                 for sem in config_write_files config_write_files_deferred config_runcmd config_scripts_user; do
                   rm -f /var/lib/cloud/instances/*/sem/"$sem"
                 done
@@ -418,9 +477,23 @@ public class ComputeGuestScripts {
                 cloud-init init --local
                 cloud-init init
                 cloud-init modules --mode=config
+                """;
+    }
+
+    /**
+     * The final stage for the boot staged in {@code stage}: waits for the early stages to end, runs the final modules
+     * when cloud-init is there, and exits with {@code cloud-init status}, which is 1 on errors and 2 when degraded.
+     */
+    static String cloudInitFinalScript(String stage) {
+        return """
+                #!/bin/sh
+                stage=STAGE
+                trap 'rm -rf "$stage"' EXIT
+                while [ ! -e "$stage/early.done" ]; do sleep 1; done
+                command -v cloud-init >/dev/null 2>&1 || exit 0
                 cloud-init modules --mode=final
                 cloud-init status
-                """;
+                """.replace("STAGE", quote(stage));
     }
 
     /**

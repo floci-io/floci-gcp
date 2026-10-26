@@ -93,6 +93,12 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                 ObjectNode original = c.reference(r, source, source.equals("sourceImage") ? "images" : "snapshots");
                 sourceSize = original.path("diskSizeGb").asInt();
                 r.put(source + "Id", original.path("id").asText());
+                if (source.equals("sourceImage") && !ComputePublicImages.isPublicReference(r.path(source).asText())) {
+                    ObjectNode image = c.object();
+                    if (original.has("name")) { image.set("name", original.get("name")); }
+                    if (original.has("family")) { image.set("family", original.get("family")); }
+                    c.state.diskImages.put(c.key(), image);
+                }
             }
         }
         if (sources > 1) { throw GcpException.invalidArgument("Only one disk source is allowed"); }

@@ -208,6 +208,22 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         assertNull(compute.instanceCloudInit(project, "us-central1-a", "missing"));
     }
 
+    @Test void aDiskKeepsItsImageCloudInitSettingAfterThatImageIsDeleted() throws Exception {
+        String root = network();
+        done(root, post(root + ZONE + "/disks", Map.of("name", "seed", "sizeGb", "10")));
+        done(root, post(root + "/global/images", Map.of("name", "golden-v2", "family", "ubuntu-2404-lts-amd64",
+                "sourceDisk", "zones/us-central1-a/disks/seed")));
+        done(root, post(root + ZONE + "/instances", withMetadata(vm("vm", "global/images/golden-v2"),
+                List.of(Map.of("key", "user-data", "value", "#cloud-config")))));
+        String project = root.substring(root.lastIndexOf('/') + 1);
+        assertNotNull(compute.instanceCloudInit(project, "us-central1-a", "vm"));
+
+        done(root, given().delete(root + "/global/images/golden-v2"));
+
+        assertNotNull(compute.instanceCloudInit(project, "us-central1-a", "vm"),
+                "cloud-init is on the disk, not in the image record");
+    }
+
     private static Map<String, Object> withMetadata(Map<String, Object> vm, List<Map<String, String>> items) {
         Map<String, Object> copy = new HashMap<>(vm);
         copy.put("metadata", Map.of("items", items));

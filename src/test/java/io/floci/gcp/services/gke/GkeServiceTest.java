@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gke;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
@@ -20,11 +21,15 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -74,6 +79,68 @@ class GkeServiceTest {
         assertEquals("RUNNING", cluster.getStatus());
         assertEquals(LOCATION, cluster.getLocation());
         assertNotNull(cluster.getCurrentMasterVersion());
+    }
+
+    @Test
+    void createClusterOperationStaysRunningUntilTheControlPlaneIsReady() throws Exception {
+        when(gkeConfig.mock()).thenReturn(false);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setEndpoint("10.0.0.2");
+            return null;
+        }).when(clusterManager).startCluster(any());
+
+        StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "real-cluster"));
+
+        assertEquals("RUNNING", op.getStatus());
+        assertNull(op.getEndTime());
+        assertFalse(new ObjectMapper().writeValueAsString(op).contains("endTime"));
+        assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "real-cluster").getStatus());
+
+        service.pollReadiness();
+        assertEquals("RUNNING", service.getOperation(PROJECT, op.getName()).getStatus());
+
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2EtZGF0YQ==");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+
+        StoredOperation done = service.getOperation(PROJECT, op.getName());
+        assertEquals("DONE", done.getStatus());
+        assertNotNull(done.getEndTime());
+        assertNull(done.getStatusMessage());
+        assertNull(done.getError());
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "real-cluster");
+        assertEquals("RUNNING", cluster.getStatus());
+        assertEquals("Y2EtZGF0YQ==", cluster.getCaCertificate());
+    }
+
+    @Test
+    void createClusterOperationReportsAControlPlaneStartFailure() {
+        when(gkeConfig.mock()).thenReturn(false);
+        doThrow(new IllegalStateException("docker unavailable")).when(clusterManager).startCluster(any());
+
+        StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "broken-cluster"));
+
+        assertEquals("DONE", op.getStatus());
+        assertNotNull(op.getEndTime());
+        assertEquals(13, op.getError().get("code"));
+        assertTrue(op.getStatusMessage().contains("docker unavailable"));
+        assertEquals("ERROR", service.getCluster(PROJECT, LOCATION, "broken-cluster").getStatus());
+    }
+
+    @Test
+    void deletingAProvisioningClusterFinishesItsCreateOperation() {
+        when(gkeConfig.mock()).thenReturn(false);
+        StoredOperation create = service.createCluster(PROJECT, LOCATION, Map.of("name", "short-lived"));
+
+        service.deleteCluster(PROJECT, LOCATION, "short-lived");
+
+        StoredOperation done = service.getOperation(PROJECT, create.getName());
+        assertEquals("DONE", done.getStatus());
+        assertEquals(1, done.getError().get("code"));
+        assertNotNull(done.getStatusMessage());
     }
 
     @Test

@@ -14,6 +14,7 @@ import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.gke.operations.GkeOperationService;
 import io.floci.gcp.services.gke.operations.OperationType;
 import io.floci.gcp.services.gke.operations.StoredOperation;
+import io.grpc.Status;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -280,16 +281,25 @@ public class GkeService {
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
 
+        StoredOperation op;
+        String startFailure = null;
         if (mock()) {
             cluster.setStatus("RUNNING");
             cluster.setEndpoint("127.0.0.1");
+            op = operationService.createOperation(project, location, name, OperationType.CREATE_CLUSTER);
         } else {
             cluster.setStatus("PROVISIONING");
+            // CREATE_CLUSTER: "The cluster should be assumed to be unusable until the operation
+            // finishes" (cluster_service.proto), so the operation stays RUNNING until the readiness
+            // poller has the endpoint and CA in place. It exists before the cluster is stored so
+            // the poller can never finish the cluster ahead of it.
+            op = operationService.createRunningOperation(project, location, name, OperationType.CREATE_CLUSTER);
             try {
                 clusterManager.startCluster(cluster);
             } catch (Exception e) {
                 LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
                 cluster.setStatus("ERROR");
+                startFailure = "Failed to start the control plane for cluster " + name + ": " + e.getMessage();
             }
         }
 
@@ -297,7 +307,16 @@ public class GkeService {
         createInitialNodePools(project, location, name, clusterMap);
         refreshCurrentNodeVersion(project, location, name, cluster);
 
-        return operationService.createOperation(project, location, name, OperationType.CREATE_CLUSTER);
+        if (startFailure == null) {
+            return op;
+        }
+        operationService.completeClusterOperations(project, location, name,
+                OperationType.CREATE_CLUSTER, operationError(Status.Code.INTERNAL, startFailure));
+        return operationService.getOperation(project, op.getName());
+    }
+
+    private static Map<String, Object> operationError(Status.Code code, String message) {
+        return Map.of("code", code.value(), "message", message);
     }
 
     /** Returns a detached copy carrying the cluster's node pools. The store hands back the live
@@ -335,6 +354,8 @@ public class GkeService {
             nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
         }
         clusterStore.delete(key);
+        operationService.completeClusterOperations(project, location, clusterId, OperationType.CREATE_CLUSTER,
+                operationError(Status.Code.CANCELLED, "Cluster " + clusterId + " was deleted before it finished creating"));
         return operationService.createOperation(project, location, clusterId, OperationType.DELETE_CLUSTER);
     }
 
@@ -997,7 +1018,7 @@ public class GkeService {
         cluster.setExtraConfig(extra);
     }
 
-    private void pollReadiness() {
+    void pollReadiness() {
         try {
             for (StoredCluster cluster : clusterStore.scan(k -> true)) {
                 if ("PROVISIONING".equals(cluster.getStatus()) && clusterManager.isReady(cluster)) {
@@ -1005,6 +1026,8 @@ public class GkeService {
                     cluster.setStatus("RUNNING");
                     clusterStore.put(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()),
                             cluster);
+                    operationService.completeClusterOperations(cluster.getProject(), cluster.getLocation(),
+                            cluster.getName(), OperationType.CREATE_CLUSTER, null);
                     LOG.infov("GKE cluster {0} is now RUNNING", cluster.getName());
                 }
             }

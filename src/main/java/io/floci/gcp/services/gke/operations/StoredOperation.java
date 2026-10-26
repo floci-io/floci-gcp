@@ -1,7 +1,10 @@
 package io.floci.gcp.services.gke.operations;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.util.Map;
 
 /**
  * Models {@code google.container.v1.Operation}. Timestamps are RFC3339 strings
@@ -20,7 +23,12 @@ public class StoredOperation {
     private String targetLink;
     private String selfLink;
     private String startTime;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private String endTime;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String statusMessage;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Map<String, Object> error;
 
     public StoredOperation() {
     }
@@ -80,5 +88,29 @@ public class StoredOperation {
 
     public String getEndTime() {
         return endTime;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public void setEndTime(String endTime) {
+        this.endTime = endTime;
+    }
+
+    public String getStatusMessage() {
+        return statusMessage;
+    }
+
+    public void setStatusMessage(String statusMessage) {
+        this.statusMessage = statusMessage;
+    }
+
+    public Map<String, Object> getError() {
+        return error;
+    }
+
+    public void setError(Map<String, Object> error) {
+        this.error = error;
     }
 }

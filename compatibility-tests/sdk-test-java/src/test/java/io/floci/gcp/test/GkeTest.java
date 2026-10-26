@@ -5,6 +5,7 @@ import com.google.container.v1.Cluster;
 import com.google.container.v1.CreateClusterRequest;
 import com.google.container.v1.DeleteClusterRequest;
 import com.google.container.v1.GetClusterRequest;
+import com.google.container.v1.GetOperationRequest;
 import com.google.container.v1.ListClustersRequest;
 import com.google.container.v1.NodePool;
 import com.google.container.v1.Operation;
@@ -18,12 +19,17 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.time.Duration;
+import java.time.Instant;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * GKE (container.googleapis.com) compatibility via the official google-cloud-container SDK,
- * using the HttpJson transport against the emulator. Assertions are mode-agnostic so the suite
- * passes whether the cluster is mock (instant RUNNING) or real k3s (PROVISIONING then RUNNING).
+ * using the HttpJson transport against the emulator. Assertions are mode-agnostic: a mock cluster
+ * is RUNNING with its create operation already DONE, while a real k3s cluster's create operation
+ * stays RUNNING until the control plane is up, so the create test waits on the operation the way
+ * Terraform and gcloud do and then expects a RUNNING cluster.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class GkeTest {
@@ -33,6 +39,7 @@ class GkeTest {
     private static final String PARENT =
             "projects/" + TestFixtures.projectId() + "/locations/us-central1";
     private static final String CLUSTER_NAME = PARENT + "/clusters/" + CLUSTER;
+    private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(3);
 
     @BeforeAll
     static void setUp() throws Exception {
@@ -48,7 +55,7 @@ class GkeTest {
 
     @Test
     @Order(1)
-    void createCluster() {
+    void createCluster() throws InterruptedException {
         Cluster cluster = Cluster.newBuilder()
                 .setName(CLUSTER)
                 .setInitialNodeCount(1)
@@ -60,7 +67,35 @@ class GkeTest {
 
         assertThat(op.getName()).startsWith("operation-");
         assertThat(op.getOperationType()).isEqualTo(Operation.Type.CREATE_CLUSTER);
-        assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
+        assertThat(op.getStatus()).isIn(Operation.Status.RUNNING, Operation.Status.DONE);
+        boolean provisioned = op.getStatus() != Operation.Status.DONE;
+
+        Operation done = awaitDone(op);
+        assertThat(done.getStatusMessage()).isEmpty();
+        assertThat(done.getEndTime()).isNotBlank();
+
+        Cluster created = client.getCluster(GetClusterRequest.newBuilder()
+                .setName(CLUSTER_NAME)
+                .build());
+        assertThat(created.getStatus()).isEqualTo(Cluster.Status.RUNNING);
+        if (provisioned) {
+            assertThat(created.getEndpoint()).isNotBlank();
+            assertThat(created.getMasterAuth().getClusterCaCertificate()).isNotBlank();
+        }
+    }
+
+    private static Operation awaitDone(Operation op) throws InterruptedException {
+        Instant deadline = Instant.now().plus(CREATE_TIMEOUT);
+        Operation current = op;
+        while (current.getStatus() != Operation.Status.DONE) {
+            assertThat(Instant.now()).as("operation %s still %s", op.getName(), current.getStatus())
+                    .isBefore(deadline);
+            Thread.sleep(2_000);
+            current = client.getOperation(GetOperationRequest.newBuilder()
+                    .setName(PARENT + "/operations/" + op.getName())
+                    .build());
+        }
+        return current;
     }
 
     @Test

@@ -51,8 +51,8 @@ public class GkeOperationService {
     }
 
     /**
-     * Creates an operation that stays {@code RUNNING} until {@link #completeClusterOperations}
-     * finishes it, for work that outlives the request (a k3s control plane still starting).
+     * Creates an operation that stays {@code RUNNING} until {@link #completeOperation} finishes
+     * it, for work that outlives the request (a k3s control plane still starting).
      */
     public StoredOperation createRunningOperation(
             String project,
@@ -64,32 +64,26 @@ public class GkeOperationService {
     }
 
     /**
-     * Moves every unfinished operation of {@code type} on the cluster to {@code DONE}. A non-null
-     * {@code error} is reported both as {@code error} and as the deprecated {@code statusMessage},
-     * which is the field terraform-provider-google's operation waiter reads.
+     * Moves the named operation to {@code DONE} unless it already is, so a late caller cannot
+     * rewrite an outcome. A non-null {@code error} is reported both as {@code error} and as the
+     * deprecated {@code statusMessage}, which is the field terraform-provider-google's operation
+     * waiter reads.
      */
-    public void completeClusterOperations(
-            String project,
-            String location,
-            String clusterId,
-            OperationType type,
-            Map<String, Object> error) {
-
-        String targetLink = clusterTargetLink(project, location, clusterId);
-        String now = Instant.now().toString();
-        for (StoredOperation op : operationStore.scan(k -> true)) {
-            if (op.getOperationType() == type
-                    && targetLink.equals(op.getTargetLink())
-                    && !"DONE".equals(op.getStatus())) {
-                op.setStatus("DONE");
-                op.setEndTime(now);
-                if (error != null) {
-                    op.setError(error);
-                    op.setStatusMessage(String.valueOf(error.get("message")));
-                }
-                operationStore.put(op.getName(), op);
-            }
+    public synchronized void completeOperation(String operationName, Map<String, Object> error) {
+        if (operationName == null) {
+            return;
         }
+        operationStore.get(operationName)
+                .filter(op -> !"DONE".equals(op.getStatus()))
+                .ifPresent(op -> {
+                    op.setStatus("DONE");
+                    op.setEndTime(Instant.now().toString());
+                    if (error != null) {
+                        op.setError(error);
+                        op.setStatusMessage(String.valueOf(error.get("message")));
+                    }
+                    operationStore.put(op.getName(), op);
+                });
     }
 
     /** For node-pool-scoped mutations, whose target is the pool, not the cluster. */

@@ -67,6 +67,8 @@ public class StoredCluster {
     private int hostPort;
     private String internalEndpoint;
     private String volumeName;
+    /** Name of the {@code CREATE_CLUSTER} operation that created this record. */
+    private String createOperation;
 
     public StoredCluster() {
     }
@@ -114,6 +116,7 @@ public class StoredCluster {
         this.hostPort = other.hostPort;
         this.internalEndpoint = other.internalEndpoint;
         this.volumeName = other.volumeName;
+        this.createOperation = other.createOperation;
     }
 
     public String getName() {
@@ -370,5 +373,13 @@ public class StoredCluster {
 
     public void setVolumeName(String volumeName) {
         this.volumeName = volumeName;
+    }
+
+    public String getCreateOperation() {
+        return createOperation;
+    }
+
+    public void setCreateOperation(String createOperation) {
+        this.createOperation = createOperation;
     }
 }

@@ -3,6 +3,8 @@ package io.floci.gcp.services.gke;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
@@ -173,6 +175,27 @@ public class GkeClusterManager {
             int code = conn.getResponseCode();
             return code == 200 || code == 401 || code == 403;
         } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether the cluster's k3s container is gone or no longer running, for example after a
+     * crash or after a restart removed it. A Docker error other than not-found counts as still
+     * running, so a transient daemon hiccup never fails a create; the startup deadline covers it.
+     */
+    public boolean isControlPlaneStopped(StoredCluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return true;
+        }
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(cluster.getContainerId()).exec();
+            return !Boolean.TRUE.equals(inspect.getState().getRunning());
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Could not inspect k3s container of cluster {0}: {1}", cluster.getName(), e.getMessage());
             return false;
         }
     }

@@ -466,6 +466,7 @@ class IamServiceTest {
         try {
             restoredAccounts.load();
             restoredKeys.load();
+            assertTrue(restoredKeys.keys().isEmpty());
             IamService second = new IamService(restoredAccounts, restoredKeys, new InMemoryStorage<>());
             second.createServiceAccount("p1", "target", "", "");
 
@@ -473,6 +474,55 @@ class IamServiceTest {
         } finally {
             restoredAccounts.shutdown();
             restoredKeys.shutdown();
+        }
+    }
+
+    // Hybrid stores flush on their own schedules: the account store can save the recreated account
+    // while the key stores still hold the deleted account's keys on disk.
+    @Test
+    void recreatedAccountGetsNoOldKeysWhenOnlyTheAccountStoreFlushedBeforeARestart(@TempDir Path tempDir) {
+        Path accountsPath = tempDir.resolve("iam-service-accounts.json");
+        Path keysPath = tempDir.resolve("iam-sa-keys.json");
+        Path signingKeysPath = tempDir.resolve("iam-signing-keys.json");
+        TypeReference<Map<String, StoredServiceAccount>> accountType = new TypeReference<>() {};
+        TypeReference<Map<String, StoredServiceAccountKey>> keyType = new TypeReference<>() {};
+        TypeReference<Map<String, StoredSigningKey>> signingKeyType = new TypeReference<>() {};
+        long interval = TimeUnit.HOURS.toMillis(1);
+        HybridStorage<String, StoredServiceAccount> accounts = new HybridStorage<>(accountsPath, accountType, interval);
+        HybridStorage<String, StoredServiceAccountKey> keys = new HybridStorage<>(keysPath, keyType, interval);
+        HybridStorage<String, StoredSigningKey> signingKeys = new HybridStorage<>(signingKeysPath, signingKeyType, interval);
+        HybridStorage<String, StoredServiceAccount> restoredAccounts = new HybridStorage<>(accountsPath, accountType, interval);
+        HybridStorage<String, StoredServiceAccountKey> restoredKeys = new HybridStorage<>(keysPath, keyType, interval);
+        HybridStorage<String, StoredSigningKey> restoredSigningKeys = new HybridStorage<>(
+                signingKeysPath, signingKeyType, interval);
+        String email = "target@p1.iam.gserviceaccount.com";
+        try {
+            IamService first = new IamService(accounts, keys, new InMemoryStorage<>(), signingKeys);
+            first.createServiceAccount("p1", "target", "", "");
+            first.createKey("p1", email);
+            String oldSigningKeyId = first.signingKeyId("p1", email);
+            accounts.flush();
+            keys.flush();
+            signingKeys.flush();
+            first.deleteServiceAccount("p1", email);
+            first.createServiceAccount("p1", "target", "", "");
+            accounts.flush();
+
+            restoredAccounts.load();
+            restoredKeys.load();
+            restoredSigningKeys.load();
+            IamService second = new IamService(restoredAccounts, restoredKeys, new InMemoryStorage<>(),
+                    restoredSigningKeys);
+
+            assertTrue(second.listKeys("p1", email).isEmpty());
+            assertNotEquals(oldSigningKeyId, second.signingKeyId("p1", email));
+        } finally {
+            accounts.shutdown();
+            keys.shutdown();
+            signingKeys.shutdown();
+            restoredAccounts.shutdown();
+            restoredKeys.shutdown();
+            restoredSigningKeys.shutdown();
         }
     }
 

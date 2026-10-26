@@ -163,6 +163,9 @@ public class IamService {
             }
             policyStore.checkpoint();
             deleteAccountKeys(project, email);
+            keyStore.checkpoint();
+            signingKeyStore.delete(signingKeyStorageKey(project, email));
+            signingKeyStore.checkpoint();
             saStore.put(key, sa);
             LOG.debugf("createServiceAccount project=%s email=%s", project, email);
             return sa;

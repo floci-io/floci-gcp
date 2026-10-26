@@ -162,6 +162,7 @@ public class IamService {
                 policyStore.delete(policyKey(resource));
             }
             policyStore.checkpoint();
+            deleteAccountKeys(project, email);
             saStore.put(key, sa);
             LOG.debugf("createServiceAccount project=%s email=%s", project, email);
             return sa;
@@ -259,6 +260,7 @@ public class IamService {
                 saStore.delete(key);
                 signingKeyStore.delete(signingKeyStorageKey(ref.project(), ref.email()));
             }
+            deleteAccountKeys(ref.project(), ref.email());
             for (String resource : resources) {
                 policyStore.delete(policyKey(resource));
             }
@@ -540,12 +542,16 @@ public class IamService {
 
     // ── Service Account Keys ───────────────────────────────────────────────────
 
+    /**
+     * Keys are published under the account lock that creation and deletion hold, and only while the
+     * account that was checked first still exists, so a key never outlives its account or attaches
+     * to a recreated account with the same email.
+     */
     public StoredServiceAccountKey createKey(String requestProject, String emailOrId) {
         ServiceAccountRef ref = resolve(requestProject, emailOrId);
         String project = ref.project();
         String email = ref.email();
-        saStore.get(saKey(project, email))
-                .orElseThrow(() -> GcpException.notFound("Service account not found: " + email));
+        String ownerUniqueId = getServiceAccount(project, email).getUniqueId();
         String keyId = UUID.randomUUID().toString().replace("-", "");
         String name = "projects/" + project + "/serviceAccounts/" + email + "/keys/" + keyId;
         Instant now = Instant.now();
@@ -594,9 +600,14 @@ public class IamService {
         key.setPublicKeyData(Base64.getEncoder().encodeToString(publicKeyPem.getBytes(StandardCharsets.UTF_8)));
         key.setValidAfterTime(now.toString());
         key.setValidBeforeTime(expiry.toString());
-        keyStore.put(keyStorageKey(project, email, keyId), key);
-        LOG.debugf("createKey project=%s email=%s keyId=%s", project, email, keyId);
-        return key;
+        return withPolicyLocks(accountPolicyResources(project, email), () -> {
+            saStore.get(saKey(project, email))
+                    .filter(sa -> ownerUniqueId.equals(sa.getUniqueId()))
+                    .orElseThrow(() -> GcpException.notFound("Service account not found: " + email));
+            keyStore.put(keyStorageKey(project, email, keyId), key);
+            LOG.debugf("createKey project=%s email=%s keyId=%s", project, email, keyId);
+            return key;
+        });
     }
 
     public StoredServiceAccountKey getKey(String project, String emailOrId, String keyId) {
@@ -607,8 +618,15 @@ public class IamService {
 
     public List<StoredServiceAccountKey> listKeys(String project, String emailOrId) {
         ServiceAccountRef ref = resolve(project, emailOrId);
-        String prefix = "key:" + ref.project() + ":" + ref.email() + ":";
+        String prefix = keyStoragePrefix(ref.project(), ref.email());
         return keyStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // Also drops keys left in storage by an older account with the same email.
+    private void deleteAccountKeys(String project, String email) {
+        String prefix = keyStoragePrefix(project, email);
+        List<String> stale = keyStore.keys().stream().filter(k -> k.startsWith(prefix)).toList();
+        stale.forEach(keyStore::delete);
     }
 
     public void deleteKey(String project, String emailOrId, String keyId) {
@@ -789,6 +807,10 @@ public class IamService {
     }
 
     private static String keyStorageKey(String project, String email, String keyId) {
-        return "key:" + project + ":" + email + ":" + keyId;
+        return keyStoragePrefix(project, email) + keyId;
+    }
+
+    private static String keyStoragePrefix(String project, String email) {
+        return "key:" + project + ":" + email + ":";
     }
 }

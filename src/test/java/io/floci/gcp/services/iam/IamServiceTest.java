@@ -384,6 +384,193 @@ class IamServiceTest {
     }
 
     @Test
+    void aRecreatedAccountHasANewUniqueIdAndNoKeysOfTheDeletedOne() {
+        String email = "target@p1.iam.gserviceaccount.com";
+        String oldUniqueId = service.createServiceAccount("p1", "target", "", "").getUniqueId();
+        StoredServiceAccountKey oldKey = service.createKey("p1", email);
+
+        service.deleteServiceAccount("p1", email);
+        String newUniqueId = service.createServiceAccount("p1", "target", "", "").getUniqueId();
+
+        assertNotEquals(oldUniqueId, newUniqueId);
+        assertTrue(service.listKeys("p1", email).isEmpty());
+        GcpException error = assertThrows(GcpException.class,
+                () -> service.getKey("p1", email, oldKey.getKeyId()));
+        assertEquals(404, error.getHttpStatus());
+    }
+
+    @Test
+    void deletingAnAccountKeepsKeysOfSiblingAccountsAndOtherProjects() {
+        service.createServiceAccount("p1", "a", "", "");
+        service.createServiceAccount("p1", "ab", "", "");
+        service.createServiceAccount("p2", "a", "", "");
+        service.createKey("p1", "a@p1.iam.gserviceaccount.com");
+        StoredServiceAccountKey sibling = service.createKey("p1", "ab@p1.iam.gserviceaccount.com");
+        StoredServiceAccountKey otherProject = service.createKey("p2", "a@p2.iam.gserviceaccount.com");
+
+        service.deleteServiceAccount("p1", "a@p1.iam.gserviceaccount.com");
+
+        assertTrue(service.listKeys("p1", "a@p1.iam.gserviceaccount.com").isEmpty());
+        assertEquals(List.of(sibling.getKeyId()), service.listKeys("p1", "ab@p1.iam.gserviceaccount.com")
+                .stream().map(StoredServiceAccountKey::getKeyId).toList());
+        assertEquals(List.of(otherProject.getKeyId()), service.listKeys("p2", "a@p2.iam.gserviceaccount.com")
+                .stream().map(StoredServiceAccountKey::getKeyId).toList());
+    }
+
+    @Test
+    void anAccountCreatedOverOrphanedPersistedKeysStartsWithoutKeys() {
+        InMemoryStorage<String, StoredServiceAccountKey> keyStore = new InMemoryStorage<>();
+        StoredServiceAccountKey orphan = new StoredServiceAccountKey();
+        orphan.setKeyId("orphan");
+        orphan.setName("projects/p1/serviceAccounts/target@p1.iam.gserviceaccount.com/keys/orphan");
+        keyStore.put("key:p1:target@p1.iam.gserviceaccount.com:orphan", orphan);
+        StoredServiceAccountKey unrelated = new StoredServiceAccountKey();
+        unrelated.setKeyId("unrelated");
+        keyStore.put("key:p1:other@p1.iam.gserviceaccount.com:unrelated", unrelated);
+        IamService iam = new IamService(new InMemoryStorage<>(), keyStore, new InMemoryStorage<>());
+
+        iam.createServiceAccount("p1", "target", "", "");
+
+        assertTrue(iam.listKeys("p1", "target@p1.iam.gserviceaccount.com").isEmpty());
+        assertThrows(GcpException.class, () -> iam.getKey("p1", "target@p1.iam.gserviceaccount.com", "orphan"));
+        assertTrue(keyStore.get("key:p1:other@p1.iam.gserviceaccount.com:unrelated").isPresent());
+    }
+
+    @Test
+    void deletedAccountKeysStayGoneAfterARestartWithHybridStorage(@TempDir Path tempDir) {
+        Path accountsPath = tempDir.resolve("iam-service-accounts.json");
+        Path keysPath = tempDir.resolve("iam-sa-keys.json");
+        TypeReference<Map<String, StoredServiceAccount>> accountType = new TypeReference<>() {};
+        TypeReference<Map<String, StoredServiceAccountKey>> keyType = new TypeReference<>() {};
+        HybridStorage<String, StoredServiceAccount> accounts = new HybridStorage<>(
+                accountsPath, accountType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, StoredServiceAccountKey> keys = new HybridStorage<>(
+                keysPath, keyType, TimeUnit.HOURS.toMillis(1));
+        String email = "target@p1.iam.gserviceaccount.com";
+        try {
+            IamService first = new IamService(accounts, keys, new InMemoryStorage<>());
+            first.createServiceAccount("p1", "target", "", "");
+            first.createKey("p1", email);
+            accounts.flush();
+            keys.flush();
+            first.deleteServiceAccount("p1", email);
+        } finally {
+            accounts.shutdown();
+            keys.shutdown();
+        }
+
+        HybridStorage<String, StoredServiceAccount> restoredAccounts = new HybridStorage<>(
+                accountsPath, accountType, TimeUnit.HOURS.toMillis(1));
+        HybridStorage<String, StoredServiceAccountKey> restoredKeys = new HybridStorage<>(
+                keysPath, keyType, TimeUnit.HOURS.toMillis(1));
+        try {
+            restoredAccounts.load();
+            restoredKeys.load();
+            IamService second = new IamService(restoredAccounts, restoredKeys, new InMemoryStorage<>());
+            second.createServiceAccount("p1", "target", "", "");
+
+            assertTrue(second.listKeys("p1", email).isEmpty());
+        } finally {
+            restoredAccounts.shutdown();
+            restoredKeys.shutdown();
+        }
+    }
+
+    @Test
+    void aKeyCreatedBeforeItsAccountIsDeletedIsRemovedWithTheAccount() throws Exception {
+        CountDownLatch keyPublishing = new CountDownLatch(1);
+        CountDownLatch releaseKey = new CountDownLatch(1);
+        InMemoryStorage<String, StoredServiceAccountKey> keyStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, StoredServiceAccountKey value) {
+                keyPublishing.countDown();
+                await(releaseKey);
+                super.put(key, value);
+            }
+        };
+        IamService iam = new IamService(new InMemoryStorage<>(), keyStore, new InMemoryStorage<>());
+        String email = "target@p1.iam.gserviceaccount.com";
+        iam.createServiceAccount("p1", "target", "", "");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<StoredServiceAccountKey> creating = executor.submit(() -> iam.createKey("p1", email));
+            assertTrue(keyPublishing.await(5, TimeUnit.SECONDS));
+            Future<?> deleting = executor.submit(() -> iam.deleteServiceAccount("p1", email));
+            assertThrows(TimeoutException.class, () -> deleting.get(200, TimeUnit.MILLISECONDS),
+                    "deletion must wait while the key is being published");
+
+            releaseKey.countDown();
+            creating.get(5, TimeUnit.SECONDS);
+            deleting.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseKey.countDown();
+            executor.shutdownNow();
+        }
+
+        assertTrue(keyStore.keys().isEmpty());
+        iam.createServiceAccount("p1", "target", "", "");
+        assertTrue(iam.listKeys("p1", email).isEmpty());
+    }
+
+    @Test
+    void aKeyForAnAccountDeletedDuringCreationIsNotPublished() throws Exception {
+        assertKeyCreationRacingDeletionIsNotPublished(false);
+    }
+
+    @Test
+    void aKeyForAnAccountRecreatedDuringCreationIsNotAttachedToTheReplacement() throws Exception {
+        assertKeyCreationRacingDeletionIsNotPublished(true);
+    }
+
+    private static void assertKeyCreationRacingDeletionIsNotPublished(boolean recreate) throws Exception {
+        CountDownLatch accountChecked = new CountDownLatch(1);
+        CountDownLatch releaseCreator = new CountDownLatch(1);
+        AtomicBoolean paused = new AtomicBoolean();
+        Thread[] creator = new Thread[1];
+        InMemoryStorage<String, StoredServiceAccount> accounts = new InMemoryStorage<>() {
+            @Override
+            public Optional<StoredServiceAccount> get(String key) {
+                Optional<StoredServiceAccount> result = super.get(key);
+                if (Thread.currentThread() == creator[0] && paused.compareAndSet(false, true)) {
+                    accountChecked.countDown();
+                    await(releaseCreator);
+                }
+                return result;
+            }
+        };
+        InMemoryStorage<String, StoredServiceAccountKey> keyStore = new InMemoryStorage<>();
+        IamService iam = new IamService(accounts, keyStore, new InMemoryStorage<>());
+        String email = "target@p1.iam.gserviceaccount.com";
+        iam.createServiceAccount("p1", "target", "", "");
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<StoredServiceAccountKey> creating = executor.submit(() -> {
+                creator[0] = Thread.currentThread();
+                return iam.createKey("p1", email);
+            });
+            assertTrue(accountChecked.await(5, TimeUnit.SECONDS));
+            iam.deleteServiceAccount("p1", email);
+            if (recreate) {
+                iam.createServiceAccount("p1", "target", "", "");
+            }
+
+            releaseCreator.countDown();
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> creating.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(GcpException.class, error.getCause());
+            assertEquals(404, ((GcpException) error.getCause()).getHttpStatus());
+        } finally {
+            releaseCreator.countDown();
+            executor.shutdownNow();
+        }
+
+        assertTrue(keyStore.keys().isEmpty());
+        if (recreate) {
+            assertTrue(iam.listKeys("p1", email).isEmpty());
+        }
+    }
+
+    @Test
     void getPolicyReturnsEmptyBindingsByDefault() {
         service.createServiceAccount("p1", "sa1", "SA1", "");
         StoredPolicy policy = service.getPolicy("projects/p1/serviceAccounts/sa1@p1.iam.gserviceaccount.com");

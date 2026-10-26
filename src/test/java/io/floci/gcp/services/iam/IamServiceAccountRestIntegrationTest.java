@@ -6,9 +6,12 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class IamServiceAccountRestIntegrationTest {
@@ -61,6 +64,29 @@ class IamServiceAccountRestIntegrationTest {
                 .when().patch(sa)
                 .then().statusCode(200)
                 .body("$", not(hasKey("displayName")));
+    }
+
+    @Test
+    void recreatedAccountHasANewUniqueIdAndNoKeysOfTheDeletedAccount() {
+        String sa = create("recreated", Map.of());
+        String oldUniqueId = given().when().get(sa).then().statusCode(200).extract().path("uniqueId");
+        String oldKeyName = given().contentType("application/json").body(Map.of())
+                .when().post(sa + "/keys")
+                .then().statusCode(200)
+                .extract().path("name");
+
+        given().when().delete(sa).then().statusCode(200);
+        create("recreated", Map.of());
+
+        given().when().get(sa)
+                .then().statusCode(200)
+                .body("uniqueId", not(equalTo(oldUniqueId)));
+        given().when().get(sa + "/keys")
+                .then().statusCode(200)
+                .body("keys", anyOf(nullValue(), empty()));
+        given().when().get("/v1/" + oldKeyName)
+                .then().statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
     }
 
     @Test

@@ -1,7 +1,10 @@
 package io.floci.gcp.services.iamcredentials;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.List;
@@ -180,6 +183,25 @@ class IamCredentialsRestIntegrationTest {
                 .statusCode(200)
                 .body("keyId", equalTo(wildcardKeyId))
                 .body("signature", notNullValue());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bytesToSign", "payload"})
+    void signBlobAcceptsUrlSafeBase64AndRejectsMalformedBytes(String field) {
+        String sa = createServiceAccount("url-safe-" + field.toLowerCase());
+        String signatureField = field.equals("payload") ? "signedBlob" : "signature";
+
+        String standard = signBlob(sa, field, "+/8=").statusCode(200).extract().path(signatureField);
+
+        signBlob(sa, field, "-_8").statusCode(200).body(signatureField, equalTo(standard));
+        signBlob(sa, field, "!").statusCode(400).body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    private static ValidatableResponse signBlob(String sa, String field, String bytes) {
+        return given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of(field, bytes))
+                .when().post("/v1/projects/-/serviceAccounts/" + sa + ":signBlob")
+                .then();
     }
 
     @Test

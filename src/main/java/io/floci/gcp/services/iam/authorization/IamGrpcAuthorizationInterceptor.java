@@ -122,13 +122,14 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                 streamOperation.set(operation);
                             }
                         }
-                        super.onMessage(message);
                     } catch (Exception e) {
                         rejected = true;
                         call.close(GcpGrpcController.grpcException(e).getStatus(), new Metadata());
                         // Release streaming listeners already registered by previous messages.
                         super.onCancel();
+                        return;
                     }
+                    super.onMessage(message);
                 }
 
                 @Override

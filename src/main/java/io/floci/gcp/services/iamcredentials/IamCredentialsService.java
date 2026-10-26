@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -97,13 +98,8 @@ public class IamCredentialsService {
         if (payload == null || payload.isEmpty()) {
             throw GcpException.invalidArgument("payload is required");
         }
-        byte[] bytes;
-        try {
-            bytes = Base64.getDecoder().decode(payload);
-        } catch (IllegalArgumentException e) {
-            throw GcpException.invalidArgument("payload must be base64-encoded");
-        }
-        IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount, bytes);
+        IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount,
+                ProtoJsonBytes.decode(payload, "payload"));
         Map<String, String> response = new LinkedHashMap<>();
         response.put("keyId", signed.keyId());
         response.put("signedBlob", Base64.getEncoder().encodeToString(signed.signature()));

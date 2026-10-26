@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -621,7 +622,7 @@ public class IamService {
 
     /** IAM v1 {@code serviceAccounts.signBlob}: the response names the signature {@code signature}. */
     public Map<String, String> signBlob(String project, String emailOrId, String bytesToSignBase64) {
-        SignedBytes signed = sign(project, emailOrId, decodeBase64(bytesToSignBase64, "bytesToSign"));
+        SignedBytes signed = sign(project, emailOrId, ProtoJsonBytes.decode(bytesToSignBase64, "bytesToSign"));
         return Map.of("keyId", signed.keyId(), "signature", Base64.getEncoder().encodeToString(signed.signature()));
     }
 
@@ -684,14 +685,6 @@ public class IamService {
             signingKeyStore.put(storageKey, created);
             LOG.debugf("created signing key project=%s email=%s keyId=%s", ref.project(), ref.email(), created.getKeyId());
             return created;
-        }
-    }
-
-    private static byte[] decodeBase64(String value, String field) {
-        try {
-            return Base64.getDecoder().decode(value);
-        } catch (IllegalArgumentException e) {
-            throw GcpException.invalidArgument(field + " must be base64-encoded");
         }
     }
 

@@ -222,7 +222,9 @@ go to serial port 1 under `cloud-init[1]`.
   keeps cloud-init's records. On Container-Optimized OS, `write_files` and `runcmd`
   run on every boot, as Google documents for that image.
 - Docker owns the container's network and hostname, so cloud-init leaves both alone
-  (`network: {config: disabled}`, `preserve_hostname: true`). Modules that need
+  (`network: {config: disabled}`, `preserve_hostname: true`). Container images
+  ship no locales, so the `locale` module is off unless your cloud-config sets
+  `locale`. Modules that need
   systemd or a real kernel, such as `ntp` or `growpart`, may fail or do nothing.
 - Each part of cloud-init (the early stages, then the final stage) waits up to
   `FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT`, as the startup scripts do.

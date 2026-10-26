@@ -539,6 +539,31 @@ class ComputeGuestScriptsTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
+    void aPackageInstallWaitsForTheOneAlreadyRunning() throws Exception {
+        Path dir = Files.createTempDirectory("packages");
+        String functions = ComputeGuestScripts.PACKAGE_LOCK_FUNCTIONS
+                .replace(ComputeGuestScripts.PACKAGE_LOCK, dir.resolve("lock").toString());
+        Process run = new ProcessBuilder("sh", "-c", "has() { command -v \"$1\" >/dev/null 2>&1; }\n" + functions + "\n"
+                + "( packages_lock; echo first; sleep 1; echo first-done; packages_unlock ) & sleep 0.3\n"
+                + "packages_lock; echo second; packages_unlock; wait").redirectErrorStream(true).start();
+        String out = new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        assertEquals(0, run.waitFor(), out);
+        assertEquals("first\nfirst-done\nsecond\n", out);
+    }
+
+    @Test
+    void theSshdAndCloudInitInstallsBothTakeThePackageLock() {
+        for (String script : List.of(ComputeGuestScripts.accountsScript(Map.of(), 1),
+                ComputeGuestScripts.cloudInitEarlyScript(false, "/var/lib/google/floci-cloud-init-abc"))) {
+            assertTrue(script.contains("packages_lock() {"), script);
+            assertTrue(script.indexOf("packages_lock;") < script.indexOf("apt-get"), script);
+            assertTrue(script.indexOf("\npackages_unlock\n") > script.lastIndexOf("apt-get"), script);
+        }
+    }
+
+    @Test
     void quoteMakesOneShellWordOfAnything() {
         assertEquals("'it'\\''s'", ComputeGuestScripts.quote("it's"));
     }

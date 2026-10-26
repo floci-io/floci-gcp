@@ -43,6 +43,17 @@ public class ComputeGuestScripts {
     static final String ACCOUNTS_REQUEST = DIRECTORY + "/floci-accounts.request";
     /** Held while one update changes accounts. */
     static final String ACCOUNTS_LOCK = DIRECTORY + "/floci-accounts.lock";
+    /** Held while a guest script installs packages, so the sshd and cloud-init installs never race for apt. */
+    static final String PACKAGE_LOCK = DIRECTORY + "/floci-packages.lock";
+    /**
+     * Shell functions that take and release {@link #PACKAGE_LOCK} with flock, which the kernel releases when its
+     * holder dies, so an interrupted install never leaves it held. apt-get update fails at once rather than waiting
+     * when another apt-get holds its lists lock, and DPkg::Lock::Timeout only covers the dpkg lock. A guest without
+     * flock installs unserialised, as before.
+     */
+    static final String PACKAGE_LOCK_FUNCTIONS = "packages_lock() { if has flock; then exec 9>\"" + PACKAGE_LOCK
+            + "\"; flock -w 900 9; locked=1; fi; }\n"
+            + "packages_unlock() { if [ -n \"${locked:-}\" ]; then flock -u 9; exec 9>&-; locked=; fi; }";
     /** Longest the account step waits, an sshd package install included. */
     static final Duration ACCOUNTS_TIMEOUT = Duration.ofMinutes(5);
     /** The guest agent's default extra groups for the users it creates ({@code cfg.go}: groups). */
@@ -220,6 +231,8 @@ public class ComputeGuestScripts {
                 failed() { echo "$1"; status=1; }
                 has() { command -v "$1" >/dev/null 2>&1; }
                 sshd_bin() { for b in /usr/sbin/sshd /usr/local/sbin/sshd /sbin/sshd "$(command -v sshd 2>/dev/null)"; do [ -n "$b" ] && [ -x "$b" ] && { echo "$b"; return; }; done; }
+                PACKAGE_LOCK_FUNCTIONS
+                if [ -z "$(sshd_bin)" ]; then packages_lock; fi
                 if [ -z "$(sshd_bin)" ]; then
                   echo "Installing openssh-server."
                   if has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq openssh-server sudo >/dev/null 2>&1
@@ -230,6 +243,7 @@ public class ComputeGuestScripts {
                   fi
                   [ -n "$(sshd_bin)" ] || failed "Could not install openssh-server: no supported package manager or no network."
                 fi
+                packages_unlock
                 owner() { s="$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20)"; [ -n "$s" ] && echo "$1 $s"; }
                 me="$(owner $$)"
                 take_lock() {
@@ -245,7 +259,7 @@ public class ComputeGuestScripts {
                 }
                 take_lock
                 [ "$(cat "$mark" 2>/dev/null)" = "$request" ] || exit 0
-                """.replace("REQUEST_FILE", ACCOUNTS_REQUEST).replace("LOCK_DIR", ACCOUNTS_LOCK)
+                """.replace("PACKAGE_LOCK_FUNCTIONS", PACKAGE_LOCK_FUNCTIONS).replace("REQUEST_FILE", ACCOUNTS_REQUEST).replace("LOCK_DIR", ACCOUNTS_LOCK)
                 .replace("REQUEST", Long.toString(request)));
         if (users != null) {
             sh.append("""
@@ -449,6 +463,8 @@ public class ComputeGuestScripts {
                 trap 'touch "$stage/early.done"' EXIT
                 for old in STAGED*; do [ "$old" = "$stage" ] || rm -rf "$old"; done
                 has() { command -v "$1" >/dev/null 2>&1; }
+                PACKAGE_LOCK_FUNCTIONS
+                if ! has cloud-init; then packages_lock; fi
                 if ! has cloud-init; then
                   echo "Installing cloud-init."
                   if has apt-get; then DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends cloud-init >/dev/null 2>&1
@@ -459,6 +475,7 @@ public class ComputeGuestScripts {
                   fi
                   has cloud-init || { echo "Could not install cloud-init: no supported package manager or no network."; exit 1; }
                 fi
+                packages_unlock
                 mkdir -p /etc/cloud/cloud.cfg.d SEED
                 cat > /etc/cloud/cloud.cfg.d/90_floci.cfg <<'EOF'
                 datasource_list: [NoCloud, None]
@@ -466,9 +483,10 @@ public class ComputeGuestScripts {
                   config: disabled
                 preserve_hostname: true
                 ssh_deletekeys: false
+                locale: false
                 EOF
                 cp "$stage/user-data" "$stage/meta-data" SEED/
-                """.replace("STAGED", quote(staged)).replace("STAGE", quote(stage)).replace("SEED", CLOUD_INIT_SEED)
+                """.replace("PACKAGE_LOCK_FUNCTIONS", PACKAGE_LOCK_FUNCTIONS).replace("STAGED", quote(staged)).replace("STAGE", quote(stage)).replace("SEED", CLOUD_INIT_SEED)
                 + (everyBoot ? """
                 for sem in config_write_files config_write_files_deferred config_runcmd config_scripts_user; do
                   rm -f /var/lib/cloud/instances/*/sem/"$sem"

@@ -5,6 +5,8 @@ import com.google.api.HttpRule;
 import com.google.api.ResourceDescriptor;
 import com.google.api.ResourceProto;
 import com.google.api.ResourceReference;
+import com.google.cloud.location.LocationsProto;
+import com.google.datastore.v1.DatastoreProto;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
@@ -76,9 +78,7 @@ class ServiceRegistryConsistencyTest {
      * gRPC services, on a gated descriptor with the generic usage adapter, that the generic resolution does
      * not cover: a method whose request names no project in a field the gate reads.
      */
-    private static final Map<String, String> GRPC_PROJECT_RESOLUTION = Map.of(
-            "BigQueryReadController", "bound with bindForApi under bigquerystorage.googleapis.com and its own adapter",
-            "BigQueryWriteController", "bound with bindForApi under bigquerystorage.googleapis.com and its own adapter");
+    private static final Map<String, String> GRPC_PROJECT_RESOLUTION = Map.of();
 
     /** Descriptors that serve location-scoped resources without a strict location check. */
     private static final Map<String, String> NO_LOCATION_CHECK = Map.of(
@@ -95,9 +95,9 @@ class ServiceRegistryConsistencyTest {
 
     /** gRPC services written against a hand-built descriptor, because their stubs are not on the classpath. */
     private static final Map<String, com.google.protobuf.Descriptors.ServiceDescriptor> LOCAL_SERVICES = Map.of(
-            "DatastoreController", com.google.datastore.v1.DatastoreProto.getDescriptor()
+            "DatastoreController", DatastoreProto.getDescriptor()
                     .findServiceByName("Datastore"),
-            "LocationsGrpcController", com.google.cloud.location.LocationsProto.getDescriptor()
+            "LocationsGrpcController", LocationsProto.getDescriptor()
                     .findServiceByName("Locations"));
 
     @Inject
@@ -160,12 +160,7 @@ class ServiceRegistryConsistencyTest {
                         || GRPC_PROJECT_RESOLUTION.containsKey(service.getSimpleName())) {
                     continue;
                 }
-                Set<String> domains = Set.of(descriptor.apiName());
-                for (MethodDescriptor method : protoService(service).getMethods()) {
-                    if (!routesProject(method) && !namesProject(method.getInputType(), domains, true, MAX_DEPTH)) {
-                        missing.add(service.getSimpleName() + "." + method.getName());
-                    }
-                }
+                missing.addAll(unresolvedMethods(descriptor, service));
             }
         }
 
@@ -244,7 +239,10 @@ class ServiceRegistryConsistencyTest {
             }
         }
         for (String name : GRPC_PROJECT_RESOLUTION.keySet()) {
-            if (!endpoints.contains(name)) {
+            boolean stillNeeded = gatedWithGenericAdapter().stream().anyMatch(d -> d.resourceClasses().stream()
+                    .anyMatch(c -> c.getSimpleName().equals(name) && BindableService.class.isAssignableFrom(c)
+                            && !unresolvedMethods(d, c).isEmpty()));
+            if (!stillNeeded) {
                 stale.add("GRPC_PROJECT_RESOLUTION " + name);
             }
         }
@@ -422,6 +420,18 @@ class ServiceRegistryConsistencyTest {
         return false;
     }
 
+    /** Methods of {@code service} whose request names its project nowhere the generic resolution reads. */
+    private static List<String> unresolvedMethods(ServiceDescriptor descriptor, Class<?> service) {
+        Set<String> domains = Set.of(descriptor.apiName());
+        List<String> unresolved = new ArrayList<>();
+        for (MethodDescriptor method : protoService(service).getMethods()) {
+            if (!routesProject(method) && !namesProject(method.getInputType(), domains, true, MAX_DEPTH)) {
+                unresolved.add(service.getSimpleName() + "." + method.getName());
+            }
+        }
+        return unresolved;
+    }
+
     private static com.google.protobuf.Descriptors.ServiceDescriptor protoService(Class<?> service) {
         for (Class<?> c = service.getSuperclass(); c != null; c = c.getSuperclass()) {
             Class<?> stubs = c.getEnclosingClass();
@@ -434,7 +444,7 @@ class ServiceRegistryConsistencyTest {
                 if (grpc.getSchemaDescriptor() instanceof ProtoServiceDescriptorSupplier schema) {
                     return schema.getServiceDescriptor();
                 }
-            } catch (NoSuchMethodException e) {
+            } catch (NoSuchMethodException ignored) {
                 // Not a generated *Grpc holder; keep walking up.
             } catch (ReflectiveOperationException e) {
                 throw new IllegalStateException(e);
@@ -467,7 +477,7 @@ class ServiceRegistryConsistencyTest {
                 }
                 try {
                     classes.add(Class.forName(name, false, loader));
-                } catch (ClassNotFoundException | LinkageError e) {
+                } catch (ClassNotFoundException | LinkageError ignored) {
                     // A class that cannot load cannot serve requests either.
                 }
             }

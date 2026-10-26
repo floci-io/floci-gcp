@@ -54,7 +54,11 @@ class GcsCustomerEncryptionRawTest {
         HttpResponse<String> missingKey = CLIENT.send(
                 HttpRequest.newBuilder(objectUri()).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
-        assertThat(missingKey.statusCode()).isEqualTo(403);
+        assertThat(missingKey.statusCode()).isEqualTo(400);
+        assertThat(missingKey.headers().firstValue("Content-Type")).hasValueSatisfying(
+                contentType -> assertThat(contentType).startsWith("application/xml"));
+        assertThat(missingKey.body()).contains("<Error>",
+                "<Code>ResourceIsEncryptedWithCustomerEncryptionKey</Code>");
 
         HttpResponse<String> withKey = CLIENT.send(
                 HttpRequest.newBuilder(objectUri())

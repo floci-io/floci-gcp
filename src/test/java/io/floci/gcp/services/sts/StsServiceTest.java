@@ -106,28 +106,32 @@ class StsServiceTest {
 		assertEquals("invalid_grant", ex.error());
 	}
 
-	@Test
-	void rejectsExpiredFlociSubjectTokenAsInvalidGrant() {
-		StoredCredentialToken expired = new StoredCredentialToken(
-				CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "expired",
-				StoredCredentialToken.TokenKind.IMPERSONATED,
-				Instant.parse("2026-07-15T11:59:59Z"),
-				null,
-				"test@test-project.iam.gserviceaccount.com",
-				List.of());
-		store.put(expired.getTokenValue(), expired);
+    @Test
+    void rejectsExpiredFlociSubjectTokenAsInvalidGrantOnEveryAttempt() {
+        StoredCredentialToken expired = new StoredCredentialToken(
+                CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "expired",
+                StoredCredentialToken.TokenKind.IMPERSONATED,
+                Instant.parse("2026-07-15T11:59:59Z"),
+                null,
+                "test@test-project.iam.gserviceaccount.com",
+                List.of());
+        store.put(expired.getTokenValue(), expired);
 
-		StsException ex = assertThrows(StsException.class,
-				() -> service.exchangeToken(
-						StsService.TOKEN_EXCHANGE_GRANT_TYPE,
-						StsService.ACCESS_TOKEN_TYPE,
-						expired.getTokenValue(),
-						StsService.ACCESS_TOKEN_TYPE,
-						cab()));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            StsException error = assertThrows(StsException.class,
+                    () -> service.exchangeToken(
+                            StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+                            StsService.ACCESS_TOKEN_TYPE,
+                            expired.getTokenValue(),
+                            StsService.ACCESS_TOKEN_TYPE,
+                            cab()));
 
-		assertEquals("invalid_grant", ex.error());
-		assertTrue(store.get(expired.getTokenValue()).isEmpty());
-	}
+            assertEquals("invalid_grant", error.error());
+            assertEquals(CredentialTokenService.EXPIRED_TOKEN_MESSAGE, error.getMessage());
+            assertTrue(store.get(expired.getTokenValue()).isPresent());
+            assertEquals(1, store.keys().size());
+        }
+    }
 
 	private Map<String, Object> validExchange() {
 		return service.exchangeToken(

@@ -2220,9 +2220,10 @@ final class SqlDialectTranslator {
                     projection = "struct_pack(*COLUMNS(" + star + "))";
                 }
                 boolean clauseFollows = listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT;
+                String alias = resultColumnAlias(select);
                 tokens.subList(select, listEnd).clear();
                 String suffix = clauseFollows ? " " : "";
-                replaceSelectHead(select, modifier, projection + suffix);
+                replaceSelectHead(select, modifier, projection + alias + suffix);
                 select = tokens.size();
                 continue;
             }
@@ -2260,7 +2261,7 @@ final class SqlDialectTranslator {
                 }
                 replacement.append(DuckTypes.quoteLiteral(name)).append(": ").append(expression);
             }
-            replacement.append('}');
+            replacement.append('}').append(resultColumnAlias(select));
             if (listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT) {
                 replacement.append(' ');
             }
@@ -2268,6 +2269,14 @@ final class SqlDialectTranslator {
             replaceSelectHead(select, modifier, replacement.toString());
             select = tokens.size();
         }
+    }
+
+    /**
+     * The outermost query's struct is its only result column and is anonymous, so it gets the
+     * {@code f0_} name the derived-query wrapper gives it; DuckDB would name it after the rendered expression.
+     */
+    private String resultColumnAlias(int select) {
+        return select == firstTopLevelSelect() ? " AS f0_" : "";
     }
 
     /** Clauses that can resolve names assigned by the SELECT list must stay inside the struct wrapper. */

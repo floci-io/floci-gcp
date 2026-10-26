@@ -813,6 +813,44 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void selectAsStructResultIsOneAnonymousRecordColumn() {
+        for (String sql : List.of(
+                "SELECT AS STRUCT 1 AS a, 2 AS b",
+                "SELECT AS STRUCT x AS a, 2 AS b FROM UNNEST([1]) AS x",
+                "SELECT AS STRUCT t.* FROM (SELECT 1 AS a, 2 AS b) t",
+                "SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].*",
+                "SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].* ORDER BY 1",
+                "SELECT AS STRUCT COUNT(*) AS a, 2 AS b FROM UNNEST([1]) x HAVING a > 0 ORDER BY a")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields", hasSize(1))
+                    .body("schema.fields[0].name", equalTo("f0_"))
+                    .body("schema.fields[0].type", equalTo("RECORD"))
+                    .body("schema.fields[0].fields.name", equalTo(List.of("a", "b")))
+                    .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+        }
+    }
+
+    @Test
+    @Order(5)
+    void arraySubquerySelectAsStructKeepsAliasesForOrderBy() {
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT x AS a FROM UNNEST([1, 2]) AS x) AS arr",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].name", equalTo("arr"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT x AS v, x * 2 AS d"
+                        + " FROM UNNEST([3, 1, 2]) x ORDER BY d DESC) AS arr", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("v", "d")))
+                .body("rows[0].f[0].v.v.f.v",
+                        equalTo(List.of(List.of("3", "6"), List.of("2", "4"), List.of("1", "2"))));
+    }
+
+    @Test
+    @Order(5)
     void cteColumnsShadowEnclosingOffsetAliases() {
         query(Map.of("query", "WITH local AS (SELECT STRUCT(2 AS x) AS item)"
                         + " SELECT (SELECT item.x FROM local) AS x"

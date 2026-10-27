@@ -1065,6 +1065,8 @@ class SqlDialectTranslatorTest {
                         + " ON t1.a IS NOT DISTINCT FROM t2.a"));
         assertEquals("SELECT ARRAY(SELECT {'d': x IS DISTINCT FROM 2, 'x': x} FROM UNNEST([1, 2]) AS \"_unnest_x\"(\"x\")) AS \"a\"",
                 sql("SELECT ARRAY(SELECT AS STRUCT x IS DISTINCT FROM 2 AS d, x FROM UNNEST([1, 2]) x) a"));
+        String star = sql("SELECT a IS DISTINCT FROM b AS d, * FROM ds.t");
+        assertTrue(star.startsWith("SELECT a IS DISTINCT FROM b AS d, * NOT SIMILAR TO '^(") && star.contains("_TABLE_SUFFIX"), star);
     }
 
     @Test

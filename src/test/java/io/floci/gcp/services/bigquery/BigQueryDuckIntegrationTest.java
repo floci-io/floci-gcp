@@ -1623,6 +1623,24 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].fields.name", equalTo(List.of("d", "x")))
                 .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("true", "1"), List.of("false", "2"))));
+        query("{\"query\": \"SELECT a IS DISTINCT FROM b AS d, t.* FROM " + t + " t ORDER BY a NULLS FIRST, b NULLS FIRST\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("d", "a", "b")))
+                .body("rows.f.v", equalTo(List.of(Arrays.asList("false", null, null), Arrays.asList("true", null, "2"),
+                        List.of("false", "1", "1"), List.of("true", "1", "2"))));
+        query("{\"query\": \"SELECT t.*, a IS DISTINCT FROM b AS d FROM " + t + " t ORDER BY a NULLS FIRST, b NULLS FIRST\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b", "d")))
+                .body("rows.f.v", equalTo(List.of(Arrays.asList(null, null, "false"), Arrays.asList(null, "2", "true"),
+                        List.of("1", "1", "false"), List.of("1", "2", "true"))));
+        query("""
+                {"query": "SELECT x IS DISTINCT FROM 2 AS d, * FROM UNNEST([1, 2]) x WITH OFFSET o ORDER BY o", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("d", "x", "o")))
+                .body("rows.f.v", equalTo(List.of(List.of("true", "1", "0"), List.of("false", "2", "1"))));
     }
 
     @Test

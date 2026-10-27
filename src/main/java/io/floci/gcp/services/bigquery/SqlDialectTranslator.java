@@ -2657,7 +2657,7 @@ final class SqlDialectTranslator {
             } else if (angles > 0 && (t.isPunct(">") || t.isPunct(">>"))) {
                 angles = Math.max(0, angles - (t.isPunct(">>") ? 2 : 1));
             } else if (parens == 0 && brackets == 0 && angles == 0 && t.kind == Kind.IDENT
-                    && ((t.isKeyword("FROM") && !isDistinctFromOperator(i)) || CLAUSE_END_KEYWORDS.contains(t.upper()))
+                    && (isFromClause(i) || CLAUSE_END_KEYWORDS.contains(t.upper()))
                     && !(t.isKeyword("EXCEPT") && followsStar(i))) {
                 return i;
             }
@@ -3148,7 +3148,7 @@ final class SqlDialectTranslator {
             Token t = i < tokens.size() ? tokens.get(i) : null;
             boolean itemEnds = t == null
                     || (depth == 0 && (t.isPunct(",") || t.isPunct(")")
-                    || (t.kind == Kind.IDENT && ((t.isKeyword("FROM") && !isDistinctFromOperator(i))
+                    || (t.kind == Kind.IDENT && (isFromClause(i)
                             || CLAUSE_END_KEYWORDS.contains(t.upper()))
                             && !followsStar(i))));
             if (itemEnds) {
@@ -3330,7 +3330,7 @@ final class SqlDialectTranslator {
                 items.add(new int[] {itemStart, end});
                 itemStart = end + 1;
             } else if (depth == 0 && t.kind == Kind.IDENT
-                    && ((t.isKeyword("FROM") && !isDistinctFromOperator(end))
+                    && (isFromClause(end)
                             || CLAUSE_END_KEYWORDS.contains(t.upper())) && !followsStar(end)) {
                 break;
             }
@@ -4225,7 +4225,7 @@ final class SqlDialectTranslator {
             if (currentDepth < depth) {
                 break;
             }
-            if (currentDepth == depth && tokens.get(i).isKeyword("FROM")) {
+            if (currentDepth == depth && isFromClause(i)) {
                 from = i;
                 break;
             }
@@ -4343,7 +4343,7 @@ final class SqlDialectTranslator {
                     && CLAUSE_END_KEYWORDS.contains(tokens.get(i).upper())) {
                 break;
             }
-            if (currentDepth == depth && tokens.get(i).isKeyword("FROM")) {
+            if (currentDepth == depth && isFromClause(i)) {
                 return i;
             }
         }
@@ -4657,7 +4657,7 @@ final class SqlDialectTranslator {
             return false;
         }
         for (int i = select + 1; i < index; i++) {
-            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("FROM")) {
+            if (parenthesisDepth(i) == depth && isFromClause(i)) {
                 return false;
             }
         }
@@ -5968,6 +5968,11 @@ final class SqlDialectTranslator {
         String winner = row + "_m";
         return "list_extract(list_transform([" + best + "], " + winner + " -> CASE WHEN " + (max ? "" : "NOT ") + winner
                 + ".z THEN NULL ELSE " + winner + ".v END), 1)";
+    }
+
+    /** True when the token at {@code index} starts a FROM clause, not the FROM of {@code IS [NOT] DISTINCT FROM}. */
+    private boolean isFromClause(int index) {
+        return tokens.get(index).isKeyword("FROM") && !isDistinctFromOperator(index);
     }
 
     /** True when the FROM at {@code index} belongs to {@code IS [NOT] DISTINCT FROM}, not a FROM clause. */

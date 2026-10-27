@@ -1100,10 +1100,11 @@ public class BigQueryService {
                 throw QueryEngine.invalidQuery("CREATE TABLE COPY source must be a table, clone, or snapshot");
             }
             table.setSchema(deepCopy(source.getSchema(), TableSchema.class));
+            table.getExtra().putAll(deepCopyMap(source.getExtra()));
+            table.getExtra().remove("expirationTime");
             table.setDescription(source.getDescription());
             table.setFriendlyName(source.getFriendlyName());
             table.setLabels(source.getLabels() != null ? new LinkedHashMap<>(source.getLabels()) : null);
-            table.getExtra().putAll(deepCopyMap(source.getExtra()));
             StoredTableData sourceData = dataStore.get(tableKey(statement.copySource().datasetId(),
                     statement.copySource().tableId())).orElseGet(StoredTableData::new);
             copiedData = copyTableData(sourceData);
@@ -1128,6 +1129,9 @@ public class BigQueryService {
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
                 && existingTable.isPresent() && !samePartitioning(existingTable.get(), table)) {
             throw QueryEngine.invalidQuery("CREATE OR REPLACE TABLE cannot change the partitioning specification");
+        }
+        if (statement.copySource() != null) {
+            BigQueryMetadata.applyDatasetDefaults(table, destinationDataset, System.currentTimeMillis());
         }
         if (exists) {
             deleteTable(projectId, target.datasetId(), target.tableId());
@@ -1956,6 +1960,17 @@ public class BigQueryService {
             config.put("sourceTables", sourceMaps);
         }
 
+        Object operationType = config.get("operationType");
+        if (operationType != null && !"COPY".equals(operationType)) {
+            throw GcpException.invalidArgument("Invalid value for operationType: " + operationType)
+                    .withReason("invalid");
+        }
+        Object destinationExpirationTime = config.get("destinationExpirationTime");
+        if (destinationExpirationTime != null && !(destinationExpirationTime instanceof String)) {
+            throw GcpException.invalidArgument("destinationExpirationTime must be a string")
+                    .withReason("invalid");
+        }
+
         String write = copyDisposition(config.get("writeDisposition"), "writeDisposition",
                 Set.of("WRITE_TRUNCATE", "WRITE_APPEND", "WRITE_EMPTY"), "WRITE_EMPTY");
         String create = copyDisposition(config.get("createDisposition"), "createDisposition",
@@ -1972,7 +1987,8 @@ public class BigQueryService {
         job.setCreationTime(nowMillis());
         try {
             synchronized (writeLock) {
-                runCopy(projectId, sourceMaps, destination, write, create, jobLocation);
+                runCopy(projectId, sourceMaps, destination, write, create, jobLocation,
+                    (String) destinationExpirationTime);
             }
         } catch (GcpException e) {
             job.setErrorReason(loadErrorReason(e));
@@ -2002,7 +2018,7 @@ public class BigQueryService {
 
     private void runCopy(String projectId, List<Map<String, Object>> sourceMaps,
                          Map<String, Object> destinationMap, String write, String create,
-                         JobLocation jobLocation) {
+                         JobLocation jobLocation, String destinationExpirationTime) {
         TableReference destination = tableReference(destinationMap, projectId, "destinationTable");
         validateCopyProject(projectId, destination, "destinationTable");
         Dataset destinationDataset = getDataset(projectId, destination.getDatasetId());
@@ -2058,6 +2074,7 @@ public class BigQueryService {
         if (decoratedDestination != null) {
             if (existing.isEmpty()) {
                 Table table = deepCopy(sources.getFirst().table(), Table.class);
+                applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationTime);
                 validatePartitionDecorator(table, decoratedDestination.partitionId());
                 validateDecoratedCopy(projectId, target, table, decoratedDestination.partitionId(), sources);
                 putTable(projectId, target, table, List.of());
@@ -2074,7 +2091,7 @@ public class BigQueryService {
         }
 
         if (existing.isEmpty()) {
-            createCopiedTable(projectId, target, sources);
+            createCopiedTable(projectId, target, sources, destinationExpirationTime);
             return;
         }
 
@@ -2089,7 +2106,7 @@ public class BigQueryService {
             return;
         }
 
-        if ("WRITE_APPEND".equals(write)) {
+        if ("WRITE_APPEND".equals(write) || "WRITE_EMPTY".equals(write)) {
             requireCompatibleCopyAppendSchema(projectId, target, destinationTable, sources.getFirst().table());
         }
         BigQuerySqlEngine.Result result = new BigQuerySqlEngine.Result(
@@ -2231,9 +2248,26 @@ public class BigQueryService {
         return rows;
     }
 
+    private void applyCopyExpiration(String projectId, Table table, String destinationDatasetId,
+                                     String expirationTime) {
+        // A copy gets destination-dataset defaults, not the source table's expiration.
+        table.getExtra().remove("expirationTime");
+        Dataset dataset = getDataset(projectId, destinationDatasetId);
+        BigQueryMetadata.applyDatasetDefaults(table, dataset, System.currentTimeMillis());
+        if (expirationTime != null) {
+            try {
+                table.getExtra().put("expirationTime", String.valueOf(Instant.parse(expirationTime).toEpochMilli()));
+            } catch (DateTimeException e) {
+                throw GcpException.invalidArgument("destinationExpirationTime must be a valid RFC 3339 timestamp")
+                        .withReason("invalid");
+            }
+        }
+    }
+
     private void createCopiedTable(String projectId, SqlDialectTranslator.TableRef target,
-                                   List<CopySource> sources) {
+                                   List<CopySource> sources, String destinationExpirationTime) {
         Table table = deepCopy(sources.getFirst().table(), Table.class);
+        applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationTime);
         StoredTableData merged = mergeCopyData(sources);
         putTable(projectId, target, table, List.of());
         dataStore.put(tableKey(target.datasetId(), target.tableId()), merged);

@@ -70,7 +70,10 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `configuration.query.destinationTable`, which is how the SDK's `Job.getQueryResults()` reads
   rows.
 - **Copy jobs**: `configuration.copy` accepts either `sourceTable` or non-empty `sourceTables`,
-  plus `destinationTable`. It supports `CREATE_IF_NEEDED`/`CREATE_NEVER` and
+  plus `destinationTable`. Only `operationType` `COPY` (or unset) is supported; `SNAPSHOT` and
+  `CLONE` are rejected. `destinationExpirationTime`, when supplied, sets the created destination
+  table's expiration time. Without it, the source expiration is not inherited and the destination
+  dataset's default table expiration applies. It supports `CREATE_IF_NEEDED`/`CREATE_NEVER` and
   `WRITE_EMPTY`/`WRITE_TRUNCATE`/`WRITE_APPEND`, validates that multiple sources have identical
   schemas, partitioning and clustering, and copies table metadata when creating a destination.
   Partition-decorated source and destination references copy only the named partition. Supported

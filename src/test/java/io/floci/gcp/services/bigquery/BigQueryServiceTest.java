@@ -1523,6 +1523,32 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void copyDestinationsUseDatasetExpirationInsteadOfSourceExpiration() {
+        Dataset dataset = newDataset(DATASET);
+        dataset.setExtra("defaultTableExpirationMs", "7200000");
+        service.createDataset(PROJECT, dataset);
+        Table source = newTable(DATASET, "source");
+        source.setExtra("expirationTime", String.valueOf(System.currentTimeMillis() + 86_400_000));
+        service.createTable(PROJECT, DATASET, source);
+
+        long beforeCopy = System.currentTimeMillis();
+        StoredJob copyJob = service.copy(PROJECT, null, null, copyConfig("source", "job_copy"));
+        long jobExpiration = Long.parseLong((String) service.getTable(PROJECT, DATASET, "job_copy")
+                .getExtra().get("expirationTime"));
+        StoredJob ddlJob = service.query(PROJECT, null, null,
+                "CREATE TABLE " + DATASET + ".sql_copy COPY " + DATASET + ".source", null);
+        long ddlExpiration = Long.parseLong((String) service.getTable(PROJECT, DATASET, "sql_copy")
+                .getExtra().get("expirationTime"));
+
+        assertFalse(copyJob.failed(), copyJob.getErrorMessage());
+        assertFalse(ddlJob.failed(), ddlJob.getErrorMessage());
+        assertTrue(jobExpiration >= beforeCopy + 7_200_000L);
+        assertTrue(jobExpiration <= System.currentTimeMillis() + 7_200_000L);
+        assertTrue(ddlExpiration >= beforeCopy + 7_200_000L);
+        assertTrue(ddlExpiration <= System.currentTimeMillis() + 7_200_000L);
+    }
+
+    @Test
     void copyRecreatesExpiredDestinationBeforeDispositionChecks() {
         service.createDataset(PROJECT, newDataset(DATASET));
         Table source = newTable(DATASET, "source");
@@ -1559,6 +1585,25 @@ class BigQueryServiceTest {
 
         StoredJob copied = service.copy(PROJECT, null, null,
                 copyConfig("source", "destination", "writeDisposition", "WRITE_APPEND"));
+
+        assertTrue(copied.failed());
+        assertEquals(0, service.listTableData(PROJECT, DATASET, "destination").rows().size());
+    }
+
+    @Test
+    void copyWriteEmptyRejectsDifferentDestinationSchemaEvenWhenEmpty() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table source = newTable(DATASET, "source");
+        service.createTable(PROJECT, DATASET, source);
+        Table destination = newTable(DATASET, "destination");
+        TableFieldSchema incompatible = new TableFieldSchema();
+        incompatible.setName("name");
+        incompatible.setType("INTEGER");
+        destination.setSchema(new TableSchema(List.of(incompatible)));
+        service.createTable(PROJECT, DATASET, destination);
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("source", "destination", "writeDisposition", "WRITE_EMPTY"));
 
         assertTrue(copied.failed());
         assertEquals(0, service.listTableData(PROJECT, DATASET, "destination").rows().size());

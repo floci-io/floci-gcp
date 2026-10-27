@@ -1641,6 +1641,13 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("d", "x", "o")))
                 .body("rows.f.v", equalTo(List.of(List.of("true", "1", "0"), List.of("false", "2", "1"))));
+        query("""
+                {"query": "SELECT 1 IS DISTINCT FROM 2 AS d, STRUCT(MAX(x) AS n) AS s FROM UNNEST([1, 2]) x HAVING s.n > 0", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("d", "s")))
+                .body("rows[0].f[0].v", equalTo("true"))
+                .body("rows[0].f[1].v.f.v", equalTo(List.of("2")));
     }
 
     @Test

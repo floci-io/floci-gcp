@@ -2879,7 +2879,7 @@ final class SqlDialectTranslator {
         int start = select + 1;
         int selectEnd = before;
         for (int i = start; i < before; i++) {
-            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("FROM")) {
+            if (parenthesisDepth(i) == depth && isFromClause(i)) {
                 selectEnd = i;
                 break;
             }

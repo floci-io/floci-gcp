@@ -374,23 +374,38 @@ public class GcsService {
         return applyBucketUpdate(name, patch, false);
     }
 
+    static Map<String, String> patchLabels(Map<String, String> current, Map<String, Object> patch) {
+        if (patch == null) {
+            return null;
+        }
+        Map<String, String> labels = current == null ? new LinkedHashMap<>() : new LinkedHashMap<>(current);
+        patch.forEach((key, value) -> {
+            if (value == null) {
+                labels.remove(key);
+            } else {
+                labels.put(key, value.toString());
+            }
+        });
+        return labels.isEmpty() ? null : labels;
+    }
+
     GcsBucket updateBucketWithResolvedFields(String name, Map<String, Object> fields) {
         return applyBucketUpdate(name, fields, true);
     }
 
     @SuppressWarnings("unchecked")
     private GcsBucket applyBucketUpdate(String name, Map<String, Object> patch,
-            boolean replaceIamConfiguration) {
+            boolean resolvedFields) {
         if (bucketLifecycleService == null) {
-            return applyBucketUpdateUncoordinated(name, patch, replaceIamConfiguration);
+            return applyBucketUpdateUncoordinated(name, patch, resolvedFields);
         }
         return bucketLifecycleService.updateBucket(name,
-                () -> applyBucketUpdateUncoordinated(name, patch, replaceIamConfiguration));
+                () -> applyBucketUpdateUncoordinated(name, patch, resolvedFields));
     }
 
     @SuppressWarnings("unchecked")
     private GcsBucket applyBucketUpdateUncoordinated(String name, Map<String, Object> patch,
-            boolean replaceIamConfiguration) {
+            boolean resolvedFields) {
         LOG.debugf("updateBucket name=%s", name);
         synchronized (bucketLock(name)) {
             GcsBucket bucket = getBucket(name);
@@ -398,7 +413,7 @@ public class GcsService {
                     ? updateIamConfiguration(
                             bucket.getCanonicalIamConfiguration(),
                             (Map<String, Object>) patch.get("iamConfiguration"),
-                            replaceIamConfiguration)
+                            resolvedFields)
                     : null;
             if (updatedIamConfiguration != null && bucketLifecycleService != null) {
                 bucketLifecycleService.validateIamConfiguration(name, updatedIamConfiguration);
@@ -408,8 +423,10 @@ public class GcsService {
             Map<String, Object> updatedSoftDeletePolicy = patch.get("softDeletePolicy") instanceof Map<?, ?> requested
                     ? softDeletePolicy((Map<String, Object>) requested, bucket.getSoftDeletePolicy())
                     : null;
-            if (patch.containsKey("labels")) {
+            if (patch.containsKey("labels") && resolvedFields) {
                 bucket.setLabels((Map<String, String>) patch.get("labels"));
+            } else if (patch.containsKey("labels")) {
+                bucket.setLabels(patchLabels(bucket.getLabels(), (Map<String, Object>) patch.get("labels")));
             }
             if (patch.containsKey("versioning")) {
                 bucket.setVersioning((Map<String, Object>) patch.get("versioning"));

@@ -676,6 +676,50 @@ class GcsServiceTest {
     }
 
     @Test
+    void patchMergesLabelsIntoTheExistingLabels() {
+        service.createBucket("labels-merge", "p1", BASE_URL,
+                Map.of("labels", Map.of("env", "test", "team", "data")));
+
+        service.updateBucket("labels-merge", Map.of("labels", Map.of("team", "ml", "tier", "gold")));
+
+        assertEquals(Map.of("env", "test", "team", "ml", "tier", "gold"),
+                service.getBucket("labels-merge").getLabels());
+    }
+
+    @Test
+    void patchRemovesALabelSetToNull() {
+        service.createBucket("labels-null", "p1", BASE_URL,
+                Map.of("labels", Map.of("env", "test", "team", "data")));
+        Map<String, Object> removeTeam = new LinkedHashMap<>();
+        removeTeam.put("team", null);
+
+        service.updateBucket("labels-null", Map.of("labels", removeTeam));
+
+        assertEquals(Map.of("env", "test"), service.getBucket("labels-null").getLabels());
+    }
+
+    @Test
+    void patchRemovingTheLastLabelLeavesNoLabels() {
+        service.createBucket("labels-last", "p1", BASE_URL, Map.of("labels", Map.of("env", "test")));
+        Map<String, Object> removeEnv = new LinkedHashMap<>();
+        removeEnv.put("env", null);
+
+        service.updateBucket("labels-last", Map.of("labels", removeEnv));
+
+        assertNull(service.getBucket("labels-last").getLabels());
+    }
+
+    @Test
+    void resolvedFieldsUpdateReplacesLabels() {
+        service.createBucket("labels-resolved", "p1", BASE_URL,
+                Map.of("labels", Map.of("env", "test", "team", "data")));
+
+        service.updateBucketWithResolvedFields("labels-resolved", Map.of("labels", Map.of("team", "ml")));
+
+        assertEquals(Map.of("team", "ml"), service.getBucket("labels-resolved").getLabels());
+    }
+
+    @Test
     void listingByProjectNumberKeepsProjectsWithCollidingHashesApart() {
         assertEquals("project-an".hashCode(), "project-c0".hashCode());
         service.createBucket("an-bucket", "project-an", BASE_URL, Map.of());

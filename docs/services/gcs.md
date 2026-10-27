@@ -336,7 +336,8 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   `location`, it cannot be changed afterwards
 - `GetBucket`
 - `ListBuckets` (with `pageToken` pagination)
-- `UpdateBucket` / `PatchBucket`
+- `UpdateBucket` / `PatchBucket`. A JSON `PATCH` merges `labels` into the existing labels,
+  and a label set to `null` is removed
 - `DeleteBucket`
 - `GetBucketIamPolicy` / `SetBucketIamPolicy`
 - `TestBucketIamPermissions`, `GET /b/{bucket}/iam/testPermissions?permissions=...` (the GCS

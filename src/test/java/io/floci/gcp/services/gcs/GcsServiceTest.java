@@ -1212,6 +1212,36 @@ class GcsServiceTest {
     }
 
     @Test
+    void overwriteAndRestoreKeepTheReplacedObjectsMetadata() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("bucket", "src.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        GcsObjectMeta composed = service.composeObject("bucket", "obj.txt", List.of("src.txt"),
+                "text/plain", BASE_URL);
+        service.patchObject("bucket", "obj.txt", Map.of(
+                "contentEncoding", "gzip",
+                "contentDisposition", "attachment; filename=obj.txt",
+                "contentLanguage", "en",
+                "cacheControl", "no-cache",
+                "customTime", "2026-01-01T00:00:00Z"));
+        GcsObjectMeta replaced = service.getObjectMeta("bucket", "obj.txt");
+
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", composed.getGeneration());
+
+        assertEquals("gzip", restored.getContentEncoding());
+        assertEquals("attachment; filename=obj.txt", restored.getContentDisposition());
+        assertEquals("en", restored.getContentLanguage());
+        assertEquals("no-cache", restored.getCacheControl());
+        assertEquals(replaced.getCustomTime(), restored.getCustomTime());
+        assertEquals(Integer.valueOf(1), restored.getComponentCount());
+        assertNull(restored.getSoftDeleteTime());
+        assertNull(restored.getHardDeleteTime());
+    }
+
+    @Test
     void overwriteWithAZeroRetentionKeepsNoCopyOfTheReplacedObject() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "0")));

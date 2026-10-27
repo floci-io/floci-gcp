@@ -2442,9 +2442,14 @@ public class GcsService {
         copy.setUpdated(src.getUpdated());
         copy.setCrc32c(src.getCrc32c());
         copy.setMd5Hash(src.getMd5Hash());
+        copy.setComponentCount(src.getComponentCount());
         copy.setMediaLink(src.getMediaLink());
         copy.setSelfLink(src.getSelfLink());
         copy.setEtag(src.getEtag());
+        copy.setContentDisposition(src.getContentDisposition());
+        copy.setContentEncoding(src.getContentEncoding());
+        copy.setContentLanguage(src.getContentLanguage());
+        copy.setCacheControl(src.getCacheControl());
         copy.setMetadata(src.getMetadata());
         copy.setCustomerEncryption(src.getCustomerEncryption());
         copy.setTimeDeleted(src.getTimeDeleted());
@@ -2452,6 +2457,9 @@ public class GcsService {
         copy.setTemporaryHold(src.getTemporaryHold());
         copy.setEventBasedHold(src.getEventBasedHold());
         copy.setRetentionExpirationTime(src.getRetentionExpirationTime());
+        copy.setCustomTime(src.getCustomTime());
+        copy.setSoftDeleteTime(src.getSoftDeleteTime());
+        copy.setHardDeleteTime(src.getHardDeleteTime());
         return copy;
     }
 

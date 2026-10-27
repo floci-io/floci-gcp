@@ -1924,6 +1924,23 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("%F", "2024-03-05"), List.of("%Y", "2024"), List.of("%e %Q", " 5 1"))));
+        query("""
+                {"query": "SELECT FORMAT_TIMESTAMP('%E13S', t) a, FORMAT_TIMESTAMP('%E20S', t) b, FORMAT_TIMESTAMP('%E100S', t) c, FORMAT_TIMESTAMP('%E00S', t) d FROM UNNEST([TIMESTAMP '2026-03-05 07:08:09.123456']) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("09.1234560000000", "09.123456000000000000", "09.123456000000000000", "09")));
+        query("""
+                {"query": "SELECT f, FORMAT_TIMESTAMP(f, TIMESTAMP '2026-03-05 07:08:09.123456') v FROM UNNEST(['%E12S', '%E13S', '%E20S', '%E99S', '%E100S']) f ORDER BY f", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%E100S", "09.123456000000000000"), List.of("%E12S", "09.123456000000"),
+                        List.of("%E13S", "09.1234560000000"), List.of("%E20S", "09.123456000000000000"),
+                        List.of("%E99S", "09.123456000000000000"))));
+        query("""
+                {"query": "SELECT FORMAT_TIMESTAMP('%s', TIMESTAMP '9999-12-31 23:59:59.999999') mx, FORMAT_TIMESTAMP('%s', TIMESTAMP '0001-01-01 00:00:00') mn, FORMAT_TIMESTAMP('%s', TIMESTAMP '1969-12-31 23:59:59.5') neg, FORMAT_DATETIME('%s', DATETIME '9999-12-31 23:59:59.999999') dt", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("253402300799", "-62135596800", "-1", "253402300799")));
     }
 
     @Test

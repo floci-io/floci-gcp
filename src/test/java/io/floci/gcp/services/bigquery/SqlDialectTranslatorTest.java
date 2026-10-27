@@ -911,8 +911,18 @@ class SqlDialectTranslatorTest {
         assertTrue(sql("SELECT FORMAT_DATE(f, d) AS y").startsWith("SELECT list_extract(list_transform([struct_pack(v := (d),"
                 + " f := (f))], _floci_format_row -> CASE WHEN _floci_format_row.f IS NULL OR _floci_format_row.v IS NULL"
                 + " THEN NULL ELSE array_to_string(list_transform(regexp_extract_all(_floci_format_row.f,"
-                + " '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), _floci_format_element -> CASE _floci_format_element"
-                + " WHEN '%%' THEN strftime(_floci_format_row.v, '%%')"));
+                + " '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), _floci_format_element -> CASE WHEN regexp_full_match("
+                + "_floci_format_element, '%E[0-9]+S') THEN list_extract(list_transform([CASE WHEN length(ltrim("
+                + "regexp_extract(_floci_format_element, '[0-9]+'), '0')) > 2 THEN 18 ELSE least(CAST('0' || ltrim("
+                + "regexp_extract(_floci_format_element, '[0-9]+'), '0') AS INTEGER), 18) END], _floci_format_digits ->"));
+        assertTrue(sql("SELECT FORMAT_DATE(f, d) AS y").contains(" ELSE CASE _floci_format_element WHEN '%%' THEN"
+                + " strftime(_floci_format_row.v, '%%')"));
+        assertEquals("SELECT list_extract(list_transform([(ts)], _floci_format_value -> CAST((epoch_us(_floci_format_value)"
+                + " - (epoch_us(_floci_format_value) % 1000000 + 1000000) % 1000000) // 1000000 AS VARCHAR)), 1) AS y",
+                sql("SELECT FORMAT_TIMESTAMP('%s', ts) AS y"));
+        assertEquals("SELECT list_extract(list_transform([(ts)], _floci_format_value -> (strftime(_floci_format_value, '%S.')"
+                + " || left(rpad(strftime(_floci_format_value, '%f'), 18, '0'), 18))), 1) AS y",
+                sql("SELECT FORMAT_TIMESTAMP('%E100S', ts) AS y"));
         String perRow = sql("SELECT FORMAT_DATE(h(f), g(d)) AS y");
         assertEquals(1, perRow.split("g\\(d\\)", -1).length - 1, perRow);
         assertEquals(1, perRow.split("h\\(f\\)", -1).length - 1, perRow);

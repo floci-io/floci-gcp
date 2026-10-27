@@ -5435,9 +5435,6 @@ final class SqlDialectTranslator {
         }
         elements.addAll(COMPOSITE_ELEMENTS.keySet());
         elements.addAll(EMULATED_ELEMENTS);
-        for (int digits = 0; digits <= 12; digits++) {
-            elements.add("%E" + digits + "S");
-        }
         return List.copyOf(elements);
     }
 
@@ -5493,10 +5490,14 @@ final class SqlDialectTranslator {
                     .append(pattern != null ? strftimeCall(rowValue, pattern) : emulatedElement(rowValue, element));
         }
         elements.append(" ELSE ").append(FORMAT_ELEMENT).append(" END");
+        String digits = "ltrim(regexp_extract(" + FORMAT_ELEMENT + ", '[0-9]+'), '0')";
+        String fraction = "CASE WHEN regexp_full_match(" + FORMAT_ELEMENT + ", '%E[0-9]+S') THEN " + fractionalSeconds(rowValue,
+                "CASE WHEN length(" + digits + ") > 2 THEN " + MAX_FRACTION_DIGITS + " ELSE least(CAST('0' || " + digits
+                        + " AS INTEGER), " + MAX_FRACTION_DIGITS + ") END") + " ELSE " + elements + " END";
         return "list_extract(list_transform([struct_pack(v := (" + value + "), f := (" + format + "))], " + FORMAT_ROW
                 + " -> CASE WHEN " + FORMAT_ROW + ".f IS NULL OR " + rowValue + " IS NULL THEN NULL ELSE array_to_string("
                 + "list_transform(regexp_extract_all(" + FORMAT_ROW + ".f, '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), "
-                + FORMAT_ELEMENT + " -> " + elements + "), '') END), 1)";
+                + FORMAT_ELEMENT + " -> " + fraction + "), '') END), 1)";
     }
 
     private static String strftimeCall(String value, String pattern) {
@@ -5556,7 +5557,7 @@ final class SqlDialectTranslator {
                 && (element.charAt(1) == '%' || SHARED_ELEMENTS.indexOf(element.charAt(1)) >= 0)) {
             return element;
         }
-        if (EMULATED_ELEMENTS.contains(element) || element.matches("%E\\d{1,2}S")) {
+        if (EMULATED_ELEMENTS.contains(element) || element.matches("%E\\d+S")) {
             return null;
         }
         return switch (element) {
@@ -5580,15 +5581,33 @@ final class SqlDialectTranslator {
             case "%l" -> "lpad(CAST((hour(" + value + ") + 11) % 12 + 1 AS VARCHAR), 2, ' ')";
             case "%P" -> "lower(strftime(" + value + ", '%p'))";
             case "%Q" -> "CAST(quarter(" + value + ") AS VARCHAR)";
-            case "%s" -> "CAST(CAST(floor(epoch(" + value + ")) AS BIGINT) AS VARCHAR)";
+            case "%s" -> "CAST((epoch_us(" + value + ") - (epoch_us(" + value + ") % 1000000 + 1000000) % 1000000) // 1000000"
+                    + " AS VARCHAR)";
             case "%E*S" -> "(strftime(" + value + ", '%S') || CASE WHEN strftime(" + value + ", '%f') = '000000'"
                     + " THEN '' ELSE '.' || rtrim(strftime(" + value + ", '%f'), '0') END)";
             default -> {
-                int digits = Integer.parseInt(element.substring(2, element.length() - 1));
+                int digits = fractionDigits(element);
                 yield digits == 0 ? strftimeCall(value, "%S") : "(strftime(" + value + ", '%S.') || left(rpad(strftime("
                         + value + ", '%f'), " + digits + ", '0'), " + digits + "))";
             }
         };
+    }
+
+    /** BigQuery prints at most this many fractional digits for {@code %E<n>S}, however large n is. */
+    private static final int MAX_FRACTION_DIGITS = 18;
+
+    /** The digit count of a {@code %E<n>S} element, capped at {@link #MAX_FRACTION_DIGITS}; leading zeros are ignored. */
+    private static int fractionDigits(String element) {
+        String digits = element.substring(2, element.length() - 1).replaceFirst("^0+", "");
+        return digits.length() > 2 ? MAX_FRACTION_DIGITS : Math.min(digits.isEmpty() ? 0 : Integer.parseInt(digits),
+                MAX_FRACTION_DIGITS);
+    }
+
+    /** Seconds with {@code digits} (a SQL integer expression) fractional digits, as {@code %E<n>S} prints them. */
+    private static String fractionalSeconds(String value, String digits) {
+        return "list_extract(list_transform([" + digits + "], _floci_format_digits -> CASE WHEN _floci_format_digits = 0"
+                + " THEN strftime(" + value + ", '%S') ELSE strftime(" + value + ", '%S.') || left(rpad(strftime(" + value
+                + ", '%f'), _floci_format_digits, '0'), _floci_format_digits) END), 1)";
     }
 
     /**

@@ -2139,12 +2139,12 @@ public class BigQueryService {
 
     private static void requireCompatibleCopySources(List<CopySource> sources) {
         Object schema = JSON.valueToTree(sources.getFirst().table().getSchema());
-        Object timePartitioning = JSON.valueToTree(sources.getFirst().table().getExtra().get("timePartitioning"));
         Object rangePartitioning = JSON.valueToTree(sources.getFirst().table().getExtra().get("rangePartitioning"));
         Object clustering = JSON.valueToTree(sources.getFirst().table().getExtra().get("clustering"));
         for (CopySource source : sources.subList(1, sources.size())) {
             if (!schema.equals(JSON.valueToTree(source.table().getSchema()))
-                    || !timePartitioning.equals(JSON.valueToTree(source.table().getExtra().get("timePartitioning")))
+                    || !sameTimePartitioning(timePartitioning(sources.getFirst().table()),
+                            timePartitioning(source.table()))
                     || !rangePartitioning.equals(JSON.valueToTree(
                             source.table().getExtra().get("rangePartitioning")))
                     || !clustering.equals(JSON.valueToTree(source.table().getExtra().get("clustering")))) {
@@ -2152,6 +2152,18 @@ public class BigQueryService {
                         + " partitioning, and clustering").withReason("invalid");
             }
         }
+    }
+
+    private static boolean sameTimePartitioning(Map<String, Object> first, Map<String, Object> second) {
+        Map<String, Object> normalizedFirst = first != null ? new LinkedHashMap<>(first) : null;
+        Map<String, Object> normalizedSecond = second != null ? new LinkedHashMap<>(second) : null;
+        if (normalizedFirst != null) {
+            normalizedFirst.remove("expirationMs");
+        }
+        if (normalizedSecond != null) {
+            normalizedSecond.remove("expirationMs");
+        }
+        return JSON.valueToTree(normalizedFirst).equals(JSON.valueToTree(normalizedSecond));
     }
 
     private static void validateDecoratedCopy(String projectId, SqlDialectTranslator.TableRef target,
@@ -2188,7 +2200,7 @@ public class BigQueryService {
             boolean sourceIngestion = isIngestionTimePartitioned(source.table());
             boolean destinationIngestion = isIngestionTimePartitioned(destination);
             if (!sourceIngestion || !destinationIngestion) {
-                if (!JSON.valueToTree(sourceTime).equals(JSON.valueToTree(destinationTime))
+                if (!sameTimePartitioning(sourceTime, destinationTime)
                         || !source.partitionId().equals(destinationPartition)) {
                     throw GcpException.invalidArgument("Column-partitioned copies require identical source and"
                             + " destination partitioning and decorators").withReason("invalid");
@@ -2376,8 +2388,7 @@ public class BigQueryService {
     private static void requireCompatibleDestination(String projectId, SqlDialectTranslator.TableRef target,
                                                      Table destination, Table source) {
         if (!JSON.valueToTree(destination.getSchema()).equals(JSON.valueToTree(source.getSchema()))
-                || !JSON.valueToTree(destination.getExtra().get("timePartitioning"))
-                        .equals(JSON.valueToTree(source.getExtra().get("timePartitioning")))
+                || !sameTimePartitioning(timePartitioning(destination), timePartitioning(source))
                 || !JSON.valueToTree(destination.getExtra().get("rangePartitioning"))
                         .equals(JSON.valueToTree(source.getExtra().get("rangePartitioning")))
                 || !JSON.valueToTree(destination.getExtra().get("clustering"))

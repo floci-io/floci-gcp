@@ -1808,6 +1808,39 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void partitionCopyAllowsDestinationDefaultPartitionExpiration() {
+        String sourceDatasetId = DATASET + "_copy_source";
+        String destinationDatasetId = DATASET + "_copy_destination";
+        service.createDataset(PROJECT, newDataset(sourceDatasetId));
+        Dataset destinationDataset = newDataset(destinationDatasetId);
+        destinationDataset.setExtra("defaultPartitionExpirationMs", "7200000");
+        service.createDataset(PROJECT, destinationDataset);
+        Table source = newTable(sourceDatasetId, "source");
+        source.getExtra().put("timePartitioning", Map.of("type", "DAY"));
+        service.createTable(PROJECT, sourceDatasetId, source);
+        service.load(PROJECT, null, null,
+                loadConfig(sourceDatasetId + ".source$20261015", "schema", PEOPLE_SCHEMA,
+                        "writeDisposition", "WRITE_TRUNCATE"),
+                ndjson("{\"name\": \"partition\", \"age\": 1}"));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("sourceTable", Map.of("datasetId", sourceDatasetId, "tableId", "source$20261015"));
+        config.put("destinationTable", Map.of("datasetId", destinationDatasetId,
+                "tableId", "destination$20261015"));
+
+        StoredJob created = service.copy(PROJECT, null, null, config);
+        StoredJob appended = service.copy(PROJECT, null, null,
+                Map.of("sourceTable", Map.of("datasetId", sourceDatasetId, "tableId", "source$20261015"),
+                        "destinationTable", Map.of("datasetId", destinationDatasetId,
+                                "tableId", "destination$20261015"),
+                        "writeDisposition", "WRITE_APPEND"));
+
+        assertFalse(created.failed(), created.getErrorMessage());
+        assertFalse(appended.failed(), appended.getErrorMessage());
+        assertEquals("7200000", ((Map<?, ?>) service.getTable(PROJECT, destinationDatasetId, "destination")
+                .getExtra().get("timePartitioning")).get("expirationMs"));
+    }
+
+    @Test
     void copyJobSupportsEveryTimePartitionDecoratorGranularity() {
         service.createDataset(PROJECT, newDataset(DATASET));
         List<List<String>> partitions = List.of(

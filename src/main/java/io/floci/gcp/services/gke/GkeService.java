@@ -35,6 +35,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -77,6 +78,8 @@ public class GkeService {
      * one, and the readiness poller's outcome) so a pass that read an older record never writes
      * over a deleted or recreated one. Never held across Docker calls. */
     private final Object lifecycleLock = new Object();
+    /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
+    private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "gke-readiness-poller");
         t.setDaemon(true);
@@ -1099,15 +1102,26 @@ public class GkeService {
         }
     }
 
-    private static boolean startupExpired(StoredCluster cluster) {
-        if (cluster.getCreateTime() == null) {
+    /** A cluster without a readable {@code createTime} is never expired: the emulator always
+     * writes an RFC3339 instant, so only a hand-edited store gets here, and failing a create that
+     * may still be starting is worse than waiting. The stopped-container check still applies. */
+    boolean startupExpired(StoredCluster cluster) {
+        Instant created = null;
+        if (cluster.getCreateTime() != null) {
+            try {
+                created = Instant.parse(cluster.getCreateTime());
+            } catch (DateTimeParseException e) {
+                // Logged below, once per cluster.
+            }
+        }
+        if (created == null) {
+            if (unreadableCreateTimes.add(cluster.getCreateOperation() + "|" + cluster.getName())) {
+                LOG.warnv("Cluster {0} has an unreadable createTime \"{1}\"; its startup deadline is not enforced",
+                        cluster.getName(), cluster.getCreateTime());
+            }
             return false;
         }
-        try {
-            return Instant.parse(cluster.getCreateTime()).plus(STARTUP_TIMEOUT).isBefore(Instant.now());
-        } catch (DateTimeParseException e) {
-            return false;
-        }
+        return created.plus(STARTUP_TIMEOUT).isBefore(Instant.now());
     }
 
     private boolean mock() {

@@ -184,6 +184,20 @@ class GkeServiceTest {
     }
 
     @Test
+    void anUnreadableCreateTimeNeverExpiresTheStartup() {
+        StoredCluster cluster = new StoredCluster();
+        cluster.setName("hand-edited");
+        cluster.setCreateTime("yesterday");
+
+        assertFalse(service.startupExpired(cluster));
+        assertFalse(service.startupExpired(cluster));
+        cluster.setCreateTime(null);
+        assertFalse(service.startupExpired(cluster));
+        cluster.setCreateTime(Instant.now().minus(GkeService.STARTUP_TIMEOUT).minusSeconds(1).toString());
+        assertTrue(service.startupExpired(cluster));
+    }
+
+    @Test
     void createClusterFailsWhenTheControlPlaneContainerStops() {
         when(gkeConfig.mock()).thenReturn(false);
         StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "crashed"));

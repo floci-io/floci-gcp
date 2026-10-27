@@ -268,6 +268,10 @@ Page<Blob> versions = storage.list("my-bucket",
     Storage.BlobListOption.versions(true));
 ```
 
+Deleting the live object by name makes it a noncurrent version with `timeDeleted` set, also when
+the bucket has a soft delete policy. A delete by generation soft-deletes that generation under a
+soft delete policy and removes it otherwise.
+
 ## Pre-signed URLs
 
 Generate a pre-signed URL for temporary public access:

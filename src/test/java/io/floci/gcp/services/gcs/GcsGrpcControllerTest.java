@@ -12,6 +12,7 @@ import com.google.storage.v2.ChecksummedData;
 import com.google.storage.v2.ComposeObjectRequest;
 import com.google.storage.v2.CreateBucketRequest;
 import com.google.storage.v2.DeleteBucketRequest;
+import com.google.storage.v2.DeleteObjectRequest;
 import com.google.storage.v2.GetBucketRequest;
 import com.google.storage.v2.GetObjectRequest;
 import com.google.storage.v2.ListBucketsRequest;
@@ -31,6 +32,7 @@ import com.google.storage.v2.WriteObjectResponse;
 import com.google.storage.v2.WriteObjectSpec;
 import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeEach;
@@ -759,6 +761,26 @@ class GcsGrpcControllerTest {
             allowMetadataWrite.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void deleteObjectInAVersionedBucketLeavesItNoncurrentRatherThanSoftDeleted() {
+        service.createBucket("grpc-versioned-soft-delete", "test-project", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        String generation = service.putObject("grpc-versioned-soft-delete", "object", "text/plain",
+                new byte[] {1}, BASE_URL).getGeneration();
+
+        RecordingObserver<Empty> response = new RecordingObserver<>();
+        controller.deleteObject(DeleteObjectRequest.newBuilder()
+                .setBucket("projects/_/buckets/grpc-versioned-soft-delete")
+                .setObject("object")
+                .build(), response);
+
+        assertNull(response.error);
+        assertTrue(service.listSoftDeletedObjects("grpc-versioned-soft-delete", null).isEmpty());
+        assertEquals(List.of(generation), service.listObjectVersions("grpc-versioned-soft-delete", null)
+                .stream().map(GcsObjectMeta::getGeneration).toList());
     }
 
     @Test

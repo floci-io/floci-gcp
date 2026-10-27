@@ -1113,6 +1113,60 @@ class GcsServiceTest {
     }
 
     @Test
+    void versionedDeleteByNameWithSoftDeleteLeavesTheObjectNoncurrent() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta live = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        assertTrue(service.deleteObject("bucket", "obj.txt"));
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        List<GcsObjectMeta> versions = service.listObjectVersions("bucket", null);
+        assertEquals(List.of(live.getGeneration()),
+                versions.stream().map(GcsObjectMeta::getGeneration).toList());
+        assertNotNull(versions.get(0).getTimeDeleted());
+    }
+
+    @Test
+    void deletingTheNoncurrentVersionSoftDeletesIt() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta live = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+
+        service.deleteObjectVersion("bucket", "obj.txt", live.getGeneration());
+
+        assertTrue(service.listObjectVersions("bucket", null).isEmpty());
+        assertEquals(List.of(live.getGeneration()), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+        service.restoreObject("bucket", "obj.txt", live.getGeneration());
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
+    }
+
+    @Test
+    void restoreInAVersionedBucketSoftDeletesTheDisplacedLiveObject() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta first = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+        service.deleteObjectVersion("bucket", "obj.txt", first.getGeneration());
+        GcsObjectMeta second = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.restoreObject("bucket", "obj.txt", first.getGeneration());
+
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
+        assertEquals(List.of(second.getGeneration()), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+    }
+
+    @Test
     void listObjectsReturnsAll() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());
         service.putObject("bucket", "a/1.txt", "text/plain", new byte[]{1},

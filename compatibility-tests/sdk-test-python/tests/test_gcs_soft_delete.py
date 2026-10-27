@@ -73,3 +73,31 @@ def test_delete_is_permanent_with_a_zero_retention(storage_client, unique_name):
         assert list(storage_client.list_blobs(bucket, soft_deleted=True)) == []
     finally:
         bucket.delete(force=True)
+
+
+def test_versioned_delete_by_name_keeps_a_noncurrent_version(storage_client, unique_name):
+    bucket = storage_client.bucket(f"versioned-soft-{unique_name}")
+    bucket.versioning_enabled = True
+    bucket = storage_client.create_bucket(bucket)
+    bucket.soft_delete_policy.retention_duration_seconds = RETENTION_SECONDS
+    bucket.patch()
+    try:
+        blob = bucket.blob("kept.txt")
+        blob.upload_from_string(b"kept")
+        generation = blob.generation
+
+        bucket.delete_blob("kept.txt")
+
+        noncurrent = [
+            b for b in storage_client.list_blobs(bucket, versions=True) if b.name == "kept.txt"
+        ]
+        assert [b.generation for b in noncurrent] == [generation]
+        assert noncurrent[0].time_deleted is not None
+        assert list(storage_client.list_blobs(bucket, soft_deleted=True)) == []
+
+        bucket.delete_blob("kept.txt", generation=generation)
+
+        soft_deleted = list(storage_client.list_blobs(bucket, soft_deleted=True))
+        assert [(b.name, b.generation) for b in soft_deleted] == [("kept.txt", generation)]
+    finally:
+        bucket.delete(force=True)

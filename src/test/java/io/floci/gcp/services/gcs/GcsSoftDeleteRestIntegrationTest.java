@@ -237,6 +237,49 @@ class GcsSoftDeleteRestIntegrationTest {
     }
 
     @Test
+    void versionedDeleteByNameMakesTheObjectNoncurrentAndSoftDeletesItOnlyOnceThatVersionIsDeleted() {
+        String versioned = "versioned-soft-delete-bucket";
+        given().contentType("application/json")
+                .body(Map.of("name", versioned,
+                        "versioning", Map.of("enabled", true),
+                        "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+        String generation = given().contentType("text/plain").body("bytes")
+                .queryParam("uploadType", "media").queryParam("name", "kept.txt")
+                .when().post("/upload/storage/v1/b/" + versioned + "/o")
+                .then().statusCode(200)
+                .extract().path("generation");
+
+        given().when().delete("/storage/v1/b/" + versioned + "/o/kept.txt").then().statusCode(204);
+
+        given().queryParam("versions", true)
+                .when().get("/storage/v1/b/" + versioned + "/o")
+                .then().statusCode(200)
+                .body("items.find { it.name == 'kept.txt' }.generation", equalTo(generation))
+                .body("items.find { it.name == 'kept.txt' }.timeDeleted", notNullValue());
+        given().queryParam("softDeleted", true)
+                .when().get("/storage/v1/b/" + versioned + "/o")
+                .then().statusCode(200)
+                .body("items", org.hamcrest.Matchers.anyOf(
+                        org.hamcrest.Matchers.nullValue(), org.hamcrest.Matchers.empty()));
+
+        given().queryParam("generation", generation)
+                .when().delete("/storage/v1/b/" + versioned + "/o/kept.txt")
+                .then().statusCode(204);
+
+        given().queryParam("softDeleted", true)
+                .when().get("/storage/v1/b/" + versioned + "/o")
+                .then().statusCode(200)
+                .body("items.find { it.name == 'kept.txt' }.generation", equalTo(generation));
+        given().queryParam("versions", true)
+                .when().get("/storage/v1/b/" + versioned + "/o")
+                .then().statusCode(200)
+                .body("items", org.hamcrest.Matchers.anyOf(
+                        org.hamcrest.Matchers.nullValue(), org.hamcrest.Matchers.empty()));
+    }
+
+    @Test
     void generationScopedDeleteIsAlsoRetained() {
         // "When you delete a noncurrent object, it becomes soft-deleted"
         // (https://cloud.google.com/storage/docs/soft-delete). google-cloud-storage for Python

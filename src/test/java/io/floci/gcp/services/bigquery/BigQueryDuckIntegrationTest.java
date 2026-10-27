@@ -1952,6 +1952,22 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("%s", "%s", "%s"), List.of("%H", "%H", "07"), List.of("%E3S", "%E3S", "09.123"),
                         List.of("%Y", "2024", "%Y"), List.of("%E4Y", "2024", "%E4Y"))));
+        query("""
+                {"query": "SELECT d, FORMAT_DATE('%J', d) j FROM UNNEST([DATE '2024-03-05', DATE '2024-12-30', DATE '2021-01-01', DATE '2020-12-31', DATE '2026-01-01']) d ORDER BY d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2020-12-31", "368"), List.of("2021-01-01", "369"), List.of("2024-03-05", "065"),
+                        List.of("2024-12-30", "001"), List.of("2026-01-01", "004"))));
+        query("""
+                {"query": "SELECT FORMAT_DATETIME('%J', DATETIME '2024-03-05 07:08:09') dt, FORMAT_TIMESTAMP('%J', TIMESTAMP '2024-03-05 07:08:09') ts, FORMAT_TIME('%J', TIME '07:08:09') t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("065", "065", "%J")));
+        query("""
+                {"query": "SELECT f, FORMAT_DATE(f, DATE '2021-01-01') d, FORMAT_TIME(f, TIME '07:08:09') t FROM UNNEST(['%J', '%j %J']) f ORDER BY f", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%J", "369", "%J"), List.of("%j %J", "001 369", "%j %J"))));
     }
 
     @Test

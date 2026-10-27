@@ -5424,7 +5424,7 @@ final class SqlDialectTranslator {
 
     /** Elements DuckDB lacks or renders differently, emulated in SQL by {@link #emulatedElement}. */
     private static final List<String> EMULATED_ELEMENTS = List.of(
-            "%C", "%c", "%e", "%g", "%k", "%l", "%P", "%Q", "%s", "%E*S");
+            "%C", "%c", "%e", "%g", "%J", "%k", "%l", "%P", "%Q", "%s", "%E*S");
 
     /** Every element a format read from a column may use, each rendered with a constant format. */
     private static final List<String> PER_ROW_ELEMENTS = perRowElements();
@@ -5486,7 +5486,7 @@ final class SqlDialectTranslator {
             "FORMAT_DATE", Set.of("%c", "%H", "%I", "%k", "%l", "%M", "%P", "%p", "%R", "%r", "%S", "%s", "%T", "%X", "%Z",
                     "%z", "%Ez", "%E*S"),
             "FORMAT_DATETIME", Set.of("%Z", "%z", "%Ez"),
-            "FORMAT_TIME", Set.of("%A", "%a", "%B", "%b", "%C", "%c", "%D", "%d", "%e", "%F", "%G", "%g", "%h", "%j", "%m",
+            "FORMAT_TIME", Set.of("%A", "%a", "%B", "%b", "%C", "%c", "%D", "%d", "%e", "%F", "%G", "%g", "%h", "%J", "%j", "%m",
                     "%Q", "%s", "%U", "%u", "%V", "%W", "%w", "%x", "%Y", "%y", "%Z", "%z", "%Ez", "%E4Y"));
 
     private static boolean printedAsWritten(String function, String element) {
@@ -5598,6 +5598,7 @@ final class SqlDialectTranslator {
                     + " || strftime(" + value + ", ' %H:%M:%S %Y'))";
             case "%e" -> "lpad(CAST(day(" + value + ") AS VARCHAR), 2, ' ')";
             case "%g" -> "right(strftime(" + value + ", '%G'), 2)";
+            case "%J" -> "lpad(CAST((weekofyear(" + value + ") - 1) * 7 + isodow(" + value + ") AS VARCHAR), 3, '0')";
             case "%k" -> "lpad(CAST(hour(" + value + ") AS VARCHAR), 2, ' ')";
             case "%l" -> "lpad(CAST((hour(" + value + ") + 11) % 12 + 1 AS VARCHAR), 2, ' ')";
             case "%P" -> "lower(strftime(" + value + ", '%p'))";

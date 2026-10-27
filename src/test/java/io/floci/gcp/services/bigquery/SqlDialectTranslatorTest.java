@@ -920,6 +920,9 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT strftime(d, '%%H:%m %%s') AS y", sql("SELECT FORMAT_DATE('%H:%m %s', d) AS y"));
         assertEquals("SELECT strftime((DATE '1970-01-01' + t), '%%Y %H %%z') AS y", sql("SELECT FORMAT_TIME('%Y %H %z', t) AS y"));
         assertEquals("SELECT strftime(dt, '%H %%z') AS y", sql("SELECT FORMAT_DATETIME('%H %z', dt) AS y"));
+        assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> lpad(CAST((weekofyear(_floci_format_value)"
+                + " - 1) * 7 + isodow(_floci_format_value) AS VARCHAR), 3, '0')), 1) AS y", sql("SELECT FORMAT_DATE('%J', d) AS y"));
+        assertEquals("SELECT strftime((DATE '1970-01-01' + t), '%%J') AS y", sql("SELECT FORMAT_TIME('%J', t) AS y"));
         String dateRow = sql("SELECT FORMAT_DATE(f, d) AS y");
         assertTrue(dateRow.contains("WHEN '%Y' THEN") && !dateRow.contains("WHEN '%H' THEN")
                 && !dateRow.contains("regexp_full_match"), dateRow);

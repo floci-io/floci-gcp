@@ -1422,9 +1422,13 @@ class BigQueryServiceTest {
         service.query(PROJECT, null, null,
                 "CREATE TABLE " + DATASET + ".destination (d DATE, value INT64) PARTITION BY d", null);
 
-        GcpException changed = assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
-                "CREATE OR REPLACE TABLE " + DATASET + ".destination COPY " + DATASET + ".source", null));
+        String sql = "CREATE OR REPLACE TABLE " + DATASET + ".destination COPY " + DATASET + ".source";
+        GcpException dryRunChanged = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, List.of(), null, true, false)));
+        GcpException changed = assertThrows(GcpException.class,
+                () -> service.query(PROJECT, null, null, sql, null));
 
+        assertEquals("invalidQuery", dryRunChanged.getReason());
         assertEquals("invalidQuery", changed.getReason());
         assertEquals("d", ((Map<?, ?>) service.getTable(PROJECT, DATASET, "destination")
                 .getExtra().get("timePartitioning")).get("field"));

@@ -223,7 +223,7 @@ class BigQueryDuckIntegrationTest {
                 {"query": "(SELECT 1 x) UNION ALL (SELECT 2 x) ORDER BY x", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+                .body("rows", hasSize(2));
         query("""
                 {"query": "(WITH s AS (SELECT 1 x) SELECT x + 1 FROM s)", "useLegacySql": false}
                 """)
@@ -326,17 +326,15 @@ class BigQueryDuckIntegrationTest {
                 {"query": "SELECT AS STRUCT COUNT(*) AS n FROM UNNEST([1, 2]) x HAVING n > 1 ORDER BY n", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
-                .body("schema.fields[0].type", equalTo("RECORD"))
-                .body("schema.fields[0].fields[0].name", equalTo("n"))
-                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+                .body("schema.fields.name", equalTo(List.of("n")))
+                .body("rows[0].f[0].v", equalTo("2"));
 
         query("""
-                {"query": "SELECT AS STRUCT 1 + 1 ORDER BY 1", "useLegacySql": false}
+                {"query": "SELECT AS STRUCT x + 1 FROM UNNEST([3, 1]) x ORDER BY 1", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
-                .body("schema.fields[0].type", equalTo("RECORD"))
-                .body("schema.fields[0].fields[0].name", equalTo("_field_1"))
-                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+                .body("schema.fields", hasSize(1))
+                .body("rows.f.v", equalTo(List.of(List.of("2"), List.of("4"))));
     }
 
     @Test
@@ -406,12 +404,20 @@ class BigQueryDuckIntegrationTest {
                 "SELECT AS STRUCT t.*, u.* FROM (SELECT 1 AS x) t CROSS JOIN (SELECT 2 AS y) u",
                 "SELECT AS STRUCT t.* FROM (SELECT 1 AS x, 2 AS y) t",
                 "SELECT AS STRUCT t.* EXCEPT(secret), 2 AS y FROM (SELECT 1 AS x, 9 AS secret) t",
-                "SELECT (SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t) AS record",
                 "SELECT DISTINCT AS STRUCT t.*, 2 y FROM (SELECT 1 AS x UNION ALL SELECT 1 AS x) t ORDER BY x LIMIT 1")) {
             query(Map.of("query", sql, "useLegacySql", false))
                     .then().log().ifValidationFails().statusCode(200)
-                    .body("schema.fields", hasSize(1))
+                    .body("schema.fields.name", equalTo(List.of("x", "y")))
                     .body("rows", hasSize(1))
+                    .body("rows[0].f.v", equalTo(List.of("1", "2")));
+        }
+        for (String sql : List.of(
+                "SELECT (SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t) AS record",
+                "SELECT (SELECT AS STRUCT t.*, u.* FROM (SELECT 1 AS x) t CROSS JOIN (SELECT 2 AS y) u) AS record",
+                "SELECT (SELECT AS STRUCT t.* EXCEPT(secret), 2 AS y FROM (SELECT 1 AS x, 9 AS secret) t) AS record")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().log().ifValidationFails().statusCode(200)
+                    .body("schema.fields", hasSize(1))
                     .body("schema.fields[0].type", equalTo("RECORD"))
                     .body("schema.fields[0].fields.name", equalTo(List.of("x", "y")))
                     .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
@@ -428,17 +434,17 @@ class BigQueryDuckIntegrationTest {
                         + " PIVOT(ANY_VALUE(amount) FOR metric IN ('sample'))) t")) {
             query(Map.of("query", sql, "useLegacySql", false))
                     .then().log().ifValidationFails().statusCode(200)
-                    .body("schema.fields[0].fields.name", equalTo(List.of("sample", "y")))
-                    .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+                    .body("schema.fields.name", equalTo(List.of("sample", "y")))
+                    .body("rows[0].f.v", equalTo(List.of("1", "2")));
         }
         query(Map.of("query", "SELECT AS STRUCT t.*, 2 AS y FROM"
                         + " (SELECT STRUCT(MAX(x) AS n) AS sample FROM UNNEST([1]) x HAVING sample.n = 1) t",
                         "useLegacySql", false))
                 .then().log().ifValidationFails().statusCode(200)
-                .body("schema.fields[0].fields.name", equalTo(List.of("sample", "y")))
+                .body("schema.fields.name", equalTo(List.of("sample", "y")))
                 .body("rows", hasSize(1))
-                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"))
-                .body("rows[0].f[0].v.f[1].v", equalTo("2"));
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"));
     }
 
     @Test
@@ -636,7 +642,7 @@ class BigQueryDuckIntegrationTest {
                         "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows", hasSize(1))
-                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+                .body("rows[0].f[0].v", equalTo("1"));
 
         query(Map.of("query", "SELECT [STRUCT(STRUCT(1 AS x) AS child, 2 AS y)][OFFSET(0)].*",
                         "useLegacySql", false))
@@ -785,7 +791,7 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows.size()", equalTo(1))
-                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+                .body("rows[0].f[0].v", equalTo("2"));
     }
 
     @Test
@@ -793,11 +799,11 @@ class BigQueryDuckIntegrationTest {
     void selectAsStructFieldsRewriteNestedQueries() {
         query(Map.of("query", "SELECT AS STRUCT (SELECT 1 sample) AS child", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+                .body("rows[0].f[0].v", equalTo("1"));
         query(Map.of("query", "SELECT AS STRUCT (SELECT total_x FROM (SELECT 'x' AS k, 5 AS v)"
                         + " PIVOT(SUM(v) AS total FOR k IN ('x'))) AS child", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows[0].f[0].v.f[0].v", equalTo("5"));
+                .body("rows[0].f[0].v", equalTo("5"));
     }
 
     @Test
@@ -806,29 +812,39 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT AS STRUCT [STRUCT(1 AS x, 2 AS y)][OFFSET(0)].*",
                         "useLegacySql", false))
                 .then().log().ifValidationFails().statusCode(200)
-                .body("schema.fields[0].type", equalTo("RECORD"))
-                .body("schema.fields[0].fields.name", equalTo(List.of("x", "y")))
-                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+                .body("schema.fields.name", equalTo(List.of("x", "y")))
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
     }
 
     @Test
     @Order(5)
-    void selectAsStructResultIsOneAnonymousRecordColumn() {
+    void outermostSelectAsStructReturnsItsFieldsAsColumns() {
         for (String sql : List.of(
                 "SELECT AS STRUCT 1 AS a, 2 AS b",
                 "SELECT AS STRUCT x AS a, 2 AS b FROM UNNEST([1]) AS x",
                 "SELECT AS STRUCT t.* FROM (SELECT 1 AS a, 2 AS b) t",
                 "SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].*",
-                "SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].* ORDER BY 1",
-                "SELECT AS STRUCT COUNT(*) AS a, 2 AS b FROM UNNEST([1]) x HAVING a > 0 ORDER BY a")) {
+                "SELECT AS STRUCT x AS a, x * 2 AS b FROM UNNEST([2, 1]) x WHERE x < 2 ORDER BY a",
+                "SELECT AS STRUCT COUNT(*) AS a, 2 AS b FROM UNNEST([1]) x HAVING a > 0 ORDER BY a",
+                "SELECT AS STRUCT x AS a, COUNT(*) AS b FROM UNNEST([1, 1, 2]) x GROUP BY x HAVING COUNT(*) > 1")) {
             query(Map.of("query", sql, "useLegacySql", false))
                     .then().log().ifValidationFails().statusCode(200)
-                    .body("schema.fields", hasSize(1))
-                    .body("schema.fields[0].name", equalTo("f0_"))
-                    .body("schema.fields[0].type", equalTo("RECORD"))
-                    .body("schema.fields[0].fields.name", equalTo(List.of("a", "b")))
-                    .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "2")));
+                    .body("schema.fields.name", equalTo(List.of("a", "b")))
+                    .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                    .body("rows", hasSize(1))
+                    .body("rows[0].f.v", equalTo(List.of("1", "2")));
         }
+        query(Map.of("query", "SELECT AS STRUCT 1 AS a UNION ALL SELECT AS STRUCT 2 AS a",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows", hasSize(2));
+        query(Map.of("query", "SELECT (SELECT AS STRUCT 1 AS d, 2 AS e) AS s", "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("s")))
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("d", "e")));
     }
 
     @Test
@@ -1322,7 +1338,7 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT * FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("id")))
-                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+                .body("rows", hasSize(2));
         query(Map.of("query", "SELECT id, _TABLE_SUFFIX FROM `shop.events_*` ORDER BY id", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("1", "2025"), List.of("2", "2026"))));

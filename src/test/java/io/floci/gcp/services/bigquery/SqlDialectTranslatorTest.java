@@ -35,7 +35,7 @@ class SqlDialectTranslatorTest {
 
     @Test
     void selectAsStructRewritesIndexedStructWildcardsBeforePackingTheRecord() {
-        String translated = sql("SELECT AS STRUCT [STRUCT(1 AS x, 2 AS y)][OFFSET(0)].*");
+        String translated = sql("SELECT (SELECT AS STRUCT [STRUCT(1 AS x, 2 AS y)][OFFSET(0)].*) AS r");
 
         assertTrue(translated.contains("struct_pack(*COLUMNS(*)) FROM (SELECT unnest(["), translated);
         assertTrue(translated.contains("max_depth := 2"), translated);
@@ -152,37 +152,39 @@ class SqlDialectTranslatorTest {
 
     @Test
     void translatesSelectAsStruct() {
-        assertEquals("SELECT {'id': id, 'name': name} AS f0_ FROM \"ds\".\"users\"",
-                sql("SELECT AS STRUCT id, name FROM ds.users"));
-        assertEquals("SELECT {'id': id, 'display_name': name} AS f0_ FROM \"ds\".\"users\"",
-                sql("SELECT AS STRUCT id, name AS display_name FROM ds.users"));
-        assertEquals("SELECT struct_pack(*COLUMNS(input.* EXCLUDE (\"id\"))) AS f0_"
-                        + " FROM \"ds\".\"users\" AS \"input\"",
-                sql("SELECT AS STRUCT input.* EXCEPT(id) FROM ds.users AS input"));
+        assertEquals("SELECT (SELECT {'id': id, 'name': name} FROM \"ds\".\"users\") AS s",
+                sql("SELECT (SELECT AS STRUCT id, name FROM ds.users) AS s"));
+        assertEquals("SELECT (SELECT {'id': id, 'display_name': name} FROM \"ds\".\"users\") AS s",
+                sql("SELECT (SELECT AS STRUCT id, name AS display_name FROM ds.users) AS s"));
+        assertEquals("SELECT (SELECT struct_pack(*COLUMNS(input.* EXCLUDE (\"id\")))"
+                        + " FROM \"ds\".\"users\" AS \"input\") AS s",
+                sql("SELECT (SELECT AS STRUCT input.* EXCEPT(id) FROM ds.users AS input) AS s"));
         assertEquals("SELECT {'_field_1': index * 25} AS value",
                 sql("SELECT STRUCT(index * 25) AS value"));
     }
 
     @Test
     void mixedStructStarsContributeSiblingFields() {
-        String translated = sql("SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t");
+        String translated = sql("SELECT (SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t) AS r");
         assertTrue(translated.contains("FROM (SELECT  t.*, 2 AS y"), translated);
         assertFalse(translated.contains("_field_1"), translated);
-        String twoStars = sql("SELECT AS STRUCT t.*, u.* FROM (SELECT 1 AS x) t CROSS JOIN (SELECT 2 AS y) u");
+        String twoStars = sql("SELECT (SELECT AS STRUCT t.*, u.* FROM (SELECT 1 AS x) t"
+                + " CROSS JOIN (SELECT 2 AS y) u) AS r");
         assertTrue(twoStars.contains("FROM (SELECT  t.*, u.*"), twoStars);
     }
 
     @Test
     void selectAsStructKeepsAliasesVisibleToLaterClauses() {
-        String translated = sql("SELECT AS STRUCT COUNT(*) AS n FROM UNNEST([1, 2]) x HAVING n > 1 ORDER BY n");
+        String translated = sql("SELECT ARRAY(SELECT AS STRUCT COUNT(*) AS n FROM UNNEST([1, 2]) x"
+                + " HAVING n > 1 ORDER BY n) AS a");
 
         assertTrue(translated.contains("FROM (SELECT  COUNT(*) AS n FROM"), translated);
         assertTrue(translated.contains("HAVING n > 1 ORDER BY n) AS _floci_struct_row"), translated);
-        assertTrue(translated.startsWith("SELECT struct_pack(*COLUMNS(_floci_struct_row.*))"), translated);
+        assertTrue(translated.contains("SELECT struct_pack(*COLUMNS(_floci_struct_row.*))"), translated);
 
-        String anonymous = sql("SELECT AS STRUCT 1 + 1 ORDER BY 1");
-        assertTrue(anonymous.contains("FROM (SELECT  1 + 1 AS \"_field_1\" ORDER BY 1)"), anonymous);
-        assertFalse(anonymous.contains("$col1"), anonymous);
+        String anonymous = sql("SELECT ARRAY(SELECT AS STRUCT x + 1 FROM UNNEST([1]) x ORDER BY 1) AS a");
+        assertTrue(anonymous.contains("(SELECT  x + 1 AS \"_field_1\" FROM"), anonymous);
+        assertTrue(anonymous.contains("ORDER BY 1) AS _floci_struct_row"), anonymous);
     }
 
     @Test
@@ -210,12 +212,15 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
-    void outermostSelectAsStructNamesItsRecordColumnLikeAnAnonymousColumn() {
-        assertTrue(sql("SELECT AS STRUCT 1 AS a, 2 AS b").startsWith("SELECT {'a': 1, 'b': 2} AS f0_"));
-        assertTrue(sql("SELECT AS STRUCT t.* FROM (SELECT 1 AS a) t")
-                .startsWith("SELECT struct_pack(*COLUMNS(t.*)) AS f0_ FROM"));
-        String indexed = sql("SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].*");
-        assertTrue(indexed.endsWith("AS \"_floci_indexed_struct\") AS f0_"), indexed);
+    void outermostSelectAsStructReturnsItsFieldsAsColumns() {
+        assertEquals("SELECT 1 AS a, 2 AS b", sql("SELECT AS STRUCT 1 AS a, 2 AS b"));
+        assertEquals("SELECT 1 AS \"_field_1\"", sql("SELECT AS STRUCT 1"));
+        assertEquals(sql("SELECT t.* FROM (SELECT 1 AS a) t"), sql("SELECT AS STRUCT t.* FROM (SELECT 1 AS a) t"));
+        assertEquals(sql("SELECT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].*"),
+                sql("SELECT AS STRUCT [STRUCT(1 AS a, 2 AS b)][OFFSET(0)].*"));
+        assertEquals("SELECT 1 AS a UNION ALL SELECT 2 AS a",
+                sql("SELECT AS STRUCT 1 AS a UNION ALL SELECT AS STRUCT 2 AS a"));
+        assertEquals("(SELECT 1 AS a)", sql("(SELECT AS STRUCT 1 AS a)"));
 
         String nested = sql("SELECT ARRAY(SELECT AS STRUCT x AS a FROM UNNEST([1]) AS x) AS arr");
         assertTrue(nested.contains("SELECT {'a': x} FROM"), nested);
@@ -225,17 +230,20 @@ class SqlDialectTranslatorTest {
 
     @Test
     void selectDistinctAsStructKeepsItsRowModifier() {
-        assertEquals("SELECT DISTINCT {'x': x} AS f0_ FROM UNNEST([1, 1]) AS \"_unnest_x\"(\"x\")",
+        assertTrue(sql("SELECT ARRAY(SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x) AS a")
+                .contains("SELECT DISTINCT {'x': x} FROM UNNEST([1, 1])"));
+        assertTrue(sql("SELECT ARRAY(SELECT ALL AS STRUCT x FROM UNNEST([1]) x) AS a")
+                .contains("SELECT ALL {'x': x} FROM"));
+        assertEquals("SELECT DISTINCT x FROM UNNEST([1, 1]) AS \"_unnest_x\"(\"x\")",
                 sql("SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x"));
-        assertTrue(sql("SELECT ALL AS STRUCT x FROM UNNEST([1]) x").startsWith("SELECT ALL {'x': x}"));
     }
 
     @Test
     void selectAsStructTreatsComparisonOperatorsAsExpressions() {
-        assertEquals("SELECT {'small': id < 10} AS f0_ FROM \"ds\".\"events\"",
-                sql("SELECT AS STRUCT id < 10 AS small FROM ds.events"));
-        assertEquals("SELECT {'small': id < 10, 'large': id > 20} AS f0_ FROM \"ds\".\"events\"",
-                sql("SELECT AS STRUCT id < 10 AS small, id > 20 AS large FROM ds.events"));
+        assertEquals("SELECT (SELECT {'small': id < 10} FROM \"ds\".\"events\") AS s",
+                sql("SELECT (SELECT AS STRUCT id < 10 AS small FROM ds.events) AS s"));
+        assertEquals("SELECT (SELECT {'small': id < 10, 'large': id > 20} FROM \"ds\".\"events\") AS s",
+                sql("SELECT (SELECT AS STRUCT id < 10 AS small, id > 20 AS large FROM ds.events) AS s"));
     }
 
     @Test

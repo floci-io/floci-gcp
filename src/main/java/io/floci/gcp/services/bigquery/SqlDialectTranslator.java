@@ -120,6 +120,7 @@ final class SqlDialectTranslator {
     private int generatedConcatAlias;
     private int generatedInitcapName;
     private boolean needsUnicodeCaseFold;
+    private boolean queryResult;
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -1991,6 +1992,7 @@ final class SqlDialectTranslator {
             throw invalidQuery("Statement type " + statement + " is not supported by the floci BigQuery"
                     + " emulator yet; only SELECT queries run on the SQL engine.");
         }
+        queryResult = true;
         collectCteNames();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
@@ -2200,6 +2202,15 @@ final class SqlDialectTranslator {
             if (items.isEmpty()) {
                 continue;
             }
+            if (queryResult && isOutermostQuerySelect(select)) {
+                nameAnonymousStructFields(items);
+                int end = struct + 1;
+                if (end < tokens.size() && tokens.get(end).kind == Kind.SPACE) {
+                    end++;
+                }
+                tokens.subList(marker, end).clear();
+                continue;
+            }
             if (structProjectionHasAliasClause(listEnd, parenthesisDepth(select))) {
                 nameAnonymousStructFields(items);
                 listEnd = selectStructListEnd(listStart);
@@ -2220,10 +2231,9 @@ final class SqlDialectTranslator {
                     projection = "struct_pack(*COLUMNS(" + star + "))";
                 }
                 boolean clauseFollows = listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT;
-                String alias = resultColumnAlias(select);
                 tokens.subList(select, listEnd).clear();
                 String suffix = clauseFollows ? " " : "";
-                replaceSelectHead(select, modifier, projection + alias + suffix);
+                replaceSelectHead(select, modifier, projection + suffix);
                 select = tokens.size();
                 continue;
             }
@@ -2261,7 +2271,7 @@ final class SqlDialectTranslator {
                 }
                 replacement.append(DuckTypes.quoteLiteral(name)).append(": ").append(expression);
             }
-            replacement.append('}').append(resultColumnAlias(select));
+            replacement.append('}');
             if (listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT) {
                 replacement.append(' ');
             }
@@ -2272,11 +2282,13 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * The outermost query's struct is its only result column and is anonymous, so it gets the
-     * {@code f0_} name the derived-query wrapper gives it; DuckDB would name it after the rendered expression.
+     * A query returns the struct of its outermost {@code SELECT AS STRUCT}, in every branch of a set
+     * operation, as one column per field, so that SELECT runs as a plain one. Nested ones (subqueries,
+     * CTEs, {@code ARRAY(...)}) and the source of an INSERT stay one struct value.
      */
-    private String resultColumnAlias(int select) {
-        return select == firstTopLevelSelect() ? " AS f0_" : "";
+    private boolean isOutermostQuerySelect(int select) {
+        int first = firstTopLevelSelect();
+        return first >= 0 && parenthesisDepth(select) == parenthesisDepth(first);
     }
 
     /** Clauses that can resolve names assigned by the SELECT list must stay inside the struct wrapper. */

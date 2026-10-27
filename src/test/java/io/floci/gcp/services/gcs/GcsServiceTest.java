@@ -1167,6 +1167,133 @@ class GcsServiceTest {
         assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
     }
 
+    private enum OverwriteOperation {
+        UPLOAD,
+        XML_MULTIPART,
+        COMPOSE,
+        COPY,
+        MOVE_DESTINATION
+    }
+
+    @ParameterizedTest
+    @EnumSource(OverwriteOperation.class)
+    void overwriteSoftDeletesTheReplacedLiveObject(OverwriteOperation operation) {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta replaced = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.putObject("bucket", "src.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        switch (operation) {
+            case UPLOAD -> service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                    GcsCustomerEncryption.none(), BASE_URL);
+            case XML_MULTIPART -> service.putXmlMultipartObject("bucket", "obj.txt", "text/plain",
+                    new byte[]{2}, Map.of(), BASE_URL, null);
+            case COMPOSE -> service.composeObject("bucket", "obj.txt", List.of("src.txt"),
+                    "text/plain", BASE_URL);
+            case COPY -> service.copyObject("bucket", "src.txt", "bucket", "obj.txt",
+                    GcsObjectPreconditions.NONE, BASE_URL);
+            case MOVE_DESTINATION -> service.moveObject("bucket", "src.txt", "obj.txt",
+                    GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL);
+        }
+
+        assertArrayEquals(new byte[]{2}, service.getObjectData("bucket", "obj.txt"));
+        List<GcsObjectMeta> softDeleted = service.listSoftDeletedObjects("bucket", null).stream()
+                .filter(m -> "obj.txt".equals(m.getName()))
+                .toList();
+        assertEquals(List.of(replaced.getGeneration()),
+                softDeleted.stream().map(GcsObjectMeta::getGeneration).toList());
+        assertNotNull(softDeleted.get(0).getSoftDeleteTime());
+        assertNotNull(softDeleted.get(0).getHardDeleteTime());
+
+        service.restoreObject("bucket", "obj.txt", replaced.getGeneration());
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
+    }
+
+    @Test
+    void overwriteWithAZeroRetentionKeepsNoCopyOfTheReplacedObject() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "0")));
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @Test
+    void versionedOverwriteWithSoftDeleteLeavesTheReplacedObjectNoncurrent() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta replaced = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        assertTrue(service.listObjectVersions("bucket", null).stream()
+                .anyMatch(m -> replaced.getGeneration().equals(m.getGeneration()) && m.getTimeDeleted() != null));
+    }
+
+    @Test
+    void rejectedOverwriteOfAHeldObjectSoftDeletesNothing() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.patchObject("bucket", "obj.txt", Map.of("temporaryHold", true));
+
+        GcpException ex = assertThrows(GcpException.class, () -> service.putObject("bucket", "obj.txt",
+                "text/plain", new byte[]{2}, GcsCustomerEncryption.none(), BASE_URL));
+
+        assertEquals(403, ex.getHttpStatus());
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+    }
+
+    @Test
+    void deleteBucketWaitsForAnOverwriteToSoftDeleteTheReplacedObject() throws Exception {
+        CountDownLatch softDeleteWriteStarted = new CountDownLatch(1);
+        CountDownLatch allowSoftDeleteWrite = new CountDownLatch(1);
+        var metadataStore = new ArmableBlockingPutStorage<String, GcsObjectMeta>(
+                softDeleteWriteStarted, allowSoftDeleteWrite);
+        service = new GcsService(new InMemoryStorage<>(), metadataStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "test-project");
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta replaced = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        metadataStore.blockNextPut();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var overwrite = executor.submit(() -> service.putObject("bucket", "obj.txt", "text/plain",
+                    new byte[]{2}, GcsCustomerEncryption.none(), BASE_URL));
+            assertTrue(softDeleteWriteStarted.await(5, TimeUnit.SECONDS));
+
+            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
+            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+
+            allowSoftDeleteWrite.countDown();
+            overwrite.get(5, TimeUnit.SECONDS);
+            ExecutionException ex = assertThrows(ExecutionException.class,
+                    () -> deletion.get(5, TimeUnit.SECONDS));
+            GcpException deletionException = assertInstanceOf(GcpException.class, ex.getCause());
+            assertEquals("conflict", deletionException.getReason());
+            assertArrayEquals(new byte[]{2}, service.getObjectData("bucket", "obj.txt"));
+            assertEquals(List.of(replaced.getGeneration()), service.listSoftDeletedObjects("bucket", null)
+                    .stream().map(GcsObjectMeta::getGeneration).toList());
+        } finally {
+            allowSoftDeleteWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void listObjectsReturnsAll() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of());

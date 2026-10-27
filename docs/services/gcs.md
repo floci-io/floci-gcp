@@ -387,7 +387,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`).
   A bucket created without a policy gets the GCS default of `retentionDurationSeconds: "604800"`
   (7 days), REST and gRPC alike. `0` turns soft delete off, and any other value must fall between
-  7 and 90 days, otherwise the request fails with `400` and `reason: invalid`. `effectiveTime` is
+  7 and 90 days, otherwise the request fails with `400` and `reason: invalid`. Without Object
+  Versioning, an object replaced by an upload, compose, copy, rewrite or move is soft-deleted, as a
+  deleted one is; with versioning it becomes noncurrent. `effectiveTime` is
   set by the server and moves forward when the retention grows. Buckets saved by older emulator
   versions keep the policy they had. Once its `hardDeleteTime` passes, a soft-deleted object
   leaves the listing and can no longer be restored, and a background sweep frees its bytes

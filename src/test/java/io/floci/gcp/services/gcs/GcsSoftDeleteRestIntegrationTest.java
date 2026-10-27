@@ -305,6 +305,50 @@ class GcsSoftDeleteRestIntegrationTest {
     }
 
     @Test
+    void anOverwriteRetainsTheReplacedObject() {
+        // "The soft delete feature preserves objects and buckets that get deleted or overwritten"
+        // (https://cloud.google.com/storage/docs/soft-delete).
+        ensureBucket();
+        String replaced = given().contentType("text/plain").body("first")
+                .queryParam("uploadType", "media").queryParam("name", "overwritten.txt")
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .extract().path("generation");
+        given().contentType("text/plain").body("second")
+                .queryParam("uploadType", "media").queryParam("name", "overwritten.txt")
+                .when().post("/upload/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200);
+
+        given().queryParam("softDeleted", true).queryParam("prefix", "overwritten.txt")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.generation", equalTo(List.of(replaced)))
+                .body("items[0].softDeleteTime", notNullValue())
+                .body("items[0].hardDeleteTime", notNullValue());
+
+        given().queryParam("generation", replaced)
+                .when().post("/storage/v1/b/" + BUCKET + "/o/overwritten.txt/restore")
+                .then().statusCode(200);
+        given().when().get("/storage/v1/b/" + BUCKET + "/o/overwritten.txt?alt=media")
+                .then().statusCode(200)
+                .body(equalTo("first"));
+    }
+
+    @Test
+    void anXmlApiOverwriteRetainsTheReplacedObject() {
+        ensureBucket();
+        String replaced = writeObject("xml-overwritten.txt");
+        given().contentType("text/plain").body("second")
+                .when().put("/" + BUCKET + "/xml-overwritten.txt")
+                .then().statusCode(200);
+
+        given().queryParam("softDeleted", true).queryParam("prefix", "xml-overwritten.txt")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.generation", equalTo(List.of(replaced)));
+    }
+
+    @Test
     void restoringOverALiveObjectRetainsTheDisplacedOne() {
         // Soft delete exists to stop a delete destroying data, so a restore must not destroy the
         // live generation it displaces: it goes through the ordinary delete path instead.

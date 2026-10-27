@@ -729,6 +729,11 @@ public class GcsService {
                 objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
                 objectMetaStore.put(archiveKey, archived);
             }
+        } else if (existing != null) {
+            // Soft delete "preserves objects and buckets that get deleted or overwritten"
+            // (https://cloud.google.com/storage/docs/soft-delete), so the replaced live object is
+            // retained before the new generation takes its key.
+            softDelete(bucket, objectName, existing);
         }
 
         GcsObjectMeta meta = new GcsObjectMeta();

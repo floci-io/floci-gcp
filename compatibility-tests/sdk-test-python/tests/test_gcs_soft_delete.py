@@ -101,3 +101,21 @@ def test_versioned_delete_by_name_keeps_a_noncurrent_version(storage_client, uni
         assert [(b.name, b.generation) for b in soft_deleted] == [("kept.txt", generation)]
     finally:
         bucket.delete(force=True)
+
+
+def test_overwrite_soft_deletes_the_replaced_object(storage_client, soft_delete_bucket):
+    blob = soft_delete_bucket.blob("overwritten.txt")
+    blob.upload_from_string(b"first")
+    replaced = blob.generation
+
+    soft_delete_bucket.blob("overwritten.txt").upload_from_string(b"second")
+
+    soft_deleted = [
+        b
+        for b in storage_client.list_blobs(soft_delete_bucket, soft_deleted=True)
+        if b.name == "overwritten.txt"
+    ]
+    assert [b.generation for b in soft_deleted] == [replaced]
+
+    soft_delete_bucket.restore_blob("overwritten.txt", generation=replaced)
+    assert soft_delete_bucket.blob("overwritten.txt").download_as_bytes() == b"first"

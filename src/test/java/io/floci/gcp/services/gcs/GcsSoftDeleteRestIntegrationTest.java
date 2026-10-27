@@ -261,8 +261,7 @@ class GcsSoftDeleteRestIntegrationTest {
         given().queryParam("softDeleted", true)
                 .when().get("/storage/v1/b/" + versioned + "/o")
                 .then().statusCode(200)
-                .body("items", org.hamcrest.Matchers.anyOf(
-                        org.hamcrest.Matchers.nullValue(), org.hamcrest.Matchers.empty()));
+                .body("items", anyOf(nullValue(), empty()));
 
         given().queryParam("generation", generation)
                 .when().delete("/storage/v1/b/" + versioned + "/o/kept.txt")
@@ -275,8 +274,7 @@ class GcsSoftDeleteRestIntegrationTest {
         given().queryParam("versions", true)
                 .when().get("/storage/v1/b/" + versioned + "/o")
                 .then().statusCode(200)
-                .body("items", org.hamcrest.Matchers.anyOf(
-                        org.hamcrest.Matchers.nullValue(), org.hamcrest.Matchers.empty()));
+                .body("items", anyOf(nullValue(), empty()));
     }
 
     @Test

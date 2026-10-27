@@ -1148,7 +1148,7 @@ class GcsServiceTest {
     }
 
     @Test
-    void restoreInAVersionedBucketSoftDeletesTheDisplacedLiveObject() {
+    void restoreInAVersionedBucketLeavesTheDisplacedLiveObjectNoncurrent() {
         service.createBucket("bucket", "p1", BASE_URL, Map.of(
                 "versioning", Map.of("enabled", true),
                 "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
@@ -1162,8 +1162,9 @@ class GcsServiceTest {
         service.restoreObject("bucket", "obj.txt", first.getGeneration());
 
         assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
-        assertEquals(List.of(second.getGeneration()), service.listSoftDeletedObjects("bucket", null).stream()
-                .map(GcsObjectMeta::getGeneration).toList());
+        assertTrue(service.listObjectVersions("bucket", null).stream()
+                .anyMatch(m -> second.getGeneration().equals(m.getGeneration())));
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
     }
 
     @Test

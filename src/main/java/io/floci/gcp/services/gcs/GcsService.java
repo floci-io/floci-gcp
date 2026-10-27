@@ -1307,19 +1307,12 @@ public class GcsService {
                 // through the ordinary delete path first: that enforces holds and retention, archives
                 // it when versioning is on, and retains it under the soft delete policy otherwise.
                 // Writing straight over it would destroy a live generation, which is the opposite of
-                // what this feature exists to do. "The overwritten object that was formerly live is
-                // then automatically soft-deleted" (https://cloud.google.com/storage/docs/soft-delete),
-                // so a versioned bucket retains it under the policy as well.
-                Optional<GcsObjectMeta> displaced = getLiveObjectMeta(bucket, objectName);
-                if (displaced.isPresent()) {
+                // what this feature exists to do.
+                if (getLiveObjectMeta(bucket, objectName).isPresent()) {
                     if (requireOverwritePermission != null) {
                         requireOverwritePermission.run();
                     }
                     deleteObjectLocked(bucket, objectName);
-                    if (isVersioningEnabled(bucket)) {
-                        softDelete(bucket, objectName, displaced.get(),
-                                key + "\0" + displaced.get().getGeneration());
-                    }
                 }
                 GcsObjectMeta restored = cloneMeta(archived);
                 restored.setSoftDeleteTime(null);

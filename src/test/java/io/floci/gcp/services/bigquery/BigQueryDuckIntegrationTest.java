@@ -835,6 +835,12 @@ class BigQueryDuckIntegrationTest {
                     .body("rows", hasSize(1))
                     .body("rows[0].f.v", equalTo(List.of("1", "2")));
         }
+        query(Map.of("query", "SELECT AS STRUCT 1 AS a, 2 AS b UNION ALL (SELECT AS STRUCT 3 AS a, 4 AS b)",
+                        "useLegacySql", false))
+                .then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows", hasSize(2));
         query(Map.of("query", "SELECT AS STRUCT 1 AS a UNION ALL SELECT AS STRUCT 2 AS a",
                         "useLegacySql", false))
                 .then().log().ifValidationFails().statusCode(200)

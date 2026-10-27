@@ -673,10 +673,17 @@ class BigQueryTest {
     void mixedStructStarsReturnSiblingFields() throws InterruptedException {
         TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
                 "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t").build());
-        assertThat(result.getSchema().getFields()).hasSize(1);
-        Field record = result.getSchema().getFields().get(0);
+        assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("x", "y");
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("x").getLongValue()).isEqualTo(1);
+        assertThat(row.get("y").getLongValue()).isEqualTo(2);
+
+        TableResult nested = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT (SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t) AS record").build());
+        assertThat(nested.getSchema().getFields()).hasSize(1);
+        Field record = nested.getSchema().getFields().get(0);
         assertThat(record.getSubFields()).extracting(Field::getName).containsExactly("x", "y");
-        FieldValueList value = result.iterateAll().iterator().next().get(0).getRecordValue();
+        FieldValueList value = nested.iterateAll().iterator().next().get(0).getRecordValue();
         assertThat(value.get("x").getLongValue()).isEqualTo(1);
         assertThat(value.get("y").getLongValue()).isEqualTo(2);
     }
@@ -685,11 +692,10 @@ class BigQueryTest {
     void mixedStructStarsPreserveImplicitReservedAliasesInNestedQueries() throws InterruptedException {
         TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
                 "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 sample) t").build());
-        Field record = result.getSchema().getFields().get(0);
-        assertThat(record.getSubFields()).extracting(Field::getName).containsExactly("sample", "y");
-        FieldValueList value = result.iterateAll().iterator().next().get(0).getRecordValue();
-        assertThat(value.get("sample").getLongValue()).isEqualTo(1);
-        assertThat(value.get("y").getLongValue()).isEqualTo(2);
+        assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("sample", "y");
+        FieldValueList row = result.iterateAll().iterator().next();
+        assertThat(row.get("sample").getLongValue()).isEqualTo(1);
+        assertThat(row.get("y").getLongValue()).isEqualTo(2);
     }
 
     @Test

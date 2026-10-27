@@ -221,6 +221,12 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT 1 AS a UNION ALL SELECT 2 AS a",
                 sql("SELECT AS STRUCT 1 AS a UNION ALL SELECT AS STRUCT 2 AS a"));
         assertEquals("(SELECT 1 AS a)", sql("(SELECT AS STRUCT 1 AS a)"));
+        assertEquals("SELECT 1 AS a, 2 AS b UNION ALL (SELECT 3 AS a, 4 AS b)",
+                sql("SELECT AS STRUCT 1 AS a, 2 AS b UNION ALL (SELECT AS STRUCT 3 AS a, 4 AS b)"));
+        assertEquals("(SELECT 1 AS a) UNION ((SELECT 2 AS a))",
+                sql("(SELECT AS STRUCT 1 AS a) UNION DISTINCT ((SELECT AS STRUCT 2 AS a))"));
+        assertTrue(sql("SELECT DISTINCT (SELECT AS STRUCT 1 AS a) AS s").contains("{'a': 1}"));
+        assertTrue(sql("SELECT x FROM UNNEST([1]) x WHERE x IN ((SELECT AS STRUCT 1 AS a).a)").contains("{'a': 1}"));
 
         String nested = sql("SELECT ARRAY(SELECT AS STRUCT x AS a FROM UNNEST([1]) AS x) AS arr");
         assertTrue(nested.contains("SELECT {'a': x} FROM"), nested);

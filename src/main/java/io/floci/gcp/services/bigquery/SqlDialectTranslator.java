@@ -2287,8 +2287,35 @@ final class SqlDialectTranslator {
      * CTEs, {@code ARRAY(...)}) and the source of an INSERT stay one struct value.
      */
     private boolean isOutermostQuerySelect(int select) {
-        int first = firstTopLevelSelect();
-        return first >= 0 && parenthesisDepth(select) == parenthesisDepth(first);
+        for (int open = enclosingParenthesis(select); open >= 0; open = enclosingParenthesis(open)) {
+            int before = previousSignificant(open - 1);
+            if (before >= 0 && !tokens.get(before).isPunct("(") && !opensSetOperationBranch(before)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** {@code UNION ALL (}, {@code INTERSECT DISTINCT (} and the like start a parenthesized branch. */
+    private boolean opensSetOperationBranch(int keyword) {
+        Token token = tokens.get(keyword);
+        if (token.isKeyword("ALL") || token.isKeyword("DISTINCT")) {
+            int operator = previousSignificant(keyword - 1);
+            return operator >= 0 && opensSetOperationBranch(operator);
+        }
+        return token.isKeyword("UNION") || token.isKeyword("INTERSECT") || token.isKeyword("EXCEPT");
+    }
+
+    private int enclosingParenthesis(int index) {
+        int depth = 0;
+        for (int k = index - 1; k >= 0; k--) {
+            if (tokens.get(k).isPunct(")")) {
+                depth++;
+            } else if (tokens.get(k).isPunct("(") && depth-- == 0) {
+                return k;
+            }
+        }
+        return -1;
     }
 
     /** Clauses that can resolve names assigned by the SELECT list must stay inside the struct wrapper. */

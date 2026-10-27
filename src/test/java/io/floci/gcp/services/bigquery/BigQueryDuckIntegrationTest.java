@@ -1648,6 +1648,18 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields.name", equalTo(List.of("d", "s")))
                 .body("rows[0].f[0].v", equalTo("true"))
                 .body("rows[0].f[1].v.f.v", equalTo(List.of("2")));
+        query("""
+                {"query": "SELECT *, x IS DISTINCT FROM 2 AS d FROM UNNEST([1, 2]) x WITH OFFSET o ORDER BY o", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "o", "d")))
+                .body("rows.f.v", equalTo(List.of(List.of("1", "0", "true"), List.of("2", "1", "false"))));
+        query("""
+                {"query": "SELECT * EXCEPT (o), x IS DISTINCT FROM 2 AS d FROM UNNEST([1, 2]) x WITH OFFSET o ORDER BY o", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "d")))
+                .body("rows.f.v", equalTo(List.of(List.of("1", "true"), List.of("2", "false"))));
     }
 
     @Test

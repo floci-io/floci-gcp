@@ -17,9 +17,11 @@ import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1527,6 +1529,51 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void copyJobRejectsSnapshotOperationType() {
+        seedTwoRows();
+
+        GcpException error = assertThrows(GcpException.class, () -> service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "snapshot", "operationType", "SNAPSHOT")));
+
+        assertEquals("INVALID_ARGUMENT", error.getGcpStatus());
+        assertEquals("invalid", error.getReason());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, "snapshot")).getGcpStatus());
+    }
+
+    @Test
+    void copyJobAcceptsExplicitCopyOperationType() {
+        seedTwoRows();
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "copied", "operationType", "COPY"));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals("COPY", copied.getJobType());
+        assertEquals(service.stagingRows(PROJECT, DATASET, TABLE),
+                service.stagingRows(PROJECT, DATASET, "copied"));
+    }
+
+    @Test
+    void copyJobAppliesExplicitDestinationExpirationInsteadOfDatasetDefault() {
+        Dataset dataset = newDataset(DATASET);
+        dataset.setExtra("defaultTableExpirationMs", "7200000");
+        service.createDataset(PROJECT, dataset);
+        service.createTable(PROJECT, DATASET, newTable(DATASET, "source"));
+        service.appendRows(PROJECT, DATASET, "source", List.of(Map.of("name", "copied", "age", 1)));
+        Instant expiration = Instant.now().plusSeconds(86_400).truncatedTo(ChronoUnit.MILLIS);
+
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig("source", "destination", "destinationExpirationTime", expiration.toString()));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(String.valueOf(expiration.toEpochMilli()),
+                service.getTable(PROJECT, DATASET, "destination").getExtra().get("expirationTime"));
+        assertEquals(service.stagingRows(PROJECT, DATASET, "source"),
+                service.stagingRows(PROJECT, DATASET, "destination"));
+    }
+
+    @Test
     void copyDestinationsUseDatasetExpirationInsteadOfSourceExpiration() {
         Dataset dataset = newDataset(DATASET);
         dataset.setExtra("defaultTableExpirationMs", "7200000");
@@ -1598,18 +1645,22 @@ class BigQueryServiceTest {
     void copyWriteEmptyRejectsDifferentDestinationSchemaEvenWhenEmpty() {
         service.createDataset(PROJECT, newDataset(DATASET));
         Table source = newTable(DATASET, "source");
+        source.setSchema(new TableSchema(List.of(field("id", "STRING", null))));
         service.createTable(PROJECT, DATASET, source);
+        service.appendRows(PROJECT, DATASET, "source", List.of(Map.of("id", "123")));
         Table destination = newTable(DATASET, "destination");
-        TableFieldSchema incompatible = new TableFieldSchema();
-        incompatible.setName("name");
-        incompatible.setType("INTEGER");
-        destination.setSchema(new TableSchema(List.of(incompatible)));
+        destination.setSchema(new TableSchema(List.of(field("id", "INTEGER", null))));
         service.createTable(PROJECT, DATASET, destination);
 
         StoredJob copied = service.copy(PROJECT, null, null,
                 copyConfig("source", "destination", "writeDisposition", "WRITE_EMPTY"));
 
         assertTrue(copied.failed());
+        assertEquals("invalid", copied.getErrorReason());
+        assertTrue(copied.getErrorMessage().contains("Provided Schema does not match Table"),
+                copied.getErrorMessage());
+        assertEquals("INTEGER", service.getTable(PROJECT, DATASET, "destination")
+                .getSchema().getFields().getFirst().getType());
         assertEquals(0, service.listTableData(PROJECT, DATASET, "destination").rows().size());
     }
 
@@ -1943,6 +1994,30 @@ class BigQueryServiceTest {
         StoredJob invalidBoundary = service.copy(PROJECT, null, null,
                 copyConfig("range_source$-15", "invalid_range"));
         assertEquals("invalid", invalidBoundary.getErrorReason());
+    }
+
+    @Test
+    void copyJobAllowsMultipleSourcesWithDifferentPartitionExpirations() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Table first = newTable(DATASET, "first");
+        first.setExtra("timePartitioning", Map.of("type", "DAY", "expirationMs", "7200000"));
+        service.createTable(PROJECT, DATASET, first);
+        service.appendRows(PROJECT, DATASET, "first", List.of(Map.of("name", "first", "age", 1)));
+        Table second = newTable(DATASET, "second");
+        second.setExtra("timePartitioning", Map.of("type", "DAY", "expirationMs", "14400000"));
+        service.createTable(PROJECT, DATASET, second);
+        service.appendRows(PROJECT, DATASET, "second", List.of(Map.of("name", "second", "age", 2)));
+
+        StoredJob copied = service.copy(PROJECT, null, null, Map.of(
+                "sourceTables", List.of(
+                        Map.of("datasetId", DATASET, "tableId", "first"),
+                        Map.of("datasetId", DATASET, "tableId", "second")),
+                "destinationTable", Map.of("datasetId", DATASET, "tableId", "combined")));
+
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        List<Map<String, Object>> expected = new ArrayList<>(service.stagingRows(PROJECT, DATASET, "first"));
+        expected.addAll(service.stagingRows(PROJECT, DATASET, "second"));
+        assertEquals(expected, service.stagingRows(PROJECT, DATASET, "combined"));
     }
 
     @Test

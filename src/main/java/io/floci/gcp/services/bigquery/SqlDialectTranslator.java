@@ -5175,7 +5175,8 @@ final class SqlDialectTranslator {
             // DATE. DuckDB's cast_to_type preserves that runtime type for column expressions too.
             case "DATE_TRUNC" -> renderDateTrunc(a, name);
             case "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME" -> args(a, 2, name,
-                    formatCall(at(a, 1), at(a, 0)));
+                    // DuckDB's strftime takes no TIME, so a TIME is formatted on a placeholder date it never prints.
+                    formatCall(name, name.equals("FORMAT_TIME") ? "(DATE '1970-01-01' + " + at(a, 1) + ")" : at(a, 1), at(a, 0)));
             case "PARSE_TIMESTAMP" -> renderParseTimestamp(a, name, false);
             case "PARSE_DATETIME" -> args(a, 2, name,
                     "strptime(" + at(a, 1) + ", " + timeFormat(at(a, 0)) + ")");
@@ -5446,16 +5447,16 @@ final class SqlDialectTranslator {
      * per element. The value (and a per-row format) is evaluated once, outside the lambdas: emulated
      * elements read it several times, and a subquery may not appear inside a lambda.
      */
-    private static String formatCall(String value, String format) {
+    private static String formatCall(String function, String value, String format) {
         String constant = constantString(format);
         if (constant == null) {
-            return perRowFormat(value, format);
+            return perRowFormat(function, value, format);
         }
         List<String> parts = new ArrayList<>();
         StringBuilder pattern = new StringBuilder();
         boolean emulated = false;
         for (String element : formatElements(constant)) {
-            String fragment = strftimePattern(element);
+            String fragment = printedAsWritten(function, element) ? element.replace("%", "%%") : strftimePattern(element);
             if (fragment != null) {
                 pattern.append(fragment);
                 continue;
@@ -5477,23 +5478,43 @@ final class SqlDialectTranslator {
         return "list_extract(list_transform([(" + value + ")], " + FORMAT_VALUE + " -> " + body + "), 1)";
     }
 
+    /**
+     * Elements a function prints as written because its type has no such part, as BigQuery does: the time and zone
+     * elements for a DATE, the zone elements for a DATETIME, and the date, epoch and zone elements for a TIME.
+     */
+    private static final Map<String, Set<String>> PRINTED_AS_WRITTEN = Map.of(
+            "FORMAT_DATE", Set.of("%c", "%H", "%I", "%k", "%l", "%M", "%P", "%p", "%R", "%r", "%S", "%s", "%T", "%X", "%Z",
+                    "%z", "%Ez", "%E*S"),
+            "FORMAT_DATETIME", Set.of("%Z", "%z", "%Ez"),
+            "FORMAT_TIME", Set.of("%A", "%a", "%B", "%b", "%C", "%c", "%D", "%d", "%e", "%F", "%G", "%g", "%h", "%j", "%m",
+                    "%Q", "%s", "%U", "%u", "%V", "%W", "%w", "%x", "%Y", "%y", "%Z", "%z", "%Ez", "%E4Y"));
+
+    private static boolean printedAsWritten(String function, String element) {
+        return PRINTED_AS_WRITTEN.getOrDefault(function, Set.of()).contains(element)
+                || function.equals("FORMAT_DATE") && element.matches("%E\\d+S");
+    }
+
     private static final String FORMAT_VALUE = "_floci_format_value";
     private static final String FORMAT_ROW = "_floci_format_row";
     private static final String FORMAT_ELEMENT = "_floci_format_element";
 
-    private static String perRowFormat(String value, String format) {
+    private static String perRowFormat(String function, String value, String format) {
         String rowValue = FORMAT_ROW + ".v";
         StringBuilder elements = new StringBuilder("CASE " + FORMAT_ELEMENT);
         for (String element : PER_ROW_ELEMENTS) {
+            if (printedAsWritten(function, element)) {
+                continue;
+            }
             String pattern = strftimePattern(element);
             elements.append(" WHEN ").append(DuckTypes.quoteLiteral(element)).append(" THEN ")
                     .append(pattern != null ? strftimeCall(rowValue, pattern) : emulatedElement(rowValue, element));
         }
         elements.append(" ELSE ").append(FORMAT_ELEMENT).append(" END");
         String digits = "ltrim(regexp_extract(" + FORMAT_ELEMENT + ", '[0-9]+'), '0')";
-        String fraction = "CASE WHEN regexp_full_match(" + FORMAT_ELEMENT + ", '%E[0-9]+S') THEN " + fractionalSeconds(rowValue,
-                "CASE WHEN length(" + digits + ") > 2 THEN " + MAX_FRACTION_DIGITS + " ELSE least(CAST('0' || " + digits
-                        + " AS INTEGER), " + MAX_FRACTION_DIGITS + ") END") + " ELSE " + elements + " END";
+        String fraction = printedAsWritten(function, "%E0S") ? elements.toString() : "CASE WHEN regexp_full_match("
+                + FORMAT_ELEMENT + ", '%E[0-9]+S') THEN " + fractionalSeconds(rowValue, "CASE WHEN length(" + digits + ") > 2 THEN "
+                + MAX_FRACTION_DIGITS + " ELSE least(CAST('0' || " + digits + " AS INTEGER), " + MAX_FRACTION_DIGITS + ") END")
+                + " ELSE " + elements + " END";
         return "list_extract(list_transform([struct_pack(v := (" + value + "), f := (" + format + "))], " + FORMAT_ROW
                 + " -> CASE WHEN " + FORMAT_ROW + ".f IS NULL OR " + rowValue + " IS NULL THEN NULL ELSE array_to_string("
                 + "list_transform(regexp_extract_all(" + FORMAT_ROW + ".f, '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), "

@@ -899,7 +899,7 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT cast_to_type(date_trunc('month', CAST('2024-05-17' AS DATE)), CAST('2024-05-17' AS DATE)) AS m",
                 sql("SELECT DATE_TRUNC('2024-05-17', MONTH) AS m"));
         assertEquals("SELECT strftime(ts, '%Y') AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
-        assertEquals("SELECT strftime(d, '%Y-%m-%d %%F %m/%d/%y %H:%M') AS y",
+        assertEquals("SELECT strftime(d, '%Y-%m-%d %%F %m/%d/%y %%R') AS y",
                 sql("SELECT FORMAT_DATE('%F %%F %D %R', d) AS y"));
         assertEquals("SELECT CAST(strptime(s, '%Y-%m-%d') AS DATE) AS y", sql("SELECT PARSE_DATE('%F', s) AS y"));
         assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> (lpad(CAST(day(_floci_format_value)"
@@ -908,15 +908,21 @@ class SqlDialectTranslatorTest {
         String emulated = sql("SELECT FORMAT_DATE('%e/%m %Q', g(d)) AS y");
         assertEquals(1, emulated.split("g\\(d\\)", -1).length - 1, emulated);
         assertEquals("SELECT strftime(d, '%%K a%%') AS y", sql("SELECT FORMAT_DATE('%K a%', d) AS y"));
-        assertTrue(sql("SELECT FORMAT_DATE(f, d) AS y").startsWith("SELECT list_extract(list_transform([struct_pack(v := (d),"
+        assertTrue(sql("SELECT FORMAT_TIMESTAMP(f, d) AS y").startsWith("SELECT list_extract(list_transform([struct_pack(v := (d),"
                 + " f := (f))], _floci_format_row -> CASE WHEN _floci_format_row.f IS NULL OR _floci_format_row.v IS NULL"
                 + " THEN NULL ELSE array_to_string(list_transform(regexp_extract_all(_floci_format_row.f,"
                 + " '%E\\*S|%E[0-9]+S|%E4Y|%Ez|%.?|[^%]+'), _floci_format_element -> CASE WHEN regexp_full_match("
                 + "_floci_format_element, '%E[0-9]+S') THEN list_extract(list_transform([CASE WHEN length(ltrim("
                 + "regexp_extract(_floci_format_element, '[0-9]+'), '0')) > 2 THEN 18 ELSE least(CAST('0' || ltrim("
                 + "regexp_extract(_floci_format_element, '[0-9]+'), '0') AS INTEGER), 18) END], _floci_format_digits ->"));
-        assertTrue(sql("SELECT FORMAT_DATE(f, d) AS y").contains(" ELSE CASE _floci_format_element WHEN '%%' THEN"
+        assertTrue(sql("SELECT FORMAT_TIMESTAMP(f, d) AS y").contains(" ELSE CASE _floci_format_element WHEN '%%' THEN"
                 + " strftime(_floci_format_row.v, '%%')"));
+        assertEquals("SELECT strftime(d, '%%H:%m %%s') AS y", sql("SELECT FORMAT_DATE('%H:%m %s', d) AS y"));
+        assertEquals("SELECT strftime((DATE '1970-01-01' + t), '%%Y %H %%z') AS y", sql("SELECT FORMAT_TIME('%Y %H %z', t) AS y"));
+        assertEquals("SELECT strftime(dt, '%H %%z') AS y", sql("SELECT FORMAT_DATETIME('%H %z', dt) AS y"));
+        String dateRow = sql("SELECT FORMAT_DATE(f, d) AS y");
+        assertTrue(dateRow.contains("WHEN '%Y' THEN") && !dateRow.contains("WHEN '%H' THEN")
+                && !dateRow.contains("regexp_full_match"), dateRow);
         assertEquals("SELECT list_extract(list_transform([(ts)], _floci_format_value -> CAST((epoch_us(_floci_format_value)"
                 + " - (epoch_us(_floci_format_value) % 1000000 + 1000000) % 1000000) // 1000000 AS VARCHAR)), 1) AS y",
                 sql("SELECT FORMAT_TIMESTAMP('%s', ts) AS y"));

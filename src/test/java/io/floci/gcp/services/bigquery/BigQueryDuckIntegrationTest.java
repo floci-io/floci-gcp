@@ -1941,6 +1941,17 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("253402300799", "-62135596800", "-1", "253402300799")));
+        query("""
+                {"query": "SELECT FORMAT_DATE('%H|%M|%S|%s|%E3S|%z|%T|%c|%k|%P', DATE '2024-03-05') d, FORMAT_TIME('%Y|%d|%z|%H|%s|%c', TIME '07:08:09.123456') t, FORMAT_DATETIME('%H|%s|%z|%Ez|%Z', DATETIME '2024-03-05 00:00:00') dt", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("%H|%M|%S|%s|%E3S|%z|%T|%c|%k|%P", "%Y|%d|%z|07|%s|%c", "00|1709596800|%z|%Ez|%Z")));
+        query("""
+                {"query": "SELECT f, FORMAT_DATE(f, DATE '2024-03-05') d, FORMAT_TIME(f, TIME '07:08:09.123456') t FROM UNNEST(['%s', '%H', '%E3S', '%Y', '%E4Y']) f WITH OFFSET o ORDER BY o", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%s", "%s", "%s"), List.of("%H", "%H", "07"), List.of("%E3S", "%E3S", "09.123"),
+                        List.of("%Y", "2024", "%Y"), List.of("%E4Y", "2024", "%E4Y"))));
     }
 
     @Test

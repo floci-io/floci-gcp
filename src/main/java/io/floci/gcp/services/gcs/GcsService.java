@@ -43,6 +43,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1188,7 +1189,9 @@ public class GcsService {
         }
         try {
             return !Instant.parse(meta.getHardDeleteTime()).isAfter(now);
-        } catch (RuntimeException e) {
+        } catch (DateTimeParseException e) {
+            LOG.warnf("Keeping soft-deleted object with unparseable hardDeleteTime bucket=%s name=%s generation=%s hardDeleteTime=%s",
+                    meta.getBucket(), meta.getName(), meta.getGeneration(), meta.getHardDeleteTime());
             return false;
         }
     }

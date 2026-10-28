@@ -88,6 +88,12 @@ public class CloudLoggingSinkService {
         }
     }
 
+    void requireSinkExists(String name) {
+        validateSinkName(name);
+        // IAM policy methods hold policy locks, so this check must not acquire sinkLock.
+        requireSink(name);
+    }
+
     public ListSinksResponse listSinks(String parent, int pageSize, String pageToken) {
         validateParent(parent);
         synchronized (sinkLock) {

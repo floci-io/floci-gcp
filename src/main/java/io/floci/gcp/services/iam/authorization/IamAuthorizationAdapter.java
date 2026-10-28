@@ -48,6 +48,11 @@ public interface IamAuthorizationAdapter {
 
     Map<String, Set<String>> roles();
 
+    /** Whether the shared IAM gRPC mixin implements this method for the resource. */
+    default boolean supportsIamPolicyMethod(String method, String resource) {
+        return true;
+    }
+
     /** Whether this service evaluates policies for this credential class in enforce mode. */
     default boolean requiresPolicyEvaluation(IamIdentityKind identityKind) {
         return identityKind == IamIdentityKind.FLOCI_SERVICE_ACCOUNT;

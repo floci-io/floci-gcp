@@ -1,10 +1,41 @@
 package io.floci.gcp.core.common;
 
+import com.google.rpc.ErrorInfo;
+import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class GcpExceptionMapperTest {
+
+    @Test
+    void permissionDetailUsesGoogleRestAndGrpcShapes() throws Exception {
+        String message = "Permission 'logging.sinks.get' denied on resource "
+                + "'//logging.googleapis.com/projects/p/sinks/one' (or it may not exist).";
+        GcpException error = GcpException.permissionDenied(message).withErrorInfo("IAM_PERMISSION_DENIED",
+                "iam.googleapis.com", Map.of("permission", "logging.sinks.get",
+                        "resource", "projects/p/sinks/one"));
+        GcpExceptionMapper.ErrorWrapper wrapper = (GcpExceptionMapper.ErrorWrapper)
+                new GcpExceptionMapper().toResponse(error).getEntity();
+        assertEquals(message, wrapper.error().message());
+        assertEquals("forbidden", wrapper.error().errors().getFirst().reason());
+        assertEquals("IAM_PERMISSION_DENIED", wrapper.error().details().getFirst().get("reason"));
+        assertEquals(Map.of("permission", "logging.sinks.get", "resource", "projects/p/sinks/one"),
+                wrapper.error().details().getFirst().get("metadata"));
+
+        StatusRuntimeException grpc = GcpGrpcController.grpcException(error);
+        com.google.rpc.Status status = StatusProto.fromThrowable(grpc);
+        assertNotNull(status);
+        assertEquals(7, status.getCode());
+        assertEquals(message, status.getMessage());
+        ErrorInfo info = status.getDetails(0).unpack(ErrorInfo.class);
+        assertEquals("IAM_PERMISSION_DENIED", info.getReason());
+        assertEquals("iam.googleapis.com", info.getDomain());
+        assertEquals("projects/p/sinks/one", info.getMetadataOrThrow("resource"));
+    }
 
     @Test
     void errorDetailCarriesAllFields() {

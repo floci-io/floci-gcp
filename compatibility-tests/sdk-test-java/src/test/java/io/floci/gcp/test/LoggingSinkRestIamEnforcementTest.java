@@ -10,6 +10,7 @@ import com.google.api.services.logging.v2.Logging;
 import com.google.api.services.logging.v2.model.LogSink;
 import com.google.cloud.iam.credentials.v1.IamCredentialsClient;
 import com.google.iam.v1.Binding;
+import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.IAMPolicyGrpc;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.SetIamPolicyRequest;
@@ -214,7 +215,7 @@ class LoggingSinkRestIamEnforcementTest {
             assertThat(get(caller, organization, allowed).getName()).isEqualTo("allowed");
             assertThat(list(caller, organization, parent)).extracting(LogSink::getName).contains("allowed");
             if (enforce) {
-                Policy policyBeforeDenials = policies.getIamPolicy(com.google.iam.v1.GetIamPolicyRequest.newBuilder()
+                Policy policyBeforeDenials = policies.getIamPolicy(GetIamPolicyRequest.newBuilder()
                         .setResource(parent).build());
                 LogSink before = get(admin, organization, outsideSink);
                 denied(() -> get(unbound, organization, allowed));
@@ -226,7 +227,7 @@ class LoggingSinkRestIamEnforcementTest {
                 denied(() -> delete(unbound, organization, allowed));
                 assertThat(get(admin, organization, outsideSink)).isEqualTo(before);
                 assertThat(get(admin, organization, allowed).getDescription()).isNull();
-                assertThat(policies.getIamPolicy(com.google.iam.v1.GetIamPolicyRequest.newBuilder()
+                assertThat(policies.getIamPolicy(GetIamPolicyRequest.newBuilder()
                         .setResource(parent).build())).isEqualTo(policyBeforeDenials);
                 assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(allowed)
                         .addAllPermissions(List.of("logging.sinks.get", "logging.sinks.update", "logging.sinks.delete",
@@ -238,7 +239,7 @@ class LoggingSinkRestIamEnforcementTest {
                 assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(outsideSink)
                         .addPermissions("logging.sinks.get").build()).getPermissionsList()).isEmpty();
                 if (organization || id.contains(":")) {
-                    assertThatThrownBy(() -> restricted.getIamPolicy(com.google.iam.v1.GetIamPolicyRequest
+                    assertThatThrownBy(() -> restricted.getIamPolicy(GetIamPolicyRequest
                             .newBuilder().setResource(parent).build())).isInstanceOf(StatusRuntimeException.class)
                             .satisfies(error -> assertThat(((StatusRuntimeException) error).getStatus().getCode())
                                     .isEqualTo(Status.Code.FAILED_PRECONDITION));
@@ -248,7 +249,7 @@ class LoggingSinkRestIamEnforcementTest {
                         .satisfies(error -> assertThat(((StatusRuntimeException) error).getStatus().getCode())
                                 .isEqualTo(organization || id.contains(":") ? Status.Code.FAILED_PRECONDITION
                                         : Status.Code.PERMISSION_DENIED));
-                assertThat(policies.getIamPolicy(com.google.iam.v1.GetIamPolicyRequest.newBuilder()
+                assertThat(policies.getIamPolicy(GetIamPolicyRequest.newBuilder()
                         .setResource(parent).build())).isEqualTo(policyBeforeDenials);
                 policies.setIamPolicy(policy(parent, email, "roles/logging.viewer", null));
                 assertThat(get(caller, organization, allowed).getName()).isEqualTo("allowed");

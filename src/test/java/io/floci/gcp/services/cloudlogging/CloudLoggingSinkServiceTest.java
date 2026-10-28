@@ -353,6 +353,33 @@ class CloudLoggingSinkServiceTest {
         }
     }
 
+    @Test
+    void iamExistenceLookupDoesNotWaitForSinkExportLock() throws Exception {
+        CloudLoggingGcsExporter exporter = mock(CloudLoggingGcsExporter.class);
+        CloudLoggingSinkService service = new CloudLoggingSinkService(new InMemoryStorage<>(), exporter);
+        service.createSink(PARENT, REQUEST.toBuilder().setDestination("storage.googleapis.com/logs").build(), true);
+        CountDownLatch exporting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            exporting.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            return null;
+        }).when(exporter).export(eq(PARENT), any(), any());
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> delivery = executor.submit(() -> service.exportEntries(List.of()));
+            assertTrue(exporting.await(5, TimeUnit.SECONDS));
+            try {
+                Future<?> lookup = executor.submit(() -> service.requireSinkExists(NAME));
+                lookup.get(2, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+            delivery.get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(Status.Code.NOT_FOUND, assertThrows(GcpException.class,
+                () -> service.requireSinkExists(PARENT + "/sinks/missing")).getGrpcCode());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"delete", "disable", "destination", "filter", "exclusions"})
     void deliveryAndSinkMutationsShareOneBoundary(String mutation) throws Exception {

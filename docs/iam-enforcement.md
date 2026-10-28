@@ -7,7 +7,8 @@ The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
-secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
+secrets and versions, Pub/Sub, Cloud Scheduler jobs, Cloud Logging project and organization
+sink management, IAM service-account/key management and direct access-token
 issuance, IAM project and organization custom-role management, and GCS bucket/object
 operations are integrated. Bindings to stored custom roles grant their `includedPermissions`
 through every adapter except in GCS bucket policies; see [Custom roles](services/iam.md#custom-roles). IAM policy methods also
@@ -18,7 +19,8 @@ policy methods work over REST and gRPC. GCS invokes the shared evaluator from it
 service-level authorization path so JSON filtering does not bypass its
 lock-sensitive lifecycle coordination. Cloud Logging GCS export uses the same GCS service path
 with the persisted sink writer as a trusted internal principal. It uses no request credential
-bypass; sink management caller authorization is a separate integration.
+bypass. Sink management checks the caller's emulator-issued service-account credential over
+REST and gRPC; see the [sink IAM inventory](services/logging.md#sink-management-iam).
 
 ## Service extension contract
 
@@ -107,6 +109,8 @@ across authorization and the subsequent service mutation. Other service integrat
 must use the service-level ordered-lock entry point when that consistency is required.
 Cloud Logging holds its sink lock before acquiring the ordered destination policy locks
 and GCS bucket/object locks, serializing delivery with sink configuration changes.
+IAM sink existence checks read the concurrent sink store without acquiring the sink lock,
+so policy methods cannot reverse that lock order.
 Secret Manager holds the secret lock before the ordered project and secret policy
 locks across authorization and the secret or version operation.
 Custom-role definitions are serialized among themselves but not with these policy
@@ -233,3 +237,56 @@ assertions, observed Pub/Sub delivery after permitted/denied runs, JSON null
 normalization, domain-scoped project names, and disabled-mode controls. The compatibility workflow includes it
 in the isolated enforcing native run. See the [Scheduler inventory](services/scheduler.md#iam-enforcement)
 for local condition semantics and unsupported targets.
+
+### Cloud Logging sink evidence
+
+- [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto)
+  and [Cloud Logging access control](https://cloud.google.com/logging/docs/access-control).
+- [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks)
+  and the [official Java REST SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-logging/v2/2.0.0/com/google/api/services/logging/v2/Logging.java).
+- `gcloud iam roles describe` metadata for all eleven `roles/logging.*` predefined roles:
+  admin and configWriter grant all five sink permissions, viewer and privateLogViewer grant
+  get and list, and the other seven grant no sink permissions.
+- Basic-role metadata: owner grants all five sink permissions; editor and viewer grant
+  only get and list.
+- Live project checks with the official Java REST and gRPC clients showed that
+  create evaluates the future sink name, list evaluates the project parent, and get, update,
+  and delete evaluate the existing sink name. A `resource.service` condition matched
+  `logging.googleapis.com`; a `resource.type` condition matched
+  `logging.googleapis.com/LogSink` for create, get, and list. Live organization checks
+  confirmed all five RPCs and six REST forms with sink-name, parent-name,
+  service, and type conditions. Organization REST denials returned HTTP 403 with
+  `PERMISSION_DENIED`, `IAM_PERMISSION_DENIED` in `google.rpc.ErrorInfo`, and the denied
+  permission and resource in metadata; gRPC returned `PERMISSION_DENIED`.
+
+| Parent | REST JSON v2 | ConfigServiceV2 gRPC | Live authorization target |
+|---|---|---|---|
+| Project | Create, list, get, PUT, PATCH, delete | Create, list, get, update, delete | Future sink for create, parent for list, named sink otherwise |
+| Organization | Create, list, get, PUT, PATCH, delete | Create, list, get, update, delete | Future sink for create, parent for list, named sink otherwise |
+
+The live organization probe also confirmed that every method denies an unbound service account
+after IAM propagation. The Java SDK checks use disabled sinks with a non-delivering destination;
+they do not require log traffic. The emulator matches the observed authorization decisions and
+transport status classes. Logging sink permission denials include the observed message,
+legacy REST `forbidden` reason, and `google.rpc.ErrorInfo` permission and resource metadata
+on REST and gRPC. Other error fields and headers have not been checked for exact parity.
+An additional live project sink probe under a test organization was
+denied over REST and gRPC with no binding. An organization-level
+`roles/logging.configWriter` binding then permitted the same `GetSink` calls without a project
+binding. The emulator applies this inheritance to Logging sinks when Resource Manager has
+recorded the project-to-organization parent relationship.
+
+`CloudLoggingIamAuthorizationAdapterServiceTest` inventories REST handlers and gRPC
+requests. `LoggingSinkIamEnforcementTest` uses the official Java gRPC client;
+`LoggingSinkRestIamEnforcementTest` uses the official Java REST discovery client.
+Both exercise project and organization parents, conditional create grants, resource-name
+scoping for sink and parent operations, unbound and insufficient-role denials, unchanged resources and
+policies after denials, filtered `testIamPermissions`, and disabled-mode controls.
+The gRPC suite also verifies that sink policy reads and writes fail closed in
+enforce mode. Trusted setup can write organization parent policies through the shared
+IAM mixin; evaluated callers retain the existing `FAILED_PRECONDITION` for bare
+organization policy reads and writes.
+Temporarily removing the create permission check made the conditional-create denial
+assertion fail with a successful request; restoring the check made the suite pass.
+The compatibility workflow includes both in its isolated enforcing native stage.
+See the [sink IAM inventory](services/logging.md#sink-management-iam).

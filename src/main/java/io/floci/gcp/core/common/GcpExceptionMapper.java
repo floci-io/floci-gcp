@@ -9,6 +9,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -39,11 +40,21 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
                     .build();
         }
         String reason = ex.getReason() != null ? ex.getReason() : reasonFor(ex.getGcpStatus());
+        List<Map<String, Object>> details = null;
+        if (ex.getErrorInfo() != null) {
+            GcpException.ErrorInfoDetail info = ex.getErrorInfo();
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("@type", "type.googleapis.com/google.rpc.ErrorInfo");
+            detail.put("reason", info.reason());
+            detail.put("domain", info.domain());
+            detail.put("metadata", info.metadata());
+            details = List.of(detail);
+        }
         return Response.status(ex.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)
                 .entity(new ErrorWrapper(new ErrorDetail(
                         ex.getHttpStatus(), ex.getMessage(), ex.getGcpStatus(),
-                        List.of(new ErrorItem(ex.getMessage(), "global", reason)))))
+                        List.of(new ErrorItem(ex.getMessage(), "global", reason)), details)))
                 .build();
     }
 

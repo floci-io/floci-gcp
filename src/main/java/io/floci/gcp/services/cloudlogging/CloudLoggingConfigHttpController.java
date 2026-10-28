@@ -80,6 +80,7 @@ public class CloudLoggingConfigHttpController {
 
     @DELETE
     @Path("/{sinkId}")
+    @Consumes(MediaType.WILDCARD)
     public Response deleteSink(@PathParam("parentType") String parentType, @PathParam("parentId") String parentId,
             @PathParam("sinkId") String sinkId) {
         service.deleteSink(parentType + "/" + parentId + "/sinks/" + sinkId);

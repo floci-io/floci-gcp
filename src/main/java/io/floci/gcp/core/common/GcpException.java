@@ -2,6 +2,8 @@ package io.floci.gcp.core.common;
 
 import io.grpc.Status;
 
+import java.util.Map;
+
 /**
  * Domain exception for floci-gcp services. Carries an HTTP status, a GCP status string
  * (e.g. "NOT_FOUND"), and a gRPC {@link Status.Code} for dual REST/gRPC error mapping.
@@ -13,24 +15,27 @@ public class GcpException extends RuntimeException {
     private final Status.Code grpcCode;
     private final String reason;
     private final boolean plainText;
+    private final ErrorInfoDetail errorInfo;
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message) {
-        this(httpStatus, gcpStatus, grpcCode, message, null, false);
+        this(httpStatus, gcpStatus, grpcCode, message, null, false, null);
     }
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message,
-                         String reason, boolean plainText) {
+                         String reason, boolean plainText, ErrorInfoDetail errorInfo) {
         super(message);
         this.httpStatus = httpStatus;
         this.gcpStatus = gcpStatus;
         this.grpcCode = grpcCode;
         this.reason = reason;
         this.plainText = plainText;
+        this.errorInfo = errorInfo;
     }
 
     /** Preserves the transport contracts when a service adds typed failure context. */
     protected GcpException(GcpException error) {
-        this(error.httpStatus, error.gcpStatus, error.grpcCode, error.getMessage(), error.reason, error.plainText);
+        this(error.httpStatus, error.gcpStatus, error.grpcCode, error.getMessage(), error.reason,
+                error.plainText, error.errorInfo);
     }
 
     public int getHttpStatus() {
@@ -51,8 +56,19 @@ public class GcpException extends RuntimeException {
     }
 
     public GcpException withReason(String reason) {
-        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText);
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText, errorInfo);
     }
+
+    public ErrorInfoDetail getErrorInfo() {
+        return errorInfo;
+    }
+
+    public GcpException withErrorInfo(String reason, String domain, Map<String, String> metadata) {
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), this.reason, plainText,
+                new ErrorInfoDetail(reason, domain, Map.copyOf(metadata)));
+    }
+
+    public record ErrorInfoDetail(String reason, String domain, Map<String, String> metadata) {}
 
     /** True when the REST body must be the bare message as {@code text/plain}, not the JSON error shape. */
     public boolean isPlainText() {
@@ -65,7 +81,7 @@ public class GcpException extends RuntimeException {
      * error shape would change how a client reacts.
      */
     public GcpException asPlainText() {
-        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, true);
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, true, errorInfo);
     }
 
     public static GcpException notFound(String message) {

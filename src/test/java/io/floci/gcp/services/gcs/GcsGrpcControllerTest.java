@@ -101,6 +101,43 @@ class GcsGrpcControllerTest {
     }
 
     @Test
+    void perKeyLabelMaskPathsSetAndRemoveOnlyThoseLabels() {
+        RecordingObserver<Bucket> created = new RecordingObserver<>();
+        controller.createBucket(CreateBucketRequest.newBuilder()
+                .setParent("projects/_")
+                .setBucketId("grpc-label-keys")
+                .setBucket(Bucket.newBuilder().setProject("projects/test-project")
+                        .putLabels("keep", "1").putLabels("drop", "2").putLabels("change", "3"))
+                .build(), created);
+        assertNull(created.error);
+
+        // The Go client's SetLabel and DeleteLabel send one labels.<key> path per key, with
+        // deleted keys left out of the request's map.
+        RecordingObserver<Bucket> updated = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName("grpc-label-keys"))
+                        .putLabels("change", "30").putLabels("added", "4"))
+                .setUpdateMask(FieldMask.newBuilder()
+                        .addPaths("labels.change").addPaths("labels.added").addPaths("labels.drop"))
+                .build(), updated);
+        assertNull(updated.error);
+        assertEquals(Map.of("keep", "1", "change", "30", "added", "4"), updated.single().getLabelsMap());
+        assertEquals(Map.of("keep", "1", "change", "30", "added", "4"),
+                service.getBucket("grpc-label-keys").getLabels());
+
+        RecordingObserver<Bucket> replaced = new RecordingObserver<>();
+        controller.updateBucket(UpdateBucketRequest.newBuilder()
+                .setBucket(Bucket.newBuilder()
+                        .setName(GcsGrpcMapper.bucketName("grpc-label-keys"))
+                        .putLabels("only", "5"))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("labels"))
+                .build(), replaced);
+        assertNull(replaced.error);
+        assertEquals(Map.of("only", "5"), replaced.single().getLabelsMap());
+    }
+
+    @Test
     void bucketSoftDeletePolicyDefaultsAndUpdatesThroughGrpc() {
         RecordingObserver<Bucket> created = new RecordingObserver<>();
         controller.createBucket(CreateBucketRequest.newBuilder()

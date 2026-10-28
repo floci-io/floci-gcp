@@ -145,9 +145,10 @@ final class GcsGrpcMapper {
         boolean updateUniformBucketLevelAccessEnabled = false;
         boolean updateUniformBucketLevelAccessLockTime = false;
         boolean updatePublicAccessPrevention = false;
+        Map<String, String> labels = null;
         for (String path : paths) {
             switch (path) {
-                case "labels" -> patch.put("labels", new LinkedHashMap<>(bucket.getLabelsMap()));
+                case "labels" -> labels = new LinkedHashMap<>(bucket.getLabelsMap());
                 case "versioning", "versioning.enabled" ->
                         patch.put("versioning", Map.of("enabled", bucket.getVersioning().getEnabled()));
                 case "iam_config" -> mergeIamConfigurationMessage = true;
@@ -165,12 +166,26 @@ final class GcsGrpcMapper {
                         patch.put("defaultEventBasedHold", bucket.getDefaultEventBasedHold());
                 default -> {
                     if (path.startsWith("labels.")) {
-                        patch.put("labels", new LinkedHashMap<>(bucket.getLabelsMap()));
+                        // A per-key path sets that label, or removes it when the request's map lacks the key.
+                        if (labels == null) {
+                            labels = current.getLabels() == null
+                                    ? new LinkedHashMap<>()
+                                    : new LinkedHashMap<>(current.getLabels());
+                        }
+                        String key = path.substring("labels.".length());
+                        if (bucket.containsLabels(key)) {
+                            labels.put(key, bucket.getLabelsOrThrow(key));
+                        } else {
+                            labels.remove(key);
+                        }
                     } else {
                         throw GcpException.invalidArgument("Unsupported bucket update field: " + path);
                     }
                 }
             }
+        }
+        if (labels != null) {
+            patch.put("labels", labels);
         }
         if (mergeIamConfigurationMessage || mergeUniformBucketLevelAccessMessage
                 || updateUniformBucketLevelAccessEnabled || updateUniformBucketLevelAccessLockTime

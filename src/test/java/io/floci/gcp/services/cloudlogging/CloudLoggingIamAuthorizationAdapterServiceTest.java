@@ -11,6 +11,7 @@ import io.floci.gcp.services.iam.authorization.IamOperation;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
@@ -24,11 +25,11 @@ class CloudLoggingIamAuthorizationAdapterServiceTest {
     @Test
     void everySinkHandlerAndRpcMapsToTheSamePermission() {
         Set<String> handlers = Arrays.stream(CloudLoggingConfigHttpController.class.getDeclaredMethods())
-                .filter(method -> java.lang.reflect.Modifier.isPublic(method.getModifiers()))
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
                 .map(Method::getName).collect(Collectors.toSet());
         assertEquals(Set.of("createSink", "listSinks", "getSink", "updateSink", "patchSink", "deleteSink"), handlers);
         Set<String> grpcHandlers = Arrays.stream(CloudLoggingConfigController.class.getDeclaredMethods())
-                .filter(method -> java.lang.reflect.Modifier.isPublic(method.getModifiers()))
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
                 .map(Method::getName).collect(Collectors.toSet());
         assertEquals(Set.of("createSink", "listSinks", "getSink", "updateSink", "deleteSink"), grpcHandlers);
 

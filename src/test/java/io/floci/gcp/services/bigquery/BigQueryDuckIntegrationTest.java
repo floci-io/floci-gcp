@@ -217,6 +217,34 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("1"), Arrays.asList((String) null))));
     }
 
+    @Test
+    @Order(5)
+    void dmlThatWouldStoreANullArrayElementFailsAndWritesNothing() {
+        query(Map.of("query", "CREATE TABLE shop.null_elements (id INT64, a ARRAY<INT64>, s STRUCT<b ARRAY<STRING>>)",
+                "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "INSERT INTO shop.null_elements (id, a, s) VALUES (1, [1, 2], STRUCT(['x'] AS b))",
+                "useLegacySql", false)).then().statusCode(200);
+        assertNullElementError("INSERT INTO shop.null_elements (id, a) VALUES (2, [1, NULL])", "a");
+        assertNullElementError("INSERT INTO shop.null_elements (id, a) SELECT 3, [1, NULL]", "a");
+        assertNullElementError("UPDATE shop.null_elements SET a = [5, NULL] WHERE id = 1", "a");
+        assertNullElementError("UPDATE shop.null_elements SET s = STRUCT(['y', NULL] AS b) WHERE id = 1",
+                "s.b; error in writing field s");
+        assertNullElementError("MERGE shop.null_elements t USING (SELECT 9 AS id, [NULL] AS a) s ON t.id = s.id"
+                + " WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, s.a)", "a");
+        assertNullElementError("MERGE shop.null_elements t USING (SELECT 1 AS id) s ON t.id = s.id"
+                + " WHEN MATCHED THEN UPDATE SET a = [NULL, 3]", "a");
+        query(Map.of("query", "UPDATE shop.null_elements SET a = [NULL] WHERE id = 42", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT id, a, s FROM shop.null_elements ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")))
+                .body("rows[0].f[2].v.f[0].v.v", equalTo(List.of("x")));
+        given().when().get(BASE + "/datasets/shop/tables/null_elements/data").then().statusCode(200)
+                .body("totalRows", equalTo("1"))
+                .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

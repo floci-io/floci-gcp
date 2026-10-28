@@ -245,6 +245,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
             tableRows.add(row);
         }
+        // BigQuery fails a DML statement that would store a NULL array element, and writes nothing.
+        rejectNullArrayElements(columns, tableRows);
         return new DmlResult(affected, inserted, updated, deleted, tableRows, staging.bytesProcessed());
     }
 

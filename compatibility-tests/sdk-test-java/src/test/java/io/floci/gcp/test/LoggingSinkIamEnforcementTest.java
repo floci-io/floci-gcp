@@ -219,6 +219,7 @@ class LoggingSinkIamEnforcementTest {
                 assertThatThrownBy(() -> stranger.createSink(create(parent, "unbound")))
                         .isInstanceOf(PermissionDeniedException.class)
                         .satisfies(error -> {
+                            // io.grpc.Status is used for codes; com.google.rpc.Status holds error details.
                             com.google.rpc.Status status = StatusProto.fromThrowable(error);
                             assertThat(status).isNotNull();
                             assertThat(status.getCode()).isEqualTo(Status.Code.PERMISSION_DENIED.value());

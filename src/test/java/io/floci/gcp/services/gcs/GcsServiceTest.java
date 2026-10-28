@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.storage.v2.Bucket;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
@@ -717,6 +718,25 @@ class GcsServiceTest {
         service.updateBucketWithResolvedFields("labels-resolved", Map.of("labels", Map.of("team", "ml")));
 
         assertEquals(Map.of("team", "ml"), service.getBucket("labels-resolved").getLabels());
+    }
+
+    @Test
+    void perKeyLabelChangesApplyToTheLabelsStoredWhenTheUpdateRuns() {
+        service.createBucket("labels-per-key", "p1", BASE_URL,
+                Map.of("labels", Map.of("env", "dev", "team", "data")));
+        GcsBucket snapshot = service.getBucket("labels-per-key");
+        Map<String, Object> setEnv = GcsGrpcMapper.bucketUpdateFields(snapshot,
+                Bucket.newBuilder().putLabels("env", "prod").build(), List.of("labels.env"));
+        Map<String, Object> addOwner = GcsGrpcMapper.bucketUpdateFields(snapshot,
+                Bucket.newBuilder().putLabels("owner", "ops").build(), List.of("labels.owner"));
+        Map<String, Object> removeTeam = new LinkedHashMap<>();
+        removeTeam.put("team", null);
+
+        service.updateBucket("labels-per-key", Map.of("labels", removeTeam));
+        service.updateBucketWithResolvedFields("labels-per-key", setEnv);
+        service.updateBucketWithResolvedFields("labels-per-key", addOwner);
+
+        assertEquals(Map.of("env", "prod", "owner", "ops"), service.getBucket("labels-per-key").getLabels());
     }
 
     @Test

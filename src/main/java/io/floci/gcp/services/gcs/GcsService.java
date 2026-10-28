@@ -425,6 +425,9 @@ public class GcsService {
                     : null;
             if (patch.containsKey("labels") && resolvedFields) {
                 bucket.setLabels((Map<String, String>) patch.get("labels"));
+            } else if (patch.containsKey(GcsGrpcMapper.LABEL_CHANGES) && resolvedFields) {
+                bucket.setLabels(patchLabels(bucket.getLabels(),
+                        (Map<String, Object>) patch.get(GcsGrpcMapper.LABEL_CHANGES)));
             } else if (patch.containsKey("labels")) {
                 bucket.setLabels(patchLabels(bucket.getLabels(), (Map<String, Object>) patch.get("labels")));
             }

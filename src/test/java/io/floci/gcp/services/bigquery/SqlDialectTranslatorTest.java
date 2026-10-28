@@ -72,6 +72,30 @@ class SqlDialectTranslatorTest {
         assertEquals(new SqlDialectTranslator.TableRef("ds", "source"), statement.copySource());
     }
 
+    @Test
+    void createTableCopyParsesTrailingOptions() {
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(
+                "CREATE TABLE ds.destination COPY `test-project.ds.source` OPTIONS("
+                        + "description='copy, not source', labels=[('team', 'analytics')],"
+                        + " expiration_timestamp=TIMESTAMP '2099-01-01 00:00:00 UTC');",
+                "test-project", null);
+
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "source"), statement.copySource());
+        assertEquals("copy, not source", statement.options().get("description"));
+        assertEquals(Map.of("team", "analytics"), statement.options().get("labels"));
+        assertTrue(statement.options().get("expiration_timestamp") instanceof Long);
+    }
+
+    @Test
+    void createTableCopyRejectsMalformedOptionsAndTrailingTokens() {
+        for (String suffix : List.of("OPTIONS", "OPTIONS description='x'", "OPTIONS(description=)",
+                "OPTIONS(description='x') GARBAGE", "OPTIONS(description=1)", "GARBAGE")) {
+            GcpException error = assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                    "CREATE TABLE ds.destination COPY ds.source " + suffix, "test-project", null));
+            assertEquals("invalidQuery", error.getReason());
+        }
+    }
+
     // ── Table references ─────────────────────────────────────────────────────
 
     @Test

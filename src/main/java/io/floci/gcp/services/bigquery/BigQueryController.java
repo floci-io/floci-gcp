@@ -594,6 +594,9 @@ public class BigQueryController {
         statistics.put("creationTime", sj.getCreationTime());
         statistics.put("startTime", sj.getCreationTime());
         statistics.put("endTime", sj.getCreationTime());
+        if (sj.getCopyStatistics() != null) {
+            statistics.put("copy", sj.getCopyStatistics());
+        }
         job.setStatistics(statistics);
         return job;
     }

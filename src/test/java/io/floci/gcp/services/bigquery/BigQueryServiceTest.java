@@ -1416,6 +1416,69 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void sqlCopyOptionsOverrideInheritedMetadataAndDatasetDefaults() {
+        Dataset dataset = newDataset(DATASET);
+        dataset.setExtra("defaultTableExpirationMs", "7200000");
+        service.createDataset(PROJECT, dataset);
+        Table source = newTable(DATASET, "source");
+        source.setDescription("original description");
+        source.setFriendlyName("original name");
+        source.setLabels(Map.of("old", "label"));
+        service.createTable(PROJECT, DATASET, source);
+        service.appendRows(PROJECT, DATASET, "source", List.of(Map.of("name", "copied", "age", 1)));
+        String sql = "CREATE TABLE " + DATASET + ".destination COPY " + DATASET + ".source"
+                + " OPTIONS(description='new description', friendly_name='new name', labels=[('new', 'label')],"
+                + " expiration_timestamp=TIMESTAMP '2099-01-02 03:04:05 UTC')";
+
+        StoredJob dryRun = service.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, List.of(), null, true, false));
+        assertFalse(dryRun.failed());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, "destination")).getGcpStatus());
+
+        StoredJob copied = service.query(PROJECT, null, null, sql, null);
+        assertEquals("CREATE", copied.getDdlOperationPerformed());
+        Table destination = service.getTable(PROJECT, DATASET, "destination");
+        assertEquals("new description", destination.getDescription());
+        assertEquals("new name", destination.getFriendlyName());
+        assertEquals(Map.of("new", "label"), destination.getLabels());
+        assertEquals(String.valueOf(Instant.parse("2099-01-02T03:04:05Z").toEpochMilli()),
+                destination.getExtra().get("expirationTime"));
+        assertEquals(service.stagingRows(PROJECT, DATASET, "source"),
+                service.stagingRows(PROJECT, DATASET, "destination"));
+        assertEquals("original description", service.getTable(PROJECT, DATASET, "source").getDescription());
+        assertEquals(Map.of("old", "label"), service.getTable(PROJECT, DATASET, "source").getLabels());
+
+        service.query(PROJECT, null, null, "CREATE OR REPLACE TABLE " + DATASET + ".destination COPY "
+                + DATASET + ".source OPTIONS(description=NULL, labels=NULL, expiration_timestamp=NULL)", null);
+        Table replaced = service.getTable(PROJECT, DATASET, "destination");
+        assertNull(replaced.getDescription());
+        assertNull(replaced.getLabels());
+        assertFalse(replaced.getExtra().containsKey("expirationTime"));
+        assertEquals("original name", replaced.getFriendlyName());
+
+        StoredJob skipped = service.query(PROJECT, null, null, "CREATE TABLE IF NOT EXISTS " + DATASET
+                + ".destination COPY " + DATASET + ".source OPTIONS(description='ignored')", null);
+        assertEquals("SKIP", skipped.getDdlOperationPerformed());
+        assertNull(service.getTable(PROJECT, DATASET, "destination").getDescription());
+    }
+
+    @Test
+    void sqlCopyRejectsInvalidOptionsWithoutReplacingDestination() {
+        seedTwoRows();
+        for (String option : List.of("description=1", "expiration_timestamp='nope'", "unknown_option='x'",
+                "require_partition_filter=true")) {
+            String sql = "CREATE OR REPLACE TABLE " + DATASET + "." + TABLE + " COPY "
+                    + DATASET + "." + TABLE + " OPTIONS(" + option + ")";
+            assertEquals("invalidQuery", assertThrows(GcpException.class,
+                    () -> service.query(PROJECT, null, null, sql, null)).getReason());
+            assertEquals("invalidQuery", assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                    new BigQueryService.QueryOptions(sql, null, List.of(), null, true, false))).getReason());
+            assertEquals(2, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+        }
+    }
+
+    @Test
     void createOrReplaceCopyCannotChangePartitioning() {
         service.query(PROJECT, null, null, "CREATE SCHEMA " + DATASET, null);
         service.query(PROJECT, null, null,
@@ -1508,24 +1571,89 @@ class BigQueryServiceTest {
         StoredJob created = service.copy(PROJECT, null, "copy-create", copyConfig(TABLE, "copied"));
         assertFalse(created.failed(), created.getErrorMessage());
         assertEquals("COPY", created.getJobType());
+        assertEquals(Map.of("copiedRows", "2"), created.getCopyStatistics());
+        assertEquals(created.getCopyStatistics(), service.getJob(PROJECT, "copy-create").getCopyStatistics());
         assertEquals(2, service.listTableData(PROJECT, DATASET, "copied").rows().size());
 
         StoredJob occupied = service.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
         assertEquals("duplicate", occupied.getErrorReason());
+        assertNull(occupied.getCopyStatistics());
 
         StoredJob appended = service.copy(PROJECT, null, null,
                 copyConfig(TABLE, "copied", "writeDisposition", "WRITE_APPEND"));
         assertFalse(appended.failed(), appended.getErrorMessage());
         assertEquals(4, service.listTableData(PROJECT, DATASET, "copied").rows().size());
+        assertEquals(Map.of("copiedRows", "2"), appended.getCopyStatistics());
 
         StoredJob truncated = service.copy(PROJECT, null, null,
                 copyConfig(TABLE, "copied", "writeDisposition", "WRITE_TRUNCATE"));
         assertFalse(truncated.failed(), truncated.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "2"), truncated.getCopyStatistics());
         assertEquals(2, service.listTableData(PROJECT, DATASET, "copied").rows().size());
 
         StoredJob missing = service.copy(PROJECT, null, null,
                 copyConfig(TABLE, "missing", "createDisposition", "CREATE_NEVER"));
         assertEquals("notFound", missing.getErrorReason());
+    }
+
+    @Test
+    void copyJobReportsZeroCopiedRowsForEmptySource() {
+        seedTable();
+        StoredJob copied = service.copy(PROJECT, null, null, copyConfig(TABLE, "empty_copy"));
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "0"), copied.getCopyStatistics());
+    }
+
+    @Test
+    void copyJobAcceptsUnspecifiedOperationType() {
+        seedTwoRows();
+        StoredJob copied = service.copy(PROJECT, null, null,
+                copyConfig(TABLE, "copied", "operationType", "OPERATION_TYPE_UNSPECIFIED"));
+        assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "2"), copied.getCopyStatistics());
+    }
+
+    @Test
+    void malformedCopyReferencesAreRejectedBeforeReservingAJobId() {
+        seedTwoRows();
+        List<Map<String, Object>> invalidConfigs = List.of(
+                copyConfig(TABLE, "copied", "sourceTable", 5),
+                copyConfig(TABLE, "copied", "sourceTable", Map.of("datasetId", DATASET, "tableId", 5)),
+                copyConfig(TABLE, "copied", "sourceTable", Map.of("datasetId", 5, "tableId", TABLE)),
+                copyConfig(TABLE, "copied", "sourceTable", Map.of("datasetId", DATASET)),
+                copyConfig(TABLE, "copied", "sourceTable", Map.of("datasetId", DATASET, "tableId", "")),
+                copyConfig(TABLE, "copied", "sourceTable", Map.of("projectId", 5,
+                        "datasetId", DATASET, "tableId", TABLE)),
+                copyConfig(TABLE, "copied", "destinationTable", Map.of("datasetId", DATASET, "tableId", 5)),
+                Map.of("sourceTables", List.of(Map.of("datasetId", DATASET, "tableId", 5)),
+                        "destinationTable", Map.of("datasetId", DATASET, "tableId", "copied")),
+                Map.of("sourceTables", "not an array",
+                        "destinationTable", Map.of("datasetId", DATASET, "tableId", "copied")));
+        for (Map<String, Object> config : invalidConfigs) {
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.copy(PROJECT, null, "reusable-copy-id", config));
+            assertEquals("invalid", error.getReason());
+            assertTrue(service.listJobs(PROJECT).isEmpty());
+        }
+        StoredJob copied = service.copy(PROJECT, null, "reusable-copy-id", copyConfig(TABLE, "copied"));
+        assertFalse(copied.failed(), copied.getErrorMessage());
+    }
+
+    @Test
+    void malformedCopyExpirationIsRejectedForNewAndExistingDestinationsBeforeReservingAJobId() {
+        seedTwoRows();
+        for (String destination : List.of("new_destination", TABLE)) {
+            for (Object expiration : List.of("nope", 5, "2099-01-01")) {
+                GcpException error = assertThrows(GcpException.class, () -> service.copy(PROJECT, null,
+                        "reusable-copy-id", copyConfig(TABLE, destination,
+                                "destinationExpirationTime", expiration, "writeDisposition", "WRITE_TRUNCATE")));
+                assertEquals("invalid", error.getReason());
+                assertTrue(service.listJobs(PROJECT).isEmpty());
+                assertEquals(2, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+            }
+        }
+        StoredJob copied = service.copy(PROJECT, null, "reusable-copy-id", copyConfig(TABLE, "new_destination"));
+        assertFalse(copied.failed(), copied.getErrorMessage());
     }
 
     @Test
@@ -1571,6 +1699,23 @@ class BigQueryServiceTest {
                 service.getTable(PROJECT, DATASET, "destination").getExtra().get("expirationTime"));
         assertEquals(service.stagingRows(PROJECT, DATASET, "source"),
                 service.stagingRows(PROJECT, DATASET, "destination"));
+    }
+
+    @Test
+    void copyExpirationValidationAcceptsRfc3339OffsetsAndFractions() {
+        seedTwoRows();
+        List<String> timestamps = List.of("2099-01-01T00:00:00Z", "2099-01-01T01:00:00+01:00",
+                "2099-01-01T00:00:00.123456Z");
+        for (int i = 0; i < timestamps.size(); i++) {
+            String timestamp = timestamps.get(i);
+            String destination = "expiry_copy_" + i;
+            StoredJob copied = service.copy(PROJECT, null, null,
+                    copyConfig(TABLE, destination, "destinationExpirationTime", timestamp));
+            assertFalse(copied.failed(), copied.getErrorMessage());
+            assertEquals(String.valueOf(Instant.parse(timestamp).toEpochMilli()),
+                    service.getTable(PROJECT, DATASET, destination).getExtra().get("expirationTime"));
+            assertEquals(timestamp, copied.getCopyConfiguration().get("destinationExpirationTime"));
+        }
     }
 
     @Test
@@ -1718,6 +1863,7 @@ class BigQueryServiceTest {
             append.get(5, TimeUnit.SECONDS);
             StoredJob copied = copy.get(5, TimeUnit.SECONDS);
             assertFalse(copied.failed(), copied.getErrorMessage());
+            assertEquals(Map.of("copiedRows", "1"), copied.getCopyStatistics());
         }
 
         assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "copied").rows().size());
@@ -1814,6 +1960,7 @@ class BigQueryServiceTest {
         StoredJob first = service.copy(PROJECT, "US", null,
                 copyConfig("source$20261014", "destination$20261014", "writeDisposition", "WRITE_TRUNCATE"));
         assertFalse(first.failed(), first.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "1"), first.getCopyStatistics());
         assertEquals("US", first.getLocation());
         assertEquals(1, service.listTableData(PROJECT, DATASET, "destination$20261014").rows().size());
         assertTrue(service.listTableData(PROJECT, DATASET, "destination$20261015").rows().isEmpty());
@@ -1821,6 +1968,7 @@ class BigQueryServiceTest {
         StoredJob second = service.copy(PROJECT, null, null,
                 copyConfig("source$20261015", "destination$20261015", "writeDisposition", "WRITE_APPEND"));
         assertFalse(second.failed(), second.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "1"), second.getCopyStatistics());
         assertEquals(2, service.listTableData(PROJECT, DATASET, "destination").rows().size());
     }
 
@@ -1858,6 +2006,7 @@ class BigQueryServiceTest {
                 copyConfig("copy_source", "copy_destination", "writeDisposition", "WRITE_APPEND"));
 
         assertFalse(copied.failed(), copied.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "1"), copied.getCopyStatistics());
         assertEquals(OptionalLong.of(1L),
                 service.streamRowsApplied(PROJECT, DATASET, "copy_destination", stream));
     }
@@ -1890,9 +2039,11 @@ class BigQueryServiceTest {
                         "writeDisposition", "WRITE_APPEND"));
 
         assertFalse(decoratedCopy.failed(), decoratedCopy.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "1"), decoratedCopy.getCopyStatistics());
         assertFalse(service.listTableData(PROJECT, destinationDatasetId, "destination$20261015")
                 .rows().isEmpty());
         assertFalse(wholeTableAppend.failed(), wholeTableAppend.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "1"), wholeTableAppend.getCopyStatistics());
         assertEquals(2, service.listTableData(PROJECT, destinationDatasetId, "destination").rows().size());
         assertEquals("7200000", ((Map<?, ?>) service.getTable(PROJECT, destinationDatasetId, "destination")
                 .getExtra().get("timePartitioning")).get("expirationMs"));
@@ -2033,6 +2184,7 @@ class BigQueryServiceTest {
 
         StoredJob combined = service.copy(PROJECT, null, null, config);
         assertFalse(combined.failed(), combined.getErrorMessage());
+        assertEquals(Map.of("copiedRows", "3"), combined.getCopyStatistics());
         assertEquals(3, service.listTableData(PROJECT, DATASET, "combined").rows().size());
 
         Table incompatible = newTable(DATASET, "incompatible");

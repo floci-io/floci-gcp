@@ -47,6 +47,8 @@ public class StoredJob {
     private Map<String, String> loadStatistics;
     /** The job's {@code configuration.copy}, echoed back on reads. */
     private Map<String, Object> copyConfiguration;
+    /** {@code JobStatistics5}: copiedRows. */
+    private Map<String, String> copyStatistics;
 
     public String getJobId() { return jobId; }
     public void setJobId(String jobId) { this.jobId = jobId; }
@@ -119,6 +121,9 @@ public class StoredJob {
 
     public Map<String, Object> getCopyConfiguration() { return copyConfiguration; }
     public void setCopyConfiguration(Map<String, Object> copyConfiguration) { this.copyConfiguration = copyConfiguration; }
+
+    public Map<String, String> getCopyStatistics() { return copyStatistics; }
+    public void setCopyStatistics(Map<String, String> copyStatistics) { this.copyStatistics = copyStatistics; }
 
     public boolean failed() {
         return errorReason != null;

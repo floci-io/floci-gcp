@@ -23,6 +23,7 @@ import com.google.cloud.bigquery.QueryParameterValue;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.Table;
 import com.google.cloud.bigquery.TableDataWriteChannel;
 import com.google.cloud.bigquery.TableDefinition;
 import com.google.cloud.bigquery.TableId;
@@ -761,6 +762,49 @@ class BigQueryTest {
             assertThat(echoed.getDestinationTable().getDataset()).isEqualTo(dataset);
             assertThat(echoed.getDestinationTable().getTable()).isEqualTo("destination");
             assertThat(bigquery.listTableData(destination).getTotalRows()).isEqualTo(2);
+            JobStatistics.CopyStatistics statistics = job.getStatistics();
+            assertThat(statistics.getCopiedRows()).isEqualTo(2L);
+            Job reloaded = bigquery.getJob(job.getJobId());
+            assertThat(((JobStatistics.CopyStatistics) reloaded.getStatistics()).getCopiedRows()).isEqualTo(2L);
+
+            Job appended = bigquery.create(JobInfo.of(configuration.toBuilder()
+                    .setWriteDisposition(JobInfo.WriteDisposition.WRITE_APPEND).build())).waitFor();
+            assertThat(appended.getStatus().getError()).isNull();
+            assertThat(((JobStatistics.CopyStatistics) appended.getStatistics()).getCopiedRows()).isEqualTo(2L);
+            assertThat(bigquery.listTableData(destination).getTotalRows()).isEqualTo(4);
+        } finally {
+            bigquery.delete(DatasetId.of(PROJECT_ID, dataset), BigQuery.DatasetDeleteOption.deleteContents());
+        }
+    }
+
+    @Test
+    void sqlCopyOptionsRoundTripThroughTheSdk() throws InterruptedException {
+        String dataset = TestFixtures.uniqueName("sql_copy_ds").replace("-", "_");
+        TableId source = TableId.of(dataset, "source");
+        TableId destination = TableId.of(dataset, "destination");
+        try {
+            bigquery.create(DatasetInfo.newBuilder(dataset).setLocation("US").build());
+            bigquery.create(TableInfo.newBuilder(source, StandardTableDefinition.of(
+                            Schema.of(Field.of("name", StandardSQLTypeName.STRING))))
+                    .setDescription("source description").setLabels(Map.of("source", "label")).build());
+            assertThat(bigquery.insertAll(InsertAllRequest.newBuilder(source)
+                    .addRow(Map.of("name", "copied")).build()).hasErrors()).isFalse();
+
+            Job copied = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(
+                    "CREATE TABLE " + dataset + ".destination COPY " + dataset + ".source"
+                            + " OPTIONS(description='copy description', friendly_name='copy name',"
+                            + " labels=[('team', 'analytics')],"
+                            + " expiration_timestamp=TIMESTAMP '2099-01-01 00:00:00 UTC')")
+                    .setUseLegacySql(false).build())).waitFor();
+
+            assertThat(copied.getStatus().getError()).isNull();
+            Table table = bigquery.getTable(destination);
+            assertThat(table.getDescription()).isEqualTo("copy description");
+            assertThat(table.getFriendlyName()).isEqualTo("copy name");
+            assertThat(table.getLabels()).containsExactlyEntriesOf(Map.of("team", "analytics"));
+            assertThat(table.getExpirationTime()).isEqualTo(4_070_908_800_000L);
+            assertThat(bigquery.listTableData(destination).getTotalRows()).isEqualTo(1);
+            assertThat(bigquery.getTable(source).getDescription()).isEqualTo("source description");
         } finally {
             bigquery.delete(DatasetId.of(PROJECT_ID, dataset), BigQuery.DatasetDeleteOption.deleteContents());
         }

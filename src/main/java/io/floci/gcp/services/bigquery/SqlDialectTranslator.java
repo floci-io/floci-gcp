@@ -332,8 +332,8 @@ final class SqlDialectTranslator {
      * A classified statement. {@code querySql} is the GoogleSQL text of the {@code SELECT} part
      * of {@code CREATE TABLE ... AS} and {@code CREATE VIEW}; {@code columns} is the column list
      * of a plain {@code CREATE TABLE}, already in BigQuery schema form. {@code options} are the
-     * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW}, by option name; a null value
-     * clears the option.
+     * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW} or the overrides of
+     * {@code CREATE TABLE COPY}, by option name; a null value clears the option.
      */
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
@@ -745,11 +745,16 @@ final class SqlDialectTranslator {
                 if (copy >= 0 && tokens.get(copy).isKeyword("COPY")) {
                     int sourceAt = sig.indexOf(copy) + 1;
                     Path source = pathAt(sig, sourceAt);
-                    if (nextSignificant(source.end(), tokens.size()) >= 0) {
-                        throw invalidQuery("Syntax error: Unexpected tokens after COPY source table.");
+                    int afterSource = nextSignificant(source.end(), tokens.size());
+                    Map<String, Object> options = null;
+                    if (afterSource >= 0) {
+                        if (!tokens.get(afterSource).isKeyword("OPTIONS")) {
+                            throw invalidQuery("Syntax error: Unexpected tokens after COPY source table.");
+                        }
+                        options = tableOptions(afterSource);
                     }
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_COPY", target, null,
-                            orReplace, ifNotExists, false, false, false, null, null,
+                            orReplace, ifNotExists, false, false, false, null, null, options,
                             resolveTable(source.segments()), null, null, null);
                 }
                 int asIndex = topLevelAsSelect(path.end());
@@ -831,7 +836,7 @@ final class SqlDialectTranslator {
         };
     }
 
-    /** Options {@code ALTER TABLE/VIEW ... SET OPTIONS} applies; BigQuery's other ones are rejected as unsupported. */
+    /** Options supported by ALTER SET OPTIONS and CREATE TABLE COPY. */
     private static final Set<String> ALTERABLE_OPTIONS = Set.of("description", "friendly_name", "labels",
             "expiration_timestamp");
 
@@ -861,6 +866,12 @@ final class SqlDialectTranslator {
             throw invalidQuery("ALTER " + object + " is only supported with SET OPTIONS by the floci BigQuery"
                     + " emulator yet.");
         }
+        return new Statement(object.equals("TABLE") ? StatementKind.ALTER_TABLE : StatementKind.ALTER_VIEW,
+                "ALTER_" + object, target, null, false, false, ifExists, false, false, null, null,
+                tableOptions(options));
+    }
+
+    private Map<String, Object> tableOptions(int options) {
         int open = nextSignificant(options + 1, tokens.size());
         if (open < 0 || !tokens.get(open).isPunct("(")) {
             throw invalidQuery("Syntax error: Expected \"(\" after OPTIONS");
@@ -887,8 +898,7 @@ final class SqlDialectTranslator {
                 depth--;
             }
         }
-        return new Statement(object.equals("TABLE") ? StatementKind.ALTER_TABLE : StatementKind.ALTER_VIEW,
-                "ALTER_" + object, target, null, false, false, ifExists, false, false, null, null, values);
+        return values;
     }
 
     private static void readOption(List<Token> item, Map<String, Object> values) {

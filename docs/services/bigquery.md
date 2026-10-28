@@ -70,8 +70,8 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `configuration.query.destinationTable`, which is how the SDK's `Job.getQueryResults()` reads
   rows.
 - **Copy jobs**: `configuration.copy` accepts either `sourceTable` or non-empty `sourceTables`,
-  plus `destinationTable`. Only `operationType` `COPY` (or unset) is supported; `SNAPSHOT` and
-  `CLONE` are rejected. `destinationExpirationTime`, when supplied, sets the created destination
+  plus `destinationTable`. Only `operationType` `COPY`, `OPERATION_TYPE_UNSPECIFIED` (treated as
+  unset), or an omitted operation type is supported; `SNAPSHOT`, `RESTORE` and `CLONE` are rejected. `destinationExpirationTime`, when supplied, sets the created destination
   table's expiration time. Without it, the source expiration is not inherited and the destination
   dataset's default table expiration applies. It supports `CREATE_IF_NEEDED`/`CREATE_NEVER` and
   `WRITE_EMPTY`/`WRITE_TRUNCATE`/`WRITE_APPEND`, validates that multiple sources have identical
@@ -82,7 +82,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   source to an undecorated partitioned destination retains the source partition. Column- and
   range-partitioned decorated copies require identical partition specifications and IDs;
   ingestion-time copies may target the same granularity or a containing coarser partition.
-  Copy references are currently limited to the project that owns the job.
+  Copy references are currently limited to the project that owns the job. Malformed source or
+  destination references and invalid `destinationExpirationTime` values return HTTP 400 with
+  reason `invalid` before a job ID is reserved, even when the destination already exists.
+  Resource and copy-compatibility errors remain completed jobs with `status.errorResult`.
+  Successful jobs report `statistics.copy.copiedRows` as a string-encoded integer, counting only
+  incoming rows (not pre-existing destination rows on append). Logical byte counts are not estimated.
+  These fields follow the [BigQuery v2 discovery document](https://bigquery.googleapis.com/discovery/v1/apis/bigquery/v2/rest).
 - **Query parameters**: `parameterMode` `NAMED` (`@name`) and `POSITIONAL` (`?`), with scalar,
   `ARRAY` and `STRUCT` parameter types.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
@@ -417,7 +423,7 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions populate table metadata, while ingestion-time partitioning is rejected |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source` | Copies a table, clone, or snapshot in the same job location; views are rejected |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same literal values and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options and computed expressions are unsupported |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
 | `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`; only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
@@ -429,6 +435,10 @@ DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREA
 `CREATE OR REPLACE TABLE` must preserve the existing partitioning kind, field, granularity and
 range specification. DML that writes `_PARTITIONTIME` requires an exact partition boundary from
 1970-01-01 through 2159-12-31.
+
+`COPY ... OPTIONS` uses the override semantics in the
+[CREATE TABLE COPY reference](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_table_copy).
+The supported option subset also works in dry runs without writing table metadata or rows.
 
 DML needs a floci-duck image that supports `followup_sql` (see
 [floci-duck](https://github.com/floci-io/floci-duck)). Table, dataset and plain `CREATE TABLE` /
@@ -502,7 +512,8 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   yet; they fail with `invalidQuery`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
-- `CLUSTER BY` and table `OPTIONS` in DDL are not stored. Time-based `PARTITION BY` metadata is
+- `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are
+  not stored. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY` metadata is
   stored for the supported expressions documented above.
 - Legacy SQL (`useLegacySql: true`) is rejected. A request that omits `useLegacySql` runs as
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).

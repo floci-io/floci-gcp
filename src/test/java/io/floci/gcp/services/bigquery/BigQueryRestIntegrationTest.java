@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -445,12 +446,72 @@ class BigQueryRestIntegrationTest {
                 .body("status.errorResult", nullValue())
                 .body("configuration.jobType", equalTo("COPY"))
                 .body("configuration.copy.sourceTable.tableId", equalTo("t1"))
-                .body("configuration.copy.destinationTable.tableId", equalTo("t1_copy"));
+                .body("configuration.copy.destinationTable.tableId", equalTo("t1_copy"))
+                .body("statistics.copy.copiedRows", equalTo("2"));
 
         given().when().get(BASE + "/jobs/copy-rest").then().statusCode(200)
                 .body("jobReference.location", equalTo("US"))
-                .body("configuration.copy.writeDisposition", equalTo("WRITE_EMPTY"));
+                .body("configuration.copy.writeDisposition", equalTo("WRITE_EMPTY"))
+                .body("statistics.copy.copiedRows", equalTo("2"));
+        given().when().get(BASE + "/jobs").then().statusCode(200)
+                .body("jobs.find { it.jobReference.jobId == 'copy-rest' }.statistics.copy.copiedRows", equalTo("2"));
         given().when().get(BASE + "/datasets/ds1/tables/t1_copy/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(6)
+    void malformedCopyRequestsReturnHttpErrorsWithoutCreatingJobs() {
+        Map<String, Object> source = Map.of("datasetId", "ds1", "tableId", "t1");
+        Map<String, Object> destination = Map.of("datasetId", "ds1", "tableId", "validated_copy");
+        List<Map<String, Object>> configs = List.of(
+                Map.of("sourceTable", Map.of("datasetId", "ds1", "tableId", 5),
+                        "destinationTable", destination),
+                Map.of("sourceTables", List.of(Map.of("datasetId", "ds1", "tableId", 5)),
+                        "destinationTable", destination),
+                Map.of("sourceTable", source, "destinationTable", destination,
+                        "destinationExpirationTime", "nope"),
+                Map.of("sourceTable", source, "destinationTable", source,
+                        "destinationExpirationTime", "nope", "writeDisposition", "WRITE_TRUNCATE"));
+        for (Map<String, Object> config : configs) {
+            given().contentType("application/json")
+                    .body(Map.of("jobReference", Map.of("jobId", "validated-copy-id"),
+                            "configuration", Map.of("copy", config)))
+                    .when().post(BASE + "/jobs").then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalid"))
+                    .body("error.message", containsString(config.containsKey("destinationExpirationTime")
+                            ? "RFC 3339" : "tableId must be a string"));
+            given().when().get(BASE + "/jobs/validated-copy-id").then().statusCode(404);
+        }
+        given().contentType("application/json")
+                .body(Map.of("jobReference", Map.of("jobId", "validated-copy-id"),
+                        "configuration", Map.of("copy", Map.of("sourceTable", source,
+                                "destinationTable", destination))))
+                .when().post(BASE + "/jobs").then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.copy.copiedRows", equalTo("2"));
+        given().when().get(BASE + "/datasets/ds1/tables/t1/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+    }
+
+    @Test
+    @Order(6)
+    void sqlCopyOptionsRoundTripThroughTheRestApi() {
+        given().contentType("application/json")
+                .body(Map.of("configuration", Map.of("query", Map.of("query",
+                        "CREATE TABLE ds1.sql_copy_options COPY ds1.t1 OPTIONS(description='copied table',"
+                                + " friendly_name='copy', labels=[('team', 'analytics')],"
+                                + " expiration_timestamp=TIMESTAMP '2099-01-01 00:00:00 UTC')",
+                        "useLegacySql", false))))
+                .when().post(BASE + "/jobs").then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.query.statementType", equalTo("CREATE_TABLE_COPY"));
+        given().when().get(BASE + "/datasets/ds1/tables/sql_copy_options").then().statusCode(200)
+                .body("description", equalTo("copied table"))
+                .body("friendlyName", equalTo("copy"))
+                .body("labels.team", equalTo("analytics"))
+                .body("expirationTime", equalTo("4070908800000"));
+        given().when().get(BASE + "/datasets/ds1/tables/sql_copy_options/data").then().statusCode(200)
                 .body("totalRows", equalTo("2"));
     }
 

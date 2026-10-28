@@ -941,7 +941,14 @@ public class BigQueryService {
             return;
         }
         Table table = found.get();
-        Map<String, Object> options = statement.options();
+        applyTableOptions(table, statement.options());
+        table.setLastModifiedTime(nowMillis());
+        table.setEtag(etag());
+        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+        job.setDdlOperationPerformed("ALTER");
+    }
+
+    private static void applyTableOptions(Table table, Map<String, Object> options) {
         if (options.containsKey("description")) {
             table.setDescription((String) options.get("description"));
         }
@@ -963,10 +970,6 @@ public class BigQueryService {
                 table.getExtra().put("expirationTime", String.valueOf(expiration));
             }
         }
-        table.setLastModifiedTime(nowMillis());
-        table.setEtag(etag());
-        tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
-        job.setDdlOperationPerformed("ALTER");
     }
 
     private void executeStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
@@ -1132,6 +1135,9 @@ public class BigQueryService {
         }
         if (statement.copySource() != null) {
             BigQueryMetadata.applyDatasetDefaults(table, destinationDataset, System.currentTimeMillis());
+            if (statement.options() != null) {
+                applyTableOptions(table, statement.options());
+            }
         }
         if (exists) {
             deleteTable(projectId, target.datasetId(), target.tableId());
@@ -1934,18 +1940,24 @@ public class BigQueryService {
         Map<String, Object> destination = new LinkedHashMap<>((Map<String, Object>) destinationMap);
         destination.putIfAbsent("projectId", projectId);
         config.put("destinationTable", destination);
+        tableReference(destination, projectId, "destinationTable");
 
-        boolean hasSourceTable = config.get("sourceTable") instanceof Map<?, ?>;
-        boolean hasSourceTables = config.get("sourceTables") instanceof List<?>;
+        boolean hasSourceTable = config.get("sourceTable") != null;
+        boolean hasSourceTables = config.get("sourceTables") != null;
         if (hasSourceTable == hasSourceTables) {
             throw GcpException.invalidArgument("Exactly one of sourceTable or sourceTables is required")
                     .withReason("invalid");
         }
         List<Map<String, Object>> sourceMaps;
         if (hasSourceTable) {
-            sourceMaps = List.of(new LinkedHashMap<>((Map<String, Object>) config.get("sourceTable")));
+            if (!(config.get("sourceTable") instanceof Map<?, ?> source)) {
+                throw GcpException.invalidArgument("sourceTable must be an object").withReason("invalid");
+            }
+            sourceMaps = List.of(new LinkedHashMap<>((Map<String, Object>) source));
         } else {
-            List<?> rawSources = (List<?>) config.get("sourceTables");
+            if (!(config.get("sourceTables") instanceof List<?> rawSources)) {
+                throw GcpException.invalidArgument("sourceTables must be an array").withReason("invalid");
+            }
             if (rawSources.isEmpty() || rawSources.stream().anyMatch(source -> !(source instanceof Map<?, ?>))) {
                 throw GcpException.invalidArgument("sourceTables must contain at least one table reference")
                         .withReason("invalid");
@@ -1953,7 +1965,11 @@ public class BigQueryService {
             sourceMaps = rawSources.stream()
                     .map(source -> (Map<String, Object>) new LinkedHashMap<>((Map<String, Object>) source)).toList();
         }
-        sourceMaps.forEach(source -> source.putIfAbsent("projectId", projectId));
+        for (int i = 0; i < sourceMaps.size(); i++) {
+            Map<String, Object> source = sourceMaps.get(i);
+            source.putIfAbsent("projectId", projectId);
+            tableReference(source, projectId, hasSourceTable ? "sourceTable" : "sourceTables[" + i + "]");
+        }
         if (hasSourceTable) {
             config.put("sourceTable", sourceMaps.getFirst());
         } else {
@@ -1961,15 +1977,12 @@ public class BigQueryService {
         }
 
         Object operationType = config.get("operationType");
-        if (operationType != null && !"COPY".equals(operationType)) {
+        if (operationType != null && !"COPY".equals(operationType)
+                && !"OPERATION_TYPE_UNSPECIFIED".equals(operationType)) {
             throw GcpException.invalidArgument("Invalid value for operationType: " + operationType)
                     .withReason("invalid");
         }
-        Object destinationExpirationTime = config.get("destinationExpirationTime");
-        if (destinationExpirationTime != null && !(destinationExpirationTime instanceof String)) {
-            throw GcpException.invalidArgument("destinationExpirationTime must be a string")
-                    .withReason("invalid");
-        }
+        Long destinationExpirationMillis = copyExpirationMillis(config.get("destinationExpirationTime"));
 
         String write = copyDisposition(config.get("writeDisposition"), "writeDisposition",
                 Set.of("WRITE_TRUNCATE", "WRITE_APPEND", "WRITE_EMPTY"), "WRITE_EMPTY");
@@ -1987,8 +2000,9 @@ public class BigQueryService {
         job.setCreationTime(nowMillis());
         try {
             synchronized (writeLock) {
-                runCopy(projectId, sourceMaps, destination, write, create, jobLocation,
-                    (String) destinationExpirationTime);
+                long copiedRows = runCopy(projectId, sourceMaps, destination, write, create, jobLocation,
+                        destinationExpirationMillis);
+                job.setCopyStatistics(Map.of("copiedRows", String.valueOf(copiedRows)));
             }
         } catch (GcpException e) {
             job.setErrorReason(loadErrorReason(e));
@@ -2016,9 +2030,9 @@ public class BigQueryService {
 
     private record CopySource(Table table, StoredTableData data, String partitionId) {}
 
-    private void runCopy(String projectId, List<Map<String, Object>> sourceMaps,
+    private long runCopy(String projectId, List<Map<String, Object>> sourceMaps,
                          Map<String, Object> destinationMap, String write, String create,
-                         JobLocation jobLocation, String destinationExpirationTime) {
+                         JobLocation jobLocation, Long destinationExpirationMillis) {
         TableReference destination = tableReference(destinationMap, projectId, "destinationTable");
         validateCopyProject(projectId, destination, "destinationTable");
         Dataset destinationDataset = getDataset(projectId, destination.getDatasetId());
@@ -2074,7 +2088,7 @@ public class BigQueryService {
         if (decoratedDestination != null) {
             if (existing.isEmpty()) {
                 Table table = deepCopy(sources.getFirst().table(), Table.class);
-                applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationTime);
+                applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationMillis);
                 validatePartitionDecorator(table, decoratedDestination.partitionId());
                 validateDecoratedCopy(projectId, target, table, decoratedDestination.partitionId(), sources);
                 putTable(projectId, target, table, List.of());
@@ -2087,12 +2101,11 @@ public class BigQueryService {
             BigQuerySqlEngine.Result result = new BigQuerySqlEngine.Result(
                     deepCopy(sources.getFirst().table().getSchema(), TableSchema.class), rows, "COPY", 0);
             writeRows(projectId, destination, write, create, List.of(), result);
-            return;
+            return rows.size();
         }
 
         if (existing.isEmpty()) {
-            createCopiedTable(projectId, target, sources, destinationExpirationTime);
-            return;
+            return createCopiedTable(projectId, target, sources, destinationExpirationMillis);
         }
 
         Table destinationTable = existing.get();
@@ -2102,8 +2115,7 @@ public class BigQueryService {
                     + " ingestion-time partitioned destination").withReason("invalid");
         }
         if (isPartitioned(destinationTable) && sources.stream().allMatch(BigQueryService::partitionedCopySource)) {
-            writePartitionedCopy(projectId, target, destinationTable, sources, write);
-            return;
+            return writePartitionedCopy(projectId, target, destinationTable, sources, write);
         }
 
         if ("WRITE_APPEND".equals(write) || "WRITE_EMPTY".equals(write)) {
@@ -2112,11 +2124,18 @@ public class BigQueryService {
         BigQuerySqlEngine.Result result = new BigQuerySqlEngine.Result(
                 deepCopy(sources.getFirst().table().getSchema(), TableSchema.class), copyRows(sources), "COPY", 0);
         writeRows(projectId, destination, write, create, List.of(), result);
+        return result.rows().size();
     }
 
     private static TableReference tableReference(Map<String, Object> map, String defaultProject, String field) {
         Object dataset = map.get("datasetId");
         Object table = map.get("tableId");
+        if (dataset != null && !(dataset instanceof String)) {
+            throw GcpException.invalidArgument(field + ".datasetId must be a string").withReason("invalid");
+        }
+        if (table != null && !(table instanceof String)) {
+            throw GcpException.invalidArgument(field + ".tableId must be a string").withReason("invalid");
+        }
         if (!(dataset instanceof String datasetId) || datasetId.isBlank()) {
             throw GcpException.invalidArgument(field + ".datasetId is required").withReason("invalid");
         }
@@ -2260,31 +2279,43 @@ public class BigQueryService {
         return rows;
     }
 
+    private static Long copyExpirationMillis(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof String value)) {
+            throw GcpException.invalidArgument("destinationExpirationTime must be a string").withReason("invalid");
+        }
+        try {
+            return Instant.parse(value).toEpochMilli();
+        } catch (DateTimeException | ArithmeticException e) {
+            throw GcpException.invalidArgument("destinationExpirationTime must be a valid RFC 3339 timestamp")
+                    .withReason("invalid");
+        }
+    }
+
     private void applyCopyExpiration(String projectId, Table table, String destinationDatasetId,
-                                     String expirationTime) {
+                                     Long expirationMillis) {
         // A copy gets destination-dataset defaults, not the source table's expiration.
         table.getExtra().remove("expirationTime");
         Dataset dataset = getDataset(projectId, destinationDatasetId);
         BigQueryMetadata.applyDatasetDefaults(table, dataset, System.currentTimeMillis());
-        if (expirationTime != null) {
-            try {
-                table.getExtra().put("expirationTime", String.valueOf(Instant.parse(expirationTime).toEpochMilli()));
-            } catch (DateTimeException e) {
-                throw GcpException.invalidArgument("destinationExpirationTime must be a valid RFC 3339 timestamp")
-                        .withReason("invalid");
-            }
+        if (expirationMillis != null) {
+            table.getExtra().put("expirationTime", String.valueOf(expirationMillis));
         }
     }
 
-    private void createCopiedTable(String projectId, SqlDialectTranslator.TableRef target,
-                                   List<CopySource> sources, String destinationExpirationTime) {
+    private long createCopiedTable(String projectId, SqlDialectTranslator.TableRef target,
+                                   List<CopySource> sources, Long destinationExpirationMillis) {
         Table table = deepCopy(sources.getFirst().table(), Table.class);
-        applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationTime);
+        applyCopyExpiration(projectId, table, target.datasetId(), destinationExpirationMillis);
         StoredTableData merged = mergeCopyData(sources);
         putTable(projectId, target, table, List.of());
         dataStore.put(tableKey(target.datasetId(), target.tableId()), merged);
-        table.setNumRows(String.valueOf(allRows(merged).size()));
+        long copiedRows = allRows(merged).size();
+        table.setNumRows(String.valueOf(copiedRows));
         tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+        return copiedRows;
     }
 
     private static StoredTableData mergeCopyData(List<CopySource> sources) {
@@ -2309,10 +2340,11 @@ public class BigQueryService {
         return merged;
     }
 
-    private void writePartitionedCopy(String projectId, SqlDialectTranslator.TableRef target, Table destination,
+    private long writePartitionedCopy(String projectId, SqlDialectTranslator.TableRef target, Table destination,
                                       List<CopySource> sources, String write) {
         requireCompatibleDestination(projectId, target, destination, sources.getFirst().table());
         StoredTableData incoming = mergeCopyData(sources);
+        long copiedRows = allRows(incoming).size();
         StoredTableData current = dataStore.get(tableKey(target.datasetId(), target.tableId()))
                 .map(BigQueryService::copyDestinationData).orElseGet(StoredTableData::new);
         if ("WRITE_EMPTY".equals(write) && !allRows(current).isEmpty()) {
@@ -2331,6 +2363,7 @@ public class BigQueryService {
         destination.setLastModifiedTime(nowMillis());
         destination.setEtag(etag());
         tableStore.put(tableKey(target.datasetId(), target.tableId()), destination);
+        return copiedRows;
     }
 
     /**

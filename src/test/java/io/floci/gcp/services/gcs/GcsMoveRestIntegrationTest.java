@@ -9,7 +9,10 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class GcsMoveRestIntegrationTest {
@@ -71,6 +74,22 @@ class GcsMoveRestIntegrationTest {
                 .when().get("/storage/v1/b/" + bucket + "/o/destination%2FmoveTo%2Fo%2Fname")
                 .then().statusCode(200)
                 .body(equalTo("content"));
+    }
+
+    @Test
+    void movedSourceIsNotSoftDeleted() {
+        upload("soft-delete-source", "content");
+
+        given()
+                .when().post("/storage/v1/b/" + bucket + "/o/soft-delete-source/moveTo/o/soft-delete-target")
+                .then().statusCode(200);
+
+        given()
+                .queryParam("softDeleted", true)
+                .when().get("/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200)
+                .body("items", anyOf(nullValue(), empty()));
+        assertContent("soft-delete-target", "content");
     }
 
     @Test

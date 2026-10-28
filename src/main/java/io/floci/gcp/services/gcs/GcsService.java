@@ -985,6 +985,15 @@ public class GcsService {
     }
 
     private boolean deleteObjectLocked(String bucket, String objectName) {
+        return deleteObjectLocked(bucket, objectName, true);
+    }
+
+    /**
+     * Deletes the live object. {@code retainSoftDeleted} is false for an {@code objects.move}
+     * source, which GCS deletes without soft delete: "Soft delete retention period is not applied"
+     * (https://cloud.google.com/storage/docs/json_api/v1/objects/move).
+     */
+    private boolean deleteObjectLocked(String bucket, String objectName, boolean retainSoftDeleted) {
         LOG.debugf("deleteObject bucket=%s name=%s", bucket, objectName);
         String key = objectKey(bucket, objectName);
         GcsObjectMeta live = getLiveObjectMeta(bucket, objectName).orElse(null);
@@ -1004,7 +1013,7 @@ public class GcsService {
             }
             objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
             objectMetaStore.put(archiveKey, archived);
-        } else {
+        } else if (retainSoftDeleted) {
             // Only an unversioned bucket soft-deletes here. With versioning, "The live version
             // becomes a noncurrent version and keeps the same generation number"
             // (https://cloud.google.com/storage/docs/object-versioning), and soft delete applies
@@ -1823,7 +1832,7 @@ public class GcsService {
                     checkPreconditions(bucket, dstObject, destinationPreconditions);
 
                     GcsObjectMeta moved = copyObjectLocked(source, bucket, dstObject, baseUrl);
-                    deleteObjectLocked(bucket, srcObject);
+                    deleteObjectLocked(bucket, srcObject, false);
                     return moved;
                 }
             }

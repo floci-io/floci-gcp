@@ -1286,6 +1286,36 @@ class GcsServiceTest {
     }
 
     @Test
+    void moveObjectDeletesTheSourceWithoutSoftDelete() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        service.putObject("bucket", "src.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.moveObject("bucket", "src.txt", "dst.txt",
+                GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL);
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "dst.txt"));
+    }
+
+    @Test
+    void moveObjectInAVersionedBucketKeepsTheSourceNoncurrent() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta source = service.putObject("bucket", "src.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+
+        service.moveObject("bucket", "src.txt", "dst.txt",
+                GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL);
+
+        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        assertEquals(List.of(source.getGeneration()), service.listObjectVersions("bucket", "src.txt").stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+    }
+
+    @Test
     void overwriteWithAZeroRetentionKeepsNoCopyOfTheReplacedObject() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "0")));

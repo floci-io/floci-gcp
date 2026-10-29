@@ -59,6 +59,22 @@ class GkeClusterManagerPortTest {
     }
 
     @Test
+    void startFailingAfterTheContainerExistsRemovesItAndReleasesTheHostPort() {
+        when(lifecycleManager.create(org.mockito.ArgumentMatchers.any())).thenReturn("container-1");
+        when(lifecycleManager.startCreated(anyString(), org.mockito.ArgumentMatchers.any()))
+                .thenThrow(new RuntimeException("endpoint inspection timed out"));
+        StoredCluster cluster = cluster();
+
+        assertThrows(RuntimeException.class,
+                () -> manager(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS)).startCluster(cluster));
+
+        verify(lifecycleManager).stopAndRemove("container-1", null);
+        assertEquals(null, cluster.getContainerId());
+        assertEquals(0, cluster.getHostPort());
+        assertEquals(port, allocate());
+    }
+
+    @Test
     void stopClusterReleasesTheHostPort() {
         StoredCluster cluster = runningCluster();
         when(config.services().gke().keepRunningOnShutdown()).thenReturn(false);
@@ -93,7 +109,11 @@ class GkeClusterManagerPortTest {
     }
 
     private GkeClusterManager manager() {
-        return new GkeClusterManager(mock(ContainerBuilder.class), lifecycleManager,
+        return manager(mock(ContainerBuilder.class));
+    }
+
+    private GkeClusterManager manager(ContainerBuilder containerBuilder) {
+        return new GkeClusterManager(containerBuilder, lifecycleManager,
                 mock(ContainerDetector.class), portAllocator, mock(DockerHostResolver.class), config);
     }
 

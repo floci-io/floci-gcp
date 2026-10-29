@@ -97,10 +97,25 @@ public class GkeClusterManager {
         try {
             launchContainer(cluster, image, containerName, hostPort);
         } catch (RuntimeException e) {
+            removeFailedContainer(cluster);
             portAllocator.release(hostPort);
             cluster.setHostPort(0);
             throw e;
         }
+    }
+
+    /** A container this start created would keep the published port, so it goes before the port is reused. */
+    private void removeFailedContainer(StoredCluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        try {
+            lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove k3s container {0} after a failed start of cluster {1}: {2}",
+                    cluster.getContainerId(), cluster.getName(), e.getMessage());
+        }
+        cluster.setContainerId(null);
     }
 
     private void launchContainer(StoredCluster cluster, String image, String containerName, int hostPort) {

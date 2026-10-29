@@ -294,7 +294,7 @@ public class IamService {
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
             requireResourceExists(resource);
-            return policyStore.get(key).orElseGet(IamService::emptyPolicy);
+            return policyStore.get(key).map(StoredPolicy::copy).orElseGet(IamService::emptyPolicy);
         }
     }
 
@@ -319,7 +319,7 @@ public class IamService {
                 authorization.get().validatePolicyWrite(resource, current.orElse(null), policy);
             }
             policy.setEtag(newEtag());
-            policyStore.put(key, policy);
+            policyStore.put(key, policy.copy());
             return policy;
         }
     }

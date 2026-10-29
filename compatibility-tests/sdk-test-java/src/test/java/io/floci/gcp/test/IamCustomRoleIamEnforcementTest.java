@@ -193,7 +193,8 @@ class IamCustomRoleIamEnforcementTest {
         String otherProject = project + "-x";
         String otherTopic = "projects/" + otherProject + "/topics/source";
         setupPubsub.projects().topics().create(otherTopic, new Topic()).execute();
-        grantProject(otherProject, createProjectRole(project, "topicreader", "pubsub.topics.get"));
+        String foreignRole = createProjectRole(project, "topicreader", "pubsub.topics.get");
+        rejectedGrant(() -> grantProject(otherProject, foreignRole));
         deniedRest(() -> callerPubsub.projects().topics().get(otherTopic).execute());
         if (enforce) {
             assertThatThrownBy(() -> callerTopics.getTopic(otherTopic)).hasMessageContaining("PERMISSION_DENIED");
@@ -211,8 +212,9 @@ class IamCustomRoleIamEnforcementTest {
                 .setParent(new ResourceId().setType("organization").setId(organizationId()))).execute();
         for (String id : List.of(inOrg, outsideOrg)) {
             setupPubsub.projects().topics().create("projects/" + id + "/topics/source", new Topic()).execute();
-            grantProject(id, orgRole.getName());
         }
+        grantProject(inOrg, orgRole.getName());
+        rejectedGrant(() -> grantProject(outsideOrg, orgRole.getName()));
         assertThat(callerTopics.getTopic("projects/" + inOrg + "/topics/source").getName())
                 .isEqualTo("projects/" + inOrg + "/topics/source");
         deniedRest(() -> callerPubsub.projects().topics().get("projects/" + outsideOrg + "/topics/source").execute());
@@ -408,6 +410,19 @@ class IamCustomRoleIamEnforcementTest {
             assertThatThrownBy(call::run).isInstanceOfSatisfying(GoogleJsonResponseException.class, error -> {
                 assertThat(error.getStatusCode()).isEqualTo(403);
                 assertThat(error.getDetails().get("status")).isEqualTo("PERMISSION_DENIED");
+            });
+        } else {
+            call.run();
+        }
+    }
+
+    /** GCP refuses a new grant of a custom role from outside the resource's hierarchy when the policy is written. */
+    private void rejectedGrant(IoCall call) throws Exception {
+        if (enforce) {
+            assertThatThrownBy(call::run).isInstanceOfSatisfying(GoogleJsonResponseException.class, error -> {
+                assertThat(error.getStatusCode()).isEqualTo(400);
+                assertThat(error.getDetails().get("status")).isEqualTo("INVALID_ARGUMENT");
+                assertThat(error.getDetails().getMessage()).contains("does not exist in the resource's hierarchy");
             });
         } else {
             call.run();

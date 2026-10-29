@@ -648,6 +648,19 @@ class IamServiceTest {
     }
 
     @Test
+    void policiesAreCopiedOnReadAndWrite() {
+        StoredPolicy written = new StoredPolicy();
+        written.setBindings(new java.util.ArrayList<>(List.of(Map.of("role", "roles/viewer", "members", List.of("user:a@example.com")))));
+        service.setPolicy("projects/p1/resource/r1", written);
+        written.getBindings().clear();
+
+        StoredPolicy read = service.getPolicy("projects/p1/resource/r1");
+        assertEquals(1, read.getBindings().size());
+        read.getBindings().clear();
+        assertEquals(1, service.getPolicy("projects/p1/resource/r1").getBindings().size());
+    }
+
+    @Test
     void setPolicyWithoutEtagIsBlindWrite() {
         service.setPolicy("projects/p1/resource/r1", new StoredPolicy());
 

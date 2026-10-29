@@ -139,11 +139,13 @@ public class GkeOperationService {
 
     public StoredOperation getOperation(
             String project,
+            String location,
             String operationId) {
 
         return operationStore
                 .get(operationId)
                 .filter(op -> project.equals(projectOf(op)))
+                .filter(op -> "-".equals(location) || location.equals(op.getLocation()))
                 .orElseThrow(() -> GcpException.notFound(
                         "Operation not found: " + operationId));
     }

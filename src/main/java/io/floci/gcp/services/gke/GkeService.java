@@ -329,7 +329,7 @@ public class GkeService {
             return op;
         }
         operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, startFailure));
-        return operationService.getOperation(project, op.getName());
+        return operationService.getOperation(project, location, op.getName());
     }
 
     private static Map<String, Object> operationError(Status.Code code, String message) {
@@ -782,8 +782,8 @@ public class GkeService {
         return operationService.listOperations(project, location);
     }
 
-    public StoredOperation getOperation(String project, String operationId) {
-        return operationService.getOperation(project, operationId);
+    public StoredOperation getOperation(String project, String location, String operationId) {
+        return operationService.getOperation(project, location, operationId);
     }
 
     public String kubeConfig(String project, String location, String clusterId) {

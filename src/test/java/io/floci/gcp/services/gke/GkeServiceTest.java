@@ -116,7 +116,7 @@ class GkeServiceTest {
         assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "real-cluster").getStatus());
 
         service.pollReadiness();
-        assertEquals("RUNNING", service.getOperation(PROJECT, op.getName()).getStatus());
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
 
         when(clusterManager.isReady(any())).thenReturn(true);
         doAnswer(inv -> {
@@ -125,7 +125,7 @@ class GkeServiceTest {
         }).when(clusterManager).finalizeCluster(any());
         service.pollReadiness();
 
-        StoredOperation done = service.getOperation(PROJECT, op.getName());
+        StoredOperation done = service.getOperation(PROJECT, LOCATION, op.getName());
         assertEquals("DONE", done.getStatus());
         assertNotNull(done.getEndTime());
         assertNull(done.getStatusMessage());
@@ -156,7 +156,7 @@ class GkeServiceTest {
 
         service.deleteCluster(PROJECT, LOCATION, "short-lived");
 
-        StoredOperation done = service.getOperation(PROJECT, create.getName());
+        StoredOperation done = service.getOperation(PROJECT, LOCATION, create.getName());
         assertEquals("DONE", done.getStatus());
         assertEquals(1, done.getError().get("code"));
         assertNotNull(done.getStatusMessage());
@@ -168,13 +168,13 @@ class GkeServiceTest {
         StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "stalled"));
 
         service.pollReadiness();
-        assertEquals("RUNNING", service.getOperation(PROJECT, op.getName()).getStatus());
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
 
         clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/stalled").orElseThrow()
                 .setCreateTime(Instant.now().minus(GkeService.STARTUP_TIMEOUT).minusSeconds(1).toString());
         service.pollReadiness();
 
-        StoredOperation done = service.getOperation(PROJECT, op.getName());
+        StoredOperation done = service.getOperation(PROJECT, LOCATION, op.getName());
         assertEquals("DONE", done.getStatus());
         assertEquals(13, done.getError().get("code"));
         assertTrue(done.getStatusMessage().contains("did not become ready"));
@@ -205,7 +205,7 @@ class GkeServiceTest {
         when(clusterManager.isControlPlaneStopped(any())).thenReturn(true);
         service.pollReadiness();
 
-        StoredOperation done = service.getOperation(PROJECT, op.getName());
+        StoredOperation done = service.getOperation(PROJECT, LOCATION, op.getName());
         assertEquals("DONE", done.getStatus());
         assertEquals(13, done.getError().get("code"));
         assertTrue(done.getStatusMessage().contains("stopped"));
@@ -220,7 +220,7 @@ class GkeServiceTest {
         when(clusterManager.isReady(any())).thenReturn(true);
         service.pollReadiness();
 
-        assertEquals("RUNNING", service.getOperation(PROJECT, op.getName()).getStatus());
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
         assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "no-ca").getStatus());
     }
 
@@ -244,8 +244,8 @@ class GkeServiceTest {
 
         service.pollReadiness();
 
-        assertEquals(1, service.getOperation(PROJECT, first.getName()).getError().get("code"));
-        assertEquals("RUNNING", service.getOperation(PROJECT, second[0].getName()).getStatus());
+        assertEquals(1, service.getOperation(PROJECT, LOCATION, first.getName()).getError().get("code"));
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, second[0].getName()).getStatus());
         StoredCluster replacement = service.getCluster(PROJECT, LOCATION, "reborn");
         assertEquals("PROVISIONING", replacement.getStatus());
         assertEquals("", replacement.getCaCertificate());
@@ -261,8 +261,8 @@ class GkeServiceTest {
 
         service.deleteCluster(PROJECT, LOCATION, "racing");
 
-        assertEquals(1, service.getOperation(PROJECT, first.getName()).getError().get("code"));
-        StoredOperation replacementOp = service.getOperation(PROJECT, second[0].getName());
+        assertEquals(1, service.getOperation(PROJECT, LOCATION, first.getName()).getError().get("code"));
+        StoredOperation replacementOp = service.getOperation(PROJECT, LOCATION, second[0].getName());
         assertEquals("RUNNING", replacementOp.getStatus());
         assertNull(replacementOp.getError());
         assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "racing").getStatus());
@@ -317,7 +317,17 @@ class GkeServiceTest {
     @Test
     void getOperationResolvesByName() {
         StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "with-op"));
-        assertEquals(op.getName(), service.getOperation(PROJECT, op.getName()).getName());
+        assertEquals(op.getName(), service.getOperation(PROJECT, LOCATION, op.getName()).getName());
+    }
+
+    @Test
+    void getOperationRequiresTheOperationsLocation() {
+        StoredOperation op = service.createCluster(PROJECT, LOCATION, Map.of("name", "located"));
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.getOperation(PROJECT, "europe-west1", op.getName()));
+        assertEquals(404, ex.getHttpStatus());
+        assertEquals(op.getName(), service.getOperation(PROJECT, "-", op.getName()).getName());
     }
 
     @Test
@@ -331,9 +341,9 @@ class GkeServiceTest {
                 service.listOperations("other-project", LOCATION).stream().map(StoredOperation::getName).toList());
 
         GcpException ex = assertThrows(GcpException.class,
-                () -> service.getOperation(PROJECT, theirs.getName()));
+                () -> service.getOperation(PROJECT, LOCATION, theirs.getName()));
         assertEquals(404, ex.getHttpStatus());
-        assertEquals(theirs.getName(), service.getOperation("other-project", theirs.getName()).getName());
+        assertEquals(theirs.getName(), service.getOperation("other-project", LOCATION, theirs.getName()).getName());
     }
 
     @Test
@@ -344,8 +354,8 @@ class GkeServiceTest {
 
         assertEquals(1, service.listOperations(DEFAULT_PROJECT, LOCATION).size());
         assertTrue(service.listOperations(PROJECT, LOCATION).isEmpty());
-        assertEquals("operation-legacy", service.getOperation(DEFAULT_PROJECT, "operation-legacy").getName());
-        assertThrows(GcpException.class, () -> service.getOperation(PROJECT, "operation-legacy"));
+        assertEquals("operation-legacy", service.getOperation(DEFAULT_PROJECT, LOCATION, "operation-legacy").getName());
+        assertThrows(GcpException.class, () -> service.getOperation(PROJECT, LOCATION, "operation-legacy"));
     }
 
     @Test

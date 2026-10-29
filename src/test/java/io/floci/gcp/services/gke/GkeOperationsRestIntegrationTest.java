@@ -9,7 +9,7 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * {@code ClusterManager.ListOperations} / {@code GetOperation} over REST are scoped to the
- * project in the request path, as real GKE names operations under their project.
+ * project and location in the request path, as real GKE names operations under both.
  */
 @QuarkusTest
 class GkeOperationsRestIntegrationTest {
@@ -17,6 +17,7 @@ class GkeOperationsRestIntegrationTest {
     private static final String LOCATION = "us-central1";
     private static final String PROJECT_A = "gke-ops-it-a";
     private static final String PROJECT_B = "gke-ops-it-b";
+    private static final String PROJECT_C = "gke-ops-it-c";
 
     private static String base(String project) {
         return "/container/v1/projects/" + project + "/locations/" + LOCATION;
@@ -61,5 +62,22 @@ class GkeOperationsRestIntegrationTest {
                 .statusCode(200)
                 .body("name", equalTo(opB))
                 .body("selfLink", equalTo("projects/" + PROJECT_B + "/locations/" + LOCATION + "/operations/" + opB));
+    }
+
+    @Test
+    void getOperationInAnotherLocationIsNotFound() {
+        String op = createCluster(PROJECT_C, "ops-located");
+
+        given()
+                .when().get("/container/v1/projects/" + PROJECT_C + "/locations/europe-west1/operations/" + op)
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
+
+        given()
+                .when().get(base(PROJECT_C) + "/operations/" + op)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo(op));
     }
 }

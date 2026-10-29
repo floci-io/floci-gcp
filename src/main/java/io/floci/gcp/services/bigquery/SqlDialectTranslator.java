@@ -2242,6 +2242,7 @@ final class SqlDialectTranslator {
         expandHavingStructAliasFields();
         rewritePivotSyntax();
         nameAnonymousColumns();
+        rewriteStructStarExclusions();
         expandStructStars();
         String replacementStarExclusion = replacementStarExclusion();
         String rendered = render(0, tokens.size()).trim();
@@ -2250,6 +2251,419 @@ final class SqlDialectTranslator {
                     + ") AS \"_floci_star_replace\"";
         }
         return new Translation(rendered, tables, informationSchema, needsUnicodeCaseFold);
+    }
+
+    /** Rewrites an expression {@code .* EXCEPT (...)} as a filtered star over the expression's expanded fields. */
+    private void rewriteStructStarExclusions() {
+        int select = firstTopLevelSelect();
+        if (select < 0) {
+            return;
+        }
+        List<int[]> items = selectItems(select);
+        if (items == null) {
+            return;
+        }
+        int targetItem = -1;
+        int targetDot = -1;
+        int targetStart = -1;
+        int targetOpen = -1;
+        int targetClose = -1;
+        for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+            int[] item = items.get(itemIndex);
+            for (int star = item[0]; star < item[1]; star++) {
+                if (!tokens.get(star).isPunct("*")) {
+                    continue;
+                }
+                int dot = significantBefore(star);
+                int last = dot < 0 ? -1 : significantBefore(dot);
+                int except = nextSignificant(star + 1, item[1]);
+                int open = except < 0 ? -1 : nextSignificant(except + 1, item[1]);
+                if (dot < item[0] || !tokens.get(dot).isPunct(".") || except < 0
+                        || !tokens.get(except).isKeyword("EXCEPT") || open < 0 || !tokens.get(open).isPunct("(")) {
+                    continue;
+                }
+                int close = matchingParen(open);
+                int expressionStart = starOperandStart(last);
+                int first = nextSignificant(item[0], item[1]);
+                boolean bareName = expressionStart == last && (tokens.get(last).kind == Kind.IDENT
+                        || tokens.get(last).kind == Kind.QIDENT)
+                        && !tokens.get(last).identifierText().contains(".");
+                if (bareName) {
+                    continue;
+                }
+                if (expressionStart != first || nextSignificant(close + 1, item[1]) >= 0 || targetItem >= 0) {
+                    throw unsupportedStructStarExclusion();
+                }
+                targetItem = itemIndex;
+                targetDot = dot;
+                targetStart = expressionStart;
+                targetOpen = open;
+                targetClose = close;
+            }
+        }
+        if (targetItem < 0) {
+            return;
+        }
+        Set<String> excludedNames = new HashSet<>();
+        for (Token token : significant(targetOpen + 1, targetClose)) {
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                excludedNames.add(token.identifierText().toLowerCase(Locale.ROOT));
+            }
+        }
+        Set<String> reservedNames = new HashSet<>(excludedNames);
+        List<String> outputNames = new ArrayList<>();
+        for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+            if (itemIndex == targetItem) {
+                outputNames.add(null);
+                continue;
+            }
+            int[] item = items.get(itemIndex);
+            String outputName = outputNameText(item[0], item[1]);
+            if (expandsStar(item) || outputName == null) {
+                throw unsupportedStructStarExclusion();
+            }
+            outputNames.add(outputName);
+            reservedNames.add(outputName.toLowerCase(Locale.ROOT));
+        }
+        Map<Integer, String> projectionAliases = new HashMap<>();
+        List<String> outputRenames = new ArrayList<>();
+        int aliasNumber = 0;
+        for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+            String outputName = outputNames.get(itemIndex);
+            if (outputName == null || !excludedNames.contains(outputName.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            String projectionAlias;
+            do {
+                projectionAlias = "_floci_projection_" + aliasNumber++;
+            } while (reservedNames.contains(projectionAlias.toLowerCase(Locale.ROOT)));
+            reservedNames.add(projectionAlias.toLowerCase(Locale.ROOT));
+            projectionAliases.put(itemIndex, projectionAlias);
+            outputRenames.add(DuckTypes.quoteIdentifier(projectionAlias) + " AS "
+                    + DuckTypes.quoteIdentifier(outputName));
+        }
+        int queryDepth = parenthesisDepth(select);
+        for (int i = items.getLast()[1]; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) == queryDepth && tokens.get(i).kind == Kind.IDENT
+                    && Set.of("UNION", "INTERSECT", "EXCEPT").contains(tokens.get(i).upper())) {
+                throw unsupportedStructStarExclusion();
+            }
+        }
+        Map<String, String> renameTargets = new HashMap<>();
+        for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+            String outputName = outputNames.get(itemIndex);
+            if (outputName != null && projectionAliases.containsKey(itemIndex)) {
+                renameTargets.put(outputName.toLowerCase(Locale.ROOT), projectionAliases.get(itemIndex));
+            }
+        }
+        boolean distinct = false;
+        for (int i = select + 1; i < items.getFirst()[0]; i++) {
+            distinct |= tokens.get(i).isKeyword("DISTINCT");
+        }
+        RewrittenTail tail = rewriteStructStarClauses(items.getLast()[1], queryDepth, distinct, renameTargets);
+
+        List<Token> rewritten = new ArrayList<>();
+        rewritten.addAll(tokens.subList(0, select));
+        rewritten.addAll(new Lexer("SELECT").tokenize());
+        rewritten.addAll(tokens.subList(select + 1, items.getFirst()[0]));
+        rewritten.add(Token.raw(" "));
+        rewritten.addAll(new Lexer("* EXCLUDE ").tokenize());
+        rewritten.addAll(tokens.subList(targetOpen, targetClose + 1));
+        if (!outputRenames.isEmpty()) {
+            rewritten.add(Token.raw(" RENAME (" + String.join(", ", outputRenames) + ")"));
+        }
+        rewritten.addAll(new Lexer(" FROM (SELECT ").tokenize());
+        for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+            if (itemIndex > 0) {
+                rewritten.addAll(new Lexer(", ").tokenize());
+            }
+            int[] item = items.get(itemIndex);
+            if (itemIndex == targetItem) {
+                rewritten.addAll(new Lexer("unnest(").tokenize());
+                rewritten.addAll(tokens.subList(targetStart, targetDot));
+                rewritten.addAll(new Lexer(")").tokenize());
+            } else {
+                String projectionAlias = projectionAliases.get(itemIndex);
+                int first = nextSignificant(item[0], item[1]);
+                if (projectionAlias == null) {
+                    rewritten.addAll(tokens.subList(first, item[1]));
+                } else {
+                    int as = topLevelAs(item[0], item[1]);
+                    int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
+                    int expressionEnd = alias >= 0 ? alias : item[1];
+                    while (expressionEnd > first && tokens.get(expressionEnd - 1).kind == Kind.SPACE) {
+                        expressionEnd--;
+                    }
+                    rewritten.addAll(tokens.subList(first, expressionEnd));
+                    rewritten.add(Token.raw(" AS " + DuckTypes.quoteIdentifier(projectionAlias) + " "));
+                }
+            }
+        }
+        if (targetItem == items.size() - 1) {
+            rewritten.addAll(new Lexer(" ").tokenize());
+        }
+        rewritten.addAll(withoutTrailingSpace(tail.inside()));
+        rewritten.addAll(new Lexer(") AS `_expanded`").tokenize());
+        if (!tail.outside().isEmpty()) {
+            rewritten.add(Token.raw(" "));
+            rewritten.addAll(tail.outside());
+        }
+        tokens.clear();
+        tokens.addAll(rewritten);
+    }
+
+    /** The tail of a rewritten query, split into what stays inside the derived table and what follows it. */
+    private record RewrittenTail(List<Token> inside, List<Token> outside) {}
+
+    private static List<Token> withoutTrailingSpace(List<Token> tokens) {
+        int end = tokens.size();
+        while (end > 0 && tokens.get(end - 1).kind == Kind.SPACE) {
+            end--;
+        }
+        return tokens.subList(0, end);
+    }
+
+    /**
+     * Splits the clauses that follow a select list. {@code LIMIT} and {@code OFFSET} move after the
+     * wrapper so they still apply to the filtered and de-duplicated rows, as in BigQuery. {@code ORDER BY}
+     * moves with them when it counts output columns by position, and always under {@code DISTINCT}, which
+     * reorders the rows and, in BigQuery, only accepts expressions visible after the de-duplication.
+     * References to a renamed output are pointed at its projection alias, because the excluded struct
+     * field still holds the original name inside the wrapper.
+     */
+    private RewrittenTail rewriteStructStarClauses(int tailStart, int queryDepth, boolean distinct,
+                                                   Map<String, String> renameTargets) {
+        List<Integer> keywords = new ArrayList<>();
+        for (int i = tailStart; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            int previous = significantBefore(i);
+            boolean named = isPrecededByDot(i)
+                    || previous >= 0 && (tokens.get(previous).isPunct(".") || tokens.get(previous).isKeyword("AS"));
+            if (parenthesisDepth(i) == queryDepth && token.kind == Kind.IDENT && !named
+                    && STRUCT_STAR_CLAUSES.contains(token.upper())) {
+                keywords.add(i);
+            }
+        }
+        int orderStart = -1;
+        int orderBodyStart = -1;
+        int orderEnd = -1;
+        int limitStart = -1;
+        for (int index = 0; index < keywords.size(); index++) {
+            int keyword = keywords.get(index);
+            int end = index + 1 < keywords.size() ? keywords.get(index + 1) : tokens.size();
+            String name = tokens.get(keyword).upper();
+            if (name.equals("LIMIT") || name.equals("OFFSET")) {
+                limitStart = limitStart < 0 ? keyword : limitStart;
+                continue;
+            }
+            if (!Set.of("GROUP", "HAVING", "QUALIFY", "ORDER").contains(name)) {
+                continue;
+            }
+            int bodyStart = keyword + 1;
+            if (name.equals("GROUP") || name.equals("ORDER")) {
+                int by = nextSignificant(keyword + 1, end);
+                if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+                    throw unsupportedStructStarExclusion();
+                }
+                bodyStart = by + 1;
+            }
+            if (name.equals("GROUP") && ALL.equals(only(bodyStart, end))) {
+                // GROUP BY ALL would group by the fields the wrapper filters out again.
+                throw unsupportedStructStarExclusion();
+            }
+            rewriteRenamedOutputReferences(bodyStart, end, renameTargets);
+            if (name.equals("GROUP")) {
+                for (int[] range : topLevelRanges(bodyStart, end, queryDepth)) {
+                    if (isColumnPosition(range[0], range[1])) {
+                        // A position counts the expanded output columns, which the wrapper cannot number.
+                        throw unsupportedStructStarExclusion();
+                    }
+                }
+            }
+            if (name.equals("ORDER")) {
+                orderStart = keyword;
+                orderBodyStart = bodyStart;
+                orderEnd = end;
+            }
+        }
+        if (orderStart >= 0) {
+            List<int[]> orderItems = topLevelRanges(orderBodyStart, orderEnd, queryDepth);
+            boolean anyPositional = orderItems.stream()
+                    .anyMatch(range -> isColumnPosition(range[0], range[1]));
+            boolean allPositional = !orderItems.isEmpty() && orderItems.stream()
+                    .allMatch(range -> isColumnPosition(range[0], range[1]));
+            if (distinct) {
+                Set<String> sourceAliases = structStarFromAliases(tailStart, queryDepth);
+                int removed = 0;
+                for (int index = orderItems.size() - 1; index >= 0; index--) {
+                    int[] range = orderItems.get(index);
+                    if (isColumnPosition(range[0], range[1]) || isBareReference(range[0], range[1])) {
+                        continue;
+                    }
+                    int dropped = rewriteQualifiedOrderItem(range[0], range[1], sourceAliases);
+                    if (dropped < 0) {
+                        throw unsupportedStructStarExclusion();
+                    }
+                    removed += dropped;
+                }
+                orderEnd -= removed;
+                if (limitStart >= 0) {
+                    limitStart -= removed;
+                }
+            } else {
+                if (anyPositional && !allPositional) {
+                    throw unsupportedStructStarExclusion();
+                }
+                if (!allPositional) {
+                    orderStart = -1;
+                }
+            }
+        }
+        int insideEnd = limitStart < 0 ? tokens.size() : limitStart;
+        List<Token> inside = new ArrayList<>();
+        if (orderStart >= 0) {
+            inside.addAll(tokens.subList(tailStart, orderStart));
+            inside.addAll(tokens.subList(orderEnd, insideEnd));
+        } else {
+            inside.addAll(tokens.subList(tailStart, insideEnd));
+        }
+        List<Token> outside = new ArrayList<>();
+        if (orderStart >= 0) {
+            outside.addAll(tokens.subList(orderStart, orderEnd));
+        }
+        if (limitStart >= 0) {
+            outside.addAll(tokens.subList(limitStart, tokens.size()));
+        }
+        return new RewrittenTail(inside, outside);
+    }
+
+    private static final Set<String> STRUCT_STAR_CLAUSES = Set.of("WHERE", "GROUP", "HAVING", "QUALIFY",
+            "WINDOW", "ORDER", "LIMIT", "OFFSET");
+
+    private static final String ALL = "ALL";
+
+    /** The upper-cased text of the only significant token in a range, or null when there is not exactly one. */
+    private String only(int start, int end) {
+        List<Token> item = significant(start, end);
+        return item.size() == 1 ? item.getFirst().upper() : null;
+    }
+
+    private List<int[]> topLevelRanges(int start, int end, int depth) {
+        List<int[]> ranges = new ArrayList<>();
+        int itemStart = start;
+        for (int i = start; i < end; i++) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isPunct(",")) {
+                ranges.add(new int[] {itemStart, i});
+                itemStart = i + 1;
+            }
+        }
+        ranges.add(new int[] {itemStart, end});
+        return ranges;
+    }
+
+    /** True for an {@code ORDER BY} item that counts output columns ({@code 1}, {@code 2 DESC}). */
+    private boolean isColumnPosition(int start, int end) {
+        List<Token> item = significant(start, end);
+        if (item.isEmpty() || item.getFirst().kind != Kind.NUMBER || !item.getFirst().text.matches("\\d+")) {
+            return false;
+        }
+        for (Token token : item.subList(1, item.size())) {
+            if (token.kind != Kind.IDENT
+                    || !Set.of("ASC", "DESC", "NULLS", "FIRST", "LAST").contains(token.upper())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** True for an {@code ORDER BY} item that names one output column ({@code b}, {@code omitted DESC}). */
+    private boolean isBareReference(int start, int end) {
+        List<Token> item = significant(start, end);
+        if (item.isEmpty() || (item.getFirst().kind != Kind.IDENT && item.getFirst().kind != Kind.QIDENT)) {
+            return false;
+        }
+        for (Token token : item.subList(1, item.size())) {
+            if (token.kind != Kind.IDENT
+                    || !Set.of("ASC", "DESC", "NULLS", "FIRST", "LAST").contains(token.upper())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Set<String> structStarFromAliases(int tailStart, int queryDepth) {
+        Set<String> aliases = new HashSet<>();
+        for (int i = tailStart; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) != queryDepth || !isFromClause(i)) {
+                continue;
+            }
+            for (ProjectionSource source : projectionSources(i, queryDepth)) {
+                if (source.alias() != null) {
+                    aliases.add(source.alias().toLowerCase(Locale.ROOT));
+                }
+            }
+            break;
+        }
+        return aliases;
+    }
+
+    /**
+     * Rewrites {@code source.column} to the output column {@code column} so it still resolves once the clause
+     * moves outside the wrapper, which only holds the projected columns. Returns the number of tokens removed,
+     * or -1 for a shape it cannot map so the caller can refuse instead of emitting broken SQL.
+     */
+    private int rewriteQualifiedOrderItem(int start, int end, Set<String> sourceAliases) {
+        List<Token> item = significant(start, end);
+        if (item.size() < 3 || !isName(item.getFirst()) || !item.get(1).isPunct(".") || !isName(item.get(2))
+                || !sourceAliases.contains(item.getFirst().identifierText().toLowerCase(Locale.ROOT))) {
+            return -1;
+        }
+        for (Token token : item.subList(3, item.size())) {
+            if (token.kind != Kind.IDENT
+                    || !Set.of("ASC", "DESC", "NULLS", "FIRST", "LAST").contains(token.upper())) {
+                return -1;
+            }
+        }
+        Token column = item.get(2);
+        int first = start;
+        while (first < end && tokens.get(first).kind == Kind.SPACE) {
+            first++;
+        }
+        for (int i = first; i < end; i++) {
+            if (tokens.get(i) == column) {
+                tokens.subList(first, i).clear();
+                tokens.set(first, Token.raw(DuckTypes.quoteIdentifier(column.identifierText())));
+                return i - first;
+            }
+        }
+        return -1;
+    }
+
+    /** Points an unqualified reference to a renamed select output at the projection alias it is stored under. */
+    private void rewriteRenamedOutputReferences(int start, int end, Map<String, String> renameTargets) {
+        if (renameTargets.isEmpty()) {
+            return;
+        }
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind != Kind.IDENT && token.kind != Kind.QIDENT) {
+                continue;
+            }
+            String alias = renameTargets.get(token.identifierText().toLowerCase(Locale.ROOT));
+            if (alias == null || isPrecededByDot(i)) {
+                continue;
+            }
+            int next = nextSignificant(i + 1, end);
+            if (next >= 0 && (tokens.get(next).isPunct(".") || tokens.get(next).isPunct("("))) {
+                continue;
+            }
+            tokens.set(i, Token.raw(DuckTypes.quoteIdentifier(alias)));
+        }
+    }
+
+    private GcpException unsupportedStructStarExclusion() {
+        return invalidQuery("Dot-star with EXCEPT on a STRUCT expression is not supported by the floci BigQuery"
+                + " emulator yet.");
     }
 
     /**
@@ -2282,6 +2696,9 @@ final class SqlDialectTranslator {
             int afterNext = after >= 0 ? nextSignificant(after + 1, tokens.size()) : -1;
             if (after >= 0 && (tokens.get(after).isKeyword("EXCEPT") || tokens.get(after).isKeyword("REPLACE"))
                     && afterNext >= 0 && tokens.get(afterNext).isPunct("(")) {
+                if (tokens.get(after).isKeyword("EXCEPT")) {
+                    throw unsupportedStructStarExclusion();
+                }
                 throw invalidQuery("Dot-star with " + tokens.get(after).upper() + " on a STRUCT expression is not"
                         + " supported by the floci BigQuery emulator yet.");
             }
@@ -2458,12 +2875,32 @@ final class SqlDialectTranslator {
                 int itemStart = items.getFirst()[0];
                 int itemEnd = items.getFirst()[1];
                 String indexed = indexedStructWildcardExpression(itemStart, itemEnd);
+                int scalarOpen = enclosingParenthesis(select);
+                int scalarClose = scalarOpen < 0 ? -1 : matchingParen(scalarOpen);
+                int caller = scalarOpen < 0 ? -1 : significantBefore(scalarOpen);
+                // ARRAY(SELECT AS STRUCT ...) is a one-element array, which is a list literal in DuckDB. The
+                // star has to stay in this query's scope: a star needs a FROM, and the subquery has none.
+                boolean arrayConstructor = caller >= 0 && tokens.get(caller).isKeyword("ARRAY");
+                if (indexed == null && scalarOpen >= 0
+                        && (arrayConstructor || isSubqueryParenthesis(scalarOpen))
+                        && nextSignificant(scalarOpen + 1, tokens.size()) == select
+                        && listEnd == scalarClose && hasBareStructSourceStar(itemStart, itemEnd)) {
+                    ProjectionSource correlatedSource = correlatedStructProjectionSource(itemStart, itemEnd);
+                    String star = renderSelectAsStructStar(itemStart, itemEnd, correlatedSource);
+                    String projection = "struct_pack(*COLUMNS(" + star + "))";
+                    int start = arrayConstructor ? caller : scalarOpen;
+                    tokens.subList(start, scalarClose + 1).clear();
+                    tokens.add(start, Token.raw(arrayConstructor ? "[" + projection + "]" : projection));
+                    select = tokens.size();
+                    continue;
+                }
                 String projection;
                 if (indexed != null) {
                     projection = "(SELECT struct_pack(*COLUMNS(*)) FROM (SELECT unnest([" + indexed
                             + "], max_depth := 2)) AS \"_floci_indexed_struct\")";
                 } else {
-                    String star = renderSelectAsStructStar(itemStart, itemEnd);
+                    String star = renderSelectAsStructStar(itemStart, itemEnd,
+                            correlatedStructProjectionSource(itemStart, itemEnd));
                     projection = "struct_pack(*COLUMNS(" + star + "))";
                 }
                 boolean clauseFollows = listEnd < tokens.size() && tokens.get(listEnd).kind == Kind.IDENT;
@@ -2608,19 +3045,156 @@ final class SqlDialectTranslator {
         return tokens.size();
     }
 
+    /**
+     * True when the parenthesis at {@code open} wraps a scalar subquery rather than a call or a predicate
+     * such as {@code ARRAY(...)}, {@code IN (...)} or {@code EXISTS (...)}. Only the former can be replaced
+     * by its projection, because the others need the subquery to stay a subquery.
+     */
+    private boolean isSubqueryParenthesis(int open) {
+        int before = significantBefore(open);
+        if (before < 0) {
+            return true;
+        }
+        Token token = tokens.get(before);
+        return (token.kind != Kind.IDENT && token.kind != Kind.QIDENT)
+                || SUBSELECT_PREFIX_KEYWORDS.contains(token.upper());
+    }
+
+    private static final Set<String> SUBSELECT_PREFIX_KEYWORDS = Set.of("SELECT", "AS", "WITH", "FROM", "WHERE",
+            "ON", "AND", "OR", "NOT", "BY", "THEN", "ELSE", "WHEN", "UNION", "INTERSECT", "EXCEPT", "SET",
+            "VALUES", "RETURNING", "LATERAL", "DISTINCT", "ALL");
+
+    private boolean hasBareStructSourceStar(int start, int end) {
+        return bareStructSourceToken(start, end) >= 0;
+    }
+
+    private int bareStructSourceToken(int start, int end) {
+        for (int star = start; star < end; star++) {
+            if (!tokens.get(star).isPunct("*")) {
+                continue;
+            }
+            int dot = significantBefore(star);
+            int source = dot < 0 ? -1 : significantBefore(dot);
+            int beforeSource = source < 0 ? -1 : significantBefore(source);
+            if (dot >= 0 && tokens.get(dot).isPunct(".") && source >= 0
+                    && (tokens.get(source).kind == Kind.IDENT || tokens.get(source).kind == Kind.QIDENT)
+                    && (beforeSource < 0 || !tokens.get(beforeSource).isPunct("."))) {
+                return source;
+            }
+            return -1;
+        }
+        return -1;
+    }
+
+    /**
+     * The FROM source a correlated {@code SELECT AS STRUCT <alias>.*} reads its struct from. The enclosing
+     * query of the subquery is searched first, then each query further out, because the alias belongs to
+     * the query whose FROM the subquery is correlated with, which is not necessarily the outermost one.
+     */
+    private ProjectionSource correlatedStructProjectionSource(int start, int end) {
+        int sourceToken = bareStructSourceToken(start, end);
+        if (sourceToken < 0) {
+            return null;
+        }
+        String sourceName = tokens.get(sourceToken).identifierText();
+        for (int select : enclosingSelects(start)) {
+            int depth = parenthesisDepth(select);
+            int from = -1;
+            for (int i = select + 1; i < tokens.size(); i++) {
+                if (parenthesisDepth(i) < depth) {
+                    break;
+                }
+                if (parenthesisDepth(i) == depth && isFromClause(i)) {
+                    from = i;
+                    break;
+                }
+            }
+            if (from < 0) {
+                continue;
+            }
+            for (ProjectionSource source : projectionSources(from, depth)) {
+                if (source.alias() != null && source.alias().equalsIgnoreCase(sourceName)) {
+                    return source;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The SELECT of the query containing {@code index}, then of each query enclosing that one, innermost first. */
+    private List<Integer> enclosingSelects(int index) {
+        List<Integer> selects = new ArrayList<>();
+        int position = index;
+        while (position >= 0) {
+            int select = selectInScopeBefore(position);
+            if (select >= 0) {
+                selects.add(select);
+            }
+            // A parenthesis that wraps another one, as in ((SELECT ...)), introduces no query of its own, so
+            // the search continues outside it instead of stopping.
+            position = enclosingParenthesis(select >= 0 ? select : position);
+        }
+        return selects;
+    }
+
+    /**
+     * The SELECT that owns the scope holding {@code index}. Parenthesized groups that end before
+     * {@code index} belong to siblings and are skipped, so an earlier scalar subquery cannot answer for
+     * the query the position really sits in.
+     */
+    private int selectInScopeBefore(int index) {
+        int skip = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")")) {
+                skip++;
+            } else if (token.isPunct("(")) {
+                if (skip == 0) {
+                    return -1;
+                }
+                skip--;
+            } else if (skip == 0 && token.isKeyword("SELECT")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private String renderSelectAsStructStar(int start, int end) {
+        return renderSelectAsStructStar(start, end, null);
+    }
+
+    private String renderSelectAsStructStar(int start, int end, ProjectionSource correlatedSource) {
         int star = start;
         while (star < end && !tokens.get(star).isPunct("*")) {
             star++;
         }
         int except = nextSignificant(star + 1, end);
-        if (star >= end || except < 0 || !tokens.get(except).isKeyword("EXCEPT")
-                || !nextSignificantIs(except + 1, end, "(")) {
+        if (star >= end) {
             return render(start, end).trim();
+        }
+        if (except < 0 || !tokens.get(except).isKeyword("EXCEPT")
+                || !nextSignificantIs(except + 1, end, "(")) {
+            List<String> hidden = new ArrayList<>(presentStarHiddenColumns(star));
+            if (correlatedSource != null) {
+                hidden.addAll(presentSourceHiddenColumns(correlatedSource));
+            }
+            // _TABLE_SUFFIX only exists in the data of a wildcard source, so it can only be excluded there.
+            boolean wildcard = correlatedSource != null
+                    ? correlatedSource.wildcardTable()
+                    : projectionSourcesForStar(star).stream().anyMatch(ProjectionSource::wildcardTable);
+            String exclusion = hidden.stream()
+                    .filter(name -> !name.equals("_TABLE_SUFFIX") || wildcard)
+                    .distinct().map(DuckTypes::quoteIdentifier).collect(Collectors.joining(", "));
+            String rendered = render(start, star) + "*";
+            if (!exclusion.isEmpty()) {
+                rendered += " EXCLUDE (" + exclusion + ")";
+            }
+            return (rendered + render(star + 1, end)).trim();
         }
         int open = nextSignificant(except + 1, end);
         int close = matchingParen(open);
-        return (render(start, star) + "*" + starExclusionList(star, open, close)
+        return (render(start, star) + "*" + starExclusionList(star, open, close, correlatedSource)
                 + render(close + 1, end)).trim();
     }
 
@@ -3373,6 +3947,11 @@ final class SqlDialectTranslator {
 
     /** The lower-cased name a named select item gives its column: its alias or the column it reads. */
     private String outputName(int start, int end) {
+        String name = outputNameText(start, end);
+        return name == null ? null : name.toLowerCase(Locale.ROOT);
+    }
+
+    private String outputNameText(int start, int end) {
         List<Token> item = significant(start, end);
         if (item.isEmpty()) {
             return null;
@@ -3383,7 +3962,7 @@ final class SqlDialectTranslator {
             return null;
         }
         String name = last.identifierText();
-        return name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        return name.substring(name.lastIndexOf('.') + 1);
     }
 
     /** True for a {@code *}, {@code t.*} or {@code * EXCEPT/REPLACE (...)} select item. */
@@ -4058,16 +4637,35 @@ final class SqlDialectTranslator {
 
     /** DuckDB supports EXCLUDE followed by REPLACE, unlike its pattern-filtered star form. */
     private String starExclusionList(int star, int open, int close) {
-        ProjectionSource source = projectionSourceForStar(star);
-        List<String> names = presentStarHiddenColumns(star).stream()
-                .filter(name -> !name.equals("_TABLE_SUFFIX") || source != null && source.wildcardTable())
-                .map(DuckTypes::quoteIdentifier).collect(Collectors.toCollection(ArrayList::new));
-        for (Token token : significant(open + 1, close)) {
-            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
-                names.add(DuckTypes.quoteIdentifier(token.identifierText()));
+        return starExclusionList(star, open, close, null);
+    }
+
+    private String starExclusionList(int star, int open, int close, ProjectionSource correlatedSource) {
+        ProjectionSource source = correlatedSource != null ? correlatedSource : projectionSourceForStar(star);
+        // Only the automatically hidden names are filtered: a source that cannot carry _TABLE_SUFFIX drops it,
+        // while a name the query asked to exclude is always excluded.
+        List<String> names = new ArrayList<>();
+        for (String hidden : presentStarHiddenColumns(star)) {
+            addHiddenExclusion(names, hidden, source);
+        }
+        if (correlatedSource != null) {
+            for (String hidden : presentSourceHiddenColumns(correlatedSource)) {
+                addHiddenExclusion(names, hidden, source);
             }
         }
-        return " EXCLUDE (" + String.join(", ", names) + ")";
+        for (Token token : significant(open + 1, close)) {
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                names.add(token.identifierText());
+            }
+        }
+        return " EXCLUDE (" + names.stream()
+                .distinct().map(DuckTypes::quoteIdentifier).collect(Collectors.joining(", ")) + ")";
+    }
+
+    private static void addHiddenExclusion(List<String> names, String hidden, ProjectionSource source) {
+        if (!hidden.equals("_TABLE_SUFFIX") || source != null && source.wildcardTable()) {
+            names.add(hidden);
+        }
     }
 
     /** Hidden columns that are known to exist in the staged source and are therefore safe in DuckDB EXCLUDE. */

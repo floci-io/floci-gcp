@@ -873,6 +873,11 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields.name", equalTo(List.of("id", "marker", "_TABLE_SUFFIX")))
                 .body("rows[0].f.v", equalTo(List.of("1", "derived", "kept")));
 
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT * FROM `shop.reviewed_star_*`) AS arr",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("id")));
+
         given().contentType("application/json").body("""
                 {"tableReference": {"tableId": "reviewed_partition"},
                  "timePartitioning": {"type": "DAY"},
@@ -886,6 +891,24 @@ class BigQueryDuckIntegrationTest {
                 {"rows": [{"json": {"id": 1, "name": "ana", "secret": "hidden"}}]}
                 """).when().post(BASE + "/datasets/shop/tables/reviewed_partition/insertAll")
                 .then().statusCode(200).body("insertErrors", nullValue());
+
+        query(Map.of("query", "SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
+                        + " FROM shop.reviewed_partition input", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("ana", "hidden")));
+
+        query(Map.of("query", "SELECT q.original FROM (SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
+                        + " FROM shop.reviewed_partition input) q", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("ana", "hidden")));
+
+        query(Map.of("query", "SELECT ((SELECT AS STRUCT input.* EXCEPT(id))) AS original"
+                        + " FROM shop.reviewed_partition input", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("ana", "hidden")));
 
         query(Map.of("query", "CREATE VIEW shop.reviewed_partition_times AS"
                         + " SELECT _PARTITIONTIME AS pt FROM shop.reviewed_partition",
@@ -1494,6 +1517,15 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields[0].mode", equalTo("REPEATED"))
                 .body("schema.fields[0].fields.name", equalTo(List.of("type")))
                 .body("rows[0].f[0].v.v[0].f[0].v", equalTo("example"));
+        query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT input.* EXCEPT(id)) AS arr"
+                        + " FROM (SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b') input ORDER BY id",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("name")))
+                .body("rows[0].f[0].v.v[0].f[0].v", equalTo("a"))
+                .body("rows[1].f[0].v.v[0].f[0].v", equalTo("b"));
     }
 
     @Test
@@ -1992,11 +2024,89 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields.name", equalTo(List.of("a", "b")))
                 .body("rows[0].f.v", equalTo(List.of("1", "x")));
         query("""
+                {"query": "SELECT id, (SELECT AS STRUCT input.* EXCEPT(id)) AS original FROM UNNEST([STRUCT(1 AS id, 'keep' AS retained)]) input", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "original")))
+                .body("rows[0].f[1].v.f[0].v", equalTo("keep"));
+        query("""
                 {"query": "SELECT g, ANY_VALUE(STRUCT(x AS v, x * 10 AS w)).*, MAX(x) m FROM UNNEST([STRUCT('a' AS g, 1 AS x), ('b', 3)]) GROUP BY g ORDER BY g", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("g", "v", "w", "m")))
                 .body("rows.f.v", equalTo(List.of(List.of("a", "1", "10", "1"), List.of("b", "3", "30", "3"))));
+        query("""
+                {"query": "SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted FROM UNNEST([STRUCT(1 AS group_id, STRUCT('drop' AS omitted, 'keep' AS retained) AS original)]) v GROUP BY v.group_id", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("group_id", "retained", "omitted")))
+                .body("rows[0].f.v", equalTo(List.of("1", "keep", "1")));
+        query("""
+                {"query": "SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted FROM UNNEST([STRUCT('a' AS group_id, STRUCT('zzz' AS omitted, 'keep' AS retained) AS original), ('b', STRUCT('a1' AS omitted, 'keep' AS retained)), ('b', STRUCT('a2' AS omitted, 'keep' AS retained))]) v GROUP BY v.group_id ORDER BY omitted", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("a", "keep", "1"), List.of("b", "keep", "2"))));
+        query("""
+                {"query": "SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted FROM UNNEST([STRUCT('a' AS group_id, STRUCT('zzz' AS omitted, 'keep' AS retained) AS original), ('b', STRUCT('a1' AS omitted, 'keep' AS retained)), ('b', STRUCT('a2' AS omitted, 'keep' AS retained))]) v GROUP BY v.group_id HAVING omitted > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("b", "keep", "2"))));
+        query("""
+                {"query": "SELECT DISTINCT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 1 AS b) AS s UNION ALL SELECT STRUCT(1 AS a, 1 AS b) UNION ALL SELECT STRUCT(1 AS a, 2 AS b)) t LIMIT 2", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows", hasSize(2));
+        query("""
+                {"query": "SELECT DISTINCT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 1 AS b) AS s UNION ALL SELECT STRUCT(1 AS a, 1 AS b) UNION ALL SELECT STRUCT(1 AS a, 2 AS b)) t ORDER BY 1 LIMIT 2", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query("""
+                {"query": "SELECT DISTINCT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 1 AS b) AS s UNION ALL SELECT STRUCT(1 AS a, 1 AS b) UNION ALL SELECT STRUCT(1 AS a, 2 AS b)) t ORDER BY b LIMIT 2", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(2 AS a, 1 AS b) AS s UNION ALL SELECT STRUCT(1 AS a, 2 AS b)) t ORDER BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query("""
+                {"query": "SELECT * EXCEPT(_TABLE_SUFFIX, secret) REPLACE(UPPER(name) AS name) FROM (SELECT 'x' AS _TABLE_SUFFIX, 'hidden' AS secret, 'ana' AS name) d", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name")))
+                .body("rows[0].f[0].v", equalTo("ANA"));
+        query("""
+                {"query": "SELECT ANY_VALUE(v.s).* EXCEPT(count), COUNT(*) AS count FROM (SELECT 1 AS id, STRUCT('x' AS count, 'kept' AS keep) AS s UNION ALL SELECT 1, STRUCT('z' AS count, 'kept' AS keep)) v GROUP BY v.id HAVING COUNT(*) > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("keep", "count")))
+                .body("rows[0].f.v", equalTo(List.of("kept", "2")));
+        query("""
+                {"query": "SELECT (SELECT MAX(id) FROM UNNEST([STRUCT(1 AS id, 2 AS other)]) input) AS n, (SELECT AS STRUCT input.* EXCEPT(id)) AS original FROM UNNEST([STRUCT(1 AS id, 'keep' AS retained)]) input", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("pageToken", nullValue())
+                .body("schema.fields.name", equalTo(List.of("n", "original")))
+                .body("schema.fields[1].fields.name", equalTo(List.of("retained")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v.f[0].v", equalTo("keep"));
+        query("""
+                {"query": "SELECT DISTINCT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 2 AS b) AS s, 7 AS id UNION ALL SELECT STRUCT(1 AS a, 2 AS b), 8) t ORDER BY t.id", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "id")))
+                .body("rows.f.v", equalTo(List.of(List.of("2", "7"), List.of("2", "8"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM UNNEST([STRUCT(1 AS a, 'x' AS b), STRUCT(2 AS a, 'x' AS b)]) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Dot-star with EXCEPT on a STRUCT expression is not supported"));
         query("""
                 {"query": "SELECT t.s.inr.* FROM (SELECT STRUCT(STRUCT(1 AS c, 2 AS d) AS inr) s) t", "useLegacySql": false}
                 """)

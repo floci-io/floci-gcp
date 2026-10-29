@@ -897,14 +897,153 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT t.* NOT SIMILAR TO '^(_PARTITIONDATE|_PARTITIONTIME|_TABLE_SUFFIX)$'"
                         + " FROM \"ds\".\"t\" AS \"t\"",
                 sql("SELECT t.* FROM ds.t t"));
-        assertTrue(assertThrows(GcpException.class, () -> sql("SELECT t.s.* EXCEPT (a) FROM ds.t t"))
-                .getMessage().contains("not supported by the floci BigQuery emulator yet"));
+        assertEquals("SELECT * EXCLUDE (a) FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\"",
+                sql("SELECT t.s.* EXCEPT (a) FROM ds.t t"));
         assertEquals("SELECT unnest(f(x).s) FROM \"ds\".\"t\"", sql("SELECT f(x).s.* FROM ds.t"));
         String subscript = sql("SELECT a[OFFSET(0)].s.* FROM ds.t");
         assertTrue(subscript.startsWith("SELECT unnest(") && subscript.endsWith(".s) FROM \"ds\".\"t\"")
                 && !subscript.contains(".*"), subscript);
         String difference = sql("SELECT STRUCT(1 AS a).* EXCEPT DISTINCT SELECT 1 AS a");
         assertTrue(difference.startsWith("SELECT unnest(") && difference.contains(" EXCEPT "), difference);
+    }
+
+    @Test
+    void structStarExclusionKeepsLimitAfterTheFilteredDistinct() {
+        assertEquals("SELECT DISTINCT * EXCLUDE (a) FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" LIMIT 2 OFFSET 1",
+                sql("SELECT DISTINCT t.s.* EXCEPT (a) FROM ds.t t LIMIT 2 OFFSET 1"));
+    }
+
+    @Test
+    void structStarExclusionMovesPositionalOrderByOutsideTheWrapper() {
+        assertEquals("SELECT * EXCLUDE (a) FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" ORDER BY 1 DESC",
+                sql("SELECT t.s.* EXCEPT (a) FROM ds.t t ORDER BY 1 DESC"));
+        invalid("SELECT t.s.* EXCEPT (a) FROM ds.t t ORDER BY 1, t.id");
+    }
+
+    @Test
+    void structStarExclusionMovesAnyOrderByOutsideTheWrapperUnderDistinct() {
+        assertEquals("SELECT DISTINCT * EXCLUDE (a) FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" ORDER BY b DESC LIMIT 2",
+                sql("SELECT DISTINCT t.s.* EXCEPT (a) FROM ds.t t ORDER BY b DESC LIMIT 2"));
+    }
+
+    @Test
+    void structStarExclusionSortsByARenamedOutput() {
+        assertEquals("SELECT * EXCLUDE (omitted) RENAME (\"_floci_projection_0\" AS \"omitted\")"
+                        + " FROM (SELECT v.group_id, unnest(ANY_VALUE(v.original)),"
+                        + " COUNT(*) AS \"_floci_projection_0\" FROM \"ds\".\"t\" AS \"v\""
+                        + " GROUP BY v.group_id ORDER BY \"_floci_projection_0\") AS \"_expanded\"",
+                sql("SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted"
+                        + " FROM ds.t v GROUP BY v.group_id ORDER BY omitted"));
+    }
+
+    @Test
+    void structStarExclusionPointsAHavingReferenceAtTheRenamedOutput() {
+        assertEquals("SELECT * EXCLUDE (omitted) RENAME (\"_floci_projection_0\" AS \"omitted\")"
+                        + " FROM (SELECT v.group_id, unnest(ANY_VALUE(v.original)),"
+                        + " COUNT(*) AS \"_floci_projection_0\" FROM \"ds\".\"t\" AS \"v\""
+                        + " GROUP BY v.group_id HAVING \"_floci_projection_0\" > 1) AS \"_expanded\"",
+                sql("SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted"
+                        + " FROM ds.t v GROUP BY v.group_id HAVING omitted > 1"));
+    }
+
+    @Test
+    void arrayConstructorOfACorrelatedStructStarBecomesAListLiteral() {
+        assertEquals("SELECT [struct_pack(*COLUMNS(input.* EXCLUDE (\"id\")))] AS f0_"
+                        + " FROM \"ds\".\"t\" AS \"input\"",
+                sql("SELECT ARRAY(SELECT AS STRUCT input.* EXCEPT(id)) FROM ds.t input"));
+    }
+
+    @Test
+    void renamedOutputReferenceLeavesFunctionNamesAlone() {
+        assertEquals("SELECT * EXCLUDE (count) RENAME (\"_floci_projection_0\" AS \"count\")"
+                        + " FROM (SELECT unnest(ANY_VALUE(v.s)), COUNT(*) AS \"_floci_projection_0\""
+                        + " FROM \"ds\".\"t\" AS \"v\" GROUP BY v.id HAVING COUNT(*) > 1) AS \"_expanded\"",
+                sql("SELECT ANY_VALUE(v.s).* EXCEPT (count), COUNT(*) AS count FROM ds.t v"
+                        + " GROUP BY v.id HAVING COUNT(*) > 1"));
+    }
+
+    @Test
+    void fieldNamesThatMatchClauseKeywordsStayInsideTheWrapper() {
+        assertEquals("SELECT * EXCLUDE (a) FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\""
+                        + " WHERE t.limit > 0) AS \"_expanded\"",
+                sql("SELECT t.s.* EXCEPT (a) FROM ds.t t WHERE t.limit > 0"));
+    }
+
+    @Test
+    void correlatedStructStarIgnoresAnEarlierSubquerysSource() {
+        SqlDialectTranslator.TableRef partitioned = new SqlDialectTranslator.TableRef("ds", "partitioned");
+        String translated = SqlDialectTranslator.translate(
+                "SELECT (SELECT MAX(id) FROM ds.partitioned input) AS n,"
+                        + " (SELECT AS STRUCT input.* EXCEPT(id)) AS original FROM ds.plain input",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none(),
+                ref -> ref.equals(partitioned) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null).sql();
+        assertTrue(translated.contains("struct_pack(*COLUMNS(input.* EXCLUDE (\"id\")))"), translated);
+    }
+
+    @Test
+    void extraParenthesesAroundACorrelatedStructStarStillFindTheSource() {
+        SqlDialectTranslator.TableRef partitioned = new SqlDialectTranslator.TableRef("ds", "partitioned");
+        String translated = SqlDialectTranslator.translate(
+                "SELECT ((SELECT AS STRUCT input.* EXCEPT(id))) AS original FROM ds.partitioned input",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none(),
+                ref -> ref.equals(partitioned) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null).sql();
+        assertTrue(translated.contains("EXCLUDE (\"_PARTITIONDATE\", \"_PARTITIONTIME\", \"id\")"), translated);
+    }
+
+    @Test
+    void distinctOrderByMovesQualifiedColumnsToTheirOutputNames() {
+        assertEquals("SELECT DISTINCT * EXCLUDE (a) FROM (SELECT unnest(t.s), t.id FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" ORDER BY \"id\"",
+                sql("SELECT DISTINCT t.s.* EXCEPT (a), t.id FROM ds.t t ORDER BY t.id"));
+        invalid("SELECT DISTINCT t.s.* EXCEPT (a) FROM ds.t t ORDER BY UPPER(t.name)");
+    }
+
+    @Test
+    void structStarExclusionRejectsPositionalGroupBy() {
+        invalid("SELECT t.s.* EXCEPT (a), COUNT(*) FROM ds.t t GROUP BY 1");
+        invalid("SELECT t.s.* EXCEPT (a), COUNT(*) FROM ds.t t GROUP BY ALL");
+    }
+
+    @Test
+    void bareStructStarHidesTableSuffixOnlyForAWildcardSource() {
+        assertTrue(sql("SELECT ARRAY(SELECT AS STRUCT * FROM `ds.events_*`)")
+                .contains("EXCLUDE (\"_TABLE_SUFFIX\")"));
+        assertFalse(sql("SELECT ARRAY(SELECT AS STRUCT * FROM ds.t)").contains("_TABLE_SUFFIX"));
+    }
+
+    @Test
+    void explicitTableSuffixExclusionSurvivesANonWildcardSource() {
+        String translated = sql("SELECT * EXCEPT (_TABLE_SUFFIX, secret) REPLACE (UPPER(name) AS name)"
+                + " FROM (SELECT 'x' AS _TABLE_SUFFIX, 'hidden' AS secret, 'ana' AS name) d");
+        assertTrue(translated.contains("EXCLUDE (\"_TABLE_SUFFIX\", \"secret\")"), translated);
+    }
+
+    @Test
+    void nestedCorrelatedStructStarResolvesTheEnclosingQuerySource() {
+        SqlDialectTranslator.TableRef source = new SqlDialectTranslator.TableRef("ds", "partitioned");
+        String translated = SqlDialectTranslator.translate(
+                "SELECT q.original FROM (SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
+                        + " FROM ds.partitioned input) q",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none(),
+                ref -> ref.equals(source) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null).sql();
+        assertTrue(translated.contains("EXCLUDE (\"_PARTITIONDATE\", \"_PARTITIONTIME\", \"id\")"), translated);
+    }
+
+    @Test
+    void anyValueStructStarExceptExcludesOnlyRequestedFields() {
+        assertEquals("SELECT * EXCLUDE (omitted) FROM (SELECT unnest(ANY_VALUE(v.original))"
+                        + " FROM \"ds\".\"t\" AS \"v\" GROUP BY v.id) AS \"_expanded\"",
+                sql("SELECT ANY_VALUE(v.original).* EXCEPT (omitted) FROM ds.t v GROUP BY v.id"));
+        assertEquals("SELECT * EXCLUDE (omitted) RENAME (\"_floci_projection_0\" AS \"omitted\")"
+                        + " FROM (SELECT v.group_id, unnest(ANY_VALUE(v.original)),"
+                        + " COUNT(*) AS \"_floci_projection_0\" FROM \"ds\".\"t\" AS \"v\""
+                        + " GROUP BY v.group_id) AS \"_expanded\"",
+                sql("SELECT v.group_id, ANY_VALUE(v.original).* EXCEPT (omitted), COUNT(*) AS omitted"
+                        + " FROM ds.t v GROUP BY v.group_id"));
     }
 
     @Test
@@ -1446,6 +1585,27 @@ class SqlDialectTranslatorTest {
         assertTrue(translated.contains("SELECT {'id': 1}"), translated);
         assertFalse(translated.contains("SELECT AS STRUCT"), translated);
         assertTrue(translated.contains("is out of bounds"), translated);
+    }
+
+    @Test
+    void correlatedSelectAsStructExceptExpandsInTheOuterFromScope() {
+        String translated = sql("SELECT id, (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
+                + " FROM UNNEST([STRUCT(1 AS id, 'keep' AS retained)]) input");
+
+        assertTrue(translated.contains("struct_pack(*COLUMNS(\"_floci_offset_value_0\".* EXCLUDE (\"id\")))"
+                + " AS original"), translated);
+        assertFalse(translated.contains("SELECT struct_pack(*COLUMNS("), translated);
+    }
+
+    @Test
+    void correlatedStructStarExcludesIngestionTimePseudoColumns() {
+        SqlDialectTranslator.TableRef source = new SqlDialectTranslator.TableRef("ds", "partitioned");
+        String translated = SqlDialectTranslator.translate(
+                "SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original FROM ds.partitioned input",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none(),
+                ref -> ref.equals(source) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null).sql();
+
+        assertTrue(translated.contains("EXCLUDE (\"_PARTITIONDATE\", \"_PARTITIONTIME\", \"id\")"), translated);
     }
 
     @Test

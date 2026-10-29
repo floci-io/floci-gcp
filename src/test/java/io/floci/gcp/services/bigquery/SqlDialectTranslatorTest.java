@@ -392,6 +392,12 @@ class SqlDialectTranslatorTest {
         assertTrue(e.getMessage().contains("job-project.ds.INFORMATION_SCHEMA.TABLES"), e.getMessage());
         assertEquals("ds", translateInJob("SELECT * FROM INFORMATION_SCHEMA.TABLES").informationSchema()
                 .iterator().next().dataset());
+        // A dataset spelled like the default dataset's project is still a dataset in the job's project.
+        e = assertThrows(GcpException.class,
+                () -> translateInJob("SELECT * FROM `data-project`.INFORMATION_SCHEMA.TABLES"));
+        assertTrue(e.getMessage().contains("job-project.data-project.INFORMATION_SCHEMA.TABLES"), e.getMessage());
+        assertEquals(1, translateInJob("SELECT * FROM `data-project`.INFORMATION_SCHEMA.SCHEMATA")
+                .informationSchema().size());
     }
 
     @Test

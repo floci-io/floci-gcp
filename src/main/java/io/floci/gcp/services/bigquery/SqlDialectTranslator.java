@@ -5020,7 +5020,10 @@ final class SqlDialectTranslator {
             throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
                     + String.join(".", segments));
         }
-        boolean inJobProject = qualifiers.size() == 1 ? !qualifiers.getFirst().equals(projectId)
+        // One qualifier names a project only for project-level views; for the others it is a dataset,
+        // which resolves in the job's project even when it is spelled like the default dataset's project.
+        boolean inJobProject = qualifiers.size() == 1
+                ? !InformationSchema.regionOnly(view) || !qualifiers.getFirst().equals(projectId)
                 : qualifiers.isEmpty() && InformationSchema.regionOnly(view);
         if (inJobProject && !jobProjectId.equals(projectId)) {
             throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "

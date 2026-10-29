@@ -2,6 +2,8 @@ package io.floci.gcp.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectRecord;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.HybridStorage;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageException;
@@ -659,6 +661,36 @@ class IamServiceTest {
         assertEquals(1, read.getBindings().size());
         read.getBindings().clear();
         assertEquals(1, service.getPolicy("projects/p1/resource/r1").getBindings().size());
+    }
+
+    @Test
+    void policyStoredUnderAProjectNumberStaysReadableUntilTheNextWriteMovesIt() {
+        InMemoryStorage<String, StoredPolicy> policies = new InMemoryStorage<>();
+        StoredPolicy legacy = new StoredPolicy();
+        legacy.setBindings(List.of(Map.of("role", "roles/viewer", "members", List.of("user:a@example.com"))));
+        legacy.setEtag("legacy-etag");
+        policies.put("policy:projects/123456789", legacy);
+        ProjectRecord project = new ProjectRecord();
+        project.setProjectId("my-proj");
+        project.setProjectNumber("123456789");
+        ProjectRegistry registry = org.mockito.Mockito.mock(ProjectRegistry.class);
+        org.mockito.Mockito.when(registry.find("my-proj")).thenReturn(Optional.of(project));
+        org.mockito.Mockito.when(registry.canonicalProjectName(org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(call -> "projects/123456789".equals(call.getArgument(0)) ? "projects/my-proj" : call.getArgument(0));
+        IamService upgraded = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), policies,
+                new InMemoryStorage<>(), registry);
+
+        StoredPolicy read = upgraded.getPolicy("projects/123456789");
+        assertEquals("legacy-etag", read.getEtag());
+        assertEquals(1, read.getBindings().size());
+        assertEquals(1, upgraded.policyForEvaluation("projects/my-proj").getBindings().size());
+
+        StoredPolicy update = new StoredPolicy();
+        update.setBindings(read.getBindings());
+        update.setEtag("legacy-etag");
+        upgraded.setPolicy("projects/my-proj", update);
+        assertTrue(policies.get("policy:projects/123456789").isEmpty());
+        assertEquals(1, upgraded.getPolicy("projects/123456789").getBindings().size());
     }
 
     @Test

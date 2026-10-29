@@ -121,6 +121,54 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void castingFloatingPointZerosToStringOmitsTheSignAndDecimalPoint() {
+        query(Map.of("query", "SELECT CAST(value AS STRING) AS text_value FROM UNNEST(["
+                        + "CAST(0 AS FLOAT64), CAST(-0.0 AS FLOAT64), CAST(0.5 AS FLOAT64)]) AS value",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("0"), List.of("0"), List.of("0.5"))));
+        query(Map.of("query", "SELECT CAST('0.0' AS STRING) AS text_value", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("0.0"));
+        query(Map.of("query", "SELECT CAST(0.0 AS STRING) AS pos, CAST(-0.0 AS STRING) AS neg, "
+                        + "CAST(0.5 AS STRING) AS half", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("0", "0", "0.5"))));
+        query(Map.of("query", "SELECT CAST(NUMERIC '0' AS STRING) AS zero, "
+                        + "CAST(NUMERIC '12.30' AS STRING) AS scaled, CAST(NUMERIC '100' AS STRING) AS whole, "
+                        + "CAST(NUMERIC '-0.5' AS STRING) AS negative, "
+                        + "CAST(NUMERIC '0.000000001' AS STRING) AS small", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("0", "12.3", "100", "-0.5", "0.000000001"))));
+        query(Map.of("query", "SELECT CAST(COUNT(*) AS STRING) AS c FROM shop.users", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", "SELECT CAST(SUM(total) OVER (ORDER BY user_id, total) AS STRING) AS c "
+                        + "FROM shop.orders ORDER BY user_id, total", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("4.25"), List.of("14.75"), List.of("15.75"))));
+        query(Map.of("query", "SELECT COUNT(*) AS c FROM shop.users HAVING CAST(COUNT(*) AS STRING) = '3'",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", "SELECT COUNT(DISTINCT CAST(RAND() AS STRING)) = COUNT(*) AS per_row "
+                        + "FROM shop.users", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("true"));
+        query(Map.of("query", "SELECT CAST(id AS STRING) AS s, COUNT(*) AS c FROM shop.users "
+                        + "GROUP BY CAST(id AS STRING) ORDER BY s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1", "1"), List.of("2", "1"), List.of("3", "1"))));
+        query(Map.of("query", "SELECT CAST(total AS STRING) AS s, COUNT(*) AS c FROM shop.orders "
+                        + "GROUP BY CAST(total AS STRING) ORDER BY s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1", "1"), List.of("10.5", "1"),
+                        List.of("4.25", "1"))));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}

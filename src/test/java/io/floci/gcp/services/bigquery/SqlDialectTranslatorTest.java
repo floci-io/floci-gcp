@@ -599,9 +599,65 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void stringCastOfNumericLiteralTrimsItsScale() {
+        String translated = sql("SELECT CAST(NUMERIC '12.30' AS STRING) AS a");
+        assertTrue(translated.contains("LIKE 'DECIMAL%'"), translated);
+        assertTrue(translated.contains("rtrim(rtrim(CAST(\"_floci_cast_input\" AS VARCHAR), '0'), '.')"),
+                translated);
+    }
+
+    @Test
+    void stringCastOfFloatLiteralsCoercesToDouble() {
+        String translated = sql("SELECT CAST(0.0 AS STRING) AS a, CAST(-0.0 AS STRING) AS b, "
+                + "CAST(0.5 AS STRING) AS c");
+        assertTrue(translated.contains("[CAST(0.0 AS DOUBLE)]"), translated);
+        assertTrue(translated.contains("[CAST(-0.0 AS DOUBLE)]"), translated);
+        assertTrue(translated.contains("[CAST(0.5 AS DOUBLE)]"), translated);
+    }
+
+    @Test
+    void stringCastKeepsAggregateAndWindowOperandsInTheirQuery() {
+        assertEquals("SELECT " + numericStringCast("CAST", "COUNT(*)") + " AS c FROM \"ds\".\"t\"",
+                sql("SELECT CAST(COUNT(*) AS STRING) AS c FROM ds.t"));
+        assertEquals("SELECT " + numericStringCast("CAST", "ROW_NUMBER() OVER ()")
+                        + " AS c FROM \"ds\".\"t\"",
+                sql("SELECT CAST(ROW_NUMBER() OVER () AS STRING) AS c FROM ds.t"));
+    }
+
+    @Test
+    void stringCastGroupsByTheSameTextItSelects() {
+        String wrapper = numericStringCast("CAST", "i");
+        assertEquals("SELECT " + wrapper + " AS s, COUNT(*) AS f0_ FROM \"ds\".\"t\" GROUP BY " + wrapper,
+                sql("SELECT CAST(i AS STRING) AS s, COUNT(*) FROM ds.t GROUP BY CAST(i AS STRING)"));
+        assertEquals("SELECT " + numericStringCast("CAST", "total") + " AS s, COUNT(*) AS f0_ "
+                        + "FROM \"ds\".\"t\" GROUP BY " + numericStringCast("CAST", "total"),
+                sql("SELECT CAST(total AS STRING) AS s, COUNT(*) FROM ds.t GROUP BY CAST(total AS STRING)"));
+    }
+
+    @Test
+    void stringCastWrapsAnyModArgumentThatMayBeDecimal() {
+        assertEquals("SELECT " + numericStringCast("CAST", "MOD(5, CAST('2' AS DECIMAL(38,9)))") + " AS c",
+                sql("SELECT CAST(MOD(5, NUMERIC '2') AS STRING) AS c"));
+        assertEquals("SELECT CAST(MOD(5, 2) AS VARCHAR) AS c", sql("SELECT CAST(MOD(5, 2) AS STRING) AS c"));
+    }
+
+    /** The zero-aware, decimal-trimming wrapper the translator emits for a numeric STRING cast. */
+    private static String numericStringCast(String function, String expression) {
+        String value = "\"_floci_cast_input\"";
+        return "list_extract(list_transform([" + expression + "], " + value + " -> CASE"
+                + " WHEN typeof(" + value + ") IN ('DOUBLE', 'FLOAT') AND " + value + " = 0 THEN '0'"
+                + " WHEN typeof(" + value + ") LIKE 'DECIMAL%' AND " + function + "(" + value
+                + " AS VARCHAR) LIKE '%.%'"
+                + " THEN rtrim(rtrim(" + function + "(" + value + " AS VARCHAR), '0'), '.')"
+                + " ELSE " + function + "(" + value + " AS VARCHAR) END), 1)";
+    }
+
+    @Test
     void castTypesAreMapped() {
-        assertEquals("SELECT CAST(x AS BIGINT) AS a, TRY_CAST(y AS VARCHAR) AS b, CAST(z AS DOUBLE[]) AS c",
-                sql("SELECT CAST(x AS INT64) AS a, SAFE_CAST(y AS STRING) AS b, CAST(z AS ARRAY<FLOAT64>) AS c"));
+        assertEquals("SELECT CAST(x AS BIGINT) AS a, " + numericStringCast("TRY_CAST", "y") + " AS b, "
+                        + "CAST(z AS DOUBLE[]) AS c",
+                sql("SELECT CAST(x AS INT64) AS a, SAFE_CAST(y AS STRING) AS b, "
+                        + "CAST(z AS ARRAY<FLOAT64>) AS c"));
     }
 
     @Test
@@ -1737,7 +1793,8 @@ class SqlDialectTranslatorTest {
                         + " WHEN NOT MATCHED THEN INSERT (`id`, `v`) VALUES (`id`, `v`)"));
         assertEquals("MERGE INTO \"ds\".\"t\" USING \"ds\".\"s\" ON t.id = s.id"
                         + " WHEN NOT MATCHED AND \"s\".v > 1 THEN INSERT (id, v, d)"
-                        + " VALUES (\"s\".id + 1, UPPER(CAST(\"s\".v AS VARCHAR)), \"s\".d + INTERVAL 1 DAY)"
+                        + " VALUES (\"s\".id + 1, UPPER(" + numericStringCast("CAST", "\"s\".v")
+                        + "), \"s\".d + INTERVAL 1 DAY)"
                         + " WHEN NOT MATCHED BY SOURCE AND v = 0 THEN DELETE RETURNING merge_action",
                 dml("MERGE ds.t USING ds.s ON t.id = s.id WHEN NOT MATCHED AND v > 1 THEN INSERT (id, v, d)"
                         + " VALUES (id + 1, UPPER(CAST(v AS STRING)), d + INTERVAL 1 DAY)"

@@ -5927,12 +5927,161 @@ final class SqlDialectTranslator {
             } else if (t.isPunct(")")) {
                 depth--;
             } else if (depth == 0 && t.isKeyword("AS")) {
+                List<Token> expression = significant(open + 1, k);
                 String expr = render(open + 1, k).trim();
-                String type = translateType(significant(k + 1, close));
+                List<Token> targetType = significant(k + 1, close);
+                String type = translateType(targetType);
+                if ("VARCHAR".equals(type)) {
+                    if (isFloatLiteral(expression)) {
+                        // BigQuery types a decimal or exponent literal as FLOAT64; DuckDB types it as DECIMAL,
+                        // where zero renders as "0.0" and negative zero loses its sign.
+                        return renderStringCast(function, "CAST(" + expr + " AS DOUBLE)");
+                    }
+                    if (!isDefinitelyNonFloatExpression(expression)) {
+                        return renderStringCast(function, expr);
+                    }
+                }
                 return function + "(" + expr + " AS " + type + ")";
             }
         }
         return function + "(" + render(open + 1, close) + ")";
+    }
+
+    private static boolean rendersAsNumber(String duckType) {
+        return "DOUBLE".equals(duckType) || "FLOAT".equals(duckType) || duckType.startsWith("DECIMAL");
+    }
+
+    private static boolean isFloatLiteral(List<Token> expression) {
+        if (expression.size() == 2
+                && (expression.getFirst().isPunct("-") || expression.getFirst().isPunct("+"))) {
+            return isFloatLiteral(expression.subList(1, expression.size()));
+        }
+        return expression.size() == 1 && expression.getFirst().kind == Kind.NUMBER
+                && expression.getFirst().text.matches("(?i).*[.e].*");
+    }
+
+    private boolean isDefinitelyNonFloatExpression(List<Token> expression) {
+        if (expression.isEmpty()) {
+            return false;
+        }
+        Token first = expression.getFirst();
+        if (expression.size() == 1) {
+            if (first.kind == Kind.STRING || first.kind == Kind.BYTES) {
+                return true;
+            }
+            if (first.kind == Kind.NUMBER) {
+                return !first.text.matches("(?i).*[.e].*");
+            }
+            return false;
+        }
+        if (first.kind == Kind.IDENT && Set.of("DATE", "TIME", "DATETIME", "TIMESTAMP", "STRING", "BYTES",
+                "BOOL", "BOOLEAN", "INT64", "INTEGER", "JSON")
+                .contains(first.upper()) && expression.get(1).kind == Kind.STRING) {
+            return true;
+        }
+        if ((first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) && expression.get(1).isPunct("(")) {
+            int close = matchingParenthesis(expression, 1);
+            int as = topLevelToken(expression, 2, close, "AS");
+            if (close == expression.size() - 1 && as >= 0) {
+                List<Token> castType = expression.subList(as + 1, close);
+                return castType.isEmpty() || !rendersAsNumber(translateType(castType));
+            }
+        }
+        if (first.kind == Kind.IDENT && expression.size() > 2 && expression.get(1).isPunct("(")) {
+            int close = matchingParenthesis(expression, 1);
+            if (close == expression.size() - 1 && first.isKeyword("MOD")) {
+                // MOD returns the wider of its arguments, so the result is only non-float when all of them are.
+                List<List<Token>> modArguments = callArguments(expression, 1, close);
+                return !modArguments.isEmpty()
+                        && modArguments.stream().allMatch(this::isDefinitelyNonFloatExpression);
+            }
+        }
+        int depth = 0;
+        for (int index = 0; index < expression.size(); index++) {
+            Token token = expression.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && index > 0 && index < expression.size() - 1
+                    && (token.isPunct("+") || token.isPunct("-") || token.isPunct("*"))) {
+                return isDefinitelyNonFloatExpression(expression.subList(0, index))
+                        && isDefinitelyNonFloatExpression(expression.subList(index + 1, expression.size()));
+            }
+        }
+        return false;
+    }
+
+    private static List<List<Token>> callArguments(List<Token> expression, int open, int close) {
+        List<List<Token>> arguments = new ArrayList<>();
+        int depth = 0;
+        int start = open + 1;
+        for (int index = open + 1; index < close; index++) {
+            Token token = expression.get(index);
+            if (token.isPunct("(") || token.isPunct("[")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]")) {
+                depth--;
+            } else if (depth == 0 && token.isPunct(",")) {
+                arguments.add(expression.subList(start, index));
+                start = index + 1;
+            }
+        }
+        arguments.add(expression.subList(start, close));
+        return arguments;
+    }
+
+    private static int matchingParenthesis(List<Token> expression, int open) {
+        int depth = 0;
+        for (int index = open; index < expression.size(); index++) {
+            if (expression.get(index).isPunct("(")) {
+                depth++;
+            } else if (expression.get(index).isPunct(")") && --depth == 0) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static int topLevelToken(List<Token> expression, int start, int end, String keyword) {
+        int depth = 0;
+        for (int index = start; index < end; index++) {
+            Token token = expression.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && token.isKeyword(keyword)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Renders a numeric value as BigQuery renders it as STRING: float zero is {@code "0"} (unsigned), and a
+     * decimal keeps only its significant fraction digits. DuckDB renders zero floats as {@code "0.0"} or
+     * {@code "-0.0"}, and its DECIMAL, which backs {@code NUMERIC}/{@code BIGNUMERIC}, pads the scale
+     * ({@code "12.300000000"}).
+     *
+     * The operand stays in its own query scope, held once in a single-element list, because a derived table
+     * would give an aggregate a single implicit row ({@code COUNT(*)} would be 1) and would drop a window
+     * function's partition, while an uncorrelated call such as {@code RAND()} would be shared by every row.
+     * The list holds the value once, so it is evaluated once per row.
+     *
+     * The lambda name is fixed because DuckDB matches a select item to a {@code GROUP BY} item by its text:
+     * numbering the name per call would make {@code SELECT CAST(i AS STRING) ... GROUP BY CAST(i AS STRING)}
+     * group by a column instead of the expression. The operand sits outside the lambda body, so nested
+     * wrappers cannot shadow the name.
+     */
+    private static String renderStringCast(String function, String expression) {
+        String value = DuckTypes.quoteIdentifier("_floci_cast_input");
+        String text = function + "(" + value + " AS VARCHAR)";
+        return "list_extract(list_transform([" + expression + "], " + value + " -> CASE"
+                + " WHEN typeof(" + value + ") IN ('DOUBLE', 'FLOAT') AND " + value + " = 0 THEN '0'"
+                + " WHEN typeof(" + value + ") LIKE 'DECIMAL%' AND " + text + " LIKE '%.%'"
+                + " THEN rtrim(rtrim(" + text + ", '0'), '.')"
+                + " ELSE " + text + " END), 1)";
     }
 
     private String renderExtract(int open, int close) {

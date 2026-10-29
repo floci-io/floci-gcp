@@ -983,6 +983,10 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT CAST(CAST('2026-03-01' AS DATE) + INTERVAL 2 DAY AS DATE) AS m",
                 sql("SELECT DATE_ADD('2026-03-01', INTERVAL 2 DAY) AS m"));
         assertEquals("SELECT CAST(s || 'x' + INTERVAL 1 DAY AS DATE) AS n", sql("SELECT DATE_ADD(s || 'x', INTERVAL 1 DAY) AS n"));
+        assertEquals("SELECT CAST(CAST('2026-03-01' AS DATE) + INTERVAL 1 DAY AS DATE) AS m",
+                sql("SELECT DATE_ADD(('2026-03-01'), INTERVAL 1 DAY) AS m"));
+        assertEquals("SELECT CAST(('a') || ('b') + INTERVAL 1 DAY AS DATE) AS m",
+                sql("SELECT DATE_ADD(('a') || ('b'), INTERVAL 1 DAY) AS m"));
         assertEquals("SELECT strftime(ts, '%Y') AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
         assertEquals("SELECT strftime(d, '%Y-%m-%d %%F %m/%d/%y %%R') AS y",
                 sql("SELECT FORMAT_DATE('%F %%F %D %R', d) AS y"));

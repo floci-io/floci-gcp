@@ -176,6 +176,18 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2026-03-02", "2026-02-01", "30", "2026-03-01", "1772704800",
                         "1772668800", "2026-03-05 10:00:00", "2026-03-03")));
+        query("""
+                {"query": "SELECT DATE_ADD(('2026-03-01'), INTERVAL 1 DAY) AS a, DATE_TRUNC((('2026-03-15')), MONTH) AS t, TIMESTAMP_DIFF(TIMESTAMP '2021-09-21 23:00:00+00', '2021-09-21 01:00:00+00', HOUR) AS th, DATE_DIFF(DATE '2021-09-22', '2021-09-21', DAY) AS dd, DATETIME_DIFF(DATETIME '2021-09-21 23:00:00', '2021-09-21 01:30:00', MINUTE) AS dm", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2026-03-02", "2026-03-01", "22", "1", "1290")));
+        query("""
+                {"query": "SELECT DATE_ADD(@d, INTERVAL 1 DAY) AS a, DATE_DIFF(@d, DATE '2026-03-01', DAY) AS dd, TIMESTAMP_ADD(@d, INTERVAL 1 HOUR) AS ta",
+                 "parameterMode": "NAMED", "useLegacySql": false,
+                 "queryParameters": [{"name": "d", "parameterType": {"type": "STRING"}, "parameterValue": {}}]}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null)));
     }
 
     @Test

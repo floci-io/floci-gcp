@@ -5735,14 +5735,18 @@ final class SqlDialectTranslator {
     /**
      * BigQuery coerces a STRING literal or STRING parameter passed to a date/time function to the
      * function's type ({@code DATE_ADD(@d, INTERVAL 1 DAY)} with {@code @d} a STRING). DuckDB cannot
-     * pick an overload for a string plus an interval, so such an operand gets an explicit cast.
+     * pick an overload for a string plus an interval, so such an operand gets an explicit cast. Redundant
+     * parentheses around the literal are looked through, and a NULL STRING parameter becomes a typed NULL.
      */
     private static String temporalOperand(String operand, String function) {
-        String literal = operand;
-        if (operand.startsWith("CAST(") && operand.endsWith(" AS VARCHAR)")) {
-            literal = operand.substring("CAST(".length(), operand.length() - " AS VARCHAR)".length());
+        String literal = operand.strip();
+        while (wrappedInParentheses(literal)) {
+            literal = literal.substring(1, literal.length() - 1).strip();
         }
-        if (!isStringLiteral(literal)) {
+        if (literal.startsWith("CAST(") && literal.endsWith(" AS VARCHAR)")) {
+            literal = literal.substring("CAST(".length(), literal.length() - " AS VARCHAR)".length());
+        }
+        if (!isStringLiteral(literal) && !(literal.equals("NULL") && operand.contains(" AS VARCHAR)"))) {
             return operand;
         }
         String type;
@@ -5756,6 +5760,29 @@ final class SqlDialectTranslator {
             type = "TIME";
         }
         return "CAST(" + literal + " AS " + type + ")";
+    }
+
+    /** True when {@code sql} is one parenthesized expression: its first parenthesis closes at its last character. */
+    private static boolean wrappedInParentheses(String sql) {
+        if (sql.length() < 2 || sql.charAt(0) != '(' || sql.charAt(sql.length() - 1) != ')') {
+            return false;
+        }
+        int depth = 0;
+        boolean quoted = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '\'') {
+                quoted = !quoted;
+            } else if (!quoted && c == '(') {
+                depth++;
+            } else if (!quoted && c == ')') {
+                depth--;
+                if (depth == 0 && i < sql.length() - 1) {
+                    return false;
+                }
+            }
+        }
+        return depth == 0;
     }
 
     /** True for exactly one single-quoted SQL string literal, with quotes escaped by doubling. */

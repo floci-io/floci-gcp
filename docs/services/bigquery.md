@@ -401,8 +401,9 @@ columns BigQuery documents:
 - `data_type` uses GoogleSQL names (`INT64`, `ARRAY<STRING>`, `STRUCT<name STRING, ...>`);
   `COLUMN_FIELD_PATHS` has one row per nested field path (`customer.name`).
 - `ddl` is a `CREATE TABLE` / `CREATE VIEW` / `CREATE SCHEMA` statement in BigQuery's format.
-- `TABLE_OPTIONS` reports `description`, `friendly_name` and `labels` as GoogleSQL literals
-  (`"text"`, `[STRUCT("key", "value")]`).
+- `TABLE_OPTIONS` reports `description`, `friendly_name`, `labels` and a set `expiration_timestamp`
+  as GoogleSQL literals (`"text"`, `[STRUCT("key", "value")]`,
+  `TIMESTAMP "2020-01-16T21:12:28.000Z"`).
 - `PARTITIONS` reports one row with a null `partition_id` for every unpartitioned table, reports
   decorator-written ingestion-time partitions, and derives partitions from rows in
   field-partitioned tables, including `__NULL__` and `__UNPARTITIONED__`. `total_logical_bytes` and
@@ -578,12 +579,12 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `DELETE [FROM] t WHERE ...` | `WHERE` is required |
 | `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions populate table metadata, while ingestion-time partitioning is rejected |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same values (literals or constant expressions) and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options are unsupported |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and table options populate metadata |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t [PARTITION BY ...] [CLUSTER BY ...] [OPTIONS(...)] AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and supported table options populate metadata; ingestion-time partitioning is rejected |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same literal values and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options and computed expressions are unsupported |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
-| `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`. A value can be a literal or a constant expression such as `CONCAT('a', 'b')` or `TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)`, evaluated and type-checked as BigQuery does (a `STRING` for `description` and `friendly_name`, a `TIMESTAMP` for `expiration_timestamp`), in a dry run too; `labels` takes literal pairs only. Only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
+| `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`. `expiration_timestamp` accepts a timestamp literal or a timestamp-valued SQL expression, evaluated by the configured SQL engine. Only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
 | `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE \| RESTRICT]` | Datasets; a non-empty dataset needs `CASCADE`. `CASCADE`/`RESTRICT` are rejected on `DROP TABLE`/`VIEW` |
 
 DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREATE`, `REPLACE`,
@@ -726,9 +727,11 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 - Outside scripts, `ALTER TABLE` and `ALTER VIEW` support only `SET OPTIONS`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
-- `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are
-  not stored. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY` metadata is
-  stored for the supported expressions documented above.
+- `CLUSTER BY` is stored as table metadata but does not physically cluster rows. Plain `CREATE TABLE`
+  and `CREATE TABLE AS SELECT` support the table options `description`, `friendly_name`, `labels`,
+  and `expiration_timestamp`; timestamp-valued expiration expressions are evaluated by the configured
+  SQL engine. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY`
+  metadata is stored for the supported expressions documented above.
 - Option values in `ALTER TABLE` / `ALTER VIEW SET OPTIONS` and `CREATE TABLE COPY` are evaluated
   without BigQuery's limits on the functions they call. BigQuery rejects aggregate functions
   (`Aggregate function MAX not allowed in option`), analytic functions and some scalar functions such

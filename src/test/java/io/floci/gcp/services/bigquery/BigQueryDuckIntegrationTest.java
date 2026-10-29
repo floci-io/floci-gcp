@@ -13,6 +13,10 @@ import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -30,6 +34,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Runs GoogleSQL end to end on the real floci-duck sidecar. Needs Docker; skipped when no
@@ -2545,6 +2550,76 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void executeImmediateBuildsClusteredCtasWithOptionsAndUsingParameters() {
+        query(Map.of("query", "CREATE SCHEMA dynamic_script", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE dynamic_script.dynamic_source (entity_id STRING, record_id STRING, "
+                        + "score FLOAT64, event_timestamp TIMESTAMP, record_timestamp TIMESTAMP, event_date DATE) "
+                        + "PARTITION BY event_date", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "INSERT INTO dynamic_script.dynamic_source VALUES "
+                        + "('item-1', 'record-1', 0.5, TIMESTAMP '2026-10-29 00:00:00 UTC', "
+                        + "TIMESTAMP '2026-10-29 00:00:00 UTC', DATE '2026-10-29'), "
+                        + "('item-1', 'record-1', 0.9, TIMESTAMP '2026-10-29 00:00:00 UTC', "
+                        + "TIMESTAMP '2026-10-29 00:00:00 UTC', DATE '2026-10-29')", "useLegacySql", false))
+                .then().statusCode(200);
+
+        String dynamicScript = """
+                BEGIN
+                  DECLARE table_partition_date DATE DEFAULT DATE '2026-10-29';
+                  DECLARE cache_name STRING DEFAULT '';
+                  SET cache_name = CONCAT(
+                    'bq-duck-it.dynamic_script.cache_',
+                    FORMAT_DATE('%Y%m%d', table_partition_date)
+                  );
+                  EXECUTE IMMEDIATE
+                  '''
+                  CREATE TABLE IF NOT EXISTS `''' || cache_name || '''`
+                  CLUSTER BY entity_id
+                  OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                  AS (
+                    SELECT entity_id, record_id, score
+                    FROM dynamic_script.dynamic_source
+                    WHERE event_date = @pd
+                    QUALIFY ROW_NUMBER() OVER (
+                      PARTITION BY entity_id, record_id
+                      ORDER BY score DESC NULLS LAST, event_timestamp DESC NULLS LAST,
+                               record_timestamp DESC NULLS LAST
+                    ) = 1
+                  )
+                  '''
+                  USING table_partition_date AS pd;
+                END;
+                """;
+        query(Map.of("query", dynamicScript, "useLegacySql", false)).then().statusCode(200);
+
+        query(Map.of("query", "SELECT entity_id, record_id, score FROM dynamic_script.cache_20261029",
+                        "useLegacySql", false))
+                .then().statusCode(200).body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("item-1"))
+                .body("rows[0].f[1].v", equalTo("record-1"))
+                .body("rows[0].f[2].v", equalTo("0.9"));
+
+        Response table = given().when().get(BASE + "/datasets/dynamic_script/tables/cache_20261029")
+                .then().statusCode(200).extract().response();
+        table.then().body("clustering.fields", equalTo(List.of("entity_id")));
+        long expirationMillis = Long.parseLong(table.jsonPath().getString("expirationTime"));
+        assertTrue(expirationMillis >= Instant.now().plus(Duration.ofDays(39)).toEpochMilli());
+        assertTrue(expirationMillis <= Instant.now().plus(Duration.ofDays(41)).toEpochMilli());
+        query(Map.of("query", dynamicScript, "useLegacySql", false)).then().statusCode(200);
+        given().when().get(BASE + "/datasets/dynamic_script/tables/cache_20261029")
+                .then().statusCode(200).body("expirationTime", equalTo(String.valueOf(expirationMillis)));
+        String expirationLiteral = "TIMESTAMP \"" + DateTimeFormatter
+                .ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
+                .format(Instant.ofEpochMilli(expirationMillis)) + "\"";
+        query(Map.of("query", "SELECT option_type, option_value FROM dynamic_script.INFORMATION_SCHEMA.TABLE_OPTIONS"
+                        + " WHERE table_name = 'cache_20261029' AND option_name = 'expiration_timestamp'",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("TIMESTAMP"))
+                .body("rows[0].f[1].v", equalTo(expirationLiteral));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateCreatesTemporaryTables() {
         query(Map.of("query", """
                 EXECUTE IMMEDIATE "CREATE TEMP TABLE dynamic_values AS SELECT 1 AS value UNION ALL SELECT 2";
@@ -2552,6 +2627,30 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("3"));
+    }
+
+    @Test
+    @Order(2)
+    void alterExpirationTimestampEvaluatesExpressions() {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "expiration_expression"}, "schema": {"fields": [
+                  {"name": "id", "type": "INT64"}
+                ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+
+        query(Map.of("query", """
+                DECLARE table_creation_time TIMESTAMP DEFAULT TIMESTAMP '2099-01-01 00:00:00+00';
+                ALTER TABLE shop.expiration_expression SET OPTIONS (
+                  expiration_timestamp = TIMESTAMP_ADD(
+                    table_creation_time, INTERVAL 172800000 MILLISECOND
+                  )
+                );
+                """, "useLegacySql", false)).then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/shop/tables/expiration_expression")
+                .then().statusCode(200)
+                .body("expirationTime", equalTo(String.valueOf(Instant.parse("2099-01-03T00:00:00Z")
+                        .toEpochMilli())));
     }
 
     @Test

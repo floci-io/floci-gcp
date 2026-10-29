@@ -4498,6 +4498,17 @@ class SqlDialectTranslatorTest {
         assertEquals(Map.of("field", "id", "range",
                 Map.of("start", "0", "end", "100", "interval", "1")), rangeCtas.rangePartitioning());
 
+        SqlDialectTranslator.Statement clusteredCtas = statement("""
+                CREATE TABLE IF NOT EXISTS ds.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS (SELECT entity_id FROM ds.src)
+                """);
+        assertTrue(clusteredCtas.ifNotExists());
+        assertEquals(List.of("entity_id"), clusteredCtas.clusteringFields());
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 40 DAY )",
+                ((SqlDialectTranslator.OptionExpression) clusteredCtas.options().get("expiration_timestamp")).sql());
+        assertEquals("(SELECT entity_id FROM ds.src)", clusteredCtas.querySql().trim());
+
         GcpException ingestionCtas = assertThrows(GcpException.class, () -> statement(
                 "CREATE TABLE ds.daily PARTITION BY DATE(_PARTITIONTIME) AS SELECT event_time FROM ds.src"));
         assertEquals("invalidQuery", ingestionCtas.getReason());
@@ -4526,6 +4537,10 @@ class SqlDialectTranslatorTest {
         assertTrue(all.options().containsKey("friendly_name") && all.options().get("friendly_name") == null);
         assertEquals(Map.of("a", "b", "c", "d"), all.options().get("labels"));
         assertEquals(1795132800000L, all.options().get("expiration_timestamp"));
+        SqlDialectTranslator.Statement computed = statement("ALTER TABLE ds.t SET OPTIONS(expiration_timestamp="
+                + "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))");
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )",
+                ((SqlDialectTranslator.OptionExpression) computed.options().get("expiration_timestamp")).sql());
         assertEquals("ALTER_VIEW", statement("ALTER VIEW ds.v SET OPTIONS(description='v')").statementType());
 
         SqlDialectTranslator.Statement expressions = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT('a', 'b'),"

@@ -81,6 +81,39 @@ class BigQueryDuckInformationSchemaIntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void tableOptionsIncludeExpirationTimestamp() {
+        query("ALTER TABLE shop.orders SET OPTIONS(expiration_timestamp = TIMESTAMP '2099-01-01 00:00:00 UTC')")
+                .then().statusCode(200);
+
+        assertEquals(List.of(List.of("TIMESTAMP", "TIMESTAMP \"2099-01-01T00:00:00.000Z\"")),
+                rows("SELECT option_type, option_value FROM shop.INFORMATION_SCHEMA.TABLE_OPTIONS"
+                        + " WHERE table_name = 'orders' AND option_name = 'expiration_timestamp'"));
+    }
+
+    @Test
+    @Order(11)
+    void tableCreationTimeCanInitializeTimestampScriptVariable() {
+        query("CREATE TABLE shop.timestamp_probe (id INT64)").then().statusCode(200);
+        String creationTime = query("SELECT creation_time FROM shop.INFORMATION_SCHEMA.TABLES"
+                        + " WHERE table_name = 'timestamp_probe'")
+                .then().statusCode(200).extract().jsonPath().getString("rows[0].f[0].v");
+
+        query("""
+                BEGIN
+                  DECLARE created_at TIMESTAMP DEFAULT (
+                    SELECT creation_time
+                    FROM shop.INFORMATION_SCHEMA.TABLES
+                    WHERE table_name = 'timestamp_probe'
+                  );
+                  SELECT created_at;
+                END;
+                """).then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("TIMESTAMP"))
+                .body("rows[0].f[0].v", equalTo(creationTime));
+    }
+
+    @Test
     @Order(2)
     void tablesForOneDataset() {
         assertEquals(List.of(List.of("order_ids", "VIEW", "NO"), List.of("orders", "BASE TABLE", "YES")),

@@ -782,6 +782,31 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void executeImmediateEvaluatesConcatenatedTripleQuotedSqlText() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        BigQuerySqlEngine.Result sqlText = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_script_value", "STRING", null))),
+                List.of(Map.of("_floci_script_value", "SELECT 9 AS result")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("result", "INTEGER", null))),
+                List.of(Map.of("result", 9L)), "SELECT", 0);
+        when(engine.execute(any(), any())).thenReturn(sqlText, queryResult);
+        BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        dynamicService.query(PROJECT, "US", null, """
+                DECLARE sql_suffix STRING DEFAULT "9";
+                EXECUTE IMMEDIATE '''SELECT ''' || sql_suffix || ''' AS result''';
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().getFirst().sql().contains("|| '9' ||"),
+                requests.getAllValues().getFirst().sql());
+        assertEquals("SELECT 9 AS result", requests.getAllValues().getLast().sql());
+    }
+
+    @Test
     void executeImmediateCannotBeNested() {
         BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), mock(BigQuerySqlEngine.class));
@@ -828,6 +853,69 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void alterExpirationTimestampEvaluatesTimestampExpressions() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4071081600.123456")), "SELECT", 0));
+        BigQueryService alterService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        alterService.createDataset(PROJECT, newDataset(DATASET));
+        alterService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        alterService.query(PROJECT, "US", null, """
+                DECLARE table_creation_time TIMESTAMP DEFAULT TIMESTAMP '2099-01-01 00:00:00+00';
+                ALTER TABLE ds1.t1 SET OPTIONS (
+                  expiration_timestamp = TIMESTAMP_ADD(
+                    table_creation_time, INTERVAL 172800000 MILLISECOND
+                  )
+                );
+                """, null);
+
+        assertEquals(String.valueOf(Instant.parse("2099-01-03T00:00:00.123456Z").toEpochMilli()),
+                alterService.getTable(PROJECT, DATASET, TABLE).getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void createTableAsSelectStoresClusteringAndEvaluatedExpiration() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        TableSchema querySchema = new TableSchema(List.of(field("entity_id", "STRING", null)));
+        BigQuerySqlEngine.Result described = new BigQuerySqlEngine.Result(querySchema, List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expirationDryRun = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expiration = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4070908800.123456")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(querySchema,
+                List.of(Map.of("entity_id", "item-1")), "SELECT", 0);
+        when(engine.execute(any(), any())).thenAnswer(invocation -> {
+            BigQuerySqlEngine.Request request = invocation.getArgument(0);
+            if (request.sql().contains("TIMESTAMP_ADD")) {
+                return request.dryRun() ? expirationDryRun : expiration;
+            }
+            if (request.sql().contains("ds1.source")) {
+                return request.dryRun() ? described : queryResult;
+            }
+            throw new AssertionError("Unexpected SQL request: " + request.sql());
+        });
+        BigQueryService createService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        createService.createDataset(PROJECT, newDataset(DATASET));
+
+        createService.query(PROJECT, "US", null, """
+                CREATE TABLE IF NOT EXISTS ds1.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS SELECT entity_id FROM ds1.source
+                """, null);
+
+        Table created = createService.getTable(PROJECT, DATASET, "cached");
+        assertEquals(Map.of("fields", List.of("entity_id")), created.getExtra().get("clustering"));
+        assertEquals(String.valueOf(Instant.parse("2099-01-01T00:00:00.123456Z").toEpochMilli()),
+                created.getExtra().get("expirationTime"));
+    }
+
+    @Test
     void dateAndTimestampVariablesCanBeDeclaredAndAssigned() {
         BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
         when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -851,6 +939,30 @@ class BigQueryServiceTest {
         assertTrue(request.getValue().sql().contains("DATE '2025-01-02'"), request.getValue().sql());
         assertTrue(request.getValue().sql().contains("TIMESTAMP '2025-01-02T12:00:00Z'"),
                 request.getValue().sql());
+    }
+
+    @Test
+    void timestampVariablesAcceptEpochSecondsFromTypedQueryResults() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("creation_time", "TIMESTAMP", null))),
+                        List.of(Map.of("creation_time", "1704164645.123456")), "SELECT", 0),
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("created_at", "TIMESTAMP", null))),
+                        List.of(Map.of("created_at", "2024-01-02T03:04:05.123456Z")), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null, """
+                DECLARE created_at TIMESTAMP DEFAULT (
+                  SELECT creation_time FROM ds1.INFORMATION_SCHEMA.TABLES WHERE table_name = 't1'
+                );
+                SELECT created_at;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().get(1).sql().contains(
+                "TIMESTAMP '2024-01-02T03:04:05.123456Z'"), requests.getAllValues().get(1).sql());
     }
 
     @Test

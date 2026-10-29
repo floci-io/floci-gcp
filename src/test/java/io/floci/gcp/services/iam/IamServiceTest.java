@@ -39,6 +39,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class IamServiceTest {
 
@@ -673,9 +676,9 @@ class IamServiceTest {
         ProjectRecord project = new ProjectRecord();
         project.setProjectId("my-proj");
         project.setProjectNumber("123456789");
-        ProjectRegistry registry = org.mockito.Mockito.mock(ProjectRegistry.class);
-        org.mockito.Mockito.when(registry.find("my-proj")).thenReturn(Optional.of(project));
-        org.mockito.Mockito.when(registry.canonicalProjectName(org.mockito.ArgumentMatchers.anyString()))
+        ProjectRegistry registry = mock(ProjectRegistry.class);
+        when(registry.find("my-proj")).thenReturn(Optional.of(project));
+        when(registry.canonicalProjectName(anyString()))
                 .thenAnswer(call -> "projects/123456789".equals(call.getArgument(0)) ? "projects/my-proj" : call.getArgument(0));
         IamService upgraded = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), policies,
                 new InMemoryStorage<>(), registry);

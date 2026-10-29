@@ -15,6 +15,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
@@ -60,8 +61,8 @@ class GkeClusterManagerPortTest {
 
     @Test
     void startFailingAfterTheContainerExistsRemovesItAndReleasesTheHostPort() {
-        when(lifecycleManager.create(org.mockito.ArgumentMatchers.any())).thenReturn("container-1");
-        when(lifecycleManager.startCreated(anyString(), org.mockito.ArgumentMatchers.any()))
+        when(lifecycleManager.create(any())).thenReturn("container-1");
+        when(lifecycleManager.startCreated(anyString(), any()))
                 .thenThrow(new RuntimeException("endpoint inspection timed out"));
         StoredCluster cluster = cluster();
 
@@ -69,6 +70,7 @@ class GkeClusterManagerPortTest {
                 () -> manager(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS)).startCluster(cluster));
 
         verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).removeVolume(cluster.getVolumeName());
         assertEquals(null, cluster.getContainerId());
         assertEquals(0, cluster.getHostPort());
         assertEquals(port, allocate());

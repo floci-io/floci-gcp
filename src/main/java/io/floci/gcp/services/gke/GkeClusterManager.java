@@ -104,13 +104,17 @@ public class GkeClusterManager {
         }
     }
 
-    /** A container this start created would keep the published port, so it goes before the port is reused. */
+    /**
+     * A container this start created would keep the published port, so it goes before the port is reused,
+     * together with the volume: with no container ID left, stopCluster would never remove it.
+     */
     private void removeFailedContainer(StoredCluster cluster) {
         if (cluster.getContainerId() == null) {
             return;
         }
         try {
             lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+            lifecycleManager.removeVolume(volumeName(cluster));
         } catch (RuntimeException e) {
             LOG.warnv("Could not remove k3s container {0} after a failed start of cluster {1}: {2}",
                     cluster.getContainerId(), cluster.getName(), e.getMessage());

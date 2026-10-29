@@ -273,6 +273,41 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
     }
 
+    @Test
+    @Order(5)
+    void bareSubscriptOnAVisibleArrayIsZeroBased() {
+        query("""
+                {"query": "SELECT [10, 20, 30][2] AS a, [10, 20, 30][0] AS b, ['x', 'y'][1] AS c, [10, 20][CAST(NULL AS INT64)] AS n", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList("30", "10", "y", null)));
+        query("""
+                {"query": "SELECT SPLIT('a,b,c')[1] AS s, GENERATE_ARRAY(1, 5)[0] AS g, ARRAY(SELECT x FROM UNNEST([7, 8]) x ORDER BY x)[1] AS arr, ARRAY_CONCAT([1], [2, 3])[2] AS cc, ARRAY_REVERSE([1, 2, 3])[0] AS rv, GENERATE_DATE_ARRAY('2024-01-01', '2024-01-03')[2] AS gd", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("b", "1", "8", "3", "3", "2024-01-03")));
+        query("""
+                {"query": "SELECT ARRAY_AGG(x ORDER BY x)[1] AS a FROM UNNEST([3, 1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        query("""
+                {"query": "SELECT [10, 20, 30][3] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT [10, 20, 30][-1] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index -1 is out of bounds (underflow)"));
+        query("""
+                {"query": "SELECT JSON '[1, 2, 3]'[0] AS j", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

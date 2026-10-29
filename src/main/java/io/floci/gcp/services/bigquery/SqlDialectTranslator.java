@@ -455,8 +455,9 @@ final class SqlDialectTranslator {
     /**
      * GoogleSQL array subscripts are 0-based ({@code arr[OFFSET(i)]}) or 1-based ({@code arr[ORDINAL(i)]}).
      * The plain forms fail on an index outside the array, the {@code SAFE_} forms return NULL. A bare
-     * {@code x[i]} is left as it is: GoogleSQL's JSON subscript operator has that form too
-     * ({@code json[0]}, {@code json['field']}), and a JSON value cannot be told from an array by its tokens. DuckDB lists are 1-based, return NULL out of range and count a negative index from
+     * {@code x[i]} is 0-based like {@code x[OFFSET(i)]}, but it is rewritten only when {@code x} is visibly an
+     * array (see {@link #isVisiblyArray}): GoogleSQL's JSON subscript operator has the same form ({@code json[0]},
+     * {@code json['field']}), and a JSON value cannot be told from an array by its tokens otherwise. DuckDB lists are 1-based, return NULL out of range and count a negative index from
      * the end, so every subscript is rewritten to a CASE over the array and the index: a {@code SAFE_} form
      * is NULL out of range, a plain form raises BigQuery's error. The bounds are checked before the index is
      * moved to DuckDB's 1-based one, so the largest INT64 is out of range rather than an overflow. The array
@@ -481,19 +482,23 @@ final class SqlDialectTranslator {
             String accessor = first >= 0 ? tokens.get(first).upper() : "";
             boolean wrapped = Set.of("OFFSET", "SAFE_OFFSET", "ORDINAL", "SAFE_ORDINAL").contains(accessor)
                     && tokens.get(first).kind == Kind.IDENT;
-            if (!wrapped) {
+            int start = arrayOperandStart(previous);
+            if (!wrapped && (first < 0 || !isVisiblyArray(start, previous))) {
                 i++;
                 continue;
             }
-            int open = nextSignificant(first + 1, close);
-            if (open < 0 || !tokens.get(open).isPunct("(") || nextSignificant(matchingParen(open) + 1, close) >= 0) {
-                throw invalidQuery("Syntax error: Expected \")\" after " + accessor + " in an array subscript");
+            List<Token> index;
+            if (wrapped) {
+                int open = nextSignificant(first + 1, close);
+                if (open < 0 || !tokens.get(open).isPunct("(") || nextSignificant(matchingParen(open) + 1, close) >= 0) {
+                    throw invalidQuery("Syntax error: Expected \")\" after " + accessor + " in an array subscript");
+                }
+                index = new ArrayList<>(tokens.subList(open + 1, matchingParen(open)));
+            } else {
+                accessor = "OFFSET";
+                index = new ArrayList<>(tokens.subList(i + 1, close));
             }
-            int indexFrom = open + 1;
-            int indexTo = matchingParen(open);
-            List<Token> index = new ArrayList<>(tokens.subList(indexFrom, indexTo));
             int ordinalBase = accessor.endsWith("ORDINAL") ? 1 : 0;
-            int start = arrayOperandStart(previous);
             List<Token> array = new ArrayList<>(tokens.subList(start, i));
             String bound = ordinalBase == 0 ? "" : " + 1";
             String position = ordinalBase == 0 ? "_s.i + 1" : "_s.i";
@@ -516,6 +521,26 @@ final class SqlDialectTranslator {
             tokens.addAll(start, replacement);
             i = start;
         }
+    }
+
+    /** Functions that always return an ARRAY, so a bare subscript on a call to one is an array subscript. */
+    private static final Set<String> ARRAY_FUNCTIONS = Set.of("ARRAY_AGG", "ARRAY_CONCAT", "ARRAY_REVERSE", "SPLIT",
+            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY");
+
+    /**
+     * True when the operand from {@code start} to {@code last} is an array by its own tokens: an array literal,
+     * {@code ARRAY(...)}, or a whole call to one of {@link #ARRAY_FUNCTIONS}.
+     */
+    private boolean isVisiblyArray(int start, int last) {
+        Token first = tokens.get(start);
+        if (first.isPunct("[") || first.isKeyword("ARRAY")) {
+            return true;
+        }
+        if (first.kind != Kind.IDENT || !ARRAY_FUNCTIONS.contains(first.upper()) || !tokens.get(last).isPunct(")")) {
+            return false;
+        }
+        int open = nextSignificant(start + 1, last + 1);
+        return open >= 0 && tokens.get(open).isPunct("(") && matchingParen(open) == last;
     }
 
     /** True when {@code t} can end an array value, so a {@code [} right after it is a subscript. */

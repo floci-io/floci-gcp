@@ -804,6 +804,17 @@ class SqlDialectTranslatorTest {
         assertTrue(ordinal.contains("WHEN _s.i < 1 THEN") && ordinal.contains("WHEN _s.i >= len(_s.a) + 1 THEN")
                 && ordinal.contains("ELSE _s.a[_s.i] END)[1]) AS v"), ordinal);
         assertEquals("SELECT [1, 2] AS a", sql("SELECT [1, 2] AS a"), "an array literal is not a subscript");
+        String literal = sql("SELECT [10, 20, 30][2] AS v");
+        assertTrue(literal.startsWith("SELECT (list_transform([struct_pack(a := [10, 20, 30], i := 2)], lambda _s:")
+                && literal.contains("ELSE _s.a[_s.i + 1] END)[1]) AS v"), literal);
+        for (String visible : List.of("SPLIT(s)[1]", "ARRAY(SELECT 1)[0]", "GENERATE_ARRAY(1, 5)[0]",
+                "ARRAY_AGG(x ORDER BY x)[1]")) {
+            String rendered = sql("SELECT " + visible + " AS v FROM ds.t");
+            assertTrue(rendered.startsWith("SELECT (list_transform([struct_pack(a := ") && rendered.contains("_s.a[_s.i + 1]"),
+                    visible + " -> " + rendered);
+        }
+        assertEquals("SELECT f(x)[1] AS v FROM \"ds\".\"t\"", sql("SELECT f(x)[1] AS v FROM ds.t"),
+                "a call that may return JSON keeps its bare subscript");
     }
 
     @Test

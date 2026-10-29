@@ -321,7 +321,7 @@ abstract class IamCustomRoleEnforcementContract {
         String otherTopic = otherProject + "/topics/source";
         pubsub.createTopic(otherTopic);
         createRoleViaApi(project, "topicreader", List.of("pubsub.topics.get"));
-        grant(otherProject, project + "/roles/topicreader", null);
+        storeGrant(otherProject, project + "/roles/topicreader");
 
         expectDenied(given().header("Authorization", credential).get("/v1/" + otherTopic).then(), 200);
         if (enforced()) {
@@ -349,7 +349,7 @@ abstract class IamCustomRoleEnforcementContract {
                     ? Map.of("projectId", id, "parent", parents.get(suffix)) : Map.of("projectId", id);
             given().contentType("application/json").body(body).post("/v1/projects").then().statusCode(200);
             pubsub.createTopic("projects/" + id + "/topics/source");
-            grant("projects/" + id, orgRole, null);
+            storeGrant("projects/" + id, orgRole);
         }
 
         given().header("Authorization", credential).get("/v1/projects/" + projectId + "-in/topics/source")
@@ -513,7 +513,7 @@ abstract class IamCustomRoleEnforcementContract {
                 Map.of("role", project + "-other/roles/foreignrole", "members", List.of(member),
                         "condition", unsupported),
                 Map.of("role", "roles/pubsub.viewer", "members", List.of(member))));
-        policies.setPolicy(project, policy);
+        storePolicy(project, policy);
 
         given().header("Authorization", credential).get("/v1/" + topic).then().statusCode(200);
 
@@ -540,6 +540,89 @@ abstract class IamCustomRoleEnforcementContract {
         policies.setPolicy(project, new StoredPolicy());
         grant("buckets/" + bucket, role, null);
         expectDenied(given().header("Authorization", credential).get("/storage/v1/b/" + bucket).then(), 200);
+    }
+
+    @Test
+    void projectSetIamPolicyRejectsMissingAndForeignCustomRoles() {
+        String path = "/v1/" + project + ":setIamPolicy";
+        createRoleViaApi(project + "-other", "foreign", List.of("pubsub.topics.get"));
+        createRoleViaApi(project, "reader", List.of("pubsub.topics.get"));
+
+        expectRejected(setIamPolicy(path, project + "/roles/missing", member),
+                "Role (" + project + "/roles/missing) does not exist in resource's hierarchy.");
+        expectRejected(setIamPolicy(path, "organizations/4242/roles/missing", member),
+                "Role (organizations/4242/roles/missing) does not exist in resource's hierarchy.");
+        expectRejected(setIamPolicy(path, project + "-other/roles/foreign", member),
+                "Role (" + project + "-other/roles/foreign) does not exist in the resource's hierarchy.");
+        setIamPolicy(path, project + "/roles/reader", member).statusCode(200);
+        assertEquals(List.of(project + "/roles/reader"),
+                policies.getPolicy(project).getBindings().stream().map(binding -> binding.get("role")).toList());
+    }
+
+    @Test
+    void deletedCustomRoleKeepsExistingGrantsButRejectsNewOnes() {
+        String path = "/v1/" + project + ":setIamPolicy";
+        String role = project + "/roles/reader";
+        String other = "serviceAccount:other@" + projectId + ".iam.gserviceaccount.com";
+        createRoleViaApi(project, "reader", List.of("pubsub.topics.get"));
+        setIamPolicy(path, role, member).statusCode(200);
+        roles.delete(role, null);
+
+        setIamPolicy(path, role, member).statusCode(200);
+        expectRejected(setIamPolicy(path, role, member, other),
+                "Cannot add new grants to deleted role (" + role + ").");
+        roles.undelete(role, null);
+        setIamPolicy(path, role, member, other).statusCode(200);
+    }
+
+    @Test
+    void organizationRoleBindingsFollowTheRecordedProjectParent() {
+        String organizationId = String.valueOf(Math.abs(UUID.randomUUID().getMostSignificantBits() % 1_000_000_000L));
+        String orgRole = "organizations/" + organizationId + "/roles/topicreader";
+        createRoleViaApi("organizations/" + organizationId, "topicreader", List.of("pubsub.topics.get"));
+        Map<String, Map<String, String>> parents = Map.of(
+                "in", Map.of("type", "organization", "id", organizationId),
+                "other", Map.of("type", "organization", "id", "1"),
+                "folder", Map.of("type", "folder", "id", organizationId));
+        for (String suffix : List.of("in", "other", "folder", "none")) {
+            String id = projectId + "-" + suffix;
+            Map<String, Object> body = parents.containsKey(suffix)
+                    ? Map.of("projectId", id, "parent", parents.get(suffix)) : Map.of("projectId", id);
+            given().contentType("application/json").body(body).post("/v1/projects").then().statusCode(200);
+        }
+
+        setIamPolicy("/v1/projects/" + projectId + "-in:setIamPolicy", orgRole, member).statusCode(200);
+        setIamPolicy("/v1/projects/" + projectId + "-folder:setIamPolicy", orgRole, member).statusCode(200);
+        for (String suffix : List.of("other", "none")) {
+            expectRejected(setIamPolicy("/v1/projects/" + projectId + "-" + suffix + ":setIamPolicy", orgRole, member),
+                    "Role (" + orgRole + ") does not exist in the resource's hierarchy.");
+        }
+    }
+
+    @Test
+    void resourceSetIamPolicyRejectsForeignCustomRolesOverRestAndGrpc() {
+        String topic = project + "/topics/source";
+        pubsub.createTopic(topic);
+        policies.createServiceAccount(projectId, "target", "target", "");
+        String account = project + "/serviceAccounts/target@" + projectId + ".iam.gserviceaccount.com";
+        String foreign = project + "-other/roles/foreign";
+        createRoleViaApi(project + "-other", "foreign", List.of("pubsub.topics.get"));
+        String message = "Role (" + foreign + ") does not exist in the resource's hierarchy.";
+
+        expectRejected(setIamPolicy("/v1/" + topic + ":setIamPolicy", foreign, member), message);
+        expectRejected(setIamPolicy("/v1/" + account + ":setIamPolicy", foreign, member), message);
+        SetIamPolicyRequest request = SetIamPolicyRequest.newBuilder().setResource(topic)
+                .setPolicy(Policy.newBuilder().addBindings(Binding.newBuilder().setRole(foreign).addMembers(member)))
+                .build();
+        IAMPolicyGrpc.IAMPolicyBlockingStub mixin = IAMPolicyGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(5, TimeUnit.SECONDS);
+        if (enforced()) {
+            StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> mixin.setIamPolicy(request));
+            assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+            assertEquals(message, error.getStatus().getDescription());
+        } else {
+            mixin.setIamPolicy(request);
+        }
     }
 
     /** Covers the reset path only; eager store registration at boot is not observable from a QuarkusTest. */
@@ -571,6 +654,33 @@ abstract class IamCustomRoleEnforcementContract {
                     "condition", Map.of("title", "scope", "expression", expression))));
         }
         policies.setPolicy(resource, policy);
+    }
+
+    private ValidatableResponse setIamPolicy(String path, String role, String... members) {
+        return given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("policy", Map.of("bindings", List.of(Map.of("role", role, "members", List.of(members))))))
+                .post(path).then();
+    }
+
+    private void expectRejected(ValidatableResponse response, String message) {
+        if (enforced()) {
+            response.statusCode(400).body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", equalTo(message));
+        } else {
+            response.statusCode(200);
+        }
+    }
+
+    /** Seeds a policy as stored before enforce mode, bypassing the write-time binding validation. */
+    private void storePolicy(String resource, StoredPolicy policy) {
+        storageFactory.createGlobal("iam-policies", "iam-policies.json",
+                new TypeReference<Map<String, StoredPolicy>>() {}).put("policy:" + resource, policy);
+    }
+
+    private void storeGrant(String resource, String role) {
+        StoredPolicy policy = new StoredPolicy();
+        policy.setBindings(List.of(Map.of("role", role, "members", List.of(member))));
+        storePolicy(resource, policy);
     }
 
     private void expectDenied(ValidatableResponse response, int disabledStatus) {

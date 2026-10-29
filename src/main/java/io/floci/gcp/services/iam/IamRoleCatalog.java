@@ -87,6 +87,13 @@ public class IamRoleCatalog {
         return contains(role) || (customRoles != null && customRoles.applies(role, policyResource));
     }
 
+    /** Rejects a new grant of a custom role that cannot be bound in the policy stored under {@code policyResource}. */
+    public void requireBindable(String role, String policyResource) {
+        if (customRoles != null) {
+            customRoles.requireBindable(role, policyResource);
+        }
+    }
+
     IamRoleCatalog(Map<String, Set<String>> permissionsByRole) {
         this.customRoles = null;
         Map<String, Set<String>> copiedPermissions = new LinkedHashMap<>();

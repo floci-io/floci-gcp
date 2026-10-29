@@ -199,6 +199,58 @@ public class IamRoleService {
                 && roles.get(role).filter(StoredRole::grantsPermissions).isPresent();
     }
 
+    /**
+     * Rejects a new grant of a custom role that GCP refuses when the policy on {@code policyResource}
+     * is written: a role defined outside the resource's project or organization, a missing role, or a
+     * deleted one. A placement this emulator cannot decide (folder or unrecorded parents, unresolved
+     * project numbers) is accepted. Predefined roles are not checked.
+     */
+    public void requireBindable(String role, String policyResource) {
+        Matcher matcher = role == null ? null : ROLE_NAME.matcher(role);
+        if (matcher == null || !matcher.matches()) {
+            return;
+        }
+        if (outsideHierarchy(matcher.group(2), matcher.group(3), policyResource)) {
+            throw GcpException.invalidArgument("Role (" + role + ") does not exist in the resource's hierarchy.");
+        }
+        StoredRole stored = roles.get(role).orElseThrow(() -> GcpException.invalidArgument(
+                "Role (" + role + ") does not exist in resource's hierarchy."));
+        if (stored.softDeleted()) {
+            throw GcpException.invalidArgument("Cannot add new grants to deleted role (" + role + ").");
+        }
+    }
+
+    private boolean outsideHierarchy(String parentType, String parentId, String policyResource) {
+        String project = projectOf(policyResource);
+        if (parentType.equals("projects")) {
+            if (project == null || parentId.equals(project)) {
+                return false;
+            }
+            String roleProject = canonicalProjectId(parentId);
+            String resourceProject = canonicalProjectId(project);
+            return roleProject != null && resourceProject != null && !roleProject.equals(resourceProject);
+        }
+        if (policyResource.startsWith("organizations/")) {
+            return !policyResource.equals("organizations/" + parentId);
+        }
+        Optional<ProjectRecord> record = project == null ? Optional.empty() : projects.find(project);
+        if (record.isEmpty()) {
+            return false;
+        }
+        if (record.get().hasParent()) {
+            return "organization".equals(record.get().getParentType()) && !parentId.equals(record.get().getParentId());
+        }
+        return record.get().isCreated();
+    }
+
+    /** The project ID for an ID or a registered number; null for a number that is not registered. */
+    private String canonicalProjectId(String idOrNumber) {
+        if (!ProjectRegistry.isNumber(idOrNumber)) {
+            return idOrNumber;
+        }
+        return projects.find(idOrNumber).map(ProjectRecord::getProjectId).orElse(null);
+    }
+
     private boolean inScope(String parentType, String parentId, String policyResource) {
         String project = projectOf(policyResource);
         if (parentType.equals("projects")) {

@@ -48,7 +48,9 @@ bypass; sink management caller authorization is a separate integration.
 7. Reuse `IamService` policy storage and its existing resource-existence resolvers.
    `testPermissions` routes registered resources through the evaluator. Override
    `validatePolicy` for service-specific binding constraints; it runs on policy
-   writes and before evaluation in enforce mode and must not perform I/O.
+   writes and before evaluation in enforce mode and must not perform I/O. Custom-role
+   bindings are checked on writes by the shared service, after `validatePolicy`, for
+   every resource the adapter registers.
    A service using different policy storage needs a reviewed integration before
    advertising enforcement; registering a resource factory alone is insufficient.
 8. Add the service to the documentation and coverage matrix. Startup coverage is

@@ -264,7 +264,7 @@ class IamServiceAccountEnforcementIntegrationTest {
         given().header("Authorization", "Bearer " + expired.getTokenValue()).when().delete("/v1/" + account)
                 .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
         assertEquals("original", iam.getServiceAccount(project, "target").getDisplayName());
-        setPolicy(account, "projects/" + project + "/roles/custom", callerEmail, null);
+        setPolicy(account, "roles/compute.viewer", callerEmail, null);
         given().header("Authorization", callerAuthorization).when().get("/v1/" + account).then().statusCode(403);
         StoredPolicy policy = iam.getPolicy(account);
         policy.setBindings(List.of(policy.getBindings().getFirst(), Map.of("role", "roles/iam.serviceAccountUser",

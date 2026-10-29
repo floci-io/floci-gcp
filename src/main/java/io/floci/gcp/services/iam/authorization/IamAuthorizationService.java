@@ -21,10 +21,12 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /** Single decision point shared by every supported transport and testIamPermissions. */
@@ -147,11 +149,44 @@ public class IamAuthorizationService {
         }
     }
 
-    public void validatePolicyWrite(String resource, StoredPolicy policy) {
-        if (enabled()) {
-            registry.resource(resource).ifPresent(adapter ->
-                    adapter.validatePolicy(resource, IamPolicyNormalizer.normalize(policy)));
+    /**
+     * Validates a policy write against the service's binding constraints and, for each role-member
+     * grant not already in {@code previous}, against the custom roles that can be bound there.
+     * Grants kept from {@code previous} stay valid, as GCP keeps bindings to roles deleted later.
+     */
+    public void validatePolicyWrite(String resource, StoredPolicy previous, StoredPolicy policy) {
+        if (!enabled()) {
+            return;
         }
+        Optional<IamAuthorizationAdapter> adapter = registry.resource(resource);
+        if (adapter.isEmpty()) {
+            return;
+        }
+        IamPolicy normalized = IamPolicyNormalizer.normalize(policy);
+        adapter.get().validatePolicy(resource, normalized);
+        Set<String> existing = grants(previous);
+        for (IamBinding binding : normalized.bindings()) {
+            if (!binding.members().stream().allMatch(member -> existing.contains(grant(binding.role(), member)))) {
+                roles.requireBindable(binding.role(), resource);
+            }
+        }
+    }
+
+    private static Set<String> grants(StoredPolicy policy) {
+        Set<String> grants = new HashSet<>();
+        if (policy == null || policy.getBindings() == null) {
+            return grants;
+        }
+        for (Map<String, Object> binding : policy.getBindings()) {
+            if (binding.get("role") instanceof String role && binding.get("members") instanceof List<?> members) {
+                members.forEach(member -> grants.add(grant(role, String.valueOf(member))));
+            }
+        }
+        return grants;
+    }
+
+    private static String grant(String role, String member) {
+        return role + "\n" + member;
     }
 
     /** Holds the target and ancestor policy locks while a service authorizes and mutates state. */

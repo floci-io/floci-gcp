@@ -240,6 +240,49 @@ class IamRoleServiceTest {
     }
 
     @Test
+    void requireBindableRejectsOnlyPlacementsTheRecordedHierarchySettles() {
+        service.create("projects/p", "reader", role("Reader", "pubsub.topics.get"));
+        service.create("organizations/42", "reader", role("Reader", "pubsub.topics.get"));
+        projectRecords.put("in-org", project("in-org", "organization", "42"));
+        projectRecords.put("other-org", project("other-org", "organization", "7"));
+        projectRecords.put("in-folder", project("in-folder", "folder", "42"));
+        projectRecords.put("implicit", project("implicit", null, null));
+        ProjectRecord created = project("created", null, null);
+        created.setCreated(true);
+        projectRecords.put("created", created);
+        ProjectRecord numbered = project("q", null, null);
+        numbered.setProjectNumber("123456789012");
+        projectRecords.put("123456789012", numbered);
+
+        for (String resource : List.of("projects/p", "projects/p/topics/t", "projects/-/serviceAccounts/x",
+                "projects/999999999999", "buckets/b")) {
+            service.requireBindable(ROLE, resource);
+        }
+        for (String resource : List.of("projects/in-org", "projects/in-folder/topics/t", "projects/implicit",
+                "projects/unknown", "organizations/42")) {
+            service.requireBindable(ORG_ROLE, resource);
+        }
+        service.requireBindable("roles/viewer", "projects/other");
+
+        String outside = "Role (%s) does not exist in the resource's hierarchy.";
+        for (String resource : List.of("projects/other", "projects/other/topics/t", "projects/123456789012")) {
+            assertMessage(outside.formatted(ROLE), () -> service.requireBindable(ROLE, resource));
+        }
+        for (String resource : List.of("projects/other-org", "projects/created", "organizations/7")) {
+            assertMessage(outside.formatted(ORG_ROLE), () -> service.requireBindable(ORG_ROLE, resource));
+        }
+        assertMessage("Role (projects/p/roles/missing) does not exist in resource's hierarchy.",
+                () -> service.requireBindable("projects/p/roles/missing", "projects/p"));
+        assertMessage("Role (organizations/42/roles/missing) does not exist in resource's hierarchy.",
+                () -> service.requireBindable("organizations/42/roles/missing", "projects/in-folder"));
+
+        service.delete(ROLE, null);
+        assertMessage("Cannot add new grants to deleted role (" + ROLE + ").",
+                () -> service.requireBindable(ROLE, "projects/p"));
+        assertStatus("INVALID_ARGUMENT", () -> service.requireBindable(ROLE, "projects/p"));
+    }
+
+    @Test
     void permissionEditsDisablingAndDeletionAffectSubsequentDecisions() {
         StoredRole created = service.create("projects/p", "reader", role("Reader", "pubsub.topics.get"));
         StoredRole edited = service.update(ROLE, Map.of("includedPermissions", List.of("pubsub.topics.list")),

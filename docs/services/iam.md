@@ -346,12 +346,25 @@ checks. Defining a role does not implement an operation.
 
 #### Policy writes
 
-Setting a policy does not check custom roles. GCP rejects a binding to a missing role,
-or to another project's role, with `INVALID_ARGUMENT`
-`Role (NAME) does not exist in the resource's hierarchy.`, and a new binding to a
-deleted role with `INVALID_ARGUMENT` `Cannot add new grants to deleted role (NAME).`
-Existing bindings to a deleted role are kept. Floci stores all such bindings, and they
-grant nothing.
+In enforce mode, `setIamPolicy` on a resource with an enforcing adapter (projects,
+Pub/Sub topics, subscriptions and snapshots, Secret Manager secrets, Cloud Run services,
+and service accounts, over REST and the shared IAM gRPC API) checks each role-member
+grant that is not already in the stored policy and rejects it with `400 INVALID_ARGUMENT`
+when it binds:
+
+- a custom role defined in another project, or an organization role in a project whose
+  recorded parent is another organization or that was created without a parent:
+  `Role (NAME) does not exist in the resource's hierarchy.`
+- a custom role that does not exist: `Role (NAME) does not exist in resource's hierarchy.`
+- a deleted custom role: `Cannot add new grants to deleted role (NAME).`
+
+Grants already in the stored policy are kept, so bindings to a role deleted later stay
+in the policy and grant nothing. Placements the emulator cannot decide are accepted:
+organization roles in projects under a folder, in projects registered implicitly, or in
+unknown projects, and project numbers that are not registered. Predefined roles are not
+checked. In `disabled` mode, and for resources without an enforcing adapter (GCS bucket
+policies, Cloud Functions, Cloud Run jobs, worker pools and instances, organization
+policies), all bindings are stored as sent.
 
 A binding to a missing, deleted, or disabled custom role is skipped without checking its
 condition. Creating, undeleting, or enabling that role makes the binding apply, and an
@@ -392,7 +405,8 @@ not a Google-managed production credential.
 - Shared REST/gRPC interceptors do not hold policy locks through business mutations.
   GCS object operations and Logging GCS export use service-level locks through
   publication; other integrations must provide their own consistency boundary.
-- The emulator does not validate that a role is grantable on the policy resource.
+- The emulator does not validate that a predefined role is grantable on the policy
+  resource. Custom-role bindings are checked as described in [Policy writes](#policy-writes).
   Unsupported permissions in a known role are absent from the catalog.
 
 See [Adding an enforcing service](../iam-enforcement.md) for the shared extension

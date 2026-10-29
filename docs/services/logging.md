@@ -269,7 +269,62 @@ configuration. Destination policy locks are held through authorization and objec
 the existing order: sink lock, IAM policy locks, bucket lock, object lock. A policy revocation is
 ordered before or after the publication, never between its permission check and mutation.
 
-Sink management caller authorization remains unsupported and is tracked separately in #404.
+### Sink management IAM
+
+With `floci-gcp.services.iam.authorization-mode=enforce`, emulator-issued service-account
+credentials are checked for the following methods on both REST JSON and gRPC. Anonymous and
+external credentials retain the emulator's bypass behavior. Disabled mode skips these checks.
+
+| Method | Permission | Condition resource name |
+|---|---|---|
+| CreateSink | `logging.sinks.create` | The future `.../sinks/{name}` resource |
+| ListSinks | `logging.sinks.list` | The parent |
+| GetSink | `logging.sinks.get` | The sink name |
+| UpdateSink, REST PUT or PATCH | `logging.sinks.update` | The sink name |
+| DeleteSink | `logging.sinks.delete` | The sink name |
+
+Project sinks evaluate the project's IAM policy and inherit an organization policy when
+Resource Manager has recorded that organization as the project's direct parent.
+Project parents include domain-scoped IDs such as `projects/example.com:my-project`.
+For those IDs, evaluated callers cannot use the shared IAM mixin to read or write the
+project policy; trusted policy setup remains available.
+Organization sinks evaluate the policy stored under the organization name. Trusted setup can
+write that policy through the shared IAM policy gRPC mixin. Unknown or folder ancestry does
+not grant an organization policy, and project policy bindings do not grant access to
+organization sinks.
+`roles/logging.configWriter` and `roles/logging.admin`
+grant these five permissions; `roles/logging.viewer` and `roles/logging.privateLogViewer`
+grant get and list. Supported basic-role
+slices grant all five for owner, and get and list for editor and viewer. Active custom roles
+can grant individual permissions through their stored `includedPermissions`.
+
+The restricted condition profile supports `resource.name`, `resource.type`, and
+`resource.service` comparisons, string prefixes, logical operators, and request-time comparison.
+The service and type attributes are `logging.googleapis.com` and
+`logging.googleapis.com/LogSink` for these checks. Create checks the future sink name, list
+checks the parent name, and get, update, and delete check the named sink. A condition naming
+one sink therefore permits create or operations on that sink while denying a sibling;
+it does not grant list. The published IAM Conditions
+[`resource.name` support list](https://cloud.google.com/iam/docs/conditions-resource-attributes)
+names Logging buckets and views, but not sinks. Live project and organization sink checks
+using official Java REST and gRPC clients confirmed these resource names, service, and type
+in October 2026. The organization checks covered all five RPCs and all six REST method
+forms, including both PUT and PATCH, with exact sink-name, parent-name, service, and type
+conditions. These observations apply to the tested API version and principals; they do not
+establish general IAM Conditions or Organization Policy equivalence.
+`testIamPermissions` on an existing sink, through the shared IAM gRPC mixin, returns
+only permissions granted for that sink resource. Sink policy reads and writes through that mixin are
+unsupported in enforce mode; a sink inherits its parent policy rather than storing a sink policy.
+Sink permission denials use HTTP 403 or gRPC `PERMISSION_DENIED`, with the observed
+`IAM_PERMISSION_DENIED` error detail naming the denied permission and resource.
+An evaluated caller's organization policy read or write through the mixin retains the shared IAM
+`FAILED_PRECONDITION` result for an unmapped resource. Project policy methods remain in Resource Manager.
+
+Folder and billing-account sink CRUD remain available when enforcement is disabled, but
+emulator-issued service-account requests for those parents fail closed in enforce mode because
+their IAM policy ancestry is not modeled. Other `ConfigServiceV2` methods and Logging entry
+ingestion/read APIs are not IAM-enforced. Local tests do not establish equivalence with real
+GCP IAM Conditions or Organization Policy enforcement.
 
 The wire contracts follow the [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto),
 the [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks),

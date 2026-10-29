@@ -134,10 +134,10 @@ resource service/type/name, string comparisons and prefixes, logical operators,
 and request-time comparison. The CEL standard library is not enabled.
 The catalog and condition profile are subsets of Google Cloud IAM.
 
-Cloud Logging GCS sinks authorize fresh object creation as their persisted writer principal,
+Cloud Logging sink management checks project and organization sink methods over REST and gRPC;
+see [sink management IAM](logging.md#sink-management-iam). Cloud Logging GCS sinks authorize fresh object creation as their persisted writer principal,
 including bucket/project policy grants and supported conditions. They do not use the logging
-caller's credentials. See [GCS export](logging.md#gcs-export). Sink management authorization
-is not implemented.
+caller's credentials. See [GCS export](logging.md#gcs-export).
 
 ### Service-account enforcement
 

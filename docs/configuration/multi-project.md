@@ -169,6 +169,7 @@ evaluated. These settings make it stricter. All are off by default.
 - Services that store by resource name keep the project as the request names it, so
   `projects/{number}/...` and `projects/{id}/...` address different data there. A number
   maps to the ID only for the request project on REST (the services that store by request
-  project, Cloud Storage bucket listing) and for Service Usage enablement.
+  project, Cloud Storage bucket listing), for Service Usage enablement, and for project IAM
+  policies.
 - Project numbers are derived from the ID. They are stable, but they are not the numbers real
   GCP would assign.

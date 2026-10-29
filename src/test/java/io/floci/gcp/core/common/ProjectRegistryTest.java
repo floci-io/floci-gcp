@@ -49,6 +49,22 @@ class ProjectRegistryTest {
     }
 
     @Test
+    void canonicalProjectNameMapsOnlyKnownProjectNumbers() {
+        ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
+        registry.observe("seen-proj");
+        String number = ProjectNumbers.of("seen-proj");
+
+        assertEquals("projects/seen-proj", registry.canonicalProjectName("projects/" + number));
+        assertEquals("projects/default-proj",
+                registry.canonicalProjectName("projects/" + ProjectNumbers.of("default-proj")));
+        assertEquals("projects/123456789012", registry.canonicalProjectName("projects/123456789012"));
+        assertEquals("projects/seen-proj", registry.canonicalProjectName("projects/seen-proj"));
+        assertEquals("projects/" + number + "/topics/t", registry.canonicalProjectName("projects/" + number + "/topics/t"));
+        assertEquals("buckets/b", registry.canonicalProjectName("buckets/b"));
+        assertFalse(registry.find("123456789012").isPresent());
+    }
+
+    @Test
     void resolvesRegisteredProjectsAndDefaultProjectByNumber() {
         ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
         registry.observe("seen-proj");

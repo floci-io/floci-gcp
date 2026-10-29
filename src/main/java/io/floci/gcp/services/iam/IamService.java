@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ProtoJsonBytes;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -72,19 +73,21 @@ public class IamService {
     private final Instance<IamAuthorizationService> authorization;
     private final Instance<SecretManagerService> secretManager;
     private final SecretManagerIamAuthorizationAdapter secretManagerIamAdapter;
+    private final ProjectRegistry projects;
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
             GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization,
             Instance<SecretManagerService> secretManager,
-            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter) {
+            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter, ProjectRegistry projects) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.authorization = authorization;
         this.secretManager = secretManager;
         this.secretManagerIamAdapter = secretManagerIamAdapter;
+        this.projects = projects;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -116,6 +119,7 @@ public class IamService {
         this.authorization = null;
         this.secretManager = null;
         this.secretManagerIamAdapter = null;
+        this.projects = null;
         registerServiceAccountPolicyResolver();
     }
 
@@ -291,6 +295,7 @@ public class IamService {
     }
 
     public StoredPolicy getPolicy(String resource) {
+        resource = canonicalProjectName(resource);
         String key = policyKey(resource);
         synchronized (policyLock(key)) {
             requireResourceExists(resource);
@@ -299,6 +304,7 @@ public class IamService {
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
+        resource = canonicalProjectName(resource);
         String key = policyKey(resource);
         // Serializes existence check + etag read-compare-write per resource, both
         // against concurrent setPolicy (two writers passing the etag check on the
@@ -450,6 +456,7 @@ public class IamService {
                 String[] parts = resource.split("/", 4);
                 resource = canonicalServiceAccountName(parts[1], parts[3]);
             }
+            resource = canonicalProjectName(resource);
             requireResourceExists(resource);
         } catch (GcpException e) {
             if (e.getHttpStatus() == 404) {
@@ -795,6 +802,11 @@ public class IamService {
 
     private static String saKey(String project, String email) {
         return "sa:" + project + ":" + email;
+    }
+
+    /** A project policy is stored under the project ID, whether the request names the ID or the number. */
+    private String canonicalProjectName(String resource) {
+        return projects == null ? resource : projects.canonicalProjectName(resource);
     }
 
     private static String policyKey(String resource) {

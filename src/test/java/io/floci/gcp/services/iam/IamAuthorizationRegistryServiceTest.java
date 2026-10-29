@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.iam.v1.GetIamPolicyRequest;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.cloudbilling.CloudBillingIamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -24,7 +25,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class IamAuthorizationRegistryServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
-    private final List<IamAuthorizationAdapter> adapters = List.of(new ResourceManagerIamAuthorizationAdapter());
+    private final List<IamAuthorizationAdapter> adapters = List.of(new ResourceManagerIamAuthorizationAdapter(),
+            new CloudBillingIamAuthorizationAdapter());
 
     @Test
     void everyImplementedRestHandlerHasAnExplicitOperationDecision() {

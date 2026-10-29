@@ -20,6 +20,7 @@ which mode is active and the supported service list.
 | Surface | IAM enforcement in `enforce` mode |
 |---|---|
 | Resource Manager v1 project metadata and project policies | REST JSON; project policies also use the shared IAM gRPC mixin |
+| Cloud Billing v1 project billing info | REST JSON `GET` only; the `PUT` update is not evaluated. See [Cloud Billing IAM enforcement](cloud-billing.md#iam-enforcement) |
 | Cloud Run v2 services and revisions | REST JSON service and revision operations; service-policy methods also use the shared IAM gRPC API. See [Cloud Run IAM enforcement](cloud-run.md#iam-enforcement-for-services) |
 | GCS buckets | Supported REST bucket metadata, IAM-policy, retention-lock, storage-layout, and notification operations; bucket `testIamPermissions` filters its response |
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
@@ -325,11 +326,12 @@ checks. Defining a role does not implement an operation.
 
 #### Project identity and ancestry
 
-- Role names and policy keys keep the project segment as sent, so a project number and
-  its project ID name different stored roles and different policies, as for every other
-  resource keyed by its path. A role under `projects/{number}` grants only through
-  policies keyed by that number, and organization roles grant only through policies
-  keyed by a project ID.
+- A project policy is stored and evaluated under the project ID: `projects/{number}` of a
+  known project reads, writes and inherits the same policy as `projects/{id}`, over REST
+  and the shared IAM gRPC mixin. Role names and other resource policy keys keep the
+  project segment as sent, so a role under `projects/{number}` and its project ID name
+  different stored roles, and a role under `projects/{number}` does not grant through
+  project policies. Organization roles grant only through policies keyed by a project ID.
 - Organization role requests name no project, so Service Usage gates them on the
   request's project context, which is the default project unless the request names one.
 - Folder and organization ancestry is modelled only as a project's direct parent.
@@ -395,9 +397,10 @@ not a Google-managed production credential.
 - Organization/folder inheritance, deny policies, principal access boundaries,
   group/domain membership expansion, workforce/workload identities,
   and organization policy constraints are not implemented.
-- Service-account address aliases resolve to canonical email policy names. Other
-  resource names are evaluated as requested. Project ID/number aliases are not
-  canonicalized to equivalent numeric resource names.
+- Service-account address aliases resolve to canonical email policy names, and a known
+  project's number resolves to its project ID for project policies. Other resource names
+  are evaluated as requested, so `projects/{number}/...` child resources keep their own
+  policy keys.
 - Only declared operation permissions are checked. Dependent service-agent,
   `actAs`, push-authentication, BigQuery export, CMEK, and other cross-service
   grants are not validated. This emulator cannot prove those configurations work

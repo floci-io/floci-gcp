@@ -109,7 +109,9 @@ Default `disabled` mode stores policies without restricting requests. Anonymous
 and external credentials bypass Resource Manager IAM in both modes. Project grants
 can authorize supported GCS, Pub/Sub, Cloud Run, Secret Manager, and IAM operations
 through inheritance. They do not enforce permissions on unsupported services.
-Organization and folder inheritance and project ID/number alias equivalence are not implemented.
+A known project's number and its ID share one project policy: `GET /v1/projects/{number}`
+is authorized by the grants on `projects/{id}`. Organization and folder inheritance are not
+implemented.
 A project whose recorded parent is an organization can use that organization's
 [custom roles](iam.md#custom-roles).
 See [IAM enforcement and limitations](iam.md#opt-in-enforcement).

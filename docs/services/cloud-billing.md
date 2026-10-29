@@ -43,6 +43,15 @@ the configured storage mode and follows the same strict-mode rules.
 - Billing account IAM policies, listing billing accounts and their projects, services and
   SKUs are not implemented.
 
+## IAM enforcement
+
+With `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, `GET .../billingInfo` checks
+`resourcemanager.projects.get` on the project for Floci-issued service-account tokens, as the
+Cloud Billing API states for `GetProjectBillingInfo`. `PUT .../billingInfo` and billing-account
+`testIamPermissions` are not evaluated: GCP requires ownership of both the project and the
+billing account for the update without naming the permission it checks, and billing accounts
+are not modelled. See [IAM](iam.md#opt-in-enforcement).
+
 ## Quick Start
 
 === "Terraform"

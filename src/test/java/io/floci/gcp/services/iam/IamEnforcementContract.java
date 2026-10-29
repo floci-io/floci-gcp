@@ -19,6 +19,7 @@ import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.PublisherGrpc;
 import com.google.type.Expr;
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.services.credentials.CredentialAccessBoundaryRule;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
@@ -378,6 +379,45 @@ abstract class IamEnforcementContract {
         Response create = request().header("Authorization", credential).contentType("application/json")
                 .body(Map.of("projectId", visible + "-c", "name", "Created Project")).post("/v1/projects");
         restDenied(create);
+    }
+
+    @Test
+    void projectNumberAndProjectIdShareOnePolicy() {
+        String id = project.substring("projects/".length());
+        String byNumber = "projects/" + ProjectNumbers.of(id);
+        String other = id + "-n";
+        request().contentType("application/json").body(Map.of("projectId", other, "name", "Other Project"))
+                .post("/v1/projects").then().statusCode(200);
+        request().get("/v1/" + project).then().statusCode(200);
+        grant(byNumber, "roles/browser", null);
+
+        request().contentType("application/json").body(Map.of())
+                .post("/v1/" + project + ":getIamPolicy").then().statusCode(200)
+                .body("bindings[0].role", equalTo("roles/browser"));
+        assertEquals("roles/browser", grpcRead(authenticated, project).getBindings(0).getRole());
+        assertEquals("roles/browser", grpcRead(authenticated, byNumber).getBindings(0).getRole());
+        request().header("Authorization", credential).get("/v1/" + project).then().statusCode(200);
+        request().header("Authorization", credential).get("/v1/" + byNumber).then().statusCode(200)
+                .body("projectId", equalTo(id));
+        List<String> permissions = List.of("resourcemanager.projects.get", "resourcemanager.projects.setIamPolicy");
+        request().header("Authorization", credential).contentType("application/json")
+                .body(Map.of("permissions", permissions)).post("/v1/" + byNumber + ":testIamPermissions")
+                .then().statusCode(200)
+                .body("permissions", equalTo(enforced() ? List.of(permissions.getFirst()) : permissions));
+
+        restDenied(request().header("Authorization", credential)
+                .get("/v1/projects/" + ProjectNumbers.of(other)));
+    }
+
+    @Test
+    void projectBillingInfoReadNeedsProjectGet() {
+        String id = project.substring("projects/".length());
+        restDenied(request().header("Authorization", credential).get("/v1/" + project + "/billingInfo"));
+        grant(project, "roles/browser", null);
+        request().header("Authorization", credential).get("/v1/" + project + "/billingInfo")
+                .then().statusCode(200).body("projectId", equalTo(id));
+        request().header("Authorization", credential).get("/v1/projects/" + ProjectNumbers.of(id) + "/billingInfo")
+                .then().statusCode(200).body("projectId", equalTo(id));
     }
 
     @Test

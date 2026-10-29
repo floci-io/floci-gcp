@@ -6,7 +6,7 @@ and gRPC transport adapters. The gRPC interceptor is installed in
 The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
-Resource Manager projects, Cloud Run v2 services and revisions, Secret Manager
+Resource Manager projects, Cloud Billing project billing-info reads, Cloud Run v2 services and revisions, Secret Manager
 secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
 issuance, IAM project and organization custom-role management, and GCS bucket/object
 operations are integrated. Bindings to stored custom roles grant their `includedPermissions`

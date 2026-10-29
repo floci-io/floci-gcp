@@ -1,5 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -23,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
@@ -4033,6 +4036,171 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(java.util.Arrays.asList("object", "array", "string", "number",
                         "number", "number", "number", "boolean", "null", null)));
+    }
+
+    @Test
+    @Order(5)
+    void arrayConcatAggAndHllSketchesCompose() {
+        query("""
+                {"query": "SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM shop.users", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("a", "b")));
+
+        query(Map.of("query", """
+                WITH sketches AS (SELECT HLL_COUNT.INIT(name, 20) AS sketch FROM shop.users)
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value) FROM UNNEST([sketch, sketch]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(List.of("3", "3")));
+
+        query(Map.of("query", """
+                SELECT HLL_COUNT.INIT(CAST(NULL AS STRING)) IS NULL AS init_all_null,
+                  HLL_COUNT.MERGE(CAST(NULL AS BYTES)) = 0 AS merge_all_null,
+                  HLL_COUNT.MERGE_PARTIAL(CAST(NULL AS BYTES)) IS NULL AS merge_partial_all_null
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "true", "true")));
+    }
+
+    @Test
+    @Order(5)
+    void hllOperationsReadBigQueryCompatibleSketchBytes() {
+        query(Map.of("query", """
+                WITH sketches AS (
+                  SELECT FROM_BASE64('CHAQARgCIAuCBwsQARgPIBQyA9bwNQ==') AS sketch
+                )
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value)
+                   FROM UNNEST([sketch, FROM_BASE64('CHAQAhgCIAuCBw4QAhgPIBQyBr/IHISsGQ==')]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "3")));
+    }
+
+    @Test
+    @Order(5)
+    void lengthAndFarmFingerprintMatchBigQuery() {
+        query(Map.of("query", """
+                SELECT LENGTH('hé') AS string_length,
+                  BYTE_LENGTH('hé') AS string_bytes,
+                  LENGTH(b'h\\xC3\\xA9') AS bytes_length,
+                  FARM_FINGERPRINT('1footrue') AS negative_hash,
+                  FARM_FINGERPRINT('2applefalse') AS positive_hash,
+                  FARM_FINGERPRINT(b'1footrue') AS bytes_hash,
+                  FARM_FINGERPRINT(CAST(NULL AS STRING)) AS null_hash
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of(
+                        "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER")))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("3"))
+                .body("rows[0].f[2].v", equalTo("3"))
+                .body("rows[0].f[3].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[4].v", equalTo("2794438866806483259"))
+                .body("rows[0].f[5].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[6].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void netIpFunctionsProduceCanonicalBytesAndStrings() {
+        query(Map.of("query", """
+                SELECT NET.SAFE_IP_FROM_STRING('123.123.123.123') AS ipv4,
+                  NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING('1111:1111:1111:1111::'), 64) AS ipv6,
+                  NET.SAFE_IP_FROM_STRING('not-an-ip') AS malformed,
+                  NET.IP_TO_STRING(NET.IP_FROM_STRING('123.123.123.123')) AS ipv4_text,
+                  NET.IP_TO_STRING(NET.IP_FROM_STRING('1111:1111:1111:1111::')) AS ipv6_text
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("BYTES", "BYTES", "BYTES", "STRING", "STRING")))
+                .body("rows[0].f[0].v", equalTo("e3t7ew=="))
+                .body("rows[0].f[1].v", equalTo("EREREREREREAAAAAAAAAAA=="))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[0].f[3].v", equalTo("123.123.123.123"))
+                .body("rows[0].f[4].v", equalTo("1111:1111:1111:1111::"));
+    }
+
+    @Test
+    @Order(5)
+    void toJsonStringUsesBigQueryFormatting() throws Exception {
+        Response response = query(Map.of("query", """
+                WITH input AS (
+                  SELECT TIMESTAMP '2021-07-09 00:00:00+00' AS occurred_at,
+                    DATE '2021-07-10' AS event_date,
+                    TIME '03:04:05.123400' AS event_time,
+                    DATETIME '2021-07-11 06:07:08.123400' AS event_datetime,
+                    GENERATE_UUID() AS unique_key,
+                    '2021-07-09 00:00:00+00' AS timestamp_shaped_text
+                )
+                SELECT TO_JSON_STRING(row) AS json FROM input AS row
+                """, "useLegacySql", false));
+        response.then().statusCode(200).body("schema.fields[0].type", equalTo("STRING"));
+
+        JsonNode json = new ObjectMapper().readTree(response.jsonPath().getString("rows[0].f[0].v"));
+        assertEquals(Instant.parse("2021-07-09T00:00:00Z"), Instant.parse(json.path("occurred_at").asText()));
+        assertEquals("2021-07-10", json.path("event_date").asText());
+        assertEquals("03:04:05.123400", json.path("event_time").asText());
+        assertEquals("2021-07-11T06:07:08.123400", json.path("event_datetime").asText());
+        assertEquals(UUID.fromString(json.path("unique_key").asText()).toString(), json.path("unique_key").asText());
+        assertEquals("2021-07-09 00:00:00+00", json.path("timestamp_shaped_text").asText());
+
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST(NULL AS STRING)) AS null_value,
+                  TO_JSON_STRING(STRUCT(1 AS id, [10, 20] AS coordinates), TRUE) AS pretty,
+                  TO_JSON_STRING(STRUCT(1 AS id), NULL) AS null_pretty,
+                  TO_JSON_STRING(CAST('9223372036854775808' AS HUGEINT)) AS huge_value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("null"))
+                .body("rows[0].f[1].v", equalTo(
+                        "{\n  \"id\": 1,\n  \"coordinates\": [\n    10,\n    20\n  ]\n}"))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[0].f[3].v", equalTo("\"9223372036854775808\""));
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionsComposeBlobOverloads() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                SELECT check_bit_set(b'\\x10', 4) AS set_bit,
+                       check_bit_set(b'\\x10', 3) AS clear_bit,
+                       check_bit_set(b'', 4) AS empty_bytes
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "false", "false")));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                WITH inputs AS (
+                  SELECT 'row1' AS row_id, b'\\x10' AS value
+                  UNION ALL SELECT 'row2', b''
+                  UNION ALL SELECT 'row3', CAST(NULL AS BYTES)
+                )
+                SELECT row_id,
+                  ARRAY_AGG(STRUCT(COALESCE(check_bit_set(value, 4), false) AS bit_set)) AS flags
+                FROM inputs
+                GROUP BY row_id
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(3));
+
+        query(Map.of("query", "SELECT REPEAT(b'x', -1)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("BYTES repeat count must not be negative"));
     }
 
     @Test

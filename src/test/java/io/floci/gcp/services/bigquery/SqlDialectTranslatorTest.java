@@ -366,6 +366,48 @@ class SqlDialectTranslatorTest {
         assertTrue(e.getMessage().contains("Cross-project"));
     }
 
+    private static SqlDialectTranslator.Translation translateInJob(String sql) {
+        return SqlDialectTranslator.translate(sql, "data-project", "job-project", "ds",
+                SqlDialectTranslator.QueryParameters.none(), ref -> null);
+    }
+
+    @Test
+    void unqualifiedTableResolvesAgainstTheDefaultDatasetProject() {
+        SqlDialectTranslator.Translation t = translateInJob("SELECT * FROM t");
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), t.tables());
+
+        t = translateInJob("SELECT * FROM `data-project.ds.t`");
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), t.tables());
+    }
+
+    @Test
+    void datasetQualifiedTableStaysInTheJobProject() {
+        GcpException e = assertThrows(GcpException.class, () -> translateInJob("SELECT * FROM ds.t"));
+        assertEquals("invalidQuery", e.getReason());
+        assertTrue(e.getMessage().contains("Cross-project") && e.getMessage().contains("job-project.ds.t"),
+                e.getMessage());
+        e = assertThrows(GcpException.class, () -> translateInJob("SELECT * FROM `job-project.ds.t`"));
+        assertTrue(e.getMessage().contains("Cross-project"), e.getMessage());
+        e = assertThrows(GcpException.class, () -> translateInJob("SELECT * FROM ds.INFORMATION_SCHEMA.TABLES"));
+        assertTrue(e.getMessage().contains("job-project.ds.INFORMATION_SCHEMA.TABLES"), e.getMessage());
+        assertEquals("ds", translateInJob("SELECT * FROM INFORMATION_SCHEMA.TABLES").informationSchema()
+                .iterator().next().dataset());
+    }
+
+    @Test
+    void defaultDatasetProjectAppliesToStatementTargets() {
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "t"), SqlDialectTranslator.parseStatement(
+                "INSERT INTO t (id) VALUES (1)", "data-project", "job-project", "ds").target());
+        assertEquals(new SqlDialectTranslator.TableRef("ds", "t"), SqlDialectTranslator.parseStatement(
+                "CREATE TABLE t (id INT64)", "data-project", "job-project", "ds").target());
+        assertEquals("other", SqlDialectTranslator.parseStatement(
+                "CREATE SCHEMA other", "data-project", "job-project", "ds").datasetTarget());
+        assertEquals("other", SqlDialectTranslator.parseStatement(
+                "CREATE SCHEMA `job-project.other`", "data-project", "job-project", "ds").datasetTarget());
+        assertThrows(GcpException.class, () -> SqlDialectTranslator.parseStatement(
+                "CREATE SCHEMA `data-project.other`", "data-project", "job-project", "ds"));
+    }
+
     @Test
     void subqueryInFromIsNotATable() {
         SqlDialectTranslator.Translation t = translate("SELECT x FROM (SELECT id AS x FROM ds.t) AS sub");

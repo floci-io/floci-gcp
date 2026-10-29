@@ -111,6 +111,8 @@ final class SqlDialectTranslator {
             "varchar");
 
     private final String projectId;
+    /** The project a dataset-qualified name ({@code ds.t}) or an unqualified dataset name belongs to. */
+    private final String jobProjectId;
     private final String defaultDatasetId;
     private final QueryParameters parameters;
     private final List<CteScope> cteScopes = new ArrayList<>();
@@ -145,8 +147,14 @@ final class SqlDialectTranslator {
 
     private record CteScope(String name, Token start, Token end) {}
 
-    private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
+    /**
+     * {@code projectId} holds the tables the statement can reach, the default dataset among them;
+     * {@code jobProjectId} is the project the job runs in, which dataset-qualified names resolve to.
+     */
+    private SqlDialectTranslator(String projectId, String jobProjectId, String defaultDatasetId,
+                                 QueryParameters parameters) {
         this.projectId = projectId;
+        this.jobProjectId = jobProjectId;
         this.defaultDatasetId = defaultDatasetId;
         this.parameters = parameters;
     }
@@ -163,7 +171,14 @@ final class SqlDialectTranslator {
      */
     static Translation translate(String sql, String projectId, String defaultDatasetId,
                                  QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
-        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters);
+        return translate(sql, projectId, projectId, defaultDatasetId, parameters, columnsOf);
+    }
+
+    /** As {@link #translate(String, String, String, QueryParameters, Function)} for a job run in {@code jobProjectId}. */
+    static Translation translate(String sql, String projectId, String jobProjectId, String defaultDatasetId,
+                                 QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters);
         translator.columnsOf = columnsOf;
         return translator.run(sql);
     }
@@ -387,7 +402,12 @@ final class SqlDialectTranslator {
 
     /** Classifies a statement and resolves its target, without translating it to DuckDB. */
     static Statement parseStatement(String sql, String projectId, String defaultDatasetId) {
-        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId,
+        return parseStatement(sql, projectId, projectId, defaultDatasetId);
+    }
+
+    /** As {@link #parseStatement(String, String, String)} for a job run in {@code jobProjectId}. */
+    static Statement parseStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 QueryParameters.none());
         return translator.classify(sql);
     }
@@ -409,7 +429,14 @@ final class SqlDialectTranslator {
      */
     static Translation translateDml(String sql, String projectId, String defaultDatasetId,
                                     QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
-        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters);
+        return translateDml(sql, projectId, projectId, defaultDatasetId, parameters, columnsOf);
+    }
+
+    /** As {@link #translateDml(String, String, String, QueryParameters, Function)} for a job run in {@code jobProjectId}. */
+    static Translation translateDml(String sql, String projectId, String jobProjectId, String defaultDatasetId,
+                                    QueryParameters parameters, Function<TableRef, Set<String>> columnsOf) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters);
         translator.columnsOf = columnsOf;
         return translator.runDml(sql);
     }
@@ -1126,7 +1153,7 @@ final class SqlDialectTranslator {
 
     private String datasetOf(List<String> segments) {
         if (segments.size() == 2) {
-            if (!segments.get(0).equals(projectId)) {
+            if (!segments.get(0).equals(jobProjectId)) {
                 throw invalidQuery("Cross-project statements are not supported by the floci BigQuery emulator: "
                         + String.join(".", segments));
             }
@@ -4993,6 +5020,12 @@ final class SqlDialectTranslator {
             throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
                     + String.join(".", segments));
         }
+        boolean inJobProject = qualifiers.size() == 1 ? !qualifiers.getFirst().equals(projectId)
+                : qualifiers.isEmpty() && InformationSchema.regionOnly(view);
+        if (inJobProject && !jobProjectId.equals(projectId)) {
+            throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
+                    + jobProjectId + "." + String.join(".", segments));
+        }
         String scope = qualifiers.isEmpty() ? null : qualifiers.getLast();
         if (scope != null && scope.toLowerCase(Locale.ROOT).startsWith("region-")) {
             if (InformationSchema.datasetOnly(view)) {
@@ -5033,6 +5066,10 @@ final class SqlDialectTranslator {
             return new TableRef(defaultDatasetId, name);
         }
         if (segments.size() == 2) {
+            if (!jobProjectId.equals(projectId)) {
+                throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
+                        + jobProjectId + "." + String.join(".", segments));
+            }
             return new TableRef(segments.get(0), segments.get(1));
         }
         if (segments.size() == 3) {

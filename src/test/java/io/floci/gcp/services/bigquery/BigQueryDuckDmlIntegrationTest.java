@@ -769,4 +769,32 @@ class BigQueryDuckDmlIntegrationTest {
                 .then().statusCode(400).body("error.errors[0].reason", equalTo("invalidQuery"));
         assertEquals(List.of(List.of("7")), rows("SELECT id FROM ddl_copy.copy_destination"));
     }
+
+    @Test
+    @Order(13)
+    void defaultDatasetInAnotherProjectHoldsUnqualifiedTables() {
+        String data = "/bigquery/v2/projects/bq-dml-data";
+        Map<String, Object> defaultDataset = Map.of("projectId", "bq-dml-data", "datasetId", "inv");
+        given().contentType("application/json").body(Map.of("datasetReference", Map.of("datasetId", "inv")))
+                .when().post(data + "/datasets").then().statusCode(200);
+
+        insertJob(Map.of("query", "CREATE TABLE stock (sku STRING, qty INT64)", "useLegacySql", false,
+                "defaultDataset", defaultDataset)).then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("statistics.query.ddlTargetTable.projectId", equalTo("bq-dml-data"));
+        insertJob(Map.of("query", "INSERT INTO stock VALUES ('a', 2), ('b', 3)", "useLegacySql", false,
+                "defaultDataset", defaultDataset)).then().statusCode(200)
+                .body("status.errorResult", nullValue());
+
+        given().contentType("application/json")
+                .body(Map.of("query", "SELECT SUM(qty) AS total FROM stock", "useLegacySql", false,
+                        "defaultDataset", defaultDataset))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"))
+                .body("jobReference.projectId", equalTo(PROJECT));
+        given().when().get(data + "/datasets/inv/tables/stock/data").then().statusCode(200)
+                .body("totalRows", equalTo("2"));
+        given().when().get(BASE + "/datasets/inv/tables/stock").then().statusCode(404);
+    }
 }

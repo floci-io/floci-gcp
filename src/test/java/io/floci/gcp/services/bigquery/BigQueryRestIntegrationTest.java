@@ -1072,4 +1072,63 @@ class BigQueryRestIntegrationTest {
         given().queryParam("location", "US").when().get(BASE + "/jobs/" + jobId)
                 .then().statusCode(404);
     }
+
+    @Test
+    @Order(23)
+    void unqualifiedTablesResolveAgainstTheDefaultDatasetProject() {
+        String data = "/bigquery/v2/projects/bq-dd-data";
+        String job = "/bigquery/v2/projects/bq-dd-job";
+        given().contentType("application/json")
+                .body("""
+                        {"datasetReference": {"datasetId": "ds"}}
+                        """)
+                .when().post(data + "/datasets")
+                .then().statusCode(200);
+        given().contentType("application/json")
+                .body("""
+                        {"tableReference": {"tableId": "t"}, "schema": {"fields": [{"name": "id", "type": "INT64"}]}}
+                        """)
+                .when().post(data + "/datasets/ds/tables")
+                .then().statusCode(200);
+        given().contentType("application/json")
+                .body("""
+                        {"rows": [{"json": {"id": 1}}, {"json": {"id": 2}}]}
+                        """)
+                .when().post(data + "/datasets/ds/tables/t/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT COUNT(*) FROM t", "useLegacySql": false,
+                         "defaultDataset": {"projectId": "bq-dd-data", "datasetId": "ds"}}
+                        """)
+                .when().post(job + "/queries")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("jobReference.projectId", equalTo("bq-dd-job"));
+
+        String jobId = given().contentType("application/json")
+                .body("""
+                        {"configuration": {"query": {"query": "SELECT COUNT(*) FROM `bq-dd-data.ds.t`",
+                          "useLegacySql": false,
+                          "defaultDataset": {"projectId": "bq-dd-data", "datasetId": "ds"}}}}
+                        """)
+                .when().post(job + "/jobs")
+                .then().statusCode(200)
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult", nullValue())
+                .extract().path("jobReference.jobId");
+        given().when().get(job + "/queries/" + jobId)
+                .then().statusCode(200).body("rows[0].f[0].v", equalTo("2"));
+
+        // "This setting does not alter behavior of unqualified dataset names": ds.t is still in the job's project.
+        given().contentType("application/json")
+                .body("""
+                        {"query": "SELECT COUNT(*) FROM ds.t", "useLegacySql": false,
+                         "defaultDataset": {"projectId": "bq-dd-data", "datasetId": "ds"}}
+                        """)
+                .when().post(job + "/queries")
+                .then().statusCode(400)
+                .body("error.message", containsString("bq-dd-job.ds.t"));
+    }
 }

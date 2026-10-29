@@ -59,7 +59,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     @Override
     public Result execute(Request request, Tables tables) {
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
-                request.projectId(), request.defaultDatasetId(),
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> columnNames(tables, ref));
 
@@ -145,7 +145,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     @Override
     public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
-                request.projectId(), request.defaultDatasetId(),
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> columnNames(tables, ref));
         String flociEndpoint = flociEndpoint();
@@ -167,7 +167,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     @Override
     public DmlResult executeDml(Request request, Tables tables) {
         SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(request.sql(),
-                request.projectId(), request.defaultDatasetId());
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId());
         SqlDialectTranslator.TableRef target = statement.target();
         Table targetTable = tables.table(target.datasetId(), target.tableId());
         if (targetTable.viewQuery() != null) {
@@ -175,7 +175,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                     + request.projectId() + ":" + target.datasetId() + "." + target.tableId());
         }
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
-                request.projectId(), request.defaultDatasetId(),
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> dmlColumnNames(tables, ref, target, targetTable));
         String flociEndpoint = flociEndpoint();

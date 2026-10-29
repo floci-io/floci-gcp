@@ -362,6 +362,8 @@ public class BigQueryController {
         Map<String, Object> defaultDataset = asMap(config.get("defaultDataset"));
         String defaultDatasetId = defaultDataset != null ? string(defaultDataset.get("datasetId"),
                 "defaultDataset.datasetId") : null;
+        String defaultProjectId = defaultDataset != null ? string(defaultDataset.get("projectId"),
+                "defaultDataset.projectId") : null;
         Boolean useLegacySql = config.get("useLegacySql") instanceof Boolean b ? b : null;
         Map<String, Object> destination = asMap(config.get("destinationTable"));
         TableReference destinationTable = destination != null
@@ -376,7 +378,8 @@ public class BigQueryController {
                 disposition(config.get("createDisposition"), "createDisposition", CREATE_DISPOSITIONS),
                 schemaUpdateOptions(config.get("schemaUpdateOptions")),
                 copyMap(config.get("timePartitioning"), "timePartitioning"),
-                copyMap(config.get("rangePartitioning"), "rangePartitioning"));
+                copyMap(config.get("rangePartitioning"), "rangePartitioning"),
+                defaultProjectId);
     }
 
     private static Map<String, Object> copyMap(Object raw, String field) {

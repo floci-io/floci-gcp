@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.RequestScopes;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -51,6 +52,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -665,12 +667,16 @@ public class BigQueryService {
     static final String DML_ORIGINAL_PARTITION_TIME = "$floci_original_partition_time";
     static final String DML_ORIGINAL_UNPARTITIONED = "$floci_original_unpartitioned";
 
-    /** Request-level options of {@code jobs.query} / {@code jobs.insert} that shape execution. */
+    /**
+     * Request-level options of {@code jobs.query} / {@code jobs.insert} that shape execution.
+     * {@code defaultProjectId} is {@code defaultDataset.projectId}, null when the request leaves it out.
+     */
     public record QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                                String parameterMode, boolean dryRun, Boolean useLegacySql,
                                TableReference destinationTable, String writeDisposition,
                                String createDisposition, List<String> schemaUpdateOptions,
-                               Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning) {
+                               Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
+                               String defaultProjectId) {
 
         public QueryOptions {
             schemaUpdateOptions = schemaUpdateOptions != null ? schemaUpdateOptions : List.of();
@@ -679,16 +685,26 @@ public class BigQueryService {
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql,
                             TableReference destinationTable, String writeDisposition, String createDisposition,
+                            List<String> schemaUpdateOptions, Map<String, Object> timePartitioning,
+                            Map<String, Object> rangePartitioning) {
+            this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
+                    writeDisposition, createDisposition, schemaUpdateOptions, timePartitioning, rangePartitioning,
+                    null);
+        }
+
+        public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
+                            String parameterMode, boolean dryRun, Boolean useLegacySql,
+                            TableReference destinationTable, String writeDisposition, String createDisposition,
                             List<String> schemaUpdateOptions) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
-                    writeDisposition, createDisposition, schemaUpdateOptions, null, null);
+                    writeDisposition, createDisposition, schemaUpdateOptions, null, null, null);
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql,
                             TableReference destinationTable, String writeDisposition, String createDisposition) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
-                    writeDisposition, createDisposition, List.of(), null, null);
+                    writeDisposition, createDisposition, List.of(), null, null, null);
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
@@ -698,6 +714,15 @@ public class BigQueryService {
 
         public static QueryOptions of(String sql, String defaultDatasetId) {
             return new QueryOptions(sql, defaultDatasetId, List.of(), null, false, null);
+        }
+
+        /**
+         * The project holding the default dataset: unqualified table names resolve there, whatever
+         * project the job runs in.
+         */
+        String dataProjectId(String jobProjectId) {
+            return defaultDatasetId != null && defaultProjectId != null && !defaultProjectId.isBlank()
+                    ? defaultProjectId : jobProjectId;
         }
     }
 
@@ -747,8 +772,9 @@ public class BigQueryService {
             throw QueryEngine.invalidQuery("Legacy SQL is not supported by the floci BigQuery emulator;"
                     + " set useLegacySql to false to run GoogleSQL.");
         }
-        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(options.sql(), projectId,
-                options.defaultDatasetId());
+        String dataProjectId = options.dataProjectId(projectId);
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(options.sql(), dataProjectId,
+                projectId, options.defaultDatasetId());
 
         StoredJob job = new StoredJob();
         job.setJobId(resolvedJobId);
@@ -761,23 +787,32 @@ public class BigQueryService {
         job.setTotalBytesProcessed("0");
 
         if (statement.kind() != SqlDialectTranslator.StatementKind.QUERY) {
+            // The default dataset only qualifies table names, so a schema statement stays in the job's project.
+            String targetProjectId = statement.datasetTarget() != null ? projectId : dataProjectId;
             if (options.dryRun()) {
                 // "an invalid query will return the same error it would if it wasn't a dry run", so
                 // a dry run has to resolve what the statement touches rather than only classify it.
-                validateStatement(projectId, statement, options, jobLocation);
+                inProject(projectId, targetProjectId, () -> {
+                    validateStatement(targetProjectId, projectId, statement, options, jobLocation);
+                    return null;
+                });
                 job.setDryRun(true);
                 return job;
             }
             synchronized (writeLock) {
-                executeStatement(projectId, statement, options, job, jobLocation);
+                inProject(projectId, targetProjectId, () -> {
+                    executeStatement(targetProjectId, projectId, statement, options, job, jobLocation);
+                    return null;
+                });
             }
             job.setLocation(jobLocation.resolved());
             jobStore.put(job.getJobId(), job);
             return job;
         }
 
-        BigQuerySqlEngine.Result result = engine.execute(request(projectId, options.sql(), options,
-                options.dryRun()), tables(projectId, jobLocation));
+        BigQuerySqlEngine.Result result = inProject(projectId, dataProjectId, () -> engine.execute(
+                request(dataProjectId, projectId, options.sql(), options, options.dryRun()),
+                tables(dataProjectId, jobLocation)));
         job.setLocation(jobLocation.resolved());
         job.setStatementType(result.statementType());
         job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
@@ -822,9 +857,18 @@ public class BigQueryService {
         return null;
     }
 
-    private BigQuerySqlEngine.Request request(String projectId, String sql, QueryOptions options, boolean dryRun) {
+    private BigQuerySqlEngine.Request request(String projectId, String jobProjectId, String sql, QueryOptions options,
+                                              boolean dryRun) {
         return new BigQuerySqlEngine.Request(projectId, sql, options.defaultDatasetId(), options.queryParameters(),
-                options.parameterMode(), dryRun);
+                options.parameterMode(), dryRun, jobProjectId);
+    }
+
+    /**
+     * Runs {@code action} against {@code dataProjectId}'s stores: they are namespaced by the request's
+     * project, which is the job's, so a default dataset in another project needs the switch.
+     */
+    private static <T> T inProject(String jobProjectId, String dataProjectId, Supplier<T> action) {
+        return dataProjectId.equals(jobProjectId) ? action.get() : RequestScopes.callAs(dataProjectId, action);
     }
 
     // ── DML / DDL ────────────────────────────────────────────────────────────────
@@ -836,13 +880,13 @@ public class BigQueryService {
      * reports the same error a real run would, so a DML statement against a missing target or
      * source table, or a CREATE VIEW over a missing one, fails here instead of reporting success.
      */
-    private void validateStatement(String projectId, SqlDialectTranslator.Statement statement,
+    private void validateStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
                                    QueryOptions options, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
                 getTable(projectId, target.datasetId(), target.tableId());
-                engine.executeDml(request(projectId, options.sql(), options, true), tables(projectId, jobLocation));
+                engine.executeDml(request(projectId, jobProjectId, options.sql(), options, true), tables(projectId, jobLocation));
             }
             case TRUNCATE -> getTable(projectId, target.datasetId(), target.tableId());
             case DROP_TABLE, DROP_VIEW -> {
@@ -875,7 +919,8 @@ public class BigQueryService {
                                 "CREATE OR REPLACE TABLE cannot change the partitioning specification");
                     }
                 } else if (statement.querySql() != null) {
-                    described = engine.execute(request(projectId, statement.querySql(), options, true),
+                    described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
+                            options, true),
                             tables(projectId, jobLocation));
                 }
                 if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
@@ -972,13 +1017,14 @@ public class BigQueryService {
         }
     }
 
-    private void executeStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
-                                  StoredJob job, JobLocation jobLocation) {
+    private void executeStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
+                                  QueryOptions options, StoredJob job,
+                                  JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
-                BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, options.sql(), options,
-                        false), tables(projectId, jobLocation));
+                BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, jobProjectId,
+                        options.sql(), options, false), tables(projectId, jobLocation));
                 replaceRows(projectId, target, result.tableRows());
                 job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
                 job.setNumDmlAffectedRows(String.valueOf(result.affectedRows()));
@@ -1006,7 +1052,8 @@ public class BigQueryService {
                 replaceRows(projectId, target, List.of());
                 job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
             }
-            case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, statement, options, job, jobLocation);
+            case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, jobProjectId, statement, options, job,
+                    jobLocation);
             case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, statement, job);
             case DROP_TABLE, DROP_VIEW -> {
                 job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
@@ -1060,8 +1107,9 @@ public class BigQueryService {
         }
     }
 
-    private void createFromStatement(String projectId, SqlDialectTranslator.Statement statement, QueryOptions options,
-                                     StoredJob job, JobLocation jobLocation) {
+    private void createFromStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
+                                     QueryOptions options, StoredJob job,
+                                     JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         Dataset destinationDataset = getDataset(projectId, target.datasetId());
         if (statement.copySource() != null) {
@@ -1084,8 +1132,8 @@ public class BigQueryService {
         List<Map<String, Object>> rows = List.of();
         StoredTableData copiedData = null;
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
-            BigQuerySqlEngine.Result described = engine.execute(request(projectId, statement.querySql(), options, true),
-                    tables(projectId, jobLocation));
+            BigQuerySqlEngine.Result described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
+                    options, true), tables(projectId, jobLocation));
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
             if (statement.materialized()) {
@@ -1113,8 +1161,8 @@ public class BigQueryService {
             copiedData = copyTableData(sourceData);
             rows = allRows(copiedData);
         } else if (statement.querySql() != null) {
-            BigQuerySqlEngine.Result result = engine.execute(request(projectId, statement.querySql(), options, false),
-                    tables(projectId, jobLocation));
+            BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, statement.querySql(),
+                    options, false), tables(projectId, jobLocation));
             table.setSchema(result.schema());
             rows = result.rows();
             job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));

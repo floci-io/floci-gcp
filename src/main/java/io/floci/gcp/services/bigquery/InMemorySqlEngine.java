@@ -23,6 +23,10 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
             throw QueryEngine.invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
                     + ref.projectId() + "." + ref.datasetId() + "." + ref.tableId());
         }
+        if (ref.projectId() == null && ref.datasetId() != null && !request.jobProjectId().equals(request.projectId())) {
+            throw QueryEngine.invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
+                    + request.jobProjectId() + "." + ref.datasetId() + "." + ref.tableId());
+        }
         String datasetId = ref.datasetId() != null ? ref.datasetId() : request.defaultDatasetId();
         if (datasetId == null || datasetId.isBlank()) {
             throw QueryEngine.invalidQuery("Table name \"" + ref.tableId()

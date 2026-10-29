@@ -14,8 +14,19 @@ import java.util.Map;
  */
 interface BigQuerySqlEngine {
 
+    /**
+     * {@code projectId} holds the tables the SQL reads, the default dataset among them; it differs
+     * from {@code jobProjectId}, the project the job runs in, when the default dataset names another.
+     */
     record Request(String projectId, String sql, String defaultDatasetId,
-                   List<Map<String, Object>> queryParameters, String parameterMode, boolean dryRun) {}
+                   List<Map<String, Object>> queryParameters, String parameterMode, boolean dryRun,
+                   String jobProjectId) {
+
+        Request(String projectId, String sql, String defaultDatasetId,
+                List<Map<String, Object>> queryParameters, String parameterMode, boolean dryRun) {
+            this(projectId, sql, defaultDatasetId, queryParameters, parameterMode, dryRun, projectId);
+        }
+    }
 
     /** Result rows are in the stored representation {@link RowCodec} encodes onto the wire. */
     record Result(TableSchema schema, List<Map<String, Object>> rows, String statementType,

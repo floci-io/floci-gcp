@@ -638,7 +638,8 @@ class CloudRunRuntimeServiceTest {
         teardown.join(15_000);
 
         // Removed exactly once: the start sees teardown began and removes its own container before recording it.
-        verify(lifecycleManager).forceRemove("starting-container", null);
+        // The start removes it on its own thread, so wait for it rather than for teardown alone.
+        verify(lifecycleManager, timeout(5_000)).forceRemove("starting-container", null);
         starter.interrupt();
         starter.join(15_000);
     }

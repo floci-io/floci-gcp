@@ -21,6 +21,7 @@ import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -650,7 +651,7 @@ class IamServiceTest {
     @Test
     void policiesAreCopiedOnReadAndWrite() {
         StoredPolicy written = new StoredPolicy();
-        written.setBindings(new java.util.ArrayList<>(List.of(Map.of("role", "roles/viewer", "members", List.of("user:a@example.com")))));
+        written.setBindings(new ArrayList<>(List.of(Map.of("role", "roles/viewer", "members", List.of("user:a@example.com")))));
         service.setPolicy("projects/p1/resource/r1", written);
         written.getBindings().clear();
 

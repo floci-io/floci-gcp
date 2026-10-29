@@ -23,6 +23,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -35,6 +36,8 @@ import java.util.Set;
 public class CloudKmsService {
 
     private static final Logger LOG = Logger.getLogger(CloudKmsService.class);
+    private static final int LOCK_STRIPES = 256;
+    private final Object[] locks = createLocks();
 
     private static final String SYMMETRIC_ALGORITHM = "GOOGLE_SYMMETRIC_ENCRYPTION";
     private static final Set<String> SIGN_ALGORITHMS =
@@ -159,9 +162,6 @@ public class CloudKmsService {
         }
         String name = parent + "/cryptoKeys/" + cryptoKeyId;
         LOG.infof("createCryptoKey name=%s purpose=%s", name, purpose);
-        if (cryptoKeyStore.get(name).isPresent()) {
-            throw GcpException.alreadyExists("CryptoKey already exists: " + name);
-        }
         String effectiveAlgorithm = resolveAlgorithm(purpose, algorithm);
         validateRotationSchedule(purpose, fields.rotationPeriod(), fields.nextRotationTime());
         StoredCryptoKey key = new StoredCryptoKey(name, purpose, effectiveAlgorithm, Instant.now().toString());
@@ -173,12 +173,17 @@ public class CloudKmsService {
         if (fields.labels() != null && !fields.labels().isEmpty()) {
             key.setLabels(new LinkedHashMap<>(fields.labels()));
         }
-        cryptoKeyStore.put(name, key);
-        if (!skipInitialVersionCreation) {
-            StoredCryptoKeyVersion version = createCryptoKeyVersion(name);
-            if ("ENCRYPT_DECRYPT".equals(purpose)) {
-                key.setPrimaryVersion(version.getVersionNumber());
-                cryptoKeyStore.put(name, key);
+        synchronized (lock(name)) {
+            if (cryptoKeyStore.get(name).isPresent()) {
+                throw GcpException.alreadyExists("CryptoKey already exists: " + name);
+            }
+            cryptoKeyStore.put(name, key);
+            if (!skipInitialVersionCreation) {
+                StoredCryptoKeyVersion version = createCryptoKeyVersion(name);
+                if ("ENCRYPT_DECRYPT".equals(purpose)) {
+                    key.setPrimaryVersion(version.getVersionNumber());
+                    cryptoKeyStore.put(name, key);
+                }
             }
         }
         return key;
@@ -201,6 +206,13 @@ public class CloudKmsService {
      * is validated before the stored key is touched.
      */
     public StoredCryptoKey updateCryptoKey(String name, CryptoKeyFields fields, String versionTemplateAlgorithm,
+            Set<String> paths) {
+        synchronized (lock(name)) {
+            return applyCryptoKeyUpdate(name, fields, versionTemplateAlgorithm, paths);
+        }
+    }
+
+    private StoredCryptoKey applyCryptoKeyUpdate(String name, CryptoKeyFields fields, String versionTemplateAlgorithm,
             Set<String> paths) {
         StoredCryptoKey key = getCryptoKey(name);
         boolean setAlgorithm = (paths.contains("version_template.algorithm") || paths.contains("version_template"))
@@ -284,35 +296,39 @@ public class CloudKmsService {
     }
 
     public StoredCryptoKey updateCryptoKeyPrimaryVersion(String name, String cryptoKeyVersionId) {
-        StoredCryptoKey key = getCryptoKey(name);
-        String versionName = name + "/cryptoKeyVersions/" + cryptoKeyVersionId;
-        StoredCryptoKeyVersion version = versionStore.get(versionName)
-                .orElseThrow(() -> GcpException.notFound("CryptoKeyVersion not found: " + versionName));
-        key.setPrimaryVersion(version.getVersionNumber());
-        cryptoKeyStore.put(name, key);
-        return key;
+        synchronized (lock(name)) {
+            StoredCryptoKey key = getCryptoKey(name);
+            String versionName = name + "/cryptoKeyVersions/" + cryptoKeyVersionId;
+            StoredCryptoKeyVersion version = versionStore.get(versionName)
+                    .orElseThrow(() -> GcpException.notFound("CryptoKeyVersion not found: " + versionName));
+            key.setPrimaryVersion(version.getVersionNumber());
+            cryptoKeyStore.put(name, key);
+            return key;
+        }
     }
 
     // ── CryptoKeyVersions ────────────────────────────────────────────────────
 
     public StoredCryptoKeyVersion createCryptoKeyVersion(String cryptoKeyName) {
-        StoredCryptoKey key = getCryptoKey(cryptoKeyName);
-        if (key.isImportOnly()) {
-            throw GcpException.failedPrecondition(
-                    "CryptoKey is import_only; add versions with ImportCryptoKeyVersion: " + cryptoKeyName);
+        synchronized (lock(cryptoKeyName)) {
+            StoredCryptoKey key = getCryptoKey(cryptoKeyName);
+            if (key.isImportOnly()) {
+                throw GcpException.failedPrecondition(
+                        "CryptoKey is import_only; add versions with ImportCryptoKeyVersion: " + cryptoKeyName);
+            }
+            int versionNumber = key.getNextVersionNumber();
+            String versionName = cryptoKeyName + "/cryptoKeyVersions/" + versionNumber;
+            LOG.infof("createCryptoKeyVersion name=%s", versionName);
+            StoredCryptoKeyVersion version = new StoredCryptoKeyVersion(
+                    versionName, versionNumber, key.getAlgorithm(), Instant.now().toString());
+            KmsCrypto.GeneratedKey material = KmsCrypto.generate(key.getAlgorithm());
+            version.setKeyMaterialBase64(material.keyMaterialBase64());
+            version.setPublicKeyBase64(material.publicKeyBase64());
+            versionStore.put(versionName, version);
+            key.setNextVersionNumber(versionNumber + 1);
+            cryptoKeyStore.put(cryptoKeyName, key);
+            return version;
         }
-        int versionNumber = key.getNextVersionNumber();
-        String versionName = cryptoKeyName + "/cryptoKeyVersions/" + versionNumber;
-        LOG.infof("createCryptoKeyVersion name=%s", versionName);
-        StoredCryptoKeyVersion version = new StoredCryptoKeyVersion(
-                versionName, versionNumber, key.getAlgorithm(), Instant.now().toString());
-        KmsCrypto.GeneratedKey material = KmsCrypto.generate(key.getAlgorithm());
-        version.setKeyMaterialBase64(material.keyMaterialBase64());
-        version.setPublicKeyBase64(material.publicKeyBase64());
-        versionStore.put(versionName, version);
-        key.setNextVersionNumber(versionNumber + 1);
-        cryptoKeyStore.put(cryptoKeyName, key);
-        return version;
     }
 
     public StoredCryptoKeyVersion getCryptoKeyVersion(String name) {
@@ -331,9 +347,7 @@ public class CloudKmsService {
 
     public StoredCryptoKeyVersion updateCryptoKeyVersionState(String name, String state) {
         StoredCryptoKeyVersion version = getCryptoKeyVersion(name);
-        if ("IMPORT_FAILED".equals(version.getState())) {
-            throw GcpException.failedPrecondition("CryptoKeyVersion import failed and holds no key material: " + name);
-        }
+        requireKeyMaterial(version);
         if (!"ENABLED".equals(state) && !"DISABLED".equals(state)) {
             throw GcpException.invalidArgument("Unsupported state transition to: " + state);
         }
@@ -344,6 +358,7 @@ public class CloudKmsService {
 
     public StoredCryptoKeyVersion destroyCryptoKeyVersion(String name) {
         StoredCryptoKeyVersion version = getCryptoKeyVersion(name);
+        requireKeyMaterial(version);
         version.setState("DESTROY_SCHEDULED");
         version.setDestroyTime(Instant.now().toString());
         versionStore.put(name, version);
@@ -368,9 +383,6 @@ public class CloudKmsService {
         getKeyRing(parent);
         String name = parent + "/importJobs/" + importJobId;
         LOG.infof("createImportJob name=%s importMethod=%s", name, importMethod);
-        if (importJobStore.get(name).isPresent()) {
-            throw GcpException.alreadyExists("ImportJob already exists: " + name);
-        }
         if (importMethod == null || importMethod.isBlank() || "IMPORT_METHOD_UNSPECIFIED".equals(importMethod)) {
             throw GcpException.invalidArgument("import_method is required");
         }
@@ -383,7 +395,12 @@ public class CloudKmsService {
         KmsCrypto.GeneratedKey wrappingKey = KmsCrypto.generateWrappingKey(importMethod);
         job.setPrivateKeyBase64(wrappingKey.keyMaterialBase64());
         job.setPublicKeyBase64(wrappingKey.publicKeyBase64());
-        importJobStore.put(name, job);
+        synchronized (lock(name)) {
+            if (importJobStore.get(name).isPresent()) {
+                throw GcpException.alreadyExists("ImportJob already exists: " + name);
+            }
+            importJobStore.put(name, job);
+        }
         return job;
     }
 
@@ -426,32 +443,43 @@ public class CloudKmsService {
             throw GcpException.invalidArgument("wrapped_key is required");
         }
 
-        int versionNumber = key.getNextVersionNumber();
-        String versionName = cryptoKeyName + "/cryptoKeyVersions/" + versionNumber;
-        LOG.infof("importCryptoKeyVersion name=%s importJob=%s", versionName, importJobName);
-        String now = Instant.now().toString();
-        StoredCryptoKeyVersion version = new StoredCryptoKeyVersion(versionName, versionNumber, effectiveAlgorithm, now);
-        version.setGenerateTime(null);
-        version.setImportJob(importJobName);
+        KmsCrypto.GeneratedKey imported = null;
+        String failureReason = null;
         try {
             byte[] material = KmsCrypto.unwrapImportedKey(job.getImportMethod(), job.getPrivateKeyBase64(), wrappedKey);
-            KmsCrypto.GeneratedKey imported = KmsCrypto.importKey(effectiveAlgorithm, material);
-            version.setKeyMaterialBase64(imported.keyMaterialBase64());
-            version.setPublicKeyBase64(imported.publicKeyBase64());
-            version.setImportTime(now);
+            imported = KmsCrypto.importKey(effectiveAlgorithm, material);
         } catch (IllegalArgumentException e) {
-            LOG.debugf("importCryptoKeyVersion name=%s failed: %s", versionName, e.getMessage());
-            version.setState("IMPORT_FAILED");
-            version.setImportFailureReason(e.getMessage());
+            LOG.debugf("importCryptoKeyVersion cryptoKey=%s failed: %s", cryptoKeyName, e.getMessage());
+            failureReason = e.getMessage();
         }
-        versionStore.put(versionName, version);
-        key.setNextVersionNumber(versionNumber + 1);
-        if ("ENCRYPT_DECRYPT".equals(key.getPurpose()) && key.getPrimaryVersion() == null
-                && "ENABLED".equals(version.getState())) {
-            key.setPrimaryVersion(versionNumber);
+
+        synchronized (lock(cryptoKeyName)) {
+            StoredCryptoKey current = getCryptoKey(cryptoKeyName);
+            int versionNumber = current.getNextVersionNumber();
+            String versionName = cryptoKeyName + "/cryptoKeyVersions/" + versionNumber;
+            LOG.infof("importCryptoKeyVersion name=%s importJob=%s", versionName, importJobName);
+            String now = Instant.now().toString();
+            StoredCryptoKeyVersion version = new StoredCryptoKeyVersion(
+                    versionName, versionNumber, effectiveAlgorithm, now);
+            version.setGenerateTime(null);
+            version.setImportJob(importJobName);
+            if (imported != null) {
+                version.setKeyMaterialBase64(imported.keyMaterialBase64());
+                version.setPublicKeyBase64(imported.publicKeyBase64());
+                version.setImportTime(now);
+            } else {
+                version.setState("IMPORT_FAILED");
+                version.setImportFailureReason(failureReason);
+            }
+            versionStore.put(versionName, version);
+            current.setNextVersionNumber(versionNumber + 1);
+            if ("ENCRYPT_DECRYPT".equals(current.getPurpose()) && current.getPrimaryVersion() == null
+                    && "ENABLED".equals(version.getState())) {
+                current.setPrimaryVersion(versionNumber);
+            }
+            cryptoKeyStore.put(cryptoKeyName, current);
+            return version;
         }
-        cryptoKeyStore.put(cryptoKeyName, key);
-        return version;
     }
 
     // ── Crypto operations ────────────────────────────────────────────────────
@@ -588,6 +616,14 @@ public class CloudKmsService {
         }
     }
 
+    /** A version whose import failed holds no key material, so no state change can make it usable. */
+    private static void requireKeyMaterial(StoredCryptoKeyVersion version) {
+        if (version.getKeyMaterialBase64() == null) {
+            throw GcpException.failedPrecondition(
+                    "CryptoKeyVersion holds no key material (state=" + version.getState() + "): " + version.getName());
+        }
+    }
+
     private static void requireEnabled(StoredCryptoKeyVersion version) {
         if (!"ENABLED".equals(version.getState())) {
             throw GcpException.failedPrecondition(
@@ -598,5 +634,15 @@ public class CloudKmsService {
     private static String cryptoKeyOf(String versionName) {
         int idx = versionName.indexOf("/cryptoKeyVersions/");
         return idx > 0 ? versionName.substring(0, idx) : versionName;
+    }
+
+    private Object lock(String resourceName) {
+        return locks[Math.floorMod(resourceName.hashCode(), locks.length)];
+    }
+
+    private static Object[] createLocks() {
+        Object[] stripes = new Object[LOCK_STRIPES];
+        Arrays.setAll(stripes, ignored -> new Object());
+        return stripes;
     }
 }

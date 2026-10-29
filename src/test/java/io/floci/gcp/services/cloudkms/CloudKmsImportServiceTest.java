@@ -24,7 +24,17 @@ import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -90,7 +100,7 @@ class CloudKmsImportServiceTest {
     @Test
     void importedSymmetricKeyDecryptsWhatAnotherImportOfTheSameMaterialEncrypted() throws Exception {
         StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
-        byte[] aesKey = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] aesKey = aes256();
         StoredCryptoKey first = importOnlyKey("first", "ENCRYPT_DECRYPT");
         StoredCryptoKey second = importOnlyKey("second", "ENCRYPT_DECRYPT");
 
@@ -113,7 +123,7 @@ class CloudKmsImportServiceTest {
     @Test
     void importWithDirectRsaOaepMethodUnwrapsSymmetricKey() throws Exception {
         StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA256", "SOFTWARE");
-        byte[] aesKey = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] aesKey = aes256();
         StoredCryptoKey key = importOnlyKey("k", "ENCRYPT_DECRYPT");
 
         StoredCryptoKeyVersion version = service.importCryptoKeyVersion(key.getName(), "GOOGLE_SYMMETRIC_ENCRYPTION",
@@ -180,7 +190,7 @@ class CloudKmsImportServiceTest {
         StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
         StoredImportJob other = service.createImportJob(KEY_RING, "other", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
         StoredCryptoKey key = importOnlyKey("k", "ENCRYPT_DECRYPT");
-        byte[] aesKey = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] aesKey = aes256();
 
         StoredCryptoKeyVersion version = service.importCryptoKeyVersion(key.getName(), "GOOGLE_SYMMETRIC_ENCRYPTION",
                 job.getName(), wrap(other, aesKey));
@@ -192,6 +202,79 @@ class CloudKmsImportServiceTest {
         GcpException ex = assertThrows(GcpException.class,
                 () -> service.updateCryptoKeyVersionState(version.getName(), "ENABLED"));
         assertEquals("FAILED_PRECONDITION", ex.getGcpStatus());
+        assertEquals("FAILED_PRECONDITION", assertThrows(GcpException.class,
+                () -> service.destroyCryptoKeyVersion(version.getName())).getGcpStatus());
+        assertEquals("IMPORT_FAILED", service.getCryptoKeyVersion(version.getName()).getState());
+    }
+
+    @Test
+    void concurrentImportsIntoOneKeyEachGetTheirOwnVersion() throws Exception {
+        StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA256", "SOFTWARE");
+        StoredCryptoKey key = importOnlyKey("k", "ENCRYPT_DECRYPT");
+        List<byte[]> wrappedKeys = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            wrappedKeys.add(rsaOaep(wrappingPublicKey(job), "SHA-256", MGF1ParameterSpec.SHA256, aes256()));
+        }
+
+        List<StoredCryptoKeyVersion> versions = runConcurrently(wrappedKeys.stream()
+                .<Callable<StoredCryptoKeyVersion>>map(wrapped -> () -> service.importCryptoKeyVersion(
+                        key.getName(), "GOOGLE_SYMMETRIC_ENCRYPTION", job.getName(), wrapped))
+                .toList());
+
+        Set<String> names = new HashSet<>();
+        for (StoredCryptoKeyVersion version : versions) {
+            names.add(version.getName());
+        }
+        assertEquals(8, names.size());
+        assertEquals(8, service.listCryptoKeyVersions(key.getName()).size());
+        assertEquals(9, service.getCryptoKey(key.getName()).getNextVersionNumber());
+    }
+
+    @Test
+    void concurrentCreatesOfOneImportJobLetExactlyOneSucceed() throws Exception {
+        List<Callable<String>> creates = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            creates.add(() -> {
+                try {
+                    return service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA256", "SOFTWARE")
+                            .getPublicKeyBase64();
+                } catch (GcpException e) {
+                    assertEquals("ALREADY_EXISTS", e.getGcpStatus());
+                    return null;
+                }
+            });
+        }
+
+        List<String> publicKeys = runConcurrently(creates).stream().filter(k -> k != null).toList();
+
+        assertEquals(1, publicKeys.size());
+        assertEquals(publicKeys.get(0), service.getImportJob(KEY_RING + "/importJobs/job").getPublicKeyBase64());
+    }
+
+    private static <T> List<T> runConcurrently(List<Callable<T>> tasks) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(tasks.size());
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<T>> futures = new ArrayList<>();
+            for (Callable<T> task : tasks) {
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    return task.call();
+                }));
+            }
+            start.countDown();
+            List<T> results = new ArrayList<>();
+            for (Future<T> future : futures) {
+                try {
+                    results.add(future.get());
+                } catch (ExecutionException e) {
+                    throw new AssertionError(e.getCause());
+                }
+            }
+            return results;
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -199,11 +282,11 @@ class CloudKmsImportServiceTest {
         StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
         StoredImportJob other = service.createImportJob(KEY_RING, "other", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
         StoredCryptoKey key = importOnlyKey("k", "ENCRYPT_DECRYPT");
-        byte[] wrapped = wrap(job, KeyGenerator.getInstance("AES").generateKey().getEncoded());
+        byte[] wrapped = wrap(job, aes256());
         byte[] badKwpLayer = wrapped.clone();
         badKwpLayer[badKwpLayer.length - 1] ^= 1;
         byte[] shortAesKey = rsaOaep(wrappingPublicKey(job), "SHA-1", MGF1ParameterSpec.SHA1, new byte[16]);
-        byte[] badRsaLayer = wrap(other, KeyGenerator.getInstance("AES").generateKey().getEncoded());
+        byte[] badRsaLayer = wrap(other, aes256());
 
         String kwpReason = importFailure(key, job, badKwpLayer);
         assertEquals(kwpReason, importFailure(key, job, badRsaLayer));
@@ -275,7 +358,7 @@ class CloudKmsImportServiceTest {
     void importRejectsMissingOrExpiredJobAndMissingAlgorithm() throws Exception {
         StoredImportJob job = service.createImportJob(KEY_RING, "job", "RSA_OAEP_3072_SHA1_AES_256", "SOFTWARE");
         StoredCryptoKey key = importOnlyKey("k", "ENCRYPT_DECRYPT");
-        byte[] wrapped = wrap(job, KeyGenerator.getInstance("AES").generateKey().getEncoded());
+        byte[] wrapped = wrap(job, aes256());
 
         assertEquals("NOT_FOUND", assertThrows(GcpException.class, () -> service.importCryptoKeyVersion(
                 key.getName(), "GOOGLE_SYMMETRIC_ENCRYPTION", KEY_RING + "/importJobs/missing", wrapped)).getGcpStatus());
@@ -319,6 +402,12 @@ class CloudKmsImportServiceTest {
         return verifier.verify(signature);
     }
 
+    private static byte[] aes256() throws Exception {
+        KeyGenerator gen = KeyGenerator.getInstance("AES");
+        gen.init(256);
+        return gen.generateKey().getEncoded();
+    }
+
     private static PublicKey wrappingPublicKey(StoredImportJob job) throws Exception {
         return KeyFactory.getInstance("RSA").generatePublic(
                 new X509EncodedKeySpec(Base64.getDecoder().decode(job.getPublicKeyBase64())));
@@ -327,7 +416,7 @@ class CloudKmsImportServiceTest {
     /** Client-side CKM_RSA_AES_KEY_WRAP, as the GCP import documentation describes it. */
     private static byte[] wrap(StoredImportJob job, byte[] targetKey) throws Exception {
         boolean sha1 = job.getImportMethod().contains("_SHA1_");
-        byte[] ephemeral = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] ephemeral = aes256();
         byte[] wrappedEphemeral = rsaOaep(wrappingPublicKey(job), sha1 ? "SHA-1" : "SHA-256",
                 sha1 ? MGF1ParameterSpec.SHA1 : MGF1ParameterSpec.SHA256, ephemeral);
         Cipher kwp = Cipher.getInstance("AES/KWP/NoPadding");

@@ -282,7 +282,7 @@ class KmsTest {
                 .build());
         assertThat(key.getImportOnly()).isTrue();
 
-        byte[] aesKey = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] aesKey = aes256();
         CryptoKeyVersion version = client.importCryptoKeyVersion(ImportCryptoKeyVersionRequest.newBuilder()
                 .setParent(key.getName())
                 .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.GOOGLE_SYMMETRIC_ENCRYPTION)
@@ -342,7 +342,7 @@ class KmsTest {
     private static byte[] rsaAesWrap(ImportJob job, byte[] targetKey) throws Exception {
         boolean sha1 = job.getImportMethod().name().contains("_SHA1_");
         MGF1ParameterSpec mgf1 = sha1 ? MGF1ParameterSpec.SHA1 : MGF1ParameterSpec.SHA256;
-        byte[] ephemeral = KeyGenerator.getInstance("AES").generateKey().getEncoded();
+        byte[] ephemeral = aes256();
         Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPPadding");
         rsa.init(Cipher.ENCRYPT_MODE, parsePem(job.getPublicKey().getPem(), "RSA"),
                 new OAEPParameterSpec(sha1 ? "SHA-1" : "SHA-256", "MGF1", mgf1, PSource.PSpecified.DEFAULT));
@@ -354,6 +354,12 @@ class KmsTest {
         System.arraycopy(wrappedEphemeral, 0, out, 0, wrappedEphemeral.length);
         System.arraycopy(wrappedTarget, 0, out, wrappedEphemeral.length, wrappedTarget.length);
         return out;
+    }
+
+    private static byte[] aes256() throws Exception {
+        KeyGenerator gen = KeyGenerator.getInstance("AES");
+        gen.init(256);
+        return gen.generateKey().getEncoded();
     }
 
     private static PublicKey parsePem(String pem, String algorithm) throws Exception {

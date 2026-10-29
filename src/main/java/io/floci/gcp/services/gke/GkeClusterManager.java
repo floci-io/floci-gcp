@@ -94,7 +94,16 @@ public class GkeClusterManager {
                 config.services().gke().apiServerBasePort(),
                 config.services().gke().apiServerMaxPort());
         cluster.setHostPort(hostPort);
+        try {
+            launchContainer(cluster, image, containerName, hostPort);
+        } catch (RuntimeException e) {
+            portAllocator.release(hostPort);
+            cluster.setHostPort(0);
+            throw e;
+        }
+    }
 
+    private void launchContainer(StoredCluster cluster, String image, String containerName, int hostPort) {
         lifecycleManager.removeIfExists(containerName);
 
         // A named Docker volume (not a host bind mount) for the k3s data dir: bind mounts to a
@@ -231,6 +240,9 @@ public class GkeClusterManager {
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
         lifecycleManager.removeVolume(volumeName(cluster));
+        if (cluster.getHostPort() > 0) {
+            portAllocator.release(cluster.getHostPort());
+        }
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
     }
 

@@ -1005,4 +1005,525 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(BASE + "/datasets/eu_dml/tables/out/data").then().statusCode(200)
                 .body("totalRows", equalTo("1"));
     }
+
+    @Test
+    @Order(200)
+    void scriptsSupportTemporaryFunctionsTablesAndDiscardedQueries() {
+        assertEquals(List.of(List.of("42")), rows("""
+                SELECT 'discarded' AS value;
+                CREATE TEMP TABLE inputs AS SELECT 41 AS value;
+                CREATE TEMP FUNCTION add_one(value INT64) RETURNS INT64 AS (value + 1);
+                SELECT add_one(value) AS answer FROM inputs;
+                """));
+    }
+
+    @Test
+    @Order(201)
+    void temporaryTablesAcceptSequencedDmlAndReportOnlyTheFinalStatement() {
+        query("""
+                CREATE TEMP TABLE working AS SELECT 1 AS id;
+                INSERT INTO working VALUES (2);
+                UPDATE working SET id = id + 10 WHERE id = 1;
+                """).then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("1"))
+                .body("dmlStats.updatedRowCount", equalTo("1"));
+
+        assertEquals(List.of(List.of("2"), List.of("11")), rows("""
+                CREATE TEMP TABLE working AS SELECT 1 AS id;
+                INSERT INTO working VALUES (2);
+                UPDATE working SET id = id + 10 WHERE id = 1;
+                SELECT id FROM working ORDER BY id;
+                """));
+    }
+
+    @Test
+    @Order(202)
+    void proceduralIfExecutesOnlyTheSelectedBranchAndReturnsItsResult() {
+        query("CREATE SCHEMA scripts").then().statusCode(200);
+        query("CREATE TABLE scripts.audit (value STRING)").then().statusCode(200);
+
+        assertEquals(List.of(List.of("selected")), rows("""
+                IF EXISTS (SELECT 1) THEN
+                  INSERT INTO scripts.audit VALUES ('written');
+                  SELECT 'selected' AS result;
+                ELSE
+                  INSERT INTO scripts.audit VALUES ('skipped');
+                  SELECT 'skipped' AS result;
+                END IF;
+                """));
+        assertEquals(List.of(List.of("written")), rows("SELECT value FROM scripts.audit"));
+    }
+
+    @Test
+    @Order(203)
+    void proceduralBranchesCanExecuteCreateTableCopy() {
+        query("CREATE TABLE scripts.source AS SELECT 7 AS id").then().statusCode(200);
+
+        query("""
+                IF TRUE THEN
+                  CREATE OR REPLACE TABLE scripts.destination COPY scripts.source;
+                ELSE
+                  CREATE OR REPLACE TABLE scripts.destination AS SELECT 0 AS id;
+                END IF;
+                """).then().statusCode(200);
+        assertEquals(List.of(List.of("7")), rows("SELECT id FROM scripts.destination"));
+    }
+
+    @Test
+    @Order(204)
+    void dryRunStopsBeforeProceduralControlFlowWithoutPublishingWrites() {
+        given().contentType("application/json")
+                .body(Map.of("query", """
+                        IF EXISTS (SELECT 1 FROM scripts.missing) THEN
+                          INSERT INTO scripts.audit VALUES ('dry');
+                        ELSE
+                          INSERT INTO scripts.missing VALUES ('invalid');
+                        END IF;
+                        SELECT * FROM scripts.missing_after_if;
+                        """, "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("jobComplete", equalTo(true));
+        assertEquals(List.of(List.of("1")), rows("SELECT COUNT(*) FROM scripts.audit"));
+    }
+
+    @Test
+    @Order(205)
+    void replayedTemporaryTablesPreserveNestedBytesAndTimestamps() {
+        query("""
+                CREATE TEMP TABLE snapshot AS
+                  SELECT STRUCT(b'\\x00\\xff' AS payload,
+                                TIMESTAMP '2026-10-21 12:34:56.123456+00' AS observed_at) AS item;
+                SELECT TO_HEX(item.payload) AS payload,
+                       item.observed_at = TIMESTAMP '2026-10-21 12:34:56.123456+00' AS timestamp_matches
+                FROM snapshot;
+                """).then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("00ff", "true")));
+    }
+
+    @Test
+    @Order(206)
+    void temporaryFunctionCanUnnestTypedStructArrays() {
+        assertEquals(List.of(List.of("first-a;second-b")), rows("""
+                CREATE TEMP FUNCTION format_entries(entries ARRAY<STRUCT<label STRING, value STRING>>)
+                RETURNS STRING AS ((
+                  SELECT ARRAY_TO_STRING(ARRAY_AGG(CONCAT(LOWER(label), "-", value) ORDER BY LOWER(label)), ";")
+                  FROM UNNEST(entries)
+                ));
+                SELECT format_entries([
+                  STRUCT('second' AS label, 'b' AS value),
+                  STRUCT('first' AS label, 'a' AS value)
+                ]) AS formatted;
+                """));
+    }
+
+    @Test
+    @Order(207)
+    void temporaryFunctionsCanReadEarlierTemporaryTables() {
+        assertEquals(List.of(List.of("2")), rows("""
+                CREATE TEMP TABLE input_rows AS SELECT 1 AS id UNION ALL SELECT 2;
+                CREATE TEMP FUNCTION max_id() AS ((SELECT MAX(id) FROM input_rows));
+                SELECT max_id() AS value;
+                """));
+    }
+
+    @Test
+    @Order(208)
+    void invalidFinalTemporaryFunctionFailsExecutionAndDryRun() {
+        for (boolean dryRun : List.of(false, true)) {
+            given().contentType("application/json")
+                    .body(Map.of("query", "SELECT 1; CREATE TEMP FUNCTION f;",
+                            "useLegacySql", false, "dryRun", dryRun))
+                    .when().post(BASE + "/queries")
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"));
+        }
+    }
+
+    @Test
+    @Order(209)
+    void intermediateTemporaryDmlDoesNotLeakStatistics() {
+        query("""
+                CREATE TEMP TABLE working AS SELECT 1 AS id;
+                INSERT INTO working VALUES (2);
+                SELECT COUNT(*) AS total FROM working;
+                """).then().statusCode(200)
+                .body("numDmlAffectedRows", nullValue())
+                .body("dmlStats", nullValue())
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(210)
+    void temporaryTablesRemainSnapshotsAcrossPersistentDml() {
+        query("CREATE TABLE scripts.snapshot_source AS SELECT 1 AS id").then().statusCode(200);
+
+        assertEquals(List.of(List.of("1")), rows("""
+                CREATE TEMP TABLE snapshot AS SELECT * FROM scripts.snapshot_source;
+                DELETE FROM scripts.snapshot_source WHERE TRUE;
+                SELECT id FROM snapshot;
+                """));
+        assertEquals(List.of(List.of("0")), rows("SELECT COUNT(*) FROM scripts.snapshot_source"));
+    }
+
+    @Test
+    @Order(211)
+    void createTableAsSelectCanReadTemporaryTables() {
+        query("""
+                CREATE TEMP TABLE candidates AS SELECT 9 AS id;
+                IF TRUE THEN
+                  CREATE TABLE scripts.from_temp AS SELECT * FROM candidates;
+                END IF;
+                """).then().statusCode(200).body("errors", nullValue());
+        assertEquals(List.of(List.of("9")), rows("SELECT id FROM scripts.from_temp"));
+
+        query("""
+                CREATE TEMP TABLE staged_values AS SELECT 11 AS id;
+                CREATE TABLE scripts.straight_from_temp AS SELECT * FROM staged_values;
+                """).then().statusCode(200).body("errors", nullValue());
+        assertEquals(List.of(List.of("11")), rows("SELECT id FROM scripts.straight_from_temp"));
+    }
+
+    @Test
+    @Order(212)
+    void temporaryTableSnapshotsPreserveBackslashes() {
+        assertEquals(List.of(List.of("C:\\new")), rows("""
+                CREATE TEMP TABLE snapshot AS SELECT r'C:\\new' AS path;
+                SELECT path FROM snapshot;
+                """));
+    }
+
+    @Test
+    @Order(213)
+    void proceduralIfAcceptsCaseExpressionsAndSharesTemporaryTables() {
+        assertEquals(List.of(List.of("selected")), rows("""
+                CREATE TEMP TABLE conditions AS SELECT TRUE AS matches;
+                IF CASE WHEN EXISTS (SELECT 1 FROM conditions WHERE matches) THEN TRUE ELSE FALSE END THEN
+                  SELECT 'selected' AS result;
+                ELSE
+                  SELECT 'skipped' AS result;
+                END IF;
+                """));
+    }
+
+    @Test
+    @Order(214)
+    void multiStatementScriptsRejectPositionalParameters() {
+        given().contentType("application/json")
+                .body(Map.of(
+                        "query", "SELECT ?; SELECT ?;",
+                        "useLegacySql", false,
+                        "parameterMode", "POSITIONAL",
+                        "queryParameters", List.of(
+                                Map.of("parameterType", Map.of("type", "INT64"),
+                                        "parameterValue", Map.of("value", "1")),
+                                Map.of("parameterType", Map.of("type", "INT64"),
+                                        "parameterValue", Map.of("value", "2")))))
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(215)
+    void scriptsSupportSessionQualifiedAndSchemaDeclaredTemporaryTables() {
+        assertEquals(List.of(List.of("1"), List.of("2")), rows("""
+                CREATE TEMP TABLE _SESSION.typed_values (renamed INT64 NOT NULL)
+                  AS SELECT 1 AS original;
+                INSERT INTO _SESSION.typed_values VALUES (2);
+                SELECT renamed FROM _SESSION.typed_values ORDER BY renamed;
+                """));
+
+        assertEquals(List.of(List.of("0")), rows("""
+                CREATE TEMP TABLE empty_values (id INT64, payload BYTES);
+                SELECT COUNT(*) FROM empty_values;
+                """));
+
+        assertEquals(List.of(List.of("dropped")), rows("""
+                CREATE TEMP TABLE disposable AS SELECT 1 AS id;
+                DROP TABLE _SESSION.disposable;
+                SELECT 'dropped';
+                """));
+
+        query("SELECT * FROM _SESSION.missing")
+                .then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"))
+                .body("error.message",
+                        equalTo("Not found: Dataset " + PROJECT + ":_SESSION was not found"));
+
+        query("DROP TABLE _SESSION.missing")
+                .then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"));
+    }
+
+    @Test
+    @Order(216)
+    void temporaryTableColumnsShadowTemporaryFunctionArguments() {
+        assertEquals(List.of(List.of("2", "7")), rows("""
+                CREATE TEMP TABLE input_rows AS SELECT 2 AS x, 3 AS y;
+                CREATE TEMP FUNCTION local_column(x INT64) AS ((SELECT x FROM input_rows));
+                CREATE TEMP FUNCTION outer_argument(x INT64) AS ((SELECT x FROM (SELECT y FROM input_rows)));
+                SELECT local_column(1), outer_argument(7);
+                """));
+    }
+
+    @Test
+    @Order(216)
+    void temporaryFunctionArgumentFieldCanMatchParameterName() {
+        assertEquals(List.of(List.of("recognized")), rows("""
+                CREATE TEMP FUNCTION classify(category STRING) AS (
+                  CASE WHEN STARTS_WITH(category, 'known') THEN 'recognized' ELSE 'other' END
+                );
+                SELECT classify(item.category)
+                FROM UNNEST([STRUCT('known-value' AS category)]) item;
+                """));
+    }
+
+    @Test
+    @Order(216)
+    void nestedTemporaryFunctionsRemainUsableInGroupedUnnest() {
+        assertEquals(List.of(List.of("recognized:true", "1")), rows("""
+                CREATE TEMP FUNCTION classify(category STRING) AS (
+                  CASE WHEN STARTS_WITH(category, 'known') THEN 'recognized' ELSE 'other' END
+                );
+                CREATE TEMP FUNCTION bucket_entries(entries ARRAY<STRUCT<category STRING, enabled BOOL>>)
+                RETURNS ARRAY<STRUCT<key STRING, value INT64>> AS (ARRAY(
+                  SELECT STRUCT(
+                    ARRAY_TO_STRING([classify(item.category), CAST(item.enabled AS STRING)], ':') AS key,
+                    COUNT(1) AS value)
+                  FROM UNNEST(entries) item
+                  GROUP BY classify(item.category), item.category, item.enabled
+                ));
+                CREATE TEMP FUNCTION combine_entries(entries ARRAY<STRUCT<category STRING, enabled BOOL>>)
+                RETURNS ARRAY<STRUCT<key STRING, value INT64>> AS (bucket_entries(entries));
+                WITH source AS (
+                  SELECT [STRUCT('known-value' AS category, TRUE AS enabled)] AS entries
+                )
+                SELECT key, SUM(value)
+                FROM source, UNNEST(combine_entries(source.entries))
+                GROUP BY key;
+                """));
+    }
+
+    @Test
+    @Order(217)
+    void temporaryFunctionPreambleRemainsASingleQuery() {
+        String jobId = given().contentType("application/json")
+                .body(Map.of(
+                        "query", "CREATE TEMP FUNCTION add_one(x INT64) AS (x + 1); SELECT add_one(?);",
+                        "useLegacySql", false,
+                        "parameterMode", "POSITIONAL",
+                        "queryParameters", List.of(Map.of(
+                                "parameterType", Map.of("type", "INT64"),
+                                "parameterValue", Map.of("value", "1")))))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"))
+                .extract().jsonPath().getString("jobReference.jobId");
+
+        given().when().get(BASE + "/jobs/" + jobId).then().statusCode(200)
+                .body("statistics.query.statementType", equalTo("SELECT"));
+    }
+
+    @Test
+    @Order(218)
+    void scriptsRejectDestinationAndIncompatibleConfigurations() {
+        Map<String, Object> destination = Map.of("datasetId", "scripts", "tableId", "script_result");
+        given().contentType("application/json")
+                .body(Map.of("query", "SELECT 1; SELECT 2", "useLegacySql", false,
+                        "destinationTable", destination))
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        insertJob(Map.of("query", "SELECT 1; SELECT 2", "useLegacySql", false,
+                "destinationTable", destination)).then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalidQuery"));
+
+        // A dry run describes a temporary table instead of storing it, so the script still resolves it
+        // by name and reports the last statement's schema, as BigQuery does.
+        given().contentType("application/json")
+                .body(Map.of("query", "CREATE TEMP TABLE dry_table AS SELECT 1 AS original; "
+                        + "SELECT * FROM dry_table", "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("jobComplete", equalTo(true))
+                .body("schema.fields.name", equalTo(List.of("original")))
+                .body("rows", nullValue());
+
+        given().contentType("application/json")
+                .body(Map.of("query", "CREATE TEMP TABLE dry_missing AS SELECT * FROM scripts.nowhere; "
+                        + "SELECT 1", "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries")
+                .then().statusCode(404);
+
+        for (Map.Entry<String, Object> option : Map.<String, Object>of(
+                "clustering", Map.of("fields", List.of("id")),
+                "destinationEncryptionConfiguration", Map.of("kmsKeyName", "projects/p/locations/l/keyRings/r/cryptoKeys/k"),
+                "userDefinedFunctionResources", List.of(Map.of("resourceUri", "gs://bucket/code.js")))
+                .entrySet()) {
+            Map<String, Object> config = new LinkedHashMap<>();
+            config.put("query", "SELECT 1; SELECT 2");
+            config.put("useLegacySql", false);
+            config.put(option.getKey(), option.getValue());
+            given().contentType("application/json").body(config)
+                    .when().post(BASE + "/queries")
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"));
+        }
+    }
+
+    @Test
+    @Order(219)
+    void proceduralIfRequiresBoolAndTreatsNullAsFalse() {
+        query("IF 1 THEN SELECT 'invalid'; END IF")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+
+        assertEquals(List.of(List.of("else")), rows("""
+                IF CAST(NULL AS BOOL) THEN
+                  SELECT 'then' AS result;
+                ELSE
+                  SELECT 'else' AS result;
+                END IF;
+                """));
+    }
+
+    @Test
+    @Order(220)
+    void temporaryObjectsHonorIfNotExists() {
+        assertEquals(List.of(List.of("1")), rows("""
+                CREATE TEMP TABLE existing_table (id INT64);
+                INSERT INTO existing_table VALUES (1);
+                CREATE TEMP TABLE IF NOT EXISTS existing_table (id INT64) AS SELECT 99;
+                SELECT id FROM existing_table;
+                """));
+
+        assertEquals(List.of(List.of("1")), rows("""
+                CREATE TEMP FUNCTION existing_function() AS (1);
+                CREATE TEMP FUNCTION IF NOT EXISTS existing_function() AS (2);
+                SELECT existing_function();
+                """));
+    }
+
+    @Test
+    @Order(221)
+    void temporaryTableDmlPreservesDeclaredRequiredColumns() {
+        query("""
+                CREATE TEMP TABLE required_values (id INT64 NOT NULL);
+                INSERT INTO required_values VALUES (NULL);
+                SELECT id FROM required_values;
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(222)
+    void scriptDryRunStopsAfterFirstDdlStatement() {
+        given().contentType("application/json")
+                .body(Map.of("query", """
+                        CREATE TABLE scripts.dry_run_ddl (id INT64);
+                        SELECT * FROM scripts.missing_after_ddl;
+                        """, "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("jobComplete", equalTo(true));
+
+        given().when().get(BASE + "/datasets/scripts/tables/dry_run_ddl").then().statusCode(404);
+    }
+
+    @Test
+    @Order(223)
+    void scriptsAccumulateBytesAcrossStatementsAndConditions() {
+        query("CREATE TABLE scripts.byte_source AS SELECT 1 AS id UNION ALL SELECT 2")
+                .then().statusCode(200);
+        long oneRead = Long.parseLong(query("SELECT * FROM scripts.byte_source")
+                .then().statusCode(200).extract().jsonPath().getString("totalBytesProcessed"));
+        assertTrue(oneRead > 0);
+
+        long executed = Long.parseLong(query("""
+                SELECT COUNT(*) FROM scripts.byte_source;
+                IF EXISTS (SELECT 1 FROM scripts.byte_source) THEN
+                  SELECT COUNT(*) FROM scripts.byte_source;
+                END IF;
+                """).then().statusCode(200).extract().jsonPath().getString("totalBytesProcessed"));
+        assertTrue(executed >= oneRead * 3, "Expected all statements and the IF condition to count bytes");
+
+        long dryRun = Long.parseLong(given().contentType("application/json")
+                .body(Map.of("query", """
+                        SELECT COUNT(*) FROM scripts.byte_source;
+                        SELECT COUNT(*) FROM scripts.byte_source;
+                        """, "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200).extract().jsonPath().getString("totalBytesProcessed"));
+        assertTrue(dryRun >= oneRead * 2, "Expected every dry-run statement to count bytes");
+    }
+
+    @Test
+    @Order(224)
+    void scriptsValidateUnselectedBranches() {
+        query("""
+                IF TRUE THEN
+                  SELECT 1;
+                ELSE
+                  DECLARE unsupported INT64;
+                END IF;
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(225)
+    void temporaryTableDmlPreservesNestedRequiredFields() {
+        query("""
+                CREATE TEMP TABLE nested_required (item STRUCT<id INT64 NOT NULL>);
+                INSERT INTO nested_required VALUES (STRUCT(NULL AS id));
+                SELECT item FROM nested_required;
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(226)
+    void finalQueryDoesNotExposeEarlierDdlStatistics() {
+        String jobId = query("""
+                CREATE OR REPLACE TABLE scripts.metadata_source (id INT64);
+                SELECT 1 AS result;
+                """).then().statusCode(200)
+                .extract().jsonPath().getString("jobReference.jobId");
+
+        given().when().get(BASE + "/jobs/" + jobId).then().statusCode(200)
+                .body("statistics.query.statementType", equalTo("SCRIPT"))
+                .body("statistics.query.ddlOperationPerformed", nullValue())
+                .body("statistics.query.ddlTargetTable", nullValue());
+    }
+
+    @Test
+    @Order(227)
+    void scriptsRejectEmptyStatements() {
+        query("SELECT 1;; SELECT 2").then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+        query("IF TRUE THEN ; SELECT 1; END IF;").then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
+
+    @Test
+    @Order(228)
+    void sessionQualifiedDropIfExistsIgnoresMissingTemporaryTable() {
+        assertEquals(List.of(List.of("1")), rows("""
+                DROP TABLE IF EXISTS _SESSION.missing;
+                SELECT 1;
+                """));
+    }
+
+    @Test
+    @Order(229)
+    void duplicateFinalTemporaryFunctionIsRejected() {
+        query("""
+                CREATE TEMP FUNCTION duplicate_function() AS (1);
+                SELECT duplicate_function();
+                CREATE TEMP FUNCTION duplicate_function() AS (2);
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"));
+    }
 }

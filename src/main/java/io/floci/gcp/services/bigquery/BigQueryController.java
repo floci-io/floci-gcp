@@ -32,6 +32,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -379,7 +380,18 @@ public class BigQueryController {
                 schemaUpdateOptions(config.get("schemaUpdateOptions")),
                 copyMap(config.get("timePartitioning"), "timePartitioning"),
                 copyMap(config.get("rangePartitioning"), "rangePartitioning"),
-                defaultProjectId);
+                defaultProjectId, scriptIncompatibleOptions(config));
+    }
+
+    private static Set<String> scriptIncompatibleOptions(Map<String, Object> config) {
+        Set<String> options = new LinkedHashSet<>();
+        for (String name : List.of("clustering", "destinationEncryptionConfiguration",
+                "userDefinedFunctionResources")) {
+            if (config.containsKey(name)) {
+                options.add(name);
+            }
+        }
+        return options;
     }
 
     private static Map<String, Object> copyMap(Object raw, String field) {

@@ -2,6 +2,7 @@ package io.floci.gcp.services.bigquery;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.Table;
+import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.util.List;
 
@@ -52,6 +53,13 @@ final class InMemorySqlEngine implements BigQuerySqlEngine {
 
     @Override
     public DmlResult executeDml(Request request, Tables tables) {
+        throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
+                + "set floci-gcp.services.bigquery.mock to false.");
+    }
+
+    @Override
+    public TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable,
+                                                   List<TableFieldSchema> targetFields) {
         throw QueryEngine.invalidQuery("DML statements need the DuckDB SQL engine; "
                 + "set floci-gcp.services.bigquery.mock to false.");
     }

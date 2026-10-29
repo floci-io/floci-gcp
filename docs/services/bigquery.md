@@ -91,11 +91,53 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   These fields follow the [BigQuery v2 discovery document](https://bigquery.googleapis.com/discovery/v1/apis/bigquery/v2/rest).
 - **Query parameters**: `parameterMode` `NAMED` (`@name`) and `POSITIONAL` (`?`), with scalar,
   `ARRAY` and `STRUCT` parameter types.
+- **Scripts and temporary objects**: request-scoped `CREATE TEMP FUNCTION` and `CREATE TEMP TABLE`
+  declarations can be interleaved with queries in source order. Functions become temporary
+  DuckDB macros; typed scalar, array and nested `STRUCT` parameters are accepted, and CTEs in a
+  function body remain local to that body. Temporary tables accept an explicit schema, an `AS`
+  query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
+  name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
+  BigQuery does. Results from preceding statements are discarded; the final query or DML statement
+  supplies the result. Procedural `BEGIN`/`END` blocks can be nested and contain supported
+  statements or `IF`/`ELSEIF`/`ELSE` blocks; their statements execute in source order using the
+  same temporary objects. Searched and simple `CASE` statements run the first matching branch, with
+  optional `ELSE`. `DECLARE`/`SET` supports `INT64`,
+  `BOOL`, `STRING`, `FLOAT64`, `DATE`, `TIMESTAMP`, `BYTES`,
+  `DATETIME`, `TIME`, `JSON`, `STRUCT`, and arrays of those non-array types, including
+  `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
+  literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
+  evaluated by the configured SQL engine. Variable references are token-substituted as typed literals;
+  known source columns, aliases, function names, and qualified fields are left intact. `EXECUTE IMMEDIATE`
+  supports a single query, supported DDL or DML statement, or `BEGIN` block. `USING` binds named or positional query
+  parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
+  outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or
+  request query parameters; nested `EXECUTE IMMEDIATE` is rejected.
+  `WHILE` supports simple scalar comparisons with a
+  1,000-iteration safety limit. `BEGIN` blocks scope variables. Full GoogleSQL expression and type
+  semantics are not supported. Labels are supported
+  on `BEGIN` blocks and loops, including labeled `BREAK`/`LEAVE` and
+  `CONTINUE`/`ITERATE`; `CONTINUE` cannot target a block.
+  `BEGIN` blocks do not provide transaction semantics, and
+  transactions and exception handlers are not supported. Procedural `IF` blocks execute only their
+  selected branch. Supported persistent DML
+  and DDL statements execute in source order. A sequence
+  of temporary function declarations followed by one query remains a single query, as in BigQuery.
+  `FOR … IN` evaluates its table expression once and exposes each row as a struct in the loop body.
+  All loop forms stop after 1,000 iterations. JavaScript UDFs and positional parameters in
+  multi-statement scripts are not supported, where BigQuery binds positional parameters across the
+  statements of a script. Multi-statement queries reject destination, disposition,
+  schema update, partitioning,
+  clustering, destination encryption, and user-defined function resource configuration fields.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is
   an HTTP 400. DML and DDL dry runs resolve every table the statement reads or writes, and DML is
-  bound against those tables, so a dry run fails wherever the real run would.
+  bound against those tables, so a dry run fails wherever the real run would. A script dry run
+  describes its `CREATE TEMP TABLE` declarations instead of storing them, so a later statement of
+  the same script still resolves them by name and the reported schema is the last statement's. It
+  stops at variable statements or control flow without validating their following statements, and
+  stops after validating the first DDL statement; BigQuery validates every statement of a script,
+  including the ones after a `DECLARE` and in unselected branches.
 - **Destination tables**: `jobs.insert` honors `configuration.query.destinationTable` with
   `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
   (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
@@ -575,9 +617,19 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
   name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived
   from literal `IN` values and aggregate aliases is not validated.
-- Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
-  `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
-  yet; they fail with `invalidQuery`.
+- Scripts support nested `BEGIN` blocks, `IF`, searched/simple `CASE`, scalar variables, and
+  `WHILE`, `LOOP`, `REPEAT`, and `FOR` with labels and loop control. Full GoogleSQL variable type
+  and expression semantics, exception handlers, transactions, JavaScript UDFs, persistent
+  `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA`, `LOAD DATA`, `ALTER TABLE`, and `ALTER VIEW`
+  inside scripts are not supported; they fail with `invalidQuery`.
+  Dynamic SQL goes through `EXECUTE IMMEDIATE` and is supported only in the shapes listed above.
+- Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
+  at the first variable or control-flow statement and after the first DDL statement, where BigQuery
+  validates every statement of the script. A dry run whose script declares a temporary table reports
+  the last statement's schema, where BigQuery reports none.
+- Script statements execute synchronously within the parent job. Separate child jobs are not
+  created or returned by `jobs.list`.
+- Outside scripts, `ALTER TABLE` and `ALTER VIEW` support only `SET OPTIONS`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
 - `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are

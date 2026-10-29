@@ -1222,6 +1222,116 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void proceduralVariablesAndLoopsExecuteOnDuck() {
+        query("""
+                {"query": "DECLARE target_id INT64 DEFAULT 0; WHILE target_id < 2 DO SET target_id = target_id + 1; END WHILE; SELECT name FROM shop.users WHERE id = target_id", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("jobComplete", equalTo(true))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("bo"));
+    }
+
+    @Test
+    @Order(2)
+    void dateTimestampAndArrayVariablesKeepTheirTypes() {
+        query(Map.of("query", """
+                BEGIN
+                  DECLARE run_date DATE DEFAULT DATE '2025-01-01';
+                  DECLARE run_at TIMESTAMP DEFAULT TIMESTAMP '2025-01-01 12:00:00+00';
+                  DECLARE run_dates ARRAY<DATE> DEFAULT [DATE '2025-01-01'];
+                  SET run_date = DATE '2025-01-02';
+                  SET run_at = TIMESTAMP '2025-01-02 12:00:00+00';
+                  SET run_dates = [DATE '2025-01-02', DATE '2025-01-03'];
+                  SELECT run_date, run_at, run_dates;
+                END;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("DATE", "TIMESTAMP", "DATE")))
+                .body("schema.fields[2].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v", equalTo("2025-01-02"))
+                .body("rows[0].f[1].v", notNullValue())
+                .body("rows[0].f[2].v.v", equalTo(List.of("2025-01-02", "2025-01-03")));
+    }
+
+    @Test
+    @Order(2)
+    void declaredStructsArraysOfStructsAndAdditionalTypesRunOnDuck() {
+        query(Map.of("query", """
+                BEGIN
+                  DECLARE item STRUCT<id INT64, label STRING>
+                    DEFAULT STRUCT(1 AS id, 'first' AS label);
+                  DECLARE items ARRAY<STRUCT<id INT64, label STRING>>
+                    DEFAULT [STRUCT(1 AS id, 'first' AS label)];
+                  DECLARE payload BYTES DEFAULT b'first';
+                  DECLARE date_time DATETIME DEFAULT DATETIME '2025-02-03 12:00:00';
+                  DECLARE time_value TIME DEFAULT TIME '12:00:00';
+                  DECLARE document JSON DEFAULT JSON '{"value":"first"}';
+                  SET item = STRUCT(2 AS id, 'second' AS label);
+                  SET items = [STRUCT(2 AS id, 'second' AS label), STRUCT(3 AS id, 'third' AS label)];
+                  SET payload = b'second';
+                  SET date_time = DATETIME '2025-02-03 14:00:00';
+                  SET time_value = TIME '14:00:00';
+                  SET document = JSON '{"value":"second"}';
+                  SELECT item.id, item.label, items, payload, date_time, time_value, document;
+                END;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of(
+                        "INTEGER", "STRING", "RECORD", "BYTES", "DATETIME", "TIME", "JSON")))
+                .body("schema.fields[2].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("second"))
+                .body("rows[0].f[2].v.v.f.v", equalTo(List.of(List.of("2", "second"), List.of("3", "third"))))
+                .body("rows[0].f[3].v", equalTo("c2Vjb25k"))
+                .body("rows[0].f[4].v", equalTo("2025-02-03T14:00:00"))
+                .body("rows[0].f[5].v", equalTo("14:00:00"))
+                .body("rows[0].f[6].v", notNullValue());
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateUsesParametersAndAssignsItsResult() {
+        query(Map.of("query", """
+                DECLARE input_value INT64 DEFAULT 7;
+                DECLARE output_value INT64;
+                EXECUTE IMMEDIATE "SELECT @value * 2 AS result"
+                  INTO output_value USING input_value AS value;
+                SELECT output_value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("INTEGER"))
+                .body("rows[0].f[0].v", equalTo("14"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateBindsAndReturnsAQueryResult() {
+        query(Map.of("query", """
+                DECLARE user_id INT64 DEFAULT 2;
+                DECLARE user_name STRING;
+                EXECUTE IMMEDIATE "SELECT name FROM shop.users WHERE id = @requested_id"
+                  INTO user_name USING user_id AS requested_id;
+                SELECT user_name;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("bo"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateCreatesTemporaryTables() {
+        query(Map.of("query", """
+                EXECUTE IMMEDIATE "CREATE TEMP TABLE dynamic_values AS SELECT 1 AS value UNION ALL SELECT 2";
+                SELECT SUM(value) AS total FROM dynamic_values;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}
@@ -2397,6 +2507,78 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void selectAsStructNestedFunctionsKeepComputedFieldWithStarExcept() {
+        Response result = query(Map.of("query", """
+                CREATE TEMP FUNCTION add_digits(digit_a STRING, digit_b STRING) RETURNS STRING AS (
+                  CAST(MOD((CAST(digit_a AS INT64) + CAST(digit_b AS INT64)), 10) AS STRING)
+                );
+                CREATE TEMP FUNCTION reverse_suffix(value STRING) RETURNS STRING AS (
+                  REVERSE(SUBSTR(value, 2, 10))
+                );
+                CREATE TEMP FUNCTION reverse_identifier(value STRING) RETURNS STRING AS (
+                  CONCAT(SUBSTR(value, 1, 1), reverse_suffix(value))
+                );
+                CREATE TEMP FUNCTION encode_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CONCAT(
+                    SUBSTR(value, 1, 1),
+                    add_digits(SUBSTR(value, 2, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 3, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 4, 1), SUBSTR(code, 3, 1)),
+                    add_digits(SUBSTR(value, 5, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 6, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 7, 1), SUBSTR(code, 3, 1)),
+                    add_digits(SUBSTR(value, 8, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 9, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 10, 1), SUBSTR(code, 3, 1))
+                  )
+                );
+                CREATE TEMP FUNCTION normalize_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CASE WHEN REGEXP_CONTAINS(value, r"^[0-9]{10}$")
+                    THEN encode_identifier(reverse_identifier(value), code) ELSE NULL END
+                );
+                CREATE TEMP FUNCTION denormalize_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CONCAT(SUBSTR(value, 1, 1), REVERSE(CONCAT(
+                    CAST(MOD(CAST(SUBSTR(value, 2, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 3, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 4, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 5, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 6, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 7, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 8, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 9, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 10, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING)
+                  ))));
+                CREATE TEMP FUNCTION process_records(records ANY TYPE) AS ((
+                  ARRAY(
+                    SELECT AS STRUCT normalize_identifier(denormalize_identifier(id, '123'), '123') AS id,
+                      * EXCEPT(id)
+                    FROM UNNEST(records)
+                    WHERE kind IN ('A', 'B')
+                    UNION ALL
+                    SELECT AS STRUCT *
+                    FROM UNNEST(records)
+                    WHERE NOT kind IN ('A', 'B')
+                  )
+                ));
+                SELECT process_records([
+                  STRUCT('0123456789' AS id, 'A' AS kind, 'Record' AS label),
+                  STRUCT('bad' AS id, 'C' AS kind, 'Other' AS label)
+                ]) AS result;
+                """, "useLegacySql", false));
+        result.then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("id", "kind", "label")))
+                .body("rows", hasSize(1));
+        List<List<String>> records = result.jsonPath().getList("rows[0].f[0].v.v.f.v");
+        assertEquals(List.of("0123456789", "A", "Record"), records.stream()
+                .filter(record -> "A".equals(record.get(1))).findFirst().orElseThrow());
+        assertEquals(List.of("bad", "C", "Other"), records.stream()
+                .filter(record -> "C".equals(record.get(1))).findFirst().orElseThrow());
+    }
+
+    @Test
+    @Order(5)
     void mixedStructStarsExpandIntoSiblingFields() {
         for (String sql : List.of(
                 "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t",
@@ -2719,11 +2901,21 @@ class BigQueryDuckIntegrationTest {
                 """).when().post(BASE + "/datasets/shop/tables/reviewed_partition/insertAll")
                 .then().statusCode(200).body("insertErrors", nullValue());
 
-        query(Map.of("query", "SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
-                        + " FROM shop.reviewed_partition input", "useLegacySql", false))
+        query(Map.of("query", """
+                BEGIN
+                  CREATE TEMP TABLE correlated_projection AS
+                    SELECT id, (SELECT AS STRUCT input.* EXCEPT(id)) AS original
+                    FROM shop.reviewed_partition input;
+                  CREATE TEMP TABLE result AS
+                    SELECT v.id, ANY_VALUE(v.original).* EXCEPT(secret), COUNT(*) AS secret
+                    FROM correlated_projection v
+                    GROUP BY v.id;
+                  SELECT * FROM result;
+                END
+                """, "useLegacySql", false))
                 .then().statusCode(200)
-                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
-                .body("rows[0].f[0].v.f.v", equalTo(List.of("ana", "hidden")));
+                .body("schema.fields.name", equalTo(List.of("id", "name", "secret")))
+                .body("rows[0].f.v", equalTo(List.of("1", "ana", "1")));
 
         query(Map.of("query", "SELECT q.original FROM (SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
                         + " FROM shop.reviewed_partition input) q", "useLegacySql", false))
@@ -4673,6 +4865,12 @@ class BigQueryDuckIntegrationTest {
                 {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1", "useLegacySql": false}
                 """)
                 .then().statusCode(400);
+        query("""
+                {"query": "BEGIN CREATE TEMP TABLE input_data AS SELECT 1 AS id, STRUCT('drop' AS omitted, 'keep' AS retained) AS original; CREATE TEMP TABLE intermediate AS SELECT id, ANY_VALUE(original).* EXCEPT (omitted), COUNT(*) AS omitted FROM input_data GROUP BY id; SELECT * FROM intermediate; END", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "retained", "omitted")))
+                .body("rows[0].f.v", equalTo(List.of("1", "keep", "1")));
         query("""
                 {"query": "SELECT t.s.inr.* FROM (SELECT STRUCT(STRUCT(1 AS c, 2 AS d) AS inr) s) t", "useLegacySql": false}
                 """)

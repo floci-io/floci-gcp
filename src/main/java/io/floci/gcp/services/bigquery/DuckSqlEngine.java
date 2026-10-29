@@ -62,7 +62,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public Result execute(Request request, Tables tables) {
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
@@ -71,13 +71,15 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         String sql = translation.sql();
-        rejectMissingStructFields(translation, sql, staging.emptySetup(), flociEndpoint);
+        String setup = staging.setup() + translation.setupSql();
+        String emptySetup = staging.emptySetup() + translation.setupSql();
+        rejectMissingStructFields(translation, sql, emptySetup, flociEndpoint);
         if (request.dryRun()) {
             List<Map<String, Object>> described;
             try {
-                described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+                described = describeRows(sql, emptySetup, flociEndpoint);
             } catch (GcpException e) {
-                throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint, e);
+                throw orderByFieldFailure(translation, emptySetup, flociEndpoint, e);
             }
             return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
                     duplicateNames(translation, described));
@@ -85,17 +87,17 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
         DuckClient.DuckResult result;
         try {
-            result = run(sql, staging.setup(), flociEndpoint, null);
+            result = run(sql, setup, flociEndpoint, null);
         } catch (GcpException e) {
-            throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint, e);
+            throw orderByFieldFailure(translation, emptySetup, flociEndpoint, e);
         }
         if (result.columns() == null || hasDuplicateNames(result.columns())) {
             // A duplicate output name arrives as repeated keys in the JSON rows, so the values are read
             // again with positional aliases once the schema has BigQuery's names.
-            List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+            List<Map<String, Object>> described = describeRows(sql, emptySetup, flociEndpoint);
             List<Column> columns = columns(described);
             return new Result(schemaOf(columns),
-                    rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
+                    rejectNullArrayElements(columns, fetch(sql, setup, flociEndpoint, columns)), "SELECT",
                     staging.bytesProcessed(), duplicateNames(translation, described));
         }
         List<Column> columns = columns(result.columns().stream()
@@ -110,7 +112,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      * queries, which a schema read cannot once a star has been expanded; the described names are a fallback
      * for a shape the translator could not resolve.
      */
-    private static List<String> duplicateNames(SqlDialectTranslator.Translation translation,
+    private static List<String> duplicateNames(SqlDialectTranslator.ScriptTranslation translation,
                                                List<Map<String, Object>> described) {
         return translation.duplicateOutputNames().isEmpty()
                 ? duplicateOutputNames(described) : translation.duplicateOutputNames();
@@ -123,8 +125,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      * belongs to a nested query, or the alias is not a STRUCT column of the result, the type is left out: a result
      * column of the same name may be another struct.
      */
-    private void rejectMissingStructFields(SqlDialectTranslator.Translation translation, String sql, String setup,
-                                           String flociEndpoint) {
+    private void rejectMissingStructFields(SqlDialectTranslator.ScriptTranslation translation, String sql,
+                                           String setup, String flociEndpoint) {
         if (translation.missingStructFields().isEmpty()) {
             return;
         }
@@ -174,7 +176,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      * or {@code Cannot access field zz on a value with type INT64} past a scalar field. The type comes from
      * describing the query without its ORDER BY; any other failure is returned unchanged.
      */
-    private GcpException orderByFieldFailure(SqlDialectTranslator.Translation translation, String setup,
+    private GcpException orderByFieldFailure(SqlDialectTranslator.ScriptTranslation translation, String setup,
                                              String flociEndpoint, GcpException failure) {
         SqlDialectTranslator.OrderByFieldPaths orderBy = translation.orderByFieldPaths();
         if (orderBy == null || failure.getMessage() == null || !failure.getMessage().startsWith("Binder Error")) {
@@ -279,17 +281,19 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public DuckClient.ArrowIpc executeArrow(Request request, Tables tables) {
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
                 ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
-        rejectMissingStructFields(translation, translation.sql(), staging.emptySetup(), flociEndpoint);
+        rejectMissingStructFields(translation, translation.sql(), staging.emptySetup() + translation.setupSql(),
+                flociEndpoint);
         DuckClient.ArrowIpc arrow;
         try {
-            arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
+            arrow = client.query(translation.sql(), staging.setup() + translation.setupSql(),
+                    flociEndpoint, null, true).arrow();
         } catch (DuckClient.DuckSqlException e) {
             throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint,
                     SqlDialectTranslator.invalidQuery(queryErrorMessage(e.getMessage())));
@@ -303,38 +307,78 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     @Override
     public DmlResult executeDml(Request request, Tables tables) {
-        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(request.sql(),
-                request.projectId(), request.jobProjectId(), request.defaultDatasetId());
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
+                ref -> columnNames(tables, ref));
+        SqlDialectTranslator.Statement statement = script.finalStatement();
+        if (!statement.isDml()) {
+            throw SqlDialectTranslator.invalidQuery("A DML script must end with INSERT, UPDATE, DELETE or MERGE.");
+        }
         SqlDialectTranslator.TableRef target = statement.target();
         Table targetTable = tables.table(target.datasetId(), target.tableId());
         if (targetTable.viewQuery() != null) {
             throw SqlDialectTranslator.invalidQuery("Cannot run " + statement.statementType() + " on view "
                     + request.projectId() + ":" + target.datasetId() + "." + target.tableId());
         }
-        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateDml(request.sql(),
-                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
-                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> dmlColumnNames(tables, ref, target, targetTable));
+        if (BigQueryService.isIngestionTimePartitioned(targetTable)) {
+            script = SqlDialectTranslator.translateScript(request.sql(),
+                    request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
+                    ref -> dmlColumnNames(tables, ref, target, targetTable));
+            statement = script.finalStatement();
+        }
         String flociEndpoint = flociEndpoint();
-        Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
-                translation.needsUnicodeCaseFold(), tables, flociEndpoint);
+        Staging staging = stage(request.projectId(), script.tables(), script.informationSchema(),
+                script.needsUnicodeCaseFold(), tables, flociEndpoint);
         String stagedTarget = DuckTypes.quoteIdentifier(target.datasetId()) + "."
                 + DuckTypes.quoteIdentifier(target.tableId());
-        String setup = dmlSetup(staging.setup(), stagedTarget, targetTable);
+        String setup = dmlSetup(staging.setup() + script.setupSql(), stagedTarget, targetTable);
         if (request.dryRun()) {
             // EXPLAIN binds the statement against the staged tables without running it, so a missing
             // column or a malformed clause fails the dry run just as it would fail the real one.
-            run("EXPLAIN " + translation.sql(), dmlSetup(staging.emptySetup(), stagedTarget, targetTable),
+            run("EXPLAIN " + script.sql(), dmlSetup(staging.emptySetup() + script.setupSql(), stagedTarget, targetTable),
                     flociEndpoint, null);
             return new DmlResult(0, 0, 0, 0, List.of(), staging.bytesProcessed());
         }
         String followup = "SELECT * FROM " + stagedTarget;
-        DuckClient.DuckResult result = run(translation.sql(), setup, flociEndpoint, followup);
+        DuckClient.DuckResult result = run(script.sql(), setup, flociEndpoint, followup);
         if (result.followup() == null || result.followup().columns() == null) {
             throw GcpException.failedPrecondition("DML needs a floci-duck image that supports follow-up"
                     + " statements; update " + config.services().bigquery().duck().defaultImage());
         }
 
+        List<TableFieldSchema> targetFields = targetTable.getSchema() != null
+                && targetTable.getSchema().getFields() != null ? targetTable.getSchema().getFields() : List.of();
+        return decodeDmlResult(statement, result, targetFields, staging.bytesProcessed()).dmlResult();
+    }
+
+    @Override
+    public TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable,
+                                                   List<TableFieldSchema> targetFields) {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
+                request.projectId(), request.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
+        SqlDialectTranslator.Statement statement = script.finalStatement();
+        if (!statement.isDml()) {
+            throw SqlDialectTranslator.invalidQuery("A temporary table mutation must end with DML.");
+        }
+        String flociEndpoint = flociEndpoint();
+        Staging staging = stage(request.projectId(), script.tables(), script.informationSchema(),
+                script.needsUnicodeCaseFold(), tables, flociEndpoint);
+        String followup = "SELECT * FROM " + DuckTypes.quoteIdentifier(temporaryTable);
+        DuckClient.DuckResult result = run(script.sql(), staging.setup() + script.setupSql(), flociEndpoint, followup);
+        if (result.followup() == null || result.followup().columns() == null) {
+            throw GcpException.failedPrecondition("Temporary DML needs a floci-duck image that supports follow-up"
+                    + " statements; update " + config.services().bigquery().duck().defaultImage());
+        }
+        return decodeDmlResult(statement, result, targetFields, staging.bytesProcessed());
+    }
+
+    private static TemporaryDmlResult decodeDmlResult(SqlDialectTranslator.Statement statement,
+                                                        DuckClient.DuckResult result,
+                                                        List<TableFieldSchema> targetFields,
+                                                        long totalBytesProcessed) {
         long inserted = 0;
         long updated = 0;
         long deleted = 0;
@@ -360,8 +404,6 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
         }
 
-        List<TableFieldSchema> targetFields = targetTable.getSchema() != null
-                && targetTable.getSchema().getFields() != null ? targetTable.getSchema().getFields() : List.of();
         List<Column> columns = new ArrayList<>();
         for (DuckClient.DuckColumn duckColumn : result.followup().columns()) {
             DuckTypes.DuckType type = DuckTypes.parse(duckColumn.type());
@@ -384,7 +426,37 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         // BigQuery fails a DML statement that would store a NULL array element, and writes nothing.
         rejectNullArrayElements(columns, tableRows);
-        return new DmlResult(affected, inserted, updated, deleted, tableRows, staging.bytesProcessed());
+        validateRequiredFields(targetFields, tableRows);
+        DmlResult dmlResult = new DmlResult(affected, inserted, updated, deleted, tableRows, totalBytesProcessed);
+        return new TemporaryDmlResult(schemaOf(columns), dmlResult);
+    }
+
+    private static void validateRequiredFields(List<TableFieldSchema> fields, List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            validateRequiredFields(fields, row, "");
+        }
+    }
+
+    private static void validateRequiredFields(List<TableFieldSchema> fields, Map<?, ?> row, String prefix) {
+        for (TableFieldSchema field : fields) {
+            String path = prefix + field.getName();
+            Object value = row.get(field.getName());
+            if (value == null && "REQUIRED".equals(field.getMode())) {
+                throw SqlDialectTranslator.invalidQuery("NULL value for required field " + path);
+            }
+            if (value == null || field.getFields() == null) {
+                continue;
+            }
+            if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
+                for (Object element : values) {
+                    if (element instanceof Map<?, ?> nested) {
+                        validateRequiredFields(field.getFields(), nested, path + ".");
+                    }
+                }
+            } else if (value instanceof Map<?, ?> nested) {
+                validateRequiredFields(field.getFields(), nested, path + ".");
+            }
+        }
     }
 
     // ── Load jobs ─────────────────────────────────────────────────────────────

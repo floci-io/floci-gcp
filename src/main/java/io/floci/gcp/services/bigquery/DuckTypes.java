@@ -18,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Type bridge between BigQuery table schemas and DuckDB, used by {@link DuckSqlEngine}:
@@ -142,6 +143,88 @@ final class DuckTypes {
             return "CASE WHEN " + value + " IS NULL THEN NULL ELSE " + rebuilt.append(") END");
         }
         return "BYTES".equals(field.getType()) ? "from_base64(CAST(" + value + " AS VARCHAR))" : value;
+    }
+
+    /** GoogleSQL literal for a value in the emulator's stored row representation. */
+    @SuppressWarnings("unchecked")
+    static String storedLiteral(TableFieldSchema field, Object value) {
+        if (value == null) {
+            return "CAST(NULL AS " + googleSqlType(field) + ")";
+        }
+        if ("REPEATED".equals(field.getMode())) {
+            if (!(value instanceof List<?> values)) {
+                return "CAST(NULL AS " + googleSqlType(field) + ")";
+            }
+            if (values.isEmpty()) {
+                return googleSqlType(field) + "[]";
+            }
+            TableFieldSchema element = copyWithMode(field, "NULLABLE");
+            return "[" + values.stream().map(item -> storedLiteral(element, item))
+                    .collect(Collectors.joining(", ")) + "]";
+        }
+        if ("RECORD".equals(field.getType())) {
+            if (!(value instanceof Map<?, ?> raw)) {
+                return "CAST(NULL AS " + googleSqlType(field) + ")";
+            }
+            Map<String, Object> record = (Map<String, Object>) raw;
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            return "STRUCT(" + children.stream()
+                    .map(child -> storedLiteral(child, record.get(child.getName())) + " AS "
+                            + googleIdentifier(child.getName()))
+                    .collect(Collectors.joining(", ")) + ")";
+        }
+        String text = String.valueOf(value);
+        return switch (field.getType() == null ? "STRING" : field.getType()) {
+            case "INTEGER" -> "CAST(" + text + " AS INT64)";
+            case "FLOAT" -> "CAST(" + googleSqlLiteral(text) + " AS FLOAT64)";
+            case "BOOLEAN" -> Boolean.parseBoolean(text) ? "TRUE" : "FALSE";
+            case "NUMERIC", "BIGNUMERIC" -> "CAST(" + googleSqlLiteral(text) + " AS " + field.getType() + ")";
+            case "BYTES" -> "FROM_BASE64(" + googleSqlLiteral(text) + ")";
+            case "DATE" -> "DATE " + googleSqlLiteral(text);
+            case "TIME" -> "TIME " + googleSqlLiteral(text);
+            case "DATETIME" -> "DATETIME " + googleSqlLiteral(text);
+            case "TIMESTAMP" -> timestampLiteral(text);
+            case "JSON" -> "JSON " + googleSqlLiteral(text);
+            default -> googleSqlLiteral(text);
+        };
+    }
+
+    private static String timestampLiteral(String value) {
+        try {
+            String micros = new BigDecimal(value).movePointRight(6).setScale(0, RoundingMode.HALF_UP)
+                    .toPlainString();
+            return "TIMESTAMP_MICROS(" + micros + ")";
+        } catch (NumberFormatException ignored) {
+            return "TIMESTAMP " + googleSqlLiteral(value);
+        }
+    }
+
+    /** Literal that will be parsed as GoogleSQL before it is rendered for DuckDB. */
+    private static String googleSqlLiteral(String value) {
+        return '\'' + value.replace("\\", "\\\\").replace("'", "\\'") + '\'';
+    }
+
+    private static String googleSqlType(TableFieldSchema field) {
+        TableFieldSchema element = "REPEATED".equals(field.getMode()) ? copyWithMode(field, "NULLABLE") : field;
+        String base;
+        if ("RECORD".equals(element.getType())) {
+            List<TableFieldSchema> children = element.getFields() != null ? element.getFields() : List.of();
+            base = "STRUCT<" + children.stream()
+                    .map(child -> googleIdentifier(child.getName()) + " " + googleSqlType(child))
+                    .collect(Collectors.joining(", ")) + ">";
+        } else {
+            base = switch (element.getType() == null ? "STRING" : element.getType()) {
+                case "INTEGER" -> "INT64";
+                case "FLOAT" -> "FLOAT64";
+                case "BOOLEAN" -> "BOOL";
+                default -> element.getType() == null ? "STRING" : element.getType();
+            };
+        }
+        return "REPEATED".equals(field.getMode()) ? "ARRAY<" + base + ">" : base;
+    }
+
+    private static String googleIdentifier(String value) {
+        return '`' + value.replace("`", "\\`") + '`';
     }
 
     private static boolean containsBytes(TableFieldSchema field) {

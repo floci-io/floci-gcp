@@ -22,6 +22,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.ContainerTeardown;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.Resettable;
 import io.floci.gcp.core.storage.StorageBackend;
@@ -35,14 +36,18 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.grpc.Status;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.DateTimeException;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -50,7 +55,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -75,9 +87,15 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 @RegisterForReflection(targets = {StorageError.class, StorageError.Builder.class,
         RowError.class, RowError.Builder.class})
-public class BigQueryStorageWrite implements Resettable {
+public class BigQueryStorageWrite implements Resettable, ContainerTeardown {
+
+    private static final Logger LOG = Logger.getLogger(BigQueryStorageWrite.class);
 
     static final String DEFAULT_STREAM = "_default";
+    private static final int APPEND_WORKER_COUNT = 8;
+    private static final int MAX_QUEUED_APPEND_REQUESTS = 512;
+    /** How long shutdown waits for append workers that are still inside a table write. */
+    private static final long APPEND_SHUTDOWN_SECONDS = 10;
 
     private static final Pattern TABLE = Pattern.compile("projects/([^/]+)/datasets/([^/]+)/tables/([^/]+)");
     private static final Pattern STREAM = Pattern.compile(
@@ -188,7 +206,15 @@ public class BigQueryStorageWrite implements Resettable {
     private final EmulatorConfig config;
     private final StorageBackend<String, StoredWriteStream> streamStore;
     private final Map<String, Stream> streams = new ConcurrentHashMap<>();
+    private final Semaphore appendRequestSlots = new Semaphore(MAX_QUEUED_APPEND_REQUESTS);
+    private final Object slotLock = new Object();
+    private final Deque<Runnable> slotWaiters = new ArrayDeque<>();
+    private final ThreadPoolExecutor appendExecutor = new ThreadPoolExecutor(
+            APPEND_WORKER_COUNT, APPEND_WORKER_COUNT, 0, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(MAX_QUEUED_APPEND_REQUESTS), appendThreadFactory(),
+            new ThreadPoolExecutor.AbortPolicy());
     private volatile boolean persistSuppressed;
+    private volatile boolean stopping;
 
     @Inject
     public BigQueryStorageWrite(BigQueryService service, GrpcServerManager grpcServerManager, EmulatorConfig config,
@@ -200,6 +226,122 @@ public class BigQueryStorageWrite implements Resettable {
         // calls do not pass through the REST project filter.
         this.streamStore = storageFactory.createGlobal("bigquery-write-streams", "bigquery-write-streams.json",
                 new TypeReference<Map<String, StoredWriteStream>>() {});
+    }
+
+    /**
+     * Stops the append workers during the ShutdownEvent phase, before
+     * {@code StorageFactory.shutdownAll} stops the flush schedulers and releases the data directory.
+     * A {@code @PreDestroy} alone would run after that flush, so an append could still be writing
+     * rows then. Waiting for the workers also means rows they already accepted reach the final flush.
+     */
+    @Override
+    public void stopManagedContainers() {
+        stopAppendWorkers();
+    }
+
+    @PreDestroy
+    void shutdownAppendExecutor() {
+        // Fallback for a shutdown that never reached the ShutdownEvent phase, such as a failed startup.
+        stopAppendWorkers();
+    }
+
+    private void stopAppendWorkers() {
+        // Refuse new writes first, so a caller that is about to change a stream or a table is told the emulator
+        // is stopping instead of being acknowledged for a write that shutdown discards. Stopping appends takes the
+        // table write lock, so it returns once a mutation already holding it has finished and rejects later ones;
+        // that is also what lets an append worker waiting for the lock give up instead of waiting on a lock that
+        // no longer admits it.
+        stopping = true;
+        service.stopAppends();
+        // A connection parked without a slot would otherwise wait for a worker that is about to stop.
+        wakeAllSlotWaiters();
+        // Interrupt the workers and wait for them: a request that is already past the check above saves its rows
+        // before it returns, and the lifecycle flushes those writes after this teardown.
+        appendExecutor.shutdownNow();
+        try {
+            if (!appendExecutor.awaitTermination(APPEND_SHUTDOWN_SECONDS, TimeUnit.SECONDS)) {
+                LOG.warnf("BigQuery Storage Write append workers did not stop in %ds; "
+                        + "a late write may miss the final flush", APPEND_SHUTDOWN_SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    Executor appendExecutor() {
+        return appendExecutor;
+    }
+
+    /** Whether appends have been stopped for the rest of the process. */
+    boolean stopping() {
+        return stopping;
+    }
+
+    /**
+     * Takes a slot for an append, or registers {@code waiter} to run once one frees. A connection that has a
+     * request in hand but no slot to run it in parks here instead of failing the client, and gRPC inbound flow
+     * control keeps the client from sending more until the connection requests another message.
+     *
+     * <p>The attempt and the registration share {@code slotLock} with {@link #releaseAppendRequestSlot()}, so a
+     * slot that frees while a connection is deciding is either taken by this call or seen by the release, which
+     * then wakes the waiter it registered: neither side can miss the other.
+     */
+    boolean acquireAppendRequestSlotOrWait(Runnable waiter) {
+        synchronized (slotLock) {
+            if (appendRequestSlots.tryAcquire()) {
+                return true;
+            }
+            slotWaiters.addLast(waiter);
+            return false;
+        }
+    }
+
+    void releaseAppendRequestSlot() {
+        synchronized (slotLock) {
+            appendRequestSlots.release();
+        }
+        wakeSlotWaiters();
+    }
+
+    /**
+     * Runs parked waiters while a slot is free. A waiter whose call was cancelled, or whose connection is
+     * closing, declines the slot instead of taking it, so the loop hands the same release to the connection
+     * behind it rather than leaving that one parked with a free slot.
+     */
+    private void wakeSlotWaiters() {
+        while (true) {
+            Runnable waiter;
+            synchronized (slotLock) {
+                if (slotWaiters.isEmpty() || appendRequestSlots.availablePermits() <= 0) {
+                    return;
+                }
+                waiter = slotWaiters.removeFirst();
+            }
+            waiter.run();
+        }
+    }
+
+    /** Wakes every parked connection, so a shutdown tells them to stop instead of leaving them waiting. */
+    private void wakeAllSlotWaiters() {
+        Runnable waiter;
+        while ((waiter = pollSlotWaiter()) != null) {
+            waiter.run();
+        }
+    }
+
+    private Runnable pollSlotWaiter() {
+        synchronized (slotLock) {
+            return slotWaiters.pollFirst();
+        }
+    }
+
+    private static ThreadFactory appendThreadFactory() {
+        AtomicInteger threadNumber = new AtomicInteger();
+        return runnable -> {
+            Thread thread = new Thread(runnable, "bigquery-write-append-" + threadNumber.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -223,6 +365,9 @@ public class BigQueryStorageWrite implements Resettable {
     // ── Streams ──────────────────────────────────────────────────────────────
 
     public WriteStream createWriteStream(CreateWriteStreamRequest request) {
+        if (stopping) {
+            throw GcpException.unavailable("The emulator is shutting down");
+        }
         TableRef table = table(request.getParent());
         WriteStream.Type type = request.getWriteStream().getType();
         if (type != WriteStream.Type.COMMITTED && type != WriteStream.Type.PENDING
@@ -378,6 +523,10 @@ public class BigQueryStorageWrite implements Resettable {
 
     /** Handles one request of an AppendRows connection; rejections come back as AppendException. */
     public AppendRowsResponse append(Connection connection, AppendRowsRequest request) {
+        if (stopping) {
+            throw new AppendException(Status.Code.UNAVAILABLE, null, connection.writeStream,
+                    "The emulator is shutting down");
+        }
         if (!request.getWriteStream().isEmpty()) {
             connection.writeStream = request.getWriteStream();
         }

@@ -59,6 +59,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -193,8 +194,17 @@ class BigQueryWriteGrpcIntegrationTest {
         }
 
         AppendRowsResponse send(AppendRowsRequest.Builder request) throws Exception {
+            sendAsync(request);
+            return await();
+        }
+
+        /** Sends without waiting for the response, the way a pipelining client does. */
+        void sendAsync(AppendRowsRequest.Builder request) {
             requests.onNext(request.build());
-            Object response = responses.poll(10, TimeUnit.SECONDS);
+        }
+
+        AppendRowsResponse await() throws Exception {
+            Object response = responses.poll(30, TimeUnit.SECONDS);
             if (response instanceof Throwable t) {
                 throw (Exception) t;
             }
@@ -771,5 +781,27 @@ class BigQueryWriteGrpcIntegrationTest {
         assertEquals(Status.Code.NOT_FOUND, assertThrows(StatusRuntimeException.class,
                 () -> write.getWriteStream(GetWriteStreamRequest.newBuilder().setName(name).build()))
                 .getStatus().getCode());
+    }
+
+    @Test
+    @Order(18)
+    void pipelinedAppendsOnOneConnectionAreAllAcknowledged() throws Exception {
+        int appends = 200;
+        List<AppendRowsResponse> responses = new ArrayList<>();
+        try (Connection connection = new Connection()) {
+            // A client that pipelines sends the next append without waiting for the previous response.
+            for (int index = 0; index < appends; index++) {
+                connection.sendAsync(request(index == 0 ? TABLE + "/_default" : null,
+                        index == 0 ? ROW : null, row("pipelined-" + index, null)));
+            }
+            for (int index = 0; index < appends; index++) {
+                responses.add(connection.await());
+            }
+        }
+
+        assertEquals(appends, responses.stream().filter(AppendRowsResponse::hasAppendResult).count(),
+                "every pipelined append is acknowledged");
+        assertEquals(IntStream.range(0, appends).mapToObj(index -> "pipelined-" + index).toList(),
+                tableRows().stream().map(row -> String.valueOf(row.getFirst())).toList());
     }
 }

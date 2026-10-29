@@ -69,7 +69,8 @@ class ServiceRegistryConsistencyTest {
             Map.entry("LongRunningOperationsController",
                     "google.longrunning.Operations under /v2 shared by Cloud Run, Cloud Functions and Eventarc; "
                             + "the API is only known from the request host"),
-            Map.entry("OAuthTokenController", "OAuth 2.0 token endpoint, which Service Usage does not gate"));
+            Map.entry("OAuthTokenController", "OAuth 2.0 token endpoint, which Service Usage does not gate"),
+            Map.entry("OAuthTokenV4Controller", "legacy OAuth 2.0 token endpoint, which Service Usage does not gate"));
 
     /** Descriptors registered without an API name. Their requests are never gated. */
     private static final Map<String, String> NO_API_NAME = Map.of();

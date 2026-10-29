@@ -1276,6 +1276,24 @@ class GcsServiceTest {
     }
 
     @Test
+    void patchMergesCustomMetadataAndUpdateReplacesIt() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.patchObject("bucket", "obj.txt", Map.of("metadata", Map.of("env", "dev", "team", "data")));
+        Map<String, Object> changes = new LinkedHashMap<>();
+        changes.put("team", null);
+        changes.put("owner", "ops");
+
+        service.patchObject("bucket", "obj.txt", Map.of("metadata", changes));
+        assertEquals(Map.of("env", "dev", "owner", "ops"), service.getObjectMeta("bucket", "obj.txt").getMetadata());
+
+        service.updateObject("bucket", "obj.txt", Map.of("metadata", Map.of("tier", "hot")),
+                GcsObjectPreconditions.NONE);
+        assertEquals(Map.of("tier", "hot"), service.getObjectMeta("bucket", "obj.txt").getMetadata());
+    }
+
+    @Test
     void overwriteAndRestoreKeepTheReplacedObjectsMetadata() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));

@@ -52,6 +52,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1418,10 +1419,44 @@ public class GcsService {
         return patchObject(bucket, objectName, patch, GcsObjectPreconditions.NONE);
     }
 
+    /**
+     * JSON {@code objects.patch}: the request's {@code metadata} keys merge into the object's custom
+     * metadata, and a key set to null is removed. A {@code metadata} of null removes all of it.
+     */
     public GcsObjectMeta patchObject(String bucket, String objectName, Map<String, Object> patch,
             GcsObjectPreconditions preconditions) {
-        return patchObject(bucket, objectName,
-                new GcsObjectPatch(patch, Map.of(), Set.of()), preconditions);
+        if (!(patch.get("metadata") instanceof Map<?, ?> requested)) {
+            return patchObject(bucket, objectName,
+                    new GcsObjectPatch(patch, Map.of(), Set.of()), preconditions);
+        }
+        Map<String, Object> fields = new LinkedHashMap<>(patch);
+        fields.remove("metadata");
+        Map<String, String> updates = new LinkedHashMap<>();
+        Set<String> removals = new LinkedHashSet<>();
+        requested.forEach((key, value) -> {
+            if (value == null) {
+                removals.add(String.valueOf(key));
+            } else {
+                updates.put(String.valueOf(key), value.toString());
+            }
+        });
+        return patchObject(bucket, objectName, new GcsObjectPatch(fields, updates, removals), preconditions);
+    }
+
+    /** JSON {@code objects.update}: the request's {@code metadata} replaces the object's custom metadata. */
+    public GcsObjectMeta updateObject(String bucket, String objectName, Map<String, Object> update,
+            GcsObjectPreconditions preconditions) {
+        Map<String, Object> fields = new LinkedHashMap<>(update);
+        if (update.get("metadata") instanceof Map<?, ?> requested) {
+            Map<String, String> metadata = new LinkedHashMap<>();
+            requested.forEach((key, value) -> {
+                if (value != null) {
+                    metadata.put(String.valueOf(key), value.toString());
+                }
+            });
+            fields.put("metadata", metadata);
+        }
+        return patchObject(bucket, objectName, new GcsObjectPatch(fields, Map.of(), Set.of()), preconditions);
     }
 
     GcsObjectMeta patchObject(String bucket, String objectName, GcsObjectPatch patch,
@@ -1467,7 +1502,7 @@ public class GcsService {
                     : new LinkedHashMap<>(meta.getMetadata());
             userMeta.putAll(objectPatch.metadataUpdates());
             objectPatch.metadataRemovals().forEach(userMeta::remove);
-            meta.setMetadata(userMeta);
+            meta.setMetadata(userMeta.isEmpty() ? null : userMeta);
         }
         if (patch.containsKey("temporaryHold")) {
             meta.setTemporaryHold((Boolean) patch.get("temporaryHold"));

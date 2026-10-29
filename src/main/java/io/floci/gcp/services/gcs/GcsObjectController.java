@@ -381,7 +381,7 @@ public class GcsObjectController {
         iamAuthorizationService.requireObjectWrite(authorization, bucket, objectPath, "storage.objects.update");
         GcsObjectPreconditions preconditions = new GcsObjectPreconditions(ifGenerationMatch, ifGenerationNotMatch,
                 ifMetagenerationMatch, ifMetagenerationNotMatch);
-        return Response.ok(service.patchObject(bucket, objectPath, body, preconditions)).build();
+        return Response.ok(service.updateObject(bucket, objectPath, body, preconditions)).build();
     }
 
     @POST

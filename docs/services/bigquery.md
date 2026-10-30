@@ -180,7 +180,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
   `TIMESTAMP_SECONDS`/`TIMESTAMP_MILLIS`/`TIMESTAMP_MICROS`, `TIMESTAMP_ADD`/`TIMESTAMP_SUB`,
-  `DATE_ADD`/`DATE_SUB`, `*_DIFF`, `*_TRUNC`, `FORMAT_TIMESTAMP`/`FORMAT_DATE`, `PARSE_TIMESTAMP`/`PARSE_DATE`,
+  `DATE_ADD`/`DATE_SUB`, `*_DIFF`, `*_TRUNC`, `FORMAT_TIMESTAMP`/`FORMAT_DATETIME`/`FORMAT_DATE`/`FORMAT_TIME`,
+  `PARSE_TIMESTAMP`/`PARSE_DATETIME`/`PARSE_DATE`,
   `DATE(...)`/`DATETIME(...)`/`TIMESTAMP(...)`, `EXTRACT` (including `DAYOFWEEK`, 1 = Sunday) and
   `STRUCT(... AS name)`. Functions with the same name and meaning in both dialects (`COALESCE`,
   `IFNULL`, `LOWER`, `STRING_AGG`, `ARRAY_AGG`, `ROUND`, and many more) pass through.
@@ -524,6 +525,10 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   emulated.
 - Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.FROM_HEX`, `SAFE.PARSE_DATE`,
   and `SAFE.PARSE_TIMESTAMP` are supported explicitly.
+- `FORMAT_TIMESTAMP` formats in UTC and ignores its time zone argument, so `%z` and `%Ez` print
+  `+0000` and `+00:00`. `PARSE_DATE`, `PARSE_DATETIME` and `PARSE_TIMESTAMP` need a constant
+  format (a literal or a query parameter): DuckDB's `strptime` takes no format read from a column.
+  `FORMAT_*` accepts a format read from a column.
 - `NUMERIC` and `BIGNUMERIC` are computed as `DECIMAL(38, 9)`.
 - `TIMESTAMP` values are staged as ISO-8601 strings for DuckDB, including values nested inside
   `RECORD` or `REPEATED` columns; the BigQuery wire format continues to use epoch seconds.

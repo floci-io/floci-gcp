@@ -1454,7 +1454,7 @@ public class GcsService {
                     metadata.put(String.valueOf(key), value.toString());
                 }
             });
-            fields.put("metadata", metadata);
+            fields.put("metadata", metadata.isEmpty() ? null : metadata);
         }
         return patchObject(bucket, objectName, new GcsObjectPatch(fields, Map.of(), Set.of()), preconditions);
     }

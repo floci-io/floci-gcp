@@ -70,4 +70,43 @@ class GcsObjectMetadataPatchRestIntegrationTest {
                 .then().statusCode(200)
                 .body("metadata", nullValue());
     }
+
+    @Test
+    void updateDropsMetadataKeysSetToNullAndLeavesOutMetadataLeftEmpty() {
+        String bucket = BUCKET + "-update";
+        given()
+                .contentType("application/json")
+                .body(Map.of("name", bucket))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+        given()
+                .contentType("text/plain")
+                .body("data")
+                .when().post("/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=obj.txt")
+                .then().statusCode(200);
+
+        Map<String, Object> keepAndDrop = new HashMap<>();
+        keepAndDrop.put("keep", "1");
+        keepAndDrop.put("drop", null);
+        given()
+                .contentType("application/json")
+                .body(Map.of("metadata", keepAndDrop))
+                .when().put("/storage/v1/b/" + bucket + "/o/obj.txt")
+                .then().statusCode(200)
+                .body("metadata.keep", equalTo("1"))
+                .body("metadata", not(hasKey("drop")));
+
+        Map<String, Object> allNull = new HashMap<>();
+        allNull.put("keep", null);
+        given()
+                .contentType("application/json")
+                .body(Map.of("metadata", allNull))
+                .when().put("/storage/v1/b/" + bucket + "/o/obj.txt")
+                .then().statusCode(200)
+                .body("metadata", nullValue());
+        given()
+                .when().get("/storage/v1/b/" + bucket + "/o/obj.txt")
+                .then().statusCode(200)
+                .body("metadata", nullValue());
+    }
 }

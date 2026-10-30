@@ -306,6 +306,26 @@ class BigQueryDuckIntegrationTest {
                 """)
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("1"));
+        query("""
+                {"query": "SELECT ([10, 20, 30])[1] AS a, (([10, 20, 30]))[0] AS b, (SPLIT('a,b,c'))[2] AS c", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("20", "10", "c")));
+        query("""
+                {"query": "SELECT ([10, 20, 30])[3] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT x, ARRAY_AGG(x) OVER (ORDER BY x)[0] AS f, (ARRAY_AGG(x) OVER (ORDER BY x))[0] AS g FROM UNNEST([3, 1, 2]) x ORDER BY x", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1", "1", "1"), List.of("2", "1", "1"), List.of("3", "1", "1"))));
+        query("""
+                {"query": "SELECT x, ARRAY_AGG(x) OVER (ORDER BY x)[5] AS v FROM UNNEST([3, 1, 2]) x", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 5 is out of bounds (overflow)"));
     }
 
     private static void assertNullElementError(String sql, String field) {

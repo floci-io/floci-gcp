@@ -529,10 +529,16 @@ final class SqlDialectTranslator {
 
     /**
      * True when the operand from {@code start} to {@code last} is an array by its own tokens: an array literal,
-     * {@code ARRAY(...)}, or a whole call to one of {@link #ARRAY_FUNCTIONS}.
+     * {@code ARRAY(...)}, or a whole call to one of {@link #ARRAY_FUNCTIONS}, with or without an {@code OVER}
+     * clause, looking through parentheses around any of them.
      */
     private boolean isVisiblyArray(int start, int last) {
         Token first = tokens.get(start);
+        if (first.isPunct("(") && tokens.get(last).isPunct(")") && matchingParen(start) == last) {
+            int innerStart = nextSignificant(start + 1, last);
+            int innerLast = previousSignificantBefore(last);
+            return innerStart >= 0 && innerLast >= innerStart && isVisiblyArray(innerStart, innerLast);
+        }
         if (first.isPunct("[") || first.isKeyword("ARRAY")) {
             return true;
         }
@@ -540,7 +546,16 @@ final class SqlDialectTranslator {
             return false;
         }
         int open = nextSignificant(start + 1, last + 1);
-        return open >= 0 && tokens.get(open).isPunct("(") && matchingParen(open) == last;
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int close = matchingParen(open);
+        if (close == last) {
+            return true;
+        }
+        int over = nextSignificant(close + 1, last + 1);
+        int window = over >= 0 && tokens.get(over).isKeyword("OVER") ? nextSignificant(over + 1, last + 1) : -1;
+        return window >= 0 && tokens.get(window).isPunct("(") && matchingParen(window) == last;
     }
 
     /** True when {@code t} can end an array value, so a {@code [} right after it is a subscript. */

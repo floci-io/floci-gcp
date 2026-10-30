@@ -807,12 +807,14 @@ class SqlDialectTranslatorTest {
         String literal = sql("SELECT [10, 20, 30][2] AS v");
         assertTrue(literal.startsWith("SELECT (list_transform([struct_pack(a := [10, 20, 30], i := 2)], lambda _s:")
                 && literal.contains("ELSE _s.a[_s.i + 1] END)[1]) AS v"), literal);
-        for (String visible : List.of("SPLIT(s)[1]", "ARRAY(SELECT 1)[0]", "GENERATE_ARRAY(1, 5)[0]",
+        for (String visible : List.of("([10, 20, 30])[1]", "((SPLIT(s)))[1]", "ARRAY_AGG(x) OVER (ORDER BY x)[0]", "SPLIT(s)[1]", "ARRAY(SELECT 1)[0]", "GENERATE_ARRAY(1, 5)[0]",
                 "ARRAY_AGG(x ORDER BY x)[1]")) {
             String rendered = sql("SELECT " + visible + " AS v FROM ds.t");
             assertTrue(rendered.startsWith("SELECT (list_transform([struct_pack(a := ") && rendered.contains("_s.a[_s.i + 1]"),
                     visible + " -> " + rendered);
         }
+        assertEquals("SELECT (SELECT [1] AS \"$col1\")[0] AS v FROM \"ds\".\"t\"", sql("SELECT (SELECT [1])[0] AS v FROM ds.t"),
+                "a parenthesized subquery keeps its bare subscript");
         assertEquals("SELECT f(x)[1] AS v FROM \"ds\".\"t\"", sql("SELECT f(x)[1] AS v FROM ds.t"),
                 "a call that may return JSON keeps its bare subscript");
     }

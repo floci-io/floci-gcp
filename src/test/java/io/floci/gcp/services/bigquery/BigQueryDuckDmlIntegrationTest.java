@@ -410,6 +410,44 @@ class BigQueryDuckDmlIntegrationTest {
 
     @Test
     @Order(4)
+    void alterSetOptionsEvaluatesConstantExpressionsLikeBigQuery() {
+        query("CREATE TABLE shop.optioned_expr (x INT64)").then().statusCode(200);
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=CONCAT('a', 'b'), friendly_name=UPPER('x'),"
+                + " expiration_timestamp=TIMESTAMP_ADD(TIMESTAMP '2030-01-01 00:00:00+00', INTERVAL 7 DAY))")
+                .then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned_expr").then().statusCode(200)
+                .body("description", equalTo("ab"))
+                .body("friendlyName", equalTo("X"))
+                .body("expirationTime", equalTo("1894060800000"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=CAST(NULL AS STRING))").then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned_expr").then().statusCode(200)
+                .body("description", nullValue())
+                .body("friendlyName", equalTo("X"));
+
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=1 + 1)").then().statusCode(400)
+                .body("error.message", equalTo("Option description value has type INT64 which cannot be coerced to"
+                        + " expected type STRING"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(expiration_timestamp=CONCAT('2030-01-01', ' 00:00:00'))")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Expected type TIMESTAMP; found STRING; failed to set"
+                        + " 'expiration_timestamp' in OPTIONS()"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(expiration_timestamp=DATE_ADD(CURRENT_DATE(), INTERVAL 30 DAY))")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Expected type TIMESTAMP; found DATE; failed to set"
+                        + " 'expiration_timestamp' in OPTIONS()"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=(SELECT 'x'))").then().statusCode(400)
+                .body("error.message", equalTo("Expected constant expression but found unsupported statement or clause;"
+                        + " failed to evaluate 'description' in table OPTIONS"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(labels=[('env', LOWER('DEV'))])").then().statusCode(400)
+                .body("error.message", equalTo("Found unsupported function call 'ARRAY[...]'; failed to evaluate"
+                        + " 'labels' in table OPTIONS"));
+        given().when().get(BASE + "/datasets/shop/tables/optioned_expr").then().statusCode(200)
+                .body("friendlyName", equalTo("X"))
+                .body("expirationTime", equalTo("1894060800000"));
+    }
+
+    @Test
+    @Order(4)
     void ctasWithAParenthesizedQuery() {
         // The shape dbt-bigquery generates for table and incremental models.
         query("CREATE OR REPLACE TABLE shop.wrapped PARTITION BY d CLUSTER BY id OPTIONS() AS ("

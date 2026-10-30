@@ -625,19 +625,25 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         return builder.build();
     }
 
+    /** The public key is only returned while the job is ACTIVE; expire_event_time only once it is EXPIRED. */
     private static ImportJob toProto(StoredImportJob stored) {
-        return ImportJob.newBuilder()
+        String state = CloudKmsService.importJobState(stored);
+        ImportJob.Builder job = ImportJob.newBuilder()
                 .setName(stored.getName())
                 .setImportMethod(ImportJob.ImportMethod.valueOf(stored.getImportMethod()))
                 .setProtectionLevel(ProtectionLevel.valueOf(stored.getProtectionLevel()))
                 .setCreateTime(toTimestamp(stored.getCreateTime()))
                 .setGenerateTime(toTimestamp(stored.getGenerateTime()))
                 .setExpireTime(toTimestamp(stored.getExpireTime()))
-                .setState(ImportJob.ImportJobState.valueOf(CloudKmsService.importJobState(stored)))
-                .setPublicKey(ImportJob.WrappingPublicKey.newBuilder()
-                        .setPem(KmsCrypto.toPem(stored.getPublicKeyBase64()))
-                        .build())
-                .build();
+                .setState(ImportJob.ImportJobState.valueOf(state));
+        if ("ACTIVE".equals(state)) {
+            job.setPublicKey(ImportJob.WrappingPublicKey.newBuilder()
+                    .setPem(KmsCrypto.toPem(stored.getPublicKeyBase64()))
+                    .build());
+        } else if ("EXPIRED".equals(state)) {
+            job.setExpireEventTime(toTimestamp(stored.getExpireTime()));
+        }
+        return job.build();
     }
 
     private static Timestamp toTimestamp(String isoTime) {

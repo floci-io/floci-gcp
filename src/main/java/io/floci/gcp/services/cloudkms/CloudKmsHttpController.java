@@ -588,7 +588,9 @@ public class CloudKmsHttpController {
         return json;
     }
 
+    /** The public key is only returned while the job is ACTIVE; expireEventTime only once it is EXPIRED. */
     private static Map<String, Object> toImportJobJson(StoredImportJob job) {
+        String state = CloudKmsService.importJobState(job);
         Map<String, Object> json = new LinkedHashMap<>();
         json.put("name", job.getName());
         json.put("importMethod", job.getImportMethod());
@@ -596,8 +598,12 @@ public class CloudKmsHttpController {
         json.put("createTime", job.getCreateTime());
         json.put("generateTime", job.getGenerateTime());
         json.put("expireTime", job.getExpireTime());
-        json.put("state", CloudKmsService.importJobState(job));
-        json.put("publicKey", Map.of("pem", KmsCrypto.toPem(job.getPublicKeyBase64())));
+        json.put("state", state);
+        if ("ACTIVE".equals(state)) {
+            json.put("publicKey", Map.of("pem", KmsCrypto.toPem(job.getPublicKeyBase64())));
+        } else if ("EXPIRED".equals(state)) {
+            json.put("expireEventTime", job.getExpireTime());
+        }
         return json;
     }
 

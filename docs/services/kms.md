@@ -204,6 +204,8 @@ Behavior to be aware of:
 
 - Import jobs are `ACTIVE` as soon as they are created (no `PENDING_GENERATION` phase) and
   `EXPIRED` three days later; no attestation is returned for `HSM` jobs.
+  As on GCP, an expired job no longer returns its `public_key` and reports `expire_event_time`
+  instead.
 - Imports complete synchronously. Wrapped material that cannot be unwrapped, or that does not fit
   the requested algorithm, produces a version in `IMPORT_FAILED` with `import_failure_reason` set
   rather than an error.

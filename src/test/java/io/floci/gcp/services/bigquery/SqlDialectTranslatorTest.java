@@ -1056,8 +1056,11 @@ class SqlDialectTranslatorTest {
                 sql("SELECT DATE_ADD(('2026-03-01'), INTERVAL 1 DAY) AS m"));
         assertEquals("SELECT CAST(('a') || ('b') + INTERVAL 1 DAY AS DATE) AS m",
                 sql("SELECT DATE_ADD(('a') || ('b'), INTERVAL 1 DAY) AS m"));
-        assertEquals("SELECT strftime(ts, '%Y') AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
-        assertEquals("SELECT strftime(d, '%Y-%m-%d %%F %m/%d/%y %%R') AS y",
+        assertEquals("SELECT list_extract(list_transform([(ts)], _floci_format_value -> CAST(year(_floci_format_value)"
+                + " AS VARCHAR)), 1) AS y", sql("SELECT FORMAT_TIMESTAMP('%Y', ts) AS y"));
+        assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> ((CAST(year(_floci_format_value)"
+                + " AS VARCHAR) || strftime(_floci_format_value, '-%m-%d')) || strftime(_floci_format_value,"
+                + " ' %%F %m/%d/%y %%R'))), 1) AS y",
                 sql("SELECT FORMAT_DATE('%F %%F %D %R', d) AS y"));
         assertEquals("SELECT CAST(strptime(s, '%Y-%m-%d') AS DATE) AS y", sql("SELECT PARSE_DATE('%F', s) AS y"));
         assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> (lpad(CAST(day(_floci_format_value)"
@@ -1083,7 +1086,7 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT strftime((DATE '1970-01-01' + t), '%%J') AS y", sql("SELECT FORMAT_TIME('%J', t) AS y"));
         String dateRow = sql("SELECT FORMAT_DATE(f, d) AS y");
         assertTrue(dateRow.contains("WHEN '%Y' THEN") && !dateRow.contains("WHEN '%H' THEN")
-                && !dateRow.contains("regexp_full_match"), dateRow);
+                && dateRow.contains("regexp_full_match(_floci_format_element, '%E[0-9][0-9]+S')"), dateRow);
         assertEquals("SELECT list_extract(list_transform([(ts)], _floci_format_value -> CAST((epoch_us(_floci_format_value)"
                 + " - (epoch_us(_floci_format_value) % 1000000 + 1000000) % 1000000) // 1000000 AS VARCHAR)), 1) AS y",
                 sql("SELECT FORMAT_TIMESTAMP('%s', ts) AS y"));

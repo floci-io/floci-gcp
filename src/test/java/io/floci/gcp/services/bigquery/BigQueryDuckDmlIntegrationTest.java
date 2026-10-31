@@ -441,9 +441,37 @@ class BigQueryDuckDmlIntegrationTest {
         query("ALTER TABLE shop.optioned_expr SET OPTIONS(labels=[('env', LOWER('DEV'))])").then().statusCode(400)
                 .body("error.message", equalTo("Found unsupported function call 'ARRAY[...]'; failed to evaluate"
                         + " 'labels' in table OPTIONS"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=['a', 'b'])").then().statusCode(400)
+                .body("error.message", equalTo("Option description value has type ARRAY<STRING> which cannot be"
+                        + " coerced to expected type STRING"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(expiration_timestamp=[TIMESTAMP '2030-01-01 00:00:00+00'])")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Expected type TIMESTAMP; found ARRAY<TIMESTAMP>; failed to set"
+                        + " 'expiration_timestamp' in OPTIONS()"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=CAST(x AS STRING) FROM shop.optioned_expr)")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Syntax error: Expected \")\" but got keyword FROM"));
+        query("ALTER TABLE shop.optioned_expr SET OPTIONS(description='x' WHERE TRUE)").then().statusCode(400)
+                .body("error.message", equalTo("Syntax error: Expected \")\" but got keyword WHERE"));
+
+        for (String sql : List.of("ALTER TABLE shop.optioned_expr SET OPTIONS(description=1 + 1)",
+                "CREATE TABLE shop.optioned_expr_copy COPY shop.optioned_expr OPTIONS(description=1 + 1)")) {
+            given().contentType("application/json")
+                    .body(Map.of("query", sql, "useLegacySql", false, "dryRun", true))
+                    .when().post(BASE + "/queries").then().statusCode(400)
+                    .body("error.message", equalTo("Option description value has type INT64 which cannot be coerced"
+                            + " to expected type STRING"));
+        }
+        given().contentType("application/json")
+                .body(Map.of("query", "ALTER TABLE shop.optioned_expr SET OPTIONS(description=CONCAT('a', 'b'))",
+                        "useLegacySql", false, "dryRun", true))
+                .when().post(BASE + "/queries").then().statusCode(200);
+
         given().when().get(BASE + "/datasets/shop/tables/optioned_expr").then().statusCode(200)
+                .body("description", nullValue())
                 .body("friendlyName", equalTo("X"))
                 .body("expirationTime", equalTo("1894060800000"));
+        given().when().get(BASE + "/datasets/shop/tables/optioned_expr_copy").then().statusCode(404);
     }
 
     @Test

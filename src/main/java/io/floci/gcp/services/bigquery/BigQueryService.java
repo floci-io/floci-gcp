@@ -919,6 +919,9 @@ public class BigQueryService {
                         throw QueryEngine.invalidQuery(
                                 "CREATE OR REPLACE TABLE cannot change the partitioning specification");
                     }
+                    if (statement.options() != null) {
+                        evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation);
+                    }
                 } else if (statement.querySql() != null) {
                     described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
                             options, true),
@@ -948,7 +951,11 @@ public class BigQueryService {
                             "Not found: Dataset " + projectId + ":" + statement.datasetTarget());
                 }
             }
-            case ALTER_TABLE, ALTER_VIEW -> alterTarget(projectId, statement);
+            case ALTER_TABLE, ALTER_VIEW -> {
+                if (alterTarget(projectId, statement).isPresent()) {
+                    evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation);
+                }
+            }
             default -> { }
         }
     }
@@ -996,9 +1003,9 @@ public class BigQueryService {
     }
 
     /**
-     * Evaluates the option values given as constant expressions with the SQL engine, as {@code SELECT expr},
-     * and checks each result's type as BigQuery does: a STRING for description and friendly_name, a TIMESTAMP
-     * (stored as epoch milliseconds) for expiration_timestamp.
+     * Evaluates the option values given as constant expressions with the SQL engine, as {@code SELECT expr}, for the
+     * run and for a dry run, and checks each result's type as BigQuery does: a STRING for description and
+     * friendly_name, a TIMESTAMP (stored as epoch milliseconds) for expiration_timestamp.
      */
     private Map<String, Object> evaluateOptions(String projectId, String jobProjectId, Map<String, Object> options,
                                                 QueryOptions queryOptions, JobLocation jobLocation) {
@@ -1021,6 +1028,9 @@ public class BigQueryService {
                 case "RECORD" -> "STRUCT";
                 default -> field.getType();
             };
+            if ("REPEATED".equals(field.getMode())) {
+                type = "ARRAY<" + type + ">";
+            }
             String name = option.getKey();
             if (name.equals("expiration_timestamp")) {
                 if (!type.equals("TIMESTAMP")) {

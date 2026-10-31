@@ -1012,7 +1012,7 @@ final class SqlDialectTranslator {
 
     /**
      * A value BigQuery evaluates as a constant expression; a subquery is not a constant one, and a query clause
-     * after the expression is a syntax error.
+     * after the expression is a syntax error ({@code IS [NOT] DISTINCT FROM} is an operator, not a clause).
      */
     private static OptionExpression optionExpression(String name, List<Token> value) {
         if (value.stream().anyMatch(t -> t.isKeyword("SELECT"))) {
@@ -1020,12 +1020,14 @@ final class SqlDialectTranslator {
                     + " evaluate '" + name + "' in table OPTIONS");
         }
         int depth = 0;
-        for (Token t : value) {
+        for (int k = 0; k < value.size(); k++) {
+            Token t = value.get(k);
+            boolean distinctFrom = t.isKeyword("FROM") && k > 0 && value.get(k - 1).isKeyword("DISTINCT");
             if (t.isPunct("(") || t.isPunct("[")) {
                 depth++;
             } else if (t.isPunct(")") || t.isPunct("]")) {
                 depth--;
-            } else if (depth == 0 && (t.isKeyword("FROM") || t.kind == Kind.IDENT
+            } else if (depth == 0 && !distinctFrom && (t.isKeyword("FROM") || t.kind == Kind.IDENT
                     && CLAUSE_END_KEYWORDS.contains(t.upper()))) {
                 throw invalidQuery("Syntax error: Expected \")\" but got keyword " + t.upper());
             }

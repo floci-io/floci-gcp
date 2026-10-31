@@ -2235,11 +2235,13 @@ final class SqlDialectTranslator {
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
         expandHavingStructAliasFields();
+        expandOrderByStructAliasFields();
         rewritePivotSyntax();
         rewriteSelectAsStruct();
         rewriteIndexedStructWildcards();
         quoteImplicitSelectAliases();
         expandHavingStructAliasFields();
+        expandOrderByStructAliasFields();
         rewritePivotSyntax();
         nameAnonymousColumns();
         expandStructStars();
@@ -2849,34 +2851,82 @@ final class SqlDialectTranslator {
             if (aliases.isEmpty()) {
                 continue;
             }
-            int end = clauseEnd(having + 1, depth);
-            boolean[] nestedQuery = nestedQueryPositions(having + 1, end);
-            for (int i = end - 1; i >= having; i--) {
-                if (nestedQuery[i]) {
-                    continue;
-                }
-                Token alias = tokens.get(i);
-                int dot = nextSignificant(i + 1, end);
-                int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
-                if ((alias.kind != Kind.IDENT && alias.kind != Kind.QIDENT) || dot < 0 || field < 0
-                        || !tokens.get(dot).isPunct(".")
-                        || (tokens.get(field).kind != Kind.IDENT && tokens.get(field).kind != Kind.QIDENT)) {
-                    continue;
-                }
-                Map<String, List<Token>> fields = aliases.get(alias.identifierText().toLowerCase(Locale.ROOT));
-                List<Token> expression = fields == null
-                        ? null
-                        : fields.get(tokens.get(field).identifierText().toLowerCase(Locale.ROOT));
-                if (expression == null) {
-                    continue;
-                }
-                List<Token> replacement = new ArrayList<>();
-                replacement.add(Token.raw("("));
-                replacement.addAll(expression);
-                replacement.add(Token.raw(")"));
-                tokens.subList(i, field + 1).clear();
-                tokens.addAll(i, replacement);
+            replaceStructAliasFields(having + 1, clauseEnd(having + 1, depth), aliases);
+        }
+    }
+
+    /**
+     * BigQuery's ORDER BY also resolves {@code s.n} to a field of a STRUCT select alias {@code s}, ahead of an
+     * input column of the same name, while DuckDB reads {@code s} as a table. Expand those fields as in HAVING.
+     * An ORDER BY inside a call or {@code OVER (...)} is skipped, as is one after a set operation, whose
+     * aliases come from the first SELECT and whose expressions DuckDB cannot sort by.
+     */
+    private void expandOrderByStructAliasFields() {
+        for (int order = tokens.size() - 1; order >= 0; order--) {
+            int by = nextSignificant(order + 1, tokens.size());
+            if (!tokens.get(order).isKeyword("ORDER") || by < 0 || !tokens.get(by).isKeyword("BY")) {
+                continue;
             }
+            int depth = parenthesisDepth(order);
+            int select = precedingSelect(order, depth);
+            if (select < 0 || followsSetOperator(select) || leavesDepth(select, order, depth)) {
+                continue;
+            }
+            int quantifier = nextSignificant(select + 1, order);
+            int listStart = quantifier >= 0 && (tokens.get(quantifier).isKeyword("DISTINCT")
+                    || tokens.get(quantifier).isKeyword("ALL")) ? quantifier : select;
+            Map<String, Map<String, List<Token>>> aliases = structSelectAliases(listStart, order, depth);
+            if (!aliases.isEmpty()) {
+                replaceStructAliasFields(by + 1, clauseEnd(by + 1, depth), aliases);
+            }
+        }
+    }
+
+    private boolean followsSetOperator(int select) {
+        int before = significantBefore(select);
+        return before >= 0 && (tokens.get(before).isKeyword("UNION") || tokens.get(before).isKeyword("INTERSECT")
+                || tokens.get(before).isKeyword("EXCEPT") || tokens.get(before).isKeyword("ALL")
+                || tokens.get(before).isKeyword("DISTINCT"));
+    }
+
+    /** Whether the parenthesis depth drops below {@code depth} between {@code from} and {@code to}. */
+    private boolean leavesDepth(int from, int to, int depth) {
+        for (int i = from; i < to; i++) {
+            if (parenthesisDepth(i) < depth) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression. */
+    private void replaceStructAliasFields(int start, int end, Map<String, Map<String, List<Token>>> aliases) {
+        boolean[] nestedQuery = nestedQueryPositions(start, end);
+        for (int i = end - 1; i >= start; i--) {
+            if (nestedQuery[i]) {
+                continue;
+            }
+            Token alias = tokens.get(i);
+            int dot = nextSignificant(i + 1, end);
+            int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            if ((alias.kind != Kind.IDENT && alias.kind != Kind.QIDENT) || dot < 0 || field < 0
+                    || !tokens.get(dot).isPunct(".")
+                    || (tokens.get(field).kind != Kind.IDENT && tokens.get(field).kind != Kind.QIDENT)) {
+                continue;
+            }
+            Map<String, List<Token>> fields = aliases.get(alias.identifierText().toLowerCase(Locale.ROOT));
+            List<Token> expression = fields == null
+                    ? null
+                    : fields.get(tokens.get(field).identifierText().toLowerCase(Locale.ROOT));
+            if (expression == null) {
+                continue;
+            }
+            List<Token> replacement = new ArrayList<>();
+            replacement.add(Token.raw("("));
+            replacement.addAll(expression);
+            replacement.add(Token.raw(")"));
+            tokens.subList(i, field + 1).clear();
+            tokens.addAll(i, replacement);
         }
     }
 

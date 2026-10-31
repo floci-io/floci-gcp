@@ -5532,7 +5532,7 @@ final class SqlDialectTranslator {
     }
 
     /** BigQuery format elements that DuckDB's strftime and strptime handle the same way. */
-    private static final String SHARED_ELEMENTS = "AaBbdGHhIjMmpSTUuVWwXYyZ";
+    private static final String SHARED_ELEMENTS = "AaBbdHhIjMmpSTUuVWwXyZ";
 
     /** BigQuery composite elements, spelled with elements DuckDB knows; valid for strptime too. */
     private static final Map<String, String> COMPOSITE_ELEMENTS = Map.of(
@@ -5541,7 +5541,7 @@ final class SqlDialectTranslator {
 
     /** Elements DuckDB lacks or renders differently, emulated in SQL by {@link #emulatedElement}. */
     private static final List<String> EMULATED_ELEMENTS = List.of(
-            "%C", "%c", "%e", "%g", "%J", "%k", "%l", "%P", "%Q", "%s", "%E*S");
+            "%C", "%F", "%G", "%Y", "%c", "%e", "%g", "%J", "%k", "%l", "%P", "%Q", "%s", "%E*S");
 
     /** Every element a format read from a column may use, each rendered with a constant format. */
     private static final List<String> PER_ROW_ELEMENTS = perRowElements();
@@ -5553,7 +5553,7 @@ final class SqlDialectTranslator {
         }
         elements.addAll(COMPOSITE_ELEMENTS.keySet());
         elements.addAll(EMULATED_ELEMENTS);
-        return List.copyOf(elements);
+        return List.copyOf(new LinkedHashSet<>(elements));
     }
 
     /**
@@ -5608,7 +5608,7 @@ final class SqlDialectTranslator {
 
     private static boolean printedAsWritten(String function, String element) {
         return PRINTED_AS_WRITTEN.getOrDefault(function, Set.of()).contains(element)
-                || function.equals("FORMAT_DATE") && element.matches("%E\\d+S");
+                || function.equals("FORMAT_DATE") && element.matches("%E\\dS");
     }
 
     private static final String FORMAT_VALUE = "_floci_format_value";
@@ -5628,8 +5628,10 @@ final class SqlDialectTranslator {
         }
         elements.append(" ELSE ").append(FORMAT_ELEMENT).append(" END");
         String digits = "ltrim(regexp_extract(" + FORMAT_ELEMENT + ", '[0-9]+'), '0')";
-        String fraction = printedAsWritten(function, "%E0S") ? elements.toString() : "CASE WHEN regexp_full_match("
-                + FORMAT_ELEMENT + ", '%E[0-9]+S') THEN " + fractionalSeconds(rowValue, "CASE WHEN length(" + digits + ") > 2 THEN "
+        // FORMAT_DATE prints a one-digit %E<n>S as written and renders zero seconds for two or more digits.
+        String fractionPattern = function.equals("FORMAT_DATE") ? "%E[0-9][0-9]+S" : "%E[0-9]+S";
+        String fraction = "CASE WHEN regexp_full_match(" + FORMAT_ELEMENT + ", '" + fractionPattern + "') THEN "
+                + fractionalSeconds(rowValue, "CASE WHEN length(" + digits + ") > 2 THEN "
                 + MAX_FRACTION_DIGITS + " ELSE least(CAST('0' || " + digits + " AS INTEGER), " + MAX_FRACTION_DIGITS + ") END")
                 + " ELSE " + elements + " END";
         return "list_extract(list_transform([struct_pack(v := (" + value + "), f := (" + format + "))], " + FORMAT_ROW
@@ -5688,7 +5690,7 @@ final class SqlDialectTranslator {
             return element;
         }
         String composite = COMPOSITE_ELEMENTS.get(element);
-        if (composite != null) {
+        if (composite != null && !EMULATED_ELEMENTS.contains(element)) {
             return composite;
         }
         if (element.length() == 2
@@ -5710,9 +5712,13 @@ final class SqlDialectTranslator {
 
     private static String emulatedElement(String value, String element) {
         return switch (element) {
-            case "%C" -> "lpad(CAST(year(" + value + ") // 100 AS VARCHAR), 2, '0')";
+            // BigQuery prints the year without leading zeros (year 99 is 99, its century 0); DuckDB pads %Y and %G.
+            case "%C" -> "CAST(year(" + value + ") // 100 AS VARCHAR)";
+            case "%Y" -> "CAST(year(" + value + ") AS VARCHAR)";
+            case "%G" -> "CAST(isoyear(" + value + ") AS VARCHAR)";
+            case "%F" -> "(CAST(year(" + value + ") AS VARCHAR) || strftime(" + value + ", '-%m-%d'))";
             case "%c" -> "(strftime(" + value + ", '%a %b ') || " + emulatedElement(value, "%e")
-                    + " || strftime(" + value + ", ' %H:%M:%S %Y'))";
+                    + " || strftime(" + value + ", ' %H:%M:%S ') || CAST(year(" + value + ") AS VARCHAR))";
             case "%e" -> "lpad(CAST(day(" + value + ") AS VARCHAR), 2, ' ')";
             case "%g" -> "right(strftime(" + value + ", '%G'), 2)";
             case "%J" -> "lpad(CAST((weekofyear(" + value + ") - 1) * 7 + isodow(" + value + ") AS VARCHAR), 3, '0')";

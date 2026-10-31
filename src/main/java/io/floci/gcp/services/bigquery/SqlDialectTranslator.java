@@ -1010,11 +1010,25 @@ final class SqlDialectTranslator {
         return value.size() == 2 && value.getFirst().isKeyword("TIMESTAMP") && value.get(1).kind == Kind.STRING;
     }
 
-    /** A value BigQuery evaluates as a constant expression; a subquery is not a constant one. */
+    /**
+     * A value BigQuery evaluates as a constant expression; a subquery is not a constant one, and a query clause
+     * after the expression is a syntax error.
+     */
     private static OptionExpression optionExpression(String name, List<Token> value) {
         if (value.stream().anyMatch(t -> t.isKeyword("SELECT"))) {
             throw invalidQuery("Expected constant expression but found unsupported statement or clause; failed to"
                     + " evaluate '" + name + "' in table OPTIONS");
+        }
+        int depth = 0;
+        for (Token t : value) {
+            if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            } else if (depth == 0 && (t.isKeyword("FROM") || t.kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(t.upper()))) {
+                throw invalidQuery("Syntax error: Expected \")\" but got keyword " + t.upper());
+            }
         }
         StringBuilder sql = new StringBuilder();
         for (Token t : value) {

@@ -2145,6 +2145,12 @@ class SqlDialectTranslatorTest {
         assertEquals("Found unsupported function call 'ARRAY[...]'; failed to evaluate 'labels' in table OPTIONS",
                 assertThrows(GcpException.class,
                         () -> statement("ALTER TABLE ds.t SET OPTIONS(labels=[('env', LOWER('DEV'))])")).getMessage());
+        assertEquals("Syntax error: Expected \")\" but got keyword FROM", assertThrows(GcpException.class,
+                () -> statement("ALTER TABLE ds.t SET OPTIONS(description=name FROM ds.source)")).getMessage());
+        assertEquals("Syntax error: Expected \")\" but got keyword WHERE", assertThrows(GcpException.class,
+                () -> statement("ALTER TABLE ds.t SET OPTIONS(description='x' WHERE TRUE)")).getMessage());
+        assertTrue(statement("ALTER TABLE ds.t SET OPTIONS(description=FORMAT_DATE('%Y', DATE '2030-01-01'))")
+                .options().get("description") instanceof SqlDialectTranslator.OptionExpression);
     }
 
     @Test

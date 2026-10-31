@@ -1,0 +1,2668 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Free, open-source local GCP emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci-gcp/services/compute/">
+      
+      
+        <link rel="prev" href="../">
+      
+      
+        <link rel="next" href="../locations/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>Compute Engine - floci-gcp</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#compute-engine" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="floci-gcp" class="md-header__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            floci-gcp
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Compute Engine
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="floci-gcp" class="md-nav__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    floci-gcp
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/gcp-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GCP CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Project Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compute Engine
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compute Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#networking-and-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Networking and operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instances-and-disks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances and disks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#images-and-snapshots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Images and snapshots
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Images and snapshots">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#public-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public images
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#global-external-application-load-balancer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global external application load balancer
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Global external application load balancer">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#address-ownership-and-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Address ownership and release
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instance-containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance containers
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instance containers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#startup-and-shutdown-scripts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Startup and shutdown scripts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloud-init" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cloud-init
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ssh-and-published-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH and published ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-vms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container VMs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serial-port-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Serial port output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metadata-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metadata server
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../locations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Locations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Storage (GCS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firestore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firestore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../datastore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Datastore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secret-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam-credentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Credentials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Token Service (STS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../managed-kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gke/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GKE (Kubernetes Engine)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-sql-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud SQL (PostgreSQL, MySQL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Run
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventarc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Eventarc
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Usage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-billing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Billing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firebase-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firebase Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bigquery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BigQuery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../iam-enforcement/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Enforcement Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#networking-and-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Networking and operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instances-and-disks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instances and disks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#images-and-snapshots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Images and snapshots
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Images and snapshots">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#public-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public images
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#global-external-application-load-balancer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global external application load balancer
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Global external application load balancer">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#address-ownership-and-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Address ownership and release
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#instance-containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance containers
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Instance containers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#startup-and-shutdown-scripts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Startup and shutdown scripts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloud-init" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cloud-init
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ssh-and-published-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SSH and published ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-vms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container VMs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serial-port-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Serial port output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metadata-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metadata server
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="compute-engine">Compute Engine</h1>
+<p>Compute Engine uses its native REST v1 paths under <code>/compute/v1/projects/{project}</code>
+on port 4588. Configure SDK endpoints explicitly and use synthetic credentials.
+By default the emulator does not execute virtual machines or forward network traffic.
+With <code>FLOCI_GCP_SERVICES_COMPUTE_MOCK=false</code> each instance runs as a Docker container;
+see <a href="#instance-containers">Instance containers</a>.</p>
+<p>Set <code>FLOCI_GCP_SERVICES_COMPUTE_ENABLED=false</code> to disable the service.
+<code>FLOCI_GCP_SERVICES_COMPUTE_OPERATION_DELAY_MS</code> defaults to 50 ms.
+Regions and zones come from the bundled <a href="../locations/">location catalog</a>: all 43 regions and
+their 130 real zones (for example <code>us-central1-f</code> and <code>europe-west1-d</code>). To serve fewer regions,
+set <code>FLOCI_GCP_SERVICES_COMPUTE_REGIONS</code> to a comma-separated list, such as
+<code>us-central1,europe-west1</code>. Each listed region keeps its real zones from the catalog. Unset or
+empty serves the whole catalog. Any region or zone outside that set returns <code>404</code>.
+Machine, accelerator and disk catalogs are a small deterministic fixture catalog,
+not an assertion of current Google availability, quotas or pricing.</p>
+<p>Resources and operations share a project-scoped checkpoint through StorageFactory.
+Normal writes are validated against a private snapshot before committing. Operation
+completion is advanced when the project is read, using persisted timestamps, so
+polling and restart recovery do not depend on a request-scoped background thread.
+Resource metadata changes are committed when the operation is accepted; lifecycle
+status becomes final at operation completion. No guest progress is measured.</p>
+<h2 id="networking-and-operations">Networking and operations</h2>
+<p>Custom-mode networks, regional subnetworks, firewall rules, and global/regional
+IPv4 addresses support insert/get/list/delete. Firewalls also support updates.
+Subnet overlap, scope, references, firewall ports and dependent-resource deletion
+are validated. External addresses come from the documentation-only 203.0.113.0/24
+range. Auto-mode VPCs, IPv6, Shared VPC and cross-project references are unsupported,
+except <a href="#public-images">public images</a>.</p>
+<p>Global, regional and zonal operations support get/list/wait/delete. A wait may
+return an unfinished operation, which clients must continue polling. Nonzero UUID
+request IDs deduplicate mutations. Operation responses use Compute's <code>status</code>,
+<code>targetLink</code> and scope fields, not <code>google.longrunning.Operation</code>.</p>
+<p>Inventory supports <code>maxResults</code>, opaque <code>pageToken</code>, name ordering and descending
+creation time. Filters support equality/inequality/existence on name, id, status,
+family and labels, combined with AND. Other expressions fail explicitly. Tokens
+are bound to project, collection, scope, filters and ordering. Inventory is not a
+snapshot across concurrent writes.</p>
+<p><code>projects.get</code> returns the project's Compute resource: its number as <code>id</code>, the
+default Compute service account, and <code>commonInstanceMetadata</code>.
+<code>projects.setCommonInstanceMetadata</code> replaces that metadata through a global
+operation. It needs the current fingerprint, so a missing or stale one fails with
+412 (<code>conditionNotMet</code>). Keys must match <code>[a-zA-Z0-9-_]{1,128}</code>, values must be
+strings of at most 256 KiB, and keys must be unique. The other project methods
+(usage export, default network tier, Shared VPC, moves) are unsupported.</p>
+<p>Public interfaces follow the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1">Compute REST reference</a>.
+Credential acceptance retains the emulator's existing auth bypass; resource
+isolation is not IAM enforcement.</p>
+<h2 id="instances-and-disks">Instances and disks</h2>
+<p>Zonal instances support insert/get/list/aggregatedList/start/stop/reset/delete,
+setMachineType, setMetadata, setTags, setLabels, addAccessConfig/deleteAccessConfig,
+attachDisk/detachDisk, setDiskAutoDelete and getSerialPortOutput (see
+<a href="#serial-port-output">Serial port output</a>). A stopped VM has status TERMINATED;
+reset does not imply guest health. One IPv4 NIC and one boot disk are required.
+Machine changes require a stopped VM. Ephemeral external addresses are released
+on stop; reserved addresses remain associated.</p>
+<p>Zonal disks support insert/get/list/aggregatedList/delete/resize/update/setLabels.
+Attached disks cannot be deleted. Deleting an instance retains disks unless their
+attachment enables autoDelete. Disk sizes and source sizes are validated. Only
+supported Hyperdisk types accept provisioned IOPS/throughput; unsupported knobs
+fail. Performance limits are basic API checks, not complete machine/disk quota
+or size-ratio emulation. Multi-writer disks and regional disks are unsupported.</p>
+<h2 id="images-and-snapshots">Images and snapshots</h2>
+<p>Global images support sources from disks, images and snapshots, family lookup,
+labels, inventory and deletion. Global standard snapshots support disk sources,
+labels, inventory and deletion. Source identity and size survive source deletion;
+restored disks cannot be smaller than their source. Images do not acquire invented
+backing snapshots. Copying a snapshot means restoring a disk and snapshotting it.
+Guest disk bytes and regional/instant snapshots are not emulated.</p>
+<h3 id="public-images">Public images</h3>
+<p>The public image projects <code>debian-cloud</code>, <code>ubuntu-os-cloud</code>, <code>rocky-linux-cloud</code>,
+<code>centos-cloud</code> and <code>cos-cloud</code> serve a small read-only catalog, with one current
+image per family. Any project can boot from these images, or copy them into an
+image of its own:</p>
+<table>
+<thead>
+<tr>
+<th>Project</th>
+<th>Families</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>debian-cloud</code></td>
+<td><code>debian-13</code>, <code>debian-13-arm64</code>, <code>debian-12</code>, <code>debian-12-arm64</code>, <code>debian-11</code></td>
+</tr>
+<tr>
+<td><code>ubuntu-os-cloud</code></td>
+<td><code>ubuntu-2404-lts-amd64</code>, <code>ubuntu-2404-lts-arm64</code>, <code>ubuntu-2204-lts</code>, <code>ubuntu-2204-lts-arm64</code></td>
+</tr>
+<tr>
+<td><code>rocky-linux-cloud</code></td>
+<td><code>rocky-linux-9</code>, <code>rocky-linux-8</code></td>
+</tr>
+<tr>
+<td><code>centos-cloud</code></td>
+<td><code>centos-stream-9</code></td>
+</tr>
+<tr>
+<td><code>cos-cloud</code></td>
+<td><code>cos-stable</code>, <code>cos-121-lts</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>images.get</code>, <code>images.list</code> (including <code>filter</code>) and <code>images.getFromFamily</code> work in
+those projects. A boot disk created from a family
+(<code>projects/debian-cloud/global/images/family/debian-12</code>) records the concrete image
+(<code>debian-12-bookworm-v20261001</code>) in <code>sourceImage</code>, as GCP does. Image names follow
+Google's naming, so Terraform's <code>image = "debian-cloud/debian-12"</code> resolves and
+shows no diff on later plans. Writes into a public project, and reads of anything
+other than its images, return 403. Image versions are fixed: there are no deprecated
+or older images, licenses or guest OS features.</p>
+<h2 id="global-external-application-load-balancer">Global external application load balancer</h2>
+<p>Zonal GCE_VM_IP_PORT endpoint groups support endpoint attach/detach/list. Global
+HTTP health checks, EXTERNAL_MANAGED backend services, URL maps, HTTP target proxies
+and TCP forwarding rules support configuration and ordered cleanup. Backend and
+URL-map updates require current fingerprints. Path matchers, host rules, pathRules
+and session-affinity configuration are validated; actual request routing, health
+checks, TLS certificates, regional load balancing and advanced routeRules are not
+implemented. Endpoint membership is stored separately from the public NEG resource.</p>
+<h3 id="address-ownership-and-release">Address ownership and release</h3>
+<p>Global external HTTP forwarding rules can share a PREMIUM IPv4 address when
+their TCP ports do not overlap. Ownership uses complete resource links, and
+deleting one rule preserves every other owner. A forwarding rule's IP address
+is immutable; changing it requires replacing the rule.</p>
+<p>Deleting an in-use address reservation through the API releases the reservation,
+not the IP attached to its instance or forwarding rule. The attached address
+remains unavailable to the allocator until the consumer releases it. This follows
+<a href="https://docs.cloud.google.com/vpc/docs/reserve-static-external-ip-address#release_ip">Google's API release semantics</a>,
+which differ from the Cloud console's restriction on releasing in-use addresses.</p>
+<h2 id="instance-containers">Instance containers</h2>
+<p>Set <code>FLOCI_GCP_SERVICES_COMPUTE_MOCK=false</code> to back every instance with a Docker
+container. This mode is opt-in, and it needs the Docker socket, as GKE and Cloud
+Run do. The API stays the same in both modes; only these behaviours change:</p>
+<table>
+<thead>
+<tr>
+<th>API call</th>
+<th>Container</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>instances.insert</code></td>
+<td>Pulls the boot image's Docker image (status <code>PROVISIONING</code>), then creates and starts the container (<code>STAGING</code>). The operation reaches <code>DONE</code> and the instance <code>RUNNING</code> once the container is up</td>
+</tr>
+<tr>
+<td><code>instances.stop</code></td>
+<td><code>docker stop</code>, then <code>TERMINATED</code>. The stopped container is kept, as a stopped VM keeps its boot disk</td>
+</tr>
+<tr>
+<td><code>instances.start</code></td>
+<td><code>docker start</code> of the kept container, or a new one if it is gone</td>
+</tr>
+<tr>
+<td><code>instances.reset</code></td>
+<td><code>docker restart</code></td>
+</tr>
+<tr>
+<td><code>instances.setMachineType</code></td>
+<td>Removes the stopped container, so the next start creates one with the new limits</td>
+</tr>
+<tr>
+<td><code>instances.delete</code></td>
+<td><code>docker rm -f</code></td>
+</tr>
+</tbody>
+</table>
+<p>The container runs the boot image's Docker image with an idle init process; the
+guest scripts below and anything you start with <code>docker exec -it &lt;container&gt; bash</code>
+run inside it, and the <a href="#metadata-server">metadata server</a> is available to it, as
+is <a href="#ssh-and-published-ports">SSH</a>. The
+container is named <code>floci-gcp-compute-&lt;project&gt;-&lt;zone&gt;-&lt;instance&gt;</code> and carries
+the <a href="../../configuration/docker-compose/#resource-identity-labels">resource identity labels</a>
+with <code>io.floci.service=compute</code>. With <code>FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS</code>
+on (the default), it is limited to the machine type's vCPUs and memory.</p>
+<p><strong>Images.</strong> The boot disk's source image picks the Docker image. A bundled
+catalog matches on the image's <code>family</code> first, then on its name prefix:
+<code>debian-12</code> maps to <code>debian:12</code>, <code>ubuntu-2204-lts</code> to <code>ubuntu:22.04</code>,
+<code>rocky-linux-9</code> to <code>rockylinux:9</code>, and so on. Anything else runs
+<code>FLOCI_GCP_SERVICES_COMPUTE_DEFAULT_IMAGE</code> (<code>debian:12</code>), with a warning in the log.
+To use your own mapping, point <code>FLOCI_GCP_SERVICES_COMPUTE_IMAGE_CATALOG_PATH</code> at a
+JSON file in the same format as <code>compute/image-catalog.json</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span><span class="nt">"images"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"family"</span><span class="p">:</span><span class="w"> </span><span class="s2">"golden"</span><span class="p">,</span><span class="w"> </span><span class="nt">"prefixes"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"golden-"</span><span class="p">],</span><span class="w"> </span><span class="nt">"dockerImage"</span><span class="p">:</span><span class="w"> </span><span class="s2">"registry.local/golden:1"</span><span class="p">}]}</span>
+</code></pre></div>
+<p><strong>Failures.</strong> If Docker is unreachable, the pull fails, or the container is not
+up within <code>FLOCI_GCP_SERVICES_COMPUTE_LAUNCH_TIMEOUT</code> (5 minutes), the instance
+still reaches <code>RUNNING</code>, without a container, and a warning is logged. The API
+never fails because of Docker.</p>
+<p><strong>Restarts.</strong> On shutdown, floci-gcp stops the running instance containers. On
+startup it starts the containers of <code>RUNNING</code> instances again, keeps those of
+<code>TERMINATED</code> instances, and removes those whose instance was deleted. It only
+touches containers that carry its own <code>io.floci.owner</code> label, so several
+emulators can share one Docker daemon.</p>
+<h3 id="startup-and-shutdown-scripts">Startup and shutdown scripts</h3>
+<p>On every boot (insert, start and reset), the instance runs <code>startup-script</code> and
+then <code>startup-script-url</code>, as root, as the guest environment's
+<code>google_metadata_script_runner</code> does. Instance metadata overrides project metadata
+(<code>projects.setCommonInstanceMetadata</code>) key by key. Each script is copied to
+<code>/var/lib/google/&lt;key&gt;</code> and run verbatim; one without a shebang runs under
+<code>/bin/sh</code>. <code>startup-script-url</code> is read from floci-gcp's own Cloud Storage
+(<code>gs://BUCKET/FILE</code> or <code>https://storage.googleapis.com/BUCKET/FILE</code>); other URLs are
+reported and skipped. The boot's operation does not wait for the scripts, and a
+script still running after <code>FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT</code>
+(30 minutes) is reported and left running.</p>
+<p><code>shutdown-script</code> and <code>shutdown-script-url</code> run on stop and delete while the
+instance is <code>STOPPING</code>, for up to <code>FLOCI_GCP_SERVICES_COMPUTE_SHUTDOWN_SCRIPT_TIMEOUT</code>
+(90 seconds). Reset is a hard reset and runs none.</p>
+<h3 id="cloud-init">cloud-init</h3>
+<p>On images that ship cloud-init (Ubuntu and Container-Optimized OS), an instance
+with a <code>user-data</code> metadata key runs cloud-init on every boot, around its startup
+scripts as on Compute Engine: the local, network and config stages run before
+them, and the final stage (<code>packages</code>, <code>runcmd</code>, <code>#!</code> scripts) after them and
+after a declared container starts, since <code>cloud-final.service</code> waits for
+<code>multi-user.target</code>. A startup script therefore cannot rely on what <code>runcmd</code>
+sets up. Only the instance's own <code>user-data</code> counts, as with cloud-init's GCE data
+source; <code>user-data-encoding: base64</code> is decoded. Any format cloud-init accepts
+works: <code>#cloud-config</code>, <code>#!</code> scripts, MIME multipart, gzip.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>gcloud<span class="w"> </span>compute<span class="w"> </span>instances<span class="w"> </span>create<span class="w"> </span>web<span class="w"> </span>--zone<span class="w"> </span>us-central1-a<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--image-family<span class="w"> </span>ubuntu-2404-lts-amd64<span class="w"> </span>--image-project<span class="w"> </span>ubuntu-os-cloud<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>--metadata-from-file<span class="w"> </span>user-data<span class="o">=</span>cloud-config.yaml
+</code></pre></div>
+<p>The container gets cloud-init from its package manager on the first boot that
+needs it, so that boot needs network access. The user-data and meta-data
+(<code>instance-id</code> is the instance's id, <code>local-hostname</code> its name) are written to the
+NoCloud seed <code>/var/lib/cloud/seed/nocloud</code>, because cloud-init's GCE data source
+only runs on Google hardware. The output of every stage and <code>cloud-init status</code>
+go to serial port 1 under <code>cloud-init[1]</code>.</p>
+<ul>
+<li>Per-instance modules (<code>runcmd</code>, <code>write_files</code>, <code>packages</code>, <code>#!</code> scripts) run once
+  per instance and not again after a stop and start or a reset, as the boot disk
+  keeps cloud-init's records. On Container-Optimized OS, <code>write_files</code> and <code>runcmd</code>
+  run on every boot, as Google documents for that image.</li>
+<li>Docker owns the container's network and hostname, so cloud-init leaves both alone
+  (<code>network: {config: disabled}</code>, <code>preserve_hostname: true</code>). Container images
+  ship no locales, so the <code>locale</code> module is off unless your cloud-config sets
+  <code>locale</code>. Modules that need
+  systemd or a real kernel, such as <code>ntp</code> or <code>growpart</code>, may fail or do nothing.</li>
+<li>Each part of cloud-init (the early stages, then the final stage) waits up to
+  <code>FLOCI_GCP_SERVICES_COMPUTE_STARTUP_SCRIPT_TIMEOUT</code>, as the startup scripts do.
+  Past it the boot moves on and says so on serial port 1; the final stage still
+  waits for the early stages to finish.</li>
+<li>The image setting comes from the image the boot disk was created from, and stays
+  with the disk if that image is deleted later.</li>
+<li>Debian, Rocky Linux and CentOS images do not run it. To run it on another image,
+  add <code>"cloudInit": "per-instance"</code> (or <code>"every-boot"</code>) to that image's entry in
+  your own image catalog.</li>
+</ul>
+<h3 id="ssh-and-published-ports">SSH and published ports</h3>
+<p>A new instance container publishes port 22 and every TCP port an enabled ingress
+firewall rule on the instance's network allows (a rule with <code>targetTags</code> only
+when the instance has one of those tags), each on a host port Docker picks, up to
+64 ports. The ports are reported in the log and on serial port 1:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>2026-10-25T05:01:18.361Z vm floci-gcp[1]: Published ports: 22/tcp -&gt; localhost:32770, 8080/tcp -&gt; localhost:32771
+</code></pre></div>
+<p><code>docker port &lt;container&gt; 22</code> gives the same answer. Ports are chosen when the
+container is created (insert, or the first start after <code>setMachineType</code>); a
+firewall rule added later applies from then on. Source ranges, deny rules and
+priorities are not enforced: a published port is reachable from the Docker host.
+<code>networkIP</code> and <code>natIP</code> keep their Compute Engine values.</p>
+<p>On every boot the instance applies <code>ssh-keys</code> as the Linux guest agent does:</p>
+<ul>
+<li>Instance keys, then project keys from <code>setCommonInstanceMetadata</code>, unless the
+  instance sets <code>block-project-ssh-keys</code> to true or still uses the legacy <code>sshKeys</code>
+  key. Lines are <code>USERNAME:KEY</code>, optionally ending in
+  <code>google-ssh {"userName":"USERNAME","expireOn":"TIME"}</code>; expired and malformed
+  lines are skipped.</li>
+<li>Each user is created with a home directory and no password, joins the agent's
+  groups that exist in the image (<code>adm</code>, <code>dip</code>, <code>docker</code>, <code>lxd</code>, <code>plugdev</code>,
+  <code>video</code>) and <code>google-sudoers</code>, which may <code>sudo</code> without a password. Its keys go
+  into <code>~/.ssh/authorized_keys</code> after a <code># Added by Google</code> line each; lines the
+  user added stay.</li>
+<li>A user whose keys leave metadata keeps its account but loses those keys and
+  <code>google-sudoers</code>.</li>
+<li>With <code>enable-oslogin</code> true (the instance value overriding the project's),
+  accounts are left alone.</li>
+</ul>
+<p><code>setMetadata</code> and <code>setCommonInstanceMetadata</code> apply the keys again on running
+instances at once. If the image has no sshd, the first boot installs
+<code>openssh-server</code> with its package manager (<code>apt-get</code>, <code>apk</code>, <code>dnf</code>, <code>microdnf</code> or
+<code>yum</code>), which needs network access from the container; then sshd is started. The
+agent's progress goes to serial port 1 as <code>google_guest_agent</code> lines. Connect with
+<code>ssh -p &lt;host port&gt; USERNAME@localhost</code>. OS Login, <code>gcloud compute ssh</code> key
+pushing through OS Login, and SSH host keys in guest attributes are not
+emulated.</p>
+<h3 id="container-vms">Container VMs</h3>
+<p>An instance whose metadata has a <code>gce-container-declaration</code> runs the declared
+container, as Container-Optimized OS does with the container startup agent
+(konlet). Terraform's <code>metadata = { gce-container-declaration = ... }</code> and
+<code>gcloud compute instances create-with-container</code> both set it:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">spec</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">containers</span><span class="p">:</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">web</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nginx:1.27</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">/docker-entrypoint.sh</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">nginx</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-g</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">daemon off;</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MODE</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">      </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dev</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="nt">volumeMounts</span><span class="p">:</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cache</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">      </span><span class="nt">mountPath</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/cache/nginx</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">  </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cache</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">    </span><span class="nt">emptyDir</span><span class="p">:</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">      </span><span class="nt">medium</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Memory</span>
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">  </span><span class="nt">restartPolicy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Always</span>
+</code></pre></div>
+<p>On every boot, after the startup scripts, floci-gcp starts the container as a
+second Docker container named <code>floci-gcp-compute-&lt;project&gt;-&lt;zone&gt;-&lt;instance&gt;_klt</code>,
+in the instance container's network (konlet uses the VM's host network), so it
+shares the instance's address and the <a href="#metadata-server">metadata server</a> knows
+it as that instance. It reads <code>image</code>, <code>command</code> (the entrypoint), <code>args</code> (the
+command), <code>env</code>, <code>stdin</code>, <code>tty</code> and <code>restartPolicy</code> (<code>Always</code>, the default,
+<code>OnFailure</code> or <code>Never</code>), and mounts <code>emptyDir</code> volumes with <code>medium: Memory</code> as
+tmpfs (read-only when the mount says <code>readOnly: true</code>). With
+<code>FLOCI_GCP_SERVICES_COMPUTE_INSTANCE_RESOURCE_LIMITS</code> on, it gets the machine type's
+vCPUs and memory too. <code>securityContext.privileged</code> is honoured only with
+<code>FLOCI_GCP_SERVICES_COMPUTE_ALLOW_PRIVILEGED_CONTAINERS=true</code>: the container would
+be privileged on the Docker host, not only inside the instance, so by default it
+runs unprivileged and serial port 1 says so. Its output goes to serial port 1, one
+line each behind the container's name, after konlet's own lines:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>2026-10-24T15:20:01.123Z vm konlet-startup[1]: Configured container 'web' will be started with name 'floci-gcp-compute-p-us-central1-a-vm_klt'.
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>2026-10-24T15:20:03.456Z vm web[1]: hello
+</code></pre></div>
+<p>As on Compute Engine, the declaration is read at boot: a change made with
+<code>setMetadata</code> applies at the next start or reset. Stop and delete remove the
+container after the shutdown scripts; reset replaces it. A declaration konlet
+would refuse (not exactly one container, an unknown restart policy, a volume
+mount without its volume) is reported on serial port 1 and starts nothing; the
+instance still runs.</p>
+<p><strong>Limitations.</strong> <code>hostPath</code> and <code>gcePersistentDisk</code> volumes are not mounted (the
+serial port says so), and private registry credentials are not fetched from the
+instance's service account; the image is pulled as any other floci-gcp image is.</p>
+<h3 id="serial-port-output">Serial port output</h3>
+<p><code>instances.getSerialPortOutput</code> serves serial port 1: the scripts' output and the
+runner's progress (and a <a href="#container-vms">container VM</a>'s output), one line each, in this form:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>2026-10-21T16:20:01.123Z vm google_metadata_script_runner[1]: Starting startup scripts.
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>2026-10-21T16:20:01.456Z vm google_metadata_script_runner[1]: startup-script: hello
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>2026-10-21T16:20:01.460Z vm google_metadata_script_runner[1]: startup-script exit status 0
+</code></pre></div>
+<p><code>start</code> and <code>next</code> are byte positions across everything written, the most recent
+1 MiB is kept, a negative <code>start</code> reads the last bytes, and bytes that are not
+valid UTF-8 come back as <code>\xNN</code>. Ports 2 to 4 are empty, and so is port 1 in mock
+mode. The output is kept in memory: it does not survive an emulator restart, and
+it is dropped when the instance is deleted. Kernel and boot messages are not
+emulated.</p>
+<h3 id="metadata-server">Metadata server</h3>
+<p>floci-gcp serves the GCE metadata server on its main port under
+<code>/computeMetadata/v1</code>. Every instance container gets <code>GCE_METADATA_HOST</code> (and
+<code>GCE_METADATA_IP</code>) set to the emulator's address, so the Google client libraries
+and <code>curl -H 'Metadata-Flavor: Google' "http://$GCE_METADATA_HOST/computeMetadata/v1/..."</code>
+reach it. The server answers for the instance whose container sent the request,
+identified by its container IP address.</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>instance/id</code>, <code>name</code>, <code>hostname</code>, <code>description</code></td>
+<td>From the instance; the hostname is <code>NAME.ZONE.c.PROJECT.internal</code></td>
+</tr>
+<tr>
+<td><code>instance/zone</code>, <code>instance/machine-type</code></td>
+<td><code>projects/NUMBER/zones/ZONE</code>, <code>projects/NUMBER/machineTypes/TYPE</code></td>
+</tr>
+<tr>
+<td><code>instance/image</code></td>
+<td>The boot disk's source image, <code>projects/PROJECT/global/images/NAME</code></td>
+</tr>
+<tr>
+<td><code>instance/tags</code></td>
+<td>JSON array; <code>?alt=text</code> gives one tag per line</td>
+</tr>
+<tr>
+<td><code>instance/attributes/KEY</code></td>
+<td>Instance metadata</td>
+</tr>
+<tr>
+<td><code>instance/network-interfaces/0/...</code></td>
+<td><code>ip</code>, <code>network</code>, <code>gateway</code>, <code>subnetmask</code>, <code>mac</code>, <code>mtu</code>, <code>dns-servers</code>, <code>access-configs/0/external-ip</code></td>
+</tr>
+<tr>
+<td><code>instance/disks/N/...</code></td>
+<td><code>device-name</code>, <code>index</code>, <code>interface</code>, <code>mode</code>, <code>type</code></td>
+</tr>
+<tr>
+<td><code>instance/service-accounts/{default,EMAIL}/...</code></td>
+<td><code>email</code>, <code>aliases</code>, <code>scopes</code>, <code>token</code>, <code>identity?audience=AUD[&amp;format=full]</code></td>
+</tr>
+<tr>
+<td><code>project/project-id</code>, <code>project/numeric-project-id</code></td>
+<td>The project ID and number</td>
+</tr>
+<tr>
+<td><code>project/attributes/KEY</code></td>
+<td>Project metadata (<code>projects.setCommonInstanceMetadata</code>)</td>
+</tr>
+<tr>
+<td><code>universe/universe-domain</code></td>
+<td><code>googleapis.com</code></td>
+</tr>
+</tbody>
+</table>
+<p>Requests need <code>Metadata-Flavor: Google</code> and must not carry <code>X-Forwarded-For</code>; such
+requests get 403, and unknown keys get 404. A path ending in <code>/</code> lists its entries,
+and a directory requested without the slash redirects to it. <code>?recursive=true</code>
+returns JSON with camelCase keys (attribute keys and service account emails keep
+their spelling), and with <code>alt=text</code> returns <code>path value</code> lines. <code>?alt=json</code> returns
+a single value as JSON. <code>?wait_for_change=true</code> blocks until the value's <code>ETag</code>
+differs from <code>last_etag</code>, or for <code>timeout_sec</code>
+(<code>FLOCI_GCP_SERVICES_COMPUTE_METADATA_SERVER_DEFAULT_WAIT_TIMEOUT</code>, 300 seconds,
+when absent). It is rejected on the token and on a non-recursive directory.</p>
+<p>Tokens are stub access tokens: floci-gcp accepts any credential. Identity tokens
+have Google's shape, with the requested <code>aud</code> and, with <code>format=full</code>, the
+<code>google.compute_engine</code> claims, but they are not signed by a Google key, so only
+code that skips signature verification accepts them. An instance created without
+<code>serviceAccounts</code> has none, as on GCE.</p>
+<p><strong>Limitations.</strong> <code>169.254.169.254</code> and <code>metadata.google.internal</code> are not routed;
+use <code>GCE_METADATA_HOST</code>. Identifying the caller by address needs the container's
+own IP to reach floci-gcp. That holds when floci-gcp runs in Docker on the same
+network, or directly on a Linux host. With floci-gcp on the host under Docker
+Desktop, requests arrive from a proxy address and get 404.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>

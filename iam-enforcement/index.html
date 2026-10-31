@@ -1,0 +1,2307 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Free, open-source local GCP emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci-gcp/iam-enforcement/">
+      
+      
+        <link rel="prev" href="../contributing/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>IAM Enforcement Adapters - floci-gcp</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#adding-an-enforcing-service" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="floci-gcp" class="md-header__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            floci-gcp
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              IAM Enforcement Adapters
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../services/" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../contributing/" class="md-tabs__link">
+          
+  
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="floci-gcp" class="md-nav__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../assets/floci-header.svg" alt="logo">
+
+    </a>
+    floci-gcp
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/gcp-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GCP CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/multi-project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Project Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/advanced/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/compute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compute Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/locations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Locations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/gcs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Storage (GCS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/pubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/firestore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firestore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/datastore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Datastore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/secret-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/resource-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/iam-credentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Credentials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Token Service (STS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/managed-kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/gke/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GKE (Kubernetes Engine)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-sql-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud SQL (PostgreSQL, MySQL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Run
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/eventarc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Eventarc
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/service-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Usage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/cloud-billing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Billing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/firebase-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firebase Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/bigquery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BigQuery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Enforcement Adapters
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Enforcement Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#service-extension-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service extension contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#required-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Required tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-and-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage and concurrency
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upstream-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upstream evidence
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Upstream evidence">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#iam-service-account-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM service-account evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam-custom-role-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM custom-role evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloud-scheduler-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud Scheduler evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#service-extension-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service extension contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#required-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Required tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-and-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage and concurrency
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upstream-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upstream evidence
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Upstream evidence">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#iam-service-account-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM service-account evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#iam-custom-role-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IAM custom-role evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cloud-scheduler-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud Scheduler evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="adding-an-enforcing-service">Adding an enforcing service</h1>
+<p>IAM enforcement uses one decision point, <code>IamAuthorizationService</code>, behind REST
+and gRPC transport adapters. The gRPC interceptor is installed in
+<code>GrpcServerManager.bind</code>, which is the actual Vert.x service registration path.
+The global-interceptor annotation also covers Quarkus-managed registrations.
+An annotation alone does not cover the dynamically bound controllers.</p>
+<p>Resource Manager projects, Cloud Billing project billing-info reads, Cloud Run v2 services and revisions, Secret Manager
+secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
+issuance, IAM project and organization custom-role management, and GCS bucket/object
+operations are integrated. Bindings to stored custom roles grant their <code>includedPermissions</code>
+through every adapter except in GCS bucket policies; see <a href="../services/iam/#custom-roles">Custom roles</a>. IAM policy methods also
+use REST and the shared IAM gRPC mixin; the <a href="../services/iam/#service-account-enforcement">IAM inventory</a>
+lists exact methods, permission targets, role slices, and local condition limits. Cloud Run
+service-policy methods use REST and the shared IAM gRPC API. Secret Manager secret
+policy methods work over REST and gRPC. GCS invokes the shared evaluator from its
+service-level authorization path so JSON filtering does not bypass its
+lock-sensitive lifecycle coordination. Cloud Logging GCS export uses the same GCS service path
+with the persisted sink writer as a trusted internal principal. It uses no request credential
+bypass; sink management caller authorization is a separate integration.</p>
+<h2 id="service-extension-contract">Service extension contract</h2>
+<ol>
+<li>Add an <code>@ApplicationScoped</code> implementation of <code>IamAuthorizationAdapter</code> in the
+   owning service package. Constructor injection is supported.</li>
+<li>Declare the REST controller classes and fully qualified gRPC service names.
+   Duplicate transport ownership fails registration. The shared IAM gRPC mixin
+   dispatches through the adapter's resource factory.</li>
+<li>Translate each REST handler and protobuf request to an <code>IamOperation</code>. Both
+   transports must use the same <code>checks</code> table. An unfamiliar operation must throw
+   <code>unsupported(...)</code>. Explicit permission-free methods may return an empty list.
+   gRPC services override <code>grpcOperation(String, Message)</code> and read request fields
+   through typed protobuf getters. The default rejects unmapped gRPC operations.</li>
+<li>Return every required <code>IamPermissionCheck</code>, including checks on other resources.
+   Create/list operations usually check the parent; verify the exact upstream
+   contract. Do not guess permissions from method names. Each check is conjunctive.</li>
+<li>Implement <code>resource</code> with exact accepted names, service/type/name CEL attributes,
+   and the existing policy storage key. Return empty for resources owned by other
+   adapters. Use <code>IamResource.projectChild</code> for project inheritance; do not expose
+   internal policy keys to CEL. Versioned resources can have a parent policy key.</li>
+<li>Contribute a finite predefined role map and exact <code>basicRoles</code> slices. Basic-role
+   permissions are explicitly contributed by each service, never inferred by the
+   shared catalog. Do not use wildcard permission grants. Bindings with roles outside
+   the finite catalog that are not active custom roles applying to the policy's project or
+   organization are skipped as complete, non-granting bindings before condition
+   validation; they must not block grants from known bindings or policy recovery.</li>
+<li>Reuse <code>IamService</code> policy storage and its existing resource-existence resolvers.
+   <code>testPermissions</code> routes registered resources through the evaluator. Override
+   <code>validatePolicy</code> for service-specific binding constraints; it runs on policy
+   writes and before evaluation in enforce mode and must not perform I/O. Custom-role
+   bindings are checked on writes by the shared service, after <code>validatePolicy</code>, for
+   every resource the adapter registers.
+   A service using different policy storage needs a reviewed integration before
+   advertising enforcement; registering a resource factory alone is insufficient.</li>
+<li>Add the service to the documentation and coverage matrix. Startup coverage is
+   derived from registered adapters. Update the explicit exclusions in the startup
+   message when expanding beyond the current scope.</li>
+</ol>
+<p>The current REST transport adapter buffers and restores JSON request bodies. It
+is not an XML, multipart, raw-media, or HTTP/protobuf authorization parser. Add an
+appropriate transport adapter for those formats while retaining the shared decision
+point. Likewise, streams that address resources after their initial message need
+explicit state handling and tests. Pub/Sub StreamingPull retains the first
+subscription name, checks every message and delivery, and rejects a repeated
+subscription field in later messages.
+GCS intentionally does not register its REST controllers with that filter. Its
+authorization service calls the same evaluator after applying GCS-specific
+credential handling. XML, media, upload, and service-layer paths use that entry
+point instead of relying on the JSON filter.</p>
+<h2 id="required-tests">Required tests</h2>
+<ul>
+<li>Allowed operation, forbidden permission on the same resource, ungranted sibling,
+  condition exclusion, project inheritance, and cross-project isolation.</li>
+<li>Independent REST and gRPC negative assertions, plus the same requests with the
+  feature disabled. Cover each advertised transport with real clients.</li>
+<li><code>testIamPermissions</code>, policy-mutation escalation, unknown resources/operations,
+  malformed/expired credentials, and unsupported CEL constructs.</li>
+<li>An uncatalogued role by itself denies normally, a known grant still succeeds beside
+  an uncatalogued role for the same caller, and the policy remains recoverable.</li>
+<li>Multi-resource operations, streaming entry points, and side-effect absence after
+  denial, where applicable.</li>
+<li>Inventory controller methods so adding a handler cannot silently bypass the map.</li>
+<li>Temporarily bypass the service's authorization call and run its negative tests.
+  Record that they failed with successful requests where denials were expected,
+  restore the implementation, and rerun the passing suite.</li>
+</ul>
+<p>The root integration suite exercises generated GCP gRPC clients and REST JSON in
+both modes. <code>compatibility-tests/sdk-test-java</code> also contains <code>IamEnforcementTest</code>
+using the official Resource Manager v1 REST SDK and generated IAM v1 gRPC client.
+It expects disabled mode by default. Against
+an enforcing server set <code>FLOCI_GCP_IAM_TEST_ENFORCEMENT=true</code> in the test process.
+This test-only variable does not enable server enforcement. The Java compatibility CI job
+runs the default suite and then this test against a separate enforcing native emulator.</p>
+<h2 id="storage-and-concurrency">Storage and concurrency</h2>
+<p>Policies use the global IAM store under the exact resource key; service stores
+use project routing. GCS retains the lifecycle invariant from its owning service:
+the IAM policy lock is acquired before the bucket mutation lock, and bucket creation
+holds the bucket lock through initial-policy persistence and durable rollback.
+Bucket policy mutation acquires the bucket and owning-project policy locks in global
+stripe order, revalidates bucket ownership, and holds both locks through authorization
+and the policy write. Object mutations acquire every applicable bucket and owning-project
+policy lock in the same global order before entering the storage mutation lock. The
+shared REST filter and gRPC interceptor do not hold a lock
+across authorization and the subsequent service mutation. Other service integrations
+must use the service-level ordered-lock entry point when that consistency is required.
+Cloud Logging holds its sink lock before acquiring the ordered destination policy locks
+and GCS bucket/object locks, serializing delivery with sink configuration changes.
+Secret Manager holds the secret lock before the ordered project and secret policy
+locks across authorization and the secret or version operation.
+Custom-role definitions are serialized among themselves but not with these policy
+locks, and evaluation reads them without a lock. Each read sees the latest stored
+definition, so a role edit, disable, delete, or undelete applies to reads after it is
+stored, and one decision that overlaps the change can observe both versions. A role
+activated between those reads has its condition evaluated without prior validation; an
+unsupported condition then fails closed in the evaluator rather than with
+<code>INVALID_ARGUMENT</code>.</p>
+<h2 id="upstream-evidence">Upstream evidence</h2>
+<p>The Resource Manager v1, Cloud Run v2, and Secret Manager v1 protocol and role
+contracts are defined by these upstream references:</p>
+<ul>
+<li><a href="https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/get">Resource Manager v1 project get</a>
+  <a href="https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/setIamPolicy">project policy constraints</a>,
+  and <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/resourcemanager">Resource Manager roles</a>.</li>
+<li><a href="https://docs.cloud.google.com/iam/docs/conditions-resource-attributes">IAM resource attributes</a>,
+  <a href="https://github.com/googleapis/googleapis/blob/master/google/type/expr.proto">expression protobuf</a>, and
+  <a href="https://google.aip.dev/193">Google API errors</a>.</li>
+<li><a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run">Cloud Run role permissions</a>
+  and <a href="https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services">Cloud Run service IAM methods</a>.</li>
+<li><a href="https://github.com/googleapis/googleapis/blob/master/google/cloud/run/v2/service.proto">Cloud Run v2 service proto</a>,
+  <a href="https://github.com/googleapis/googleapis/blob/master/google/cloud/run/v2/revision.proto">revision proto</a>,
+  and <a href="https://run.googleapis.com/$discovery/rest?version=v2">REST discovery document</a>.</li>
+<li><a href="https://github.com/googleapis/googleapis/blob/master/google/cloud/secretmanager/v1/service.proto">Secret Manager v1 service proto</a>
+  and <a href="https://docs.cloud.google.com/secret-manager/docs/access-control">Secret Manager access control</a>.</li>
+</ul>
+<p>The REST client implementation is in the <a href="https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-cloudresourcemanager/v1/2.0.0/com/google/api/services/cloudresourcemanager/CloudResourceManager.java">Resource Manager v1 Java SDK source</a>.
+The Cloud Run client HTTP JSON mappings are in the
+<a href="https://github.com/googleapis/google-cloud-java/blob/main/java-run/google-cloud-run/src/main/java/com/google/cloud/run/v2/stub/HttpJsonServicesStub.java">Java service stub</a>
+and <a href="https://github.com/googleapis/google-cloud-java/blob/main/java-run/google-cloud-run/src/main/java/com/google/cloud/run/v2/stub/HttpJsonRevisionsStub.java">revision stub</a>.
+The shared policy transport uses the <a href="https://github.com/googleapis/googleapis/blob/master/google/iam/v1/iam_policy.proto">IAM v1 policy proto</a>.</p>
+<p>Denial codes and permission requirements follow these contracts. Exact production
+message text, error metadata, revocation timing, and alias resolution are not
+compatibility guarantees.</p>
+<h3 id="iam-service-account-evidence">IAM service-account evidence</h3>
+<ul>
+<li><a href="https://iam.googleapis.com/$discovery/rest?version=v1">IAM v1 discovery document</a>
+  and <a href="https://github.com/googleapis/googleapis/blob/master/google/iam/admin/v1/iam.proto">IAM admin proto</a>.</li>
+<li><a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam">IAM roles and permissions</a>,
+  including the basic-role membership listed for each checked permission.</li>
+<li><a href="https://iamcredentials.googleapis.com/$discovery/rest?version=v1">Credentials v1 discovery document</a>
+  and <a href="https://github.com/googleapis/googleapis/blob/master/google/iam/credentials/v1/iamcredentials.proto">Credentials proto</a>.</li>
+<li><a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signBlob">Credentials signBlob</a>
+  and <a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt">signJwt</a>
+  permission references.</li>
+<li><a href="https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-iam/v1/2.0.0/com/google/api/services/iam/v1/Iam.java">IAM REST Java SDK source</a>
+  and <a href="https://github.com/googleapis/google-cloud-java/blob/main/java-iamcredentials/google-cloud-iamcredentials/src/main/java/com/google/cloud/iam/credentials/v1/stub/HttpJsonIamCredentialsStub.java">Credentials HTTP JSON stub</a>.</li>
+</ul>
+<p><code>IamServiceAccountAuthorizationServiceTest</code> inventories the implemented handlers
+and permission targets. The service-account integration tests exercise denial
+state, conditions, policy escalation, alias resolution, role slices, and disabled
+controls. <code>IamServiceAccountIamEnforcementTest</code> exercises official IAM REST,
+Credentials HTTP JSON, and generated shared IAM policy gRPC clients in both modes.
+The compatibility workflow runs it against its isolated enforcing native server.
+Local evidence does not establish production IAM condition or Organization Policy
+compatibility.</p>
+<h3 id="iam-custom-role-evidence">IAM custom-role evidence</h3>
+<ul>
+<li><a href="https://github.com/googleapis/googleapis/blob/master/google/iam/admin/v1/iam.proto">IAM admin proto</a>
+  <code>Role</code>, <code>RoleView</code>, <code>Role.RoleLaunchStage</code>, and the create, get, list, update, delete, and
+  undelete request messages and HTTP bindings, and the
+  <a href="https://iam.googleapis.com/$discovery/rest?version=v1">IAM v1 discovery document</a>.</li>
+<li>Method permissions on <a href="https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.roles">projects.roles</a>
+  and <a href="https://docs.cloud.google.com/iam/docs/reference/rest/v1/organizations.roles">organizations.roles</a>,
+  and the role slices in <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam">IAM roles and permissions</a>.</li>
+<li><a href="https://docs.cloud.google.com/iam/docs/understanding-custom-roles">Understanding custom roles</a> and
+  <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">creating custom roles</a> for scope,
+  limits, disabled and deleted behavior, and role ID reuse.</li>
+<li><a href="https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-iam/v1/2.0.0/com/google/api/services/iam/v1/Iam.java">IAM REST Java SDK source</a>
+  <code>Projects.Roles</code> and <code>Organizations.Roles</code> request builders.</li>
+</ul>
+<p><code>IamRoleAuthorizationServiceTest</code> inventories the role handlers and permission targets.
+<code>IamCustomRoleEnforceIntegrationTest</code> and <code>IamCustomRoleDisabledIntegrationTest</code> share one
+contract covering management denials without mutation, conditions, Pub/Sub REST and gRPC
+grants, filtered <code>testIamPermissions</code>, cross-project and cross-organization bindings, and
+revocation. <code>IamCustomRoleIamEnforcementTest</code> repeats the management, Pub/Sub grant, filtering,
+boundary, and revocation paths with the official IAM, Resource Manager, and Pub/Sub
+REST clients and the generated Pub/Sub gRPC client. It also covers resource-name
+conditions on project and organization role management and on custom-role grants over
+Pub/Sub REST and gRPC, including unchanged resources after denied mutations and the
+same requests with enforcement disabled.</p>
+<p>The following were checked against live GCP (IAM v1 REST, one organization and one
+project under a folder): basic-role
+<code>iam.roles.*</code> membership from <code>gcloud iam roles describe</code>; error codes and messages for
+duplicate IDs, reused deleted IDs, stale etags, deleted-role updates and deletes,
+undeleting an active role, invalid role IDs, titles, descriptions, stages, views, update
+masks, role names, page sizes, permission counts, and wrongly typed fields; malformed and
+non-string etags; byte-based length limits; error precedence for stale etags on deleted
+roles; unmasked patch replacement; per-method permissions and targets for a caller holding
+<code>roles/iam.roleViewer</code>; exact custom-role grants and <code>testIamPermissions</code> filtering on a
+Pub/Sub topic; revocation timing; organization-role management permissions and targets
+with and without <code>roles/iam.organizationRoleViewer</code>; and policy-write rejection of
+another project's role and of new grants to deleted roles. GCP also allowed an
+organization role in a project under a folder, which Floci does not model.</p>
+<p>The IAM v1 Java REST client sends an empty form content type for bodyless policy
+reads and deletes. The matching IAM REST handlers accept that empty-body path as
+well as JSON; payload-bearing operations retain their JSON contract. This behavior
+is exercised by the unmodified official SDK request builders above; the shared
+<a href="https://github.com/googleapis/google-api-java-client/blob/main/google-api-client/src/main/java/com/google/api/client/googleapis/services/AbstractGoogleClientRequest.java">Google Java request builder</a>
+uses empty content for bodyless custom POST methods.</p>
+<h3 id="cloud-scheduler-evidence">Cloud Scheduler evidence</h3>
+<ul>
+<li><a href="https://github.com/googleapis/googleapis/blob/master/google/cloud/scheduler/v1/cloudscheduler.proto">Scheduler v1 proto</a>
+  and <a href="https://github.com/googleapis/google-cloud-java/blob/main/java-scheduler/google-cloud-scheduler/src/main/java/com/google/cloud/scheduler/v1/stub/HttpJsonCloudSchedulerStub.java">HTTP JSON SDK stub</a>.</li>
+<li>REST <a href="https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/create">create</a>,
+  <a href="https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/list">list</a>,
+  and <a href="https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/resume">resume</a>
+  define parent targets and the <code>cloudscheduler.jobs.enable</code> permission.</li>
+<li><a href="https://docs.cloud.google.com/scheduler/docs/access-control">Scheduler access control and role permissions</a>.</li>
+</ul>
+<p><code>SchedulerIamAuthorizationAdapterServiceTest</code> inventories all eight handlers and
+RPCs. <code>SchedulerIamEnforcementTest</code> uses the official Java client over REST and
+gRPC, with restricted emulator-issued credentials, positive controls, denial state
+assertions, observed Pub/Sub delivery after permitted/denied runs, JSON null
+normalization, domain-scoped project names, and disabled-mode controls. The compatibility workflow includes it
+in the isolated enforcing native run. See the <a href="../services/scheduler/#iam-enforcement">Scheduler inventory</a>
+for local condition semantics and unsupported targets.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>

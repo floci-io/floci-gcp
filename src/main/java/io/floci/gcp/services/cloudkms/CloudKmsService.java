@@ -205,9 +205,15 @@ public class CloudKmsService {
             key.setLabels(fields.labels() != null && !fields.labels().isEmpty()
                     ? new LinkedHashMap<>(fields.labels()) : null);
         }
-        key.setAlgorithm(algorithm);
-        key.setRotationPeriod(formatDuration(rotationPeriod));
-        key.setNextRotationTime(nextRotationTime != null ? nextRotationTime.toString() : null);
+        if (setAlgorithm) {
+            key.setAlgorithm(algorithm);
+        }
+        if (paths.contains("rotation_period")) {
+            key.setRotationPeriod(formatDuration(rotationPeriod));
+        }
+        if (paths.contains("next_rotation_time")) {
+            key.setNextRotationTime(nextRotationTime != null ? nextRotationTime.toString() : null);
+        }
         cryptoKeyStore.put(name, key);
         return key;
     }

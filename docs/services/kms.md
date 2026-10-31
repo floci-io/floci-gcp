@@ -176,6 +176,10 @@ Deviations:
 - Update mask paths floci does not support, including immutable fields such as
   `destroy_scheduled_duration` and `purpose`, are ignored rather than rejected.
 - The `INVALID_ARGUMENT` messages are floci's own; production's wording was not verified.
+- Updates to one key are not serialized. An update writes only the fields its mask names, so
+  concurrent updates of different fields both land, but two concurrent updates of the rotation
+  schedule each validate against what they read and can leave `rotation_period` set without
+  `next_rotation_time`.
 
 ## Integrity (CRC32C)
 

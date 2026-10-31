@@ -16,9 +16,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
@@ -312,6 +316,69 @@ class CloudKmsServiceTest {
         StoredCryptoKey stored = service.getCryptoKey(key.getName());
         assertNull(stored.getLabels());
         assertNull(stored.getRotationPeriod());
+    }
+
+    @Test
+    void aLabelsUpdateRacingAScheduleUpdateKeepsTheNewSchedule() throws Exception {
+        StoredCryptoKey key = symmetricKey("racing");
+        service.updateCryptoKey(key.getName(), new CloudKmsService.CryptoKeyFields(
+                        Duration.ofDays(30), Instant.parse("2027-01-01T00:00:00Z"), null, null), null,
+                Set.of("rotation_period", "next_rotation_time"));
+
+        runLabelsUpdateAround(key.getName(), () -> service.updateCryptoKey(key.getName(),
+                new CloudKmsService.CryptoKeyFields(
+                        Duration.ofDays(60), Instant.parse("2028-01-01T00:00:00Z"), null, null), null,
+                Set.of("rotation_period", "next_rotation_time")));
+
+        StoredCryptoKey stored = service.getCryptoKey(key.getName());
+        assertEquals(Map.of("team", "a"), stored.getLabels());
+        assertEquals("5184000s", stored.getRotationPeriod());
+        assertEquals("2028-01-01T00:00:00Z", stored.getNextRotationTime());
+    }
+
+    @Test
+    void aLabelsUpdateRacingAnAlgorithmUpdateKeepsTheNewAlgorithm() throws Exception {
+        service.createKeyRing(LOCATION, "kr");
+        StoredCryptoKey key = service.createCryptoKey(LOCATION + "/keyRings/kr", "signer", "ASYMMETRIC_SIGN",
+                "EC_SIGN_P256_SHA256", false);
+
+        runLabelsUpdateAround(key.getName(), () -> service.updateCryptoKey(key.getName(),
+                CloudKmsService.CryptoKeyFields.NONE, "RSA_SIGN_PKCS1_2048_SHA256",
+                Set.of("version_template.algorithm")));
+
+        StoredCryptoKey stored = service.getCryptoKey(key.getName());
+        assertEquals(Map.of("team", "a"), stored.getLabels());
+        assertEquals("RSA_SIGN_PKCS1_2048_SHA256", stored.getAlgorithm());
+    }
+
+    /**
+     * Starts a labels-only update of the key, holds it after it has read the stored key and before it
+     * writes, runs {@code concurrentUpdate} in that gap, then lets the labels update finish.
+     */
+    private void runLabelsUpdateAround(String name, Runnable concurrentUpdate) throws Exception {
+        CountDownLatch labelsUpdateReadTheKey = new CountDownLatch(1);
+        CountDownLatch concurrentUpdateDone = new CountDownLatch(1);
+        Map<String, String> labels = new HashMap<>(Map.of("team", "a")) {
+            @Override
+            public boolean isEmpty() {
+                labelsUpdateReadTheKey.countDown();
+                try {
+                    assertTrue(concurrentUpdateDone.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                return super.isEmpty();
+            }
+        };
+        CompletableFuture<StoredCryptoKey> labelsUpdate = CompletableFuture.supplyAsync(() ->
+                service.updateCryptoKey(name,
+                        new CloudKmsService.CryptoKeyFields(null, null, null, labels), null, Set.of("labels")));
+
+        assertTrue(labelsUpdateReadTheKey.await(10, TimeUnit.SECONDS));
+        concurrentUpdate.run();
+        concurrentUpdateDone.countDown();
+        labelsUpdate.get(10, TimeUnit.SECONDS);
     }
 
     @Test

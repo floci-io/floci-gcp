@@ -412,6 +412,7 @@ class BigQueryDuckDmlIntegrationTest {
     @Order(4)
     void alterSetOptionsEvaluatesConstantExpressionsLikeBigQuery() {
         query("CREATE TABLE shop.optioned_expr (x INT64)").then().statusCode(200);
+        query("CREATE TABLE shop.optioned_distinct (x INT64)").then().statusCode(200);
         query("ALTER TABLE shop.optioned_expr SET OPTIONS(description=CONCAT('a', 'b'), friendly_name=UPPER('x'),"
                 + " expiration_timestamp=TIMESTAMP_ADD(TIMESTAMP '2030-01-01 00:00:00+00', INTERVAL 7 DAY))")
                 .then().statusCode(200);
@@ -453,6 +454,12 @@ class BigQueryDuckDmlIntegrationTest {
                 .body("error.message", equalTo("Syntax error: Expected \")\" but got keyword FROM"));
         query("ALTER TABLE shop.optioned_expr SET OPTIONS(description='x' WHERE TRUE)").then().statusCode(400)
                 .body("error.message", equalTo("Syntax error: Expected \")\" but got keyword WHERE"));
+        query("ALTER TABLE shop.optioned_distinct SET OPTIONS(description=CASE WHEN 1 IS DISTINCT FROM 2"
+                + " THEN 'different' ELSE 'same' END, friendly_name=IF(1 IS NOT DISTINCT FROM 1, 'eq', 'ne'))")
+                .then().statusCode(200);
+        given().when().get(BASE + "/datasets/shop/tables/optioned_distinct").then().statusCode(200)
+                .body("description", equalTo("different"))
+                .body("friendlyName", equalTo("eq"));
 
         for (String sql : List.of("ALTER TABLE shop.optioned_expr SET OPTIONS(description=1 + 1)",
                 "CREATE TABLE shop.optioned_expr_copy COPY shop.optioned_expr OPTIONS(description=1 + 1)")) {

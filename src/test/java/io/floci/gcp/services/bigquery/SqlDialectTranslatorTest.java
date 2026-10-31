@@ -2151,6 +2151,8 @@ class SqlDialectTranslatorTest {
                 () -> statement("ALTER TABLE ds.t SET OPTIONS(description='x' WHERE TRUE)")).getMessage());
         assertTrue(statement("ALTER TABLE ds.t SET OPTIONS(description=FORMAT_DATE('%Y', DATE '2030-01-01'))")
                 .options().get("description") instanceof SqlDialectTranslator.OptionExpression);
+        assertTrue(statement("ALTER TABLE ds.t SET OPTIONS(description=CASE WHEN 1 IS DISTINCT FROM 2 THEN 'a' END)")
+                .options().get("description") instanceof SqlDialectTranslator.OptionExpression);
     }
 
     @Test

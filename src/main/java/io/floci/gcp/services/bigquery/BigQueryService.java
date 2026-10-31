@@ -30,6 +30,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
@@ -918,6 +919,9 @@ public class BigQueryService {
                         throw QueryEngine.invalidQuery(
                                 "CREATE OR REPLACE TABLE cannot change the partitioning specification");
                     }
+                    if (statement.options() != null) {
+                        evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation);
+                    }
                 } else if (statement.querySql() != null) {
                     described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
                             options, true),
@@ -947,7 +951,11 @@ public class BigQueryService {
                             "Not found: Dataset " + projectId + ":" + statement.datasetTarget());
                 }
             }
-            case ALTER_TABLE, ALTER_VIEW -> alterTarget(projectId, statement);
+            case ALTER_TABLE, ALTER_VIEW -> {
+                if (alterTarget(projectId, statement).isPresent()) {
+                    evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation);
+                }
+            }
             default -> { }
         }
     }
@@ -977,7 +985,8 @@ public class BigQueryService {
     }
 
     /** Applies SET OPTIONS: each listed option is set, or cleared by NULL; labels replace the old ones. */
-    private void alterOptions(String projectId, SqlDialectTranslator.Statement statement, StoredJob job) {
+    private void alterOptions(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
+                              QueryOptions options, StoredJob job, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
         job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
         Optional<Table> found = alterTarget(projectId, statement);
@@ -986,11 +995,59 @@ public class BigQueryService {
             return;
         }
         Table table = found.get();
-        applyTableOptions(table, statement.options());
+        applyTableOptions(table, evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation));
         table.setLastModifiedTime(nowMillis());
         table.setEtag(etag());
         tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
         job.setDdlOperationPerformed("ALTER");
+    }
+
+    /**
+     * Evaluates the option values given as constant expressions with the SQL engine, as {@code SELECT expr}, for the
+     * run and for a dry run, and checks each result's type as BigQuery does: a STRING for description and
+     * friendly_name, a TIMESTAMP (stored as epoch milliseconds) for expiration_timestamp.
+     */
+    private Map<String, Object> evaluateOptions(String projectId, String jobProjectId, Map<String, Object> options,
+                                                QueryOptions queryOptions, JobLocation jobLocation) {
+        if (options.values().stream().noneMatch(v -> v instanceof SqlDialectTranslator.OptionExpression)) {
+            return options;
+        }
+        Map<String, Object> evaluated = new LinkedHashMap<>(options);
+        for (Map.Entry<String, Object> option : options.entrySet()) {
+            if (!(option.getValue() instanceof SqlDialectTranslator.OptionExpression expression)) {
+                continue;
+            }
+            BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
+                    "SELECT " + expression.sql(), queryOptions, false), tables(projectId, jobLocation));
+            TableFieldSchema field = result.schema().getFields().getFirst();
+            Object value = result.rows().isEmpty() ? null : result.rows().getFirst().get(field.getName());
+            String type = switch (field.getType()) {
+                case "INTEGER" -> "INT64";
+                case "FLOAT" -> "FLOAT64";
+                case "BOOLEAN" -> "BOOL";
+                case "RECORD" -> "STRUCT";
+                default -> field.getType();
+            };
+            if ("REPEATED".equals(field.getMode())) {
+                type = "ARRAY<" + type + ">";
+            }
+            String name = option.getKey();
+            if (name.equals("expiration_timestamp")) {
+                if (!type.equals("TIMESTAMP")) {
+                    throw QueryEngine.invalidQuery("Expected type TIMESTAMP; found " + type
+                            + "; failed to set 'expiration_timestamp' in OPTIONS()");
+                }
+                evaluated.put(name, value == null ? null
+                        : new BigDecimal(value.toString()).movePointRight(3).longValue());
+            } else {
+                if (!type.equals("STRING")) {
+                    throw QueryEngine.invalidQuery("Option " + name + " value has type " + type
+                            + " which cannot be coerced to expected type STRING");
+                }
+                evaluated.put(name, value);
+            }
+        }
+        return evaluated;
     }
 
     private static void applyTableOptions(Table table, Map<String, Object> options) {
@@ -1054,7 +1111,7 @@ public class BigQueryService {
             }
             case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, jobProjectId, statement, options, job,
                     jobLocation);
-            case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, statement, job);
+            case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, jobProjectId, statement, options, job, jobLocation);
             case DROP_TABLE, DROP_VIEW -> {
                 job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
                 Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
@@ -1184,7 +1241,8 @@ public class BigQueryService {
         if (statement.copySource() != null) {
             BigQueryMetadata.applyDatasetDefaults(table, destinationDataset, System.currentTimeMillis());
             if (statement.options() != null) {
-                applyTableOptions(table, statement.options());
+                applyTableOptions(table, evaluateOptions(projectId, jobProjectId, statement.options(), options,
+                        jobLocation));
             }
         }
         if (exists) {

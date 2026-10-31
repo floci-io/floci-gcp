@@ -2121,6 +2121,12 @@ class SqlDialectTranslatorTest {
         assertEquals(Map.of("a", "b", "c", "d"), all.options().get("labels"));
         assertEquals(1795132800000L, all.options().get("expiration_timestamp"));
         assertEquals("ALTER_VIEW", statement("ALTER VIEW ds.v SET OPTIONS(description='v')").statementType());
+
+        SqlDialectTranslator.Statement expressions = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT('a', 'b'),"
+                + " expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))");
+        assertEquals(new SqlDialectTranslator.OptionExpression("CONCAT ( 'a' , 'b' )"), expressions.options().get("description"));
+        assertEquals(new SqlDialectTranslator.OptionExpression("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )"),
+                expressions.options().get("expiration_timestamp"));
     }
 
     @Test
@@ -2132,6 +2138,21 @@ class SqlDialectTranslatorTest {
                         () -> statement("ALTER TABLE ds.t SET OPTIONS(description=5)")).getMessage());
         assertTrue(assertThrows(GcpException.class, () -> statement("ALTER TABLE ds.t ADD COLUMN y INT64"))
                 .getMessage().contains("only supported with SET OPTIONS"));
+        assertEquals("Expected constant expression but found unsupported statement or clause; failed to evaluate"
+                        + " 'description' in table OPTIONS",
+                assertThrows(GcpException.class,
+                        () -> statement("ALTER TABLE ds.t SET OPTIONS(description=(SELECT 'x'))")).getMessage());
+        assertEquals("Found unsupported function call 'ARRAY[...]'; failed to evaluate 'labels' in table OPTIONS",
+                assertThrows(GcpException.class,
+                        () -> statement("ALTER TABLE ds.t SET OPTIONS(labels=[('env', LOWER('DEV'))])")).getMessage());
+        assertEquals("Syntax error: Expected \")\" but got keyword FROM", assertThrows(GcpException.class,
+                () -> statement("ALTER TABLE ds.t SET OPTIONS(description=name FROM ds.source)")).getMessage());
+        assertEquals("Syntax error: Expected \")\" but got keyword WHERE", assertThrows(GcpException.class,
+                () -> statement("ALTER TABLE ds.t SET OPTIONS(description='x' WHERE TRUE)")).getMessage());
+        assertTrue(statement("ALTER TABLE ds.t SET OPTIONS(description=FORMAT_DATE('%Y', DATE '2030-01-01'))")
+                .options().get("description") instanceof SqlDialectTranslator.OptionExpression);
+        assertTrue(statement("ALTER TABLE ds.t SET OPTIONS(description=CASE WHEN 1 IS DISTINCT FROM 2 THEN 'a' END)")
+                .options().get("description") instanceof SqlDialectTranslator.OptionExpression);
     }
 
     @Test

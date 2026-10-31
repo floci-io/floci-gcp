@@ -903,6 +903,13 @@ final class SqlDialectTranslator {
         };
     }
 
+    /**
+     * An option value given as a constant expression ({@code CONCAT('a', 'b')}), as GoogleSQL text. The
+     * service evaluates it with the SQL engine and checks its type before applying the option.
+     */
+    public record OptionExpression(String sql) {
+    }
+
     /** Options supported by ALTER SET OPTIONS and CREATE TABLE COPY. */
     private static final Set<String> ALTERABLE_OPTIONS = Set.of("description", "friendly_name", "labels",
             "expiration_timestamp");
@@ -985,10 +992,54 @@ final class SqlDialectTranslator {
             return;
         }
         switch (name) {
-            case "description", "friendly_name" -> values.put(name, stringOption(name, value));
+            case "description", "friendly_name" -> values.put(name, isLiteral(value) ? stringOption(name, value)
+                    : optionExpression(name, value));
             case "labels" -> values.put(name, labelsOption(value));
-            default -> values.put(name, timestampOption(value));
+            default -> values.put(name, isLiteral(value) || isTimestampLiteral(value) ? timestampOption(value)
+                    : optionExpression(name, value));
         }
+    }
+
+    private static boolean isLiteral(List<Token> value) {
+        return value.size() == 1 && (value.getFirst().kind == Kind.STRING || value.getFirst().kind == Kind.NUMBER
+                || value.getFirst().kind == Kind.BYTES || value.getFirst().isKeyword("TRUE")
+                || value.getFirst().isKeyword("FALSE"));
+    }
+
+    private static boolean isTimestampLiteral(List<Token> value) {
+        return value.size() == 2 && value.getFirst().isKeyword("TIMESTAMP") && value.get(1).kind == Kind.STRING;
+    }
+
+    /**
+     * A value BigQuery evaluates as a constant expression; a subquery is not a constant one, and a query clause
+     * after the expression is a syntax error ({@code IS [NOT] DISTINCT FROM} is an operator, not a clause).
+     */
+    private static OptionExpression optionExpression(String name, List<Token> value) {
+        if (value.stream().anyMatch(t -> t.isKeyword("SELECT"))) {
+            throw invalidQuery("Expected constant expression but found unsupported statement or clause; failed to"
+                    + " evaluate '" + name + "' in table OPTIONS");
+        }
+        int depth = 0;
+        for (int k = 0; k < value.size(); k++) {
+            Token t = value.get(k);
+            boolean distinctFrom = t.isKeyword("FROM") && k > 0 && value.get(k - 1).isKeyword("DISTINCT");
+            if (t.isPunct("(") || t.isPunct("[")) {
+                depth++;
+            } else if (t.isPunct(")") || t.isPunct("]")) {
+                depth--;
+            } else if (depth == 0 && !distinctFrom && (t.isKeyword("FROM") || t.kind == Kind.IDENT
+                    && CLAUSE_END_KEYWORDS.contains(t.upper()))) {
+                throw invalidQuery("Syntax error: Expected \")\" but got keyword " + t.upper());
+            }
+        }
+        StringBuilder sql = new StringBuilder();
+        for (Token t : value) {
+            if (!sql.isEmpty()) {
+                sql.append(' ');
+            }
+            sql.append(t.text);
+        }
+        return new OptionExpression(sql.toString());
     }
 
     private static String stringOption(String name, List<Token> value) {
@@ -1018,6 +1069,12 @@ final class SqlDialectTranslator {
 
     /** {@code [('key', 'value'), ...]} or {@code [STRUCT('key' AS key, 'value' AS value), ...]}. */
     private static Map<String, String> labelsOption(List<Token> value) {
+        for (int k = 0; k + 1 < value.size(); k++) {
+            if (value.get(k).kind == Kind.IDENT && !value.get(k).isKeyword("STRUCT") && value.get(k + 1).isPunct("(")) {
+                throw invalidQuery("Found unsupported function call 'ARRAY[...]'; failed to evaluate 'labels' in"
+                        + " table OPTIONS");
+            }
+        }
         if (value.isEmpty() || !value.getFirst().isPunct("[") || !value.getLast().isPunct("]")) {
             throw invalidQuery("Option labels value must be an ARRAY<STRUCT<STRING, STRING>> literal");
         }

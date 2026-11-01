@@ -72,6 +72,40 @@ supported Hyperdisk types accept provisioned IOPS/throughput; unsupported knobs
 fail. Performance limits are basic API checks, not complete machine/disk quota
 or size-ratio emulation. Multi-writer disks and regional disks are unsupported.
 
+## Resource policies
+
+Regional `resourcePolicies` support insert/get/list/aggregatedList/patch/delete with
+`instanceSchedulePolicy` (`vmStartSchedule`, `vmStopSchedule`, `timeZone`, `startTime`,
+`expirationTime`) and `snapshotSchedulePolicy` (hourly, daily or weekly `schedule`,
+`retentionPolicy`, `snapshotProperties`). Exactly one policy type is required; other
+types (group placement, workload) fail explicitly. Policies are stored as sent and
+report `status` READY; hourly and weekly `startTime` values such as `9:00` come back
+zero-padded (`09:00`). IAM methods are not implemented.
+
+Schedules are validated but never executed, in both modes: no VM is started or stopped
+and no snapshot is taken, even when instances run as
+[containers](#instance-containers) (`FLOCI_GCP_SERVICES_COMPUTE_MOCK=false`). To act on
+a schedule in a test, call `instances.start`/`stop` or `snapshots.insert` with a
+`sourceDisk` yourself.
+
+Validation follows the API reference: instance schedules take five-field unix-cron
+expressions and a tz database `timeZone`. A daily snapshot schedule needs
+`daysInCycle` 1 and a `startTime` that resolves in UTC to 00:00, 04:00, 08:00, 12:00,
+16:00 or 20:00 (`08:00`, or `13:00-5` with an hour offset). Hourly and weekly
+`startTime` must be on the hour (`HH:00`). `hoursInCycle` takes 1 to 23.
+
+`patch` without `updateMask` replaces each field present in the body (`description`,
+`instanceSchedulePolicy`, `snapshotSchedulePolicy`), as Terraform sends it; with
+`updateMask`, only the listed paths change and a listed path missing from the body is
+cleared. The name and the policy type cannot change, and attached policies stay attached.
+
+Instances accept instance schedule policies and disks accept snapshot schedule policies,
+either in `resourcePolicies` on insert (including disk `initializeParams`) or through
+`addResourcePolicies` / `removeResourcePolicies`. The policy must exist in the same
+region as the instance or disk, and at most one policy can be attached to a resource.
+`resourcePolicies` is returned as self links on get and list. Deleting a policy that is
+still attached fails with `resourceInUseByAnotherResource`.
+
 ## Images and snapshots
 
 Global images support sources from disks, images and snapshots, family lookup,
@@ -142,6 +176,9 @@ Run do. The API stays the same in both modes; only these behaviours change:
 | `instances.reset` | `docker restart` |
 | `instances.setMachineType` | Removes the stopped container, so the next start creates one with the new limits |
 | `instances.delete` | `docker rm -f` |
+
+Resource policy instance schedules do not start or stop containers; see
+[Resource policies](#resource-policies).
 
 The container runs the boot image's Docker image with an idle init process; the
 guest scripts below and anything you start with `docker exec -it <container> bash`

@@ -589,6 +589,158 @@ class BigQueryTest {
     }
 
     @Test
+    void aggregateStructStarsResolveTheCompleteNestedOperandPath() throws InterruptedException {
+        List<String> queries = List.of(
+                "SELECT ANY_VALUE(t.s.nested).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(1 AS a, 2 AS b) AS nested, 0 AS other) AS s) t",
+                "SELECT ANY_VALUE(t.s.nested.leaf).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(STRUCT(1 AS a, 2 AS b) AS leaf, 3 AS c)"
+                        + " AS nested, 0 AS other) AS s) t");
+        for (String sql : queries) {
+            for (String grouping : List.of("", " GROUP BY ALL")) {
+                TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(sql + grouping
+                        + " QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1").build());
+                assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("b", "n");
+                assertThat(result.getTotalRows()).isEqualTo(1);
+                FieldValueList row = result.iterateAll().iterator().next();
+                assertThat(row.get("b").getLongValue()).isEqualTo(2);
+                assertThat(row.get("n").getLongValue()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void aggregateStructStarsResolveFieldsFromTheirOwnJoinedSource() throws InterruptedException {
+        for (String grouping : List.of("", " GROUP BY ALL")) {
+            TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                    "SELECT ANY_VALUE(u.s).* EXCEPT(a), COUNT(*) AS n"
+                            + " FROM (SELECT STRUCT(0 AS a, 1 AS c) s) t"
+                            + " CROSS JOIN (SELECT STRUCT(0 AS a, 2 AS b) s) u" + grouping
+                            + " QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1").build());
+            assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("b", "n");
+            assertThat(result.getTotalRows()).isEqualTo(1);
+            FieldValueList row = result.iterateAll().iterator().next();
+            assertThat(row.get("b").getLongValue()).isEqualTo(2);
+            assertThat(row.get("n").getLongValue()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void aggregateStructStarsFilterSourceColumnsBeforeAggregation() throws InterruptedException {
+        for (String grouping : List.of("", " GROUP BY ALL")) {
+            String sql = "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n"
+                    + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS b) t WHERE b ";
+            TableResult positive = bigquery.query(QueryJobConfiguration.newBuilder(sql + "> 0" + grouping).build());
+            assertThat(positive.getSchema().getFields()).extracting(Field::getName).containsExactly("b", "n");
+            FieldValueList positiveRow = positive.iterateAll().iterator().next();
+            assertThat(positiveRow.get("b").getLongValue()).isEqualTo(2);
+            assertThat(positiveRow.get("n").getLongValue()).isEqualTo(1);
+
+            TableResult empty = bigquery.query(QueryJobConfiguration.newBuilder(sql + "< 0" + grouping).build());
+            assertThat(empty.getTotalRows()).isEqualTo(1);
+            FieldValueList emptyRow = empty.iterateAll().iterator().next();
+            assertThat(emptyRow.get("b").isNull()).isTrue();
+            assertThat(emptyRow.get("n").getLongValue()).isZero();
+        }
+    }
+
+    @Test
+    void structStarReplacementsKeepFieldReferencesSeparateFromSiblingOutputs() throws InterruptedException {
+        TableResult collision = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT 99 AS b, t.s.* REPLACE(t.s.b + 1 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t").build());
+        assertThat(collision.getSchema().getFields()).extracting(Field::getName).containsExactly("b", "a", "b_1");
+        FieldValueList collisionRow = collision.iterateAll().iterator().next();
+        assertThat(collisionRow.get("b").getLongValue()).isEqualTo(99);
+        assertThat(collisionRow.get("a").getLongValue()).isEqualTo(3);
+        assertThat(collisionRow.get("b_1").getLongValue()).isEqualTo(2);
+        for (String grouping : List.of("", " GROUP BY ALL", " GROUP BY 1, 2")) {
+            TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
+                    "SELECT 99 AS b, t.s.* EXCEPT(b) REPLACE(t.s.b + 1 AS a)"
+                            + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t" + grouping).build());
+            assertThat(result.getSchema().getFields()).extracting(Field::getName).containsExactly("b", "a");
+            assertThat(result.getTotalRows()).isEqualTo(1);
+            FieldValueList row = result.iterateAll().iterator().next();
+            assertThat(row.get("b").getLongValue()).isEqualTo(99);
+            assertThat(row.get("a").getLongValue()).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void starReplacementsRejectDirectWindowsAndAllowSubqueryWindowsThroughTheSdk() throws InterruptedException {
+        List<String> invalidQueries = List.of(
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(COUNT(*) OVER () AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t) AS arr",
+                "SELECT t.s.* REPLACE(COUNT(*) OVER () AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                "SELECT * REPLACE(COUNT(*) OVER () AS a) FROM (SELECT 1 AS a)");
+        for (String sql : invalidQueries) {
+            assertThatThrownBy(() -> bigquery.query(QueryJobConfiguration.newBuilder(sql).build()))
+                    .isInstanceOfSatisfying(BigQueryException.class, error -> {
+                        assertThat(error.getCode()).isEqualTo(400);
+                        assertThat(error.getError().getReason()).isEqualTo("invalidQuery");
+                        assertThat(error.getMessage()).contains("Cannot use analytic functions inside SELECT * REPLACE");
+                    });
+        }
+        List<String> validQueries = List.of(
+                "SELECT ARRAY(SELECT AS STRUCT t.s.*"
+                        + " REPLACE((SELECT COUNT(*) OVER () FROM UNNEST([7, 8]) x LIMIT 1) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t) AS arr",
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(t.n AS a)"
+                        + " FROM (SELECT s, COUNT(*) OVER () AS n FROM"
+                        + " (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a))) t) AS arr");
+        for (String sql : validQueries) {
+            TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(sql).build());
+            assertThat(result.getSchema().getFields().get("arr").getSubFields())
+                    .extracting(Field::getName).containsExactly("a");
+            List<FieldValue> records = result.iterateAll().iterator().next().get("arr").getRepeatedValue();
+            assertThat(records).hasSize(2);
+            for (FieldValue record : records) {
+                assertThat(record.getRecordValue().get(0).getLongValue()).isEqualTo(2);
+            }
+        }
+    }
+
+    @Test
+    void structStarReplacementsKeepTheirSourceScopeThroughTheSdk() throws InterruptedException {
+        List<String> queries = List.of(
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(x + 1 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t) AS arr FROM (SELECT 5 AS x) outer_q",
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(day + 1 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS day) s, 5 AS day) t) AS arr",
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE((SELECT x + 1) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s, 5 AS x) t) AS arr");
+        for (String sql : queries) {
+            TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(sql).build());
+            assertThat(result.getTotalRows()).as(sql).isEqualTo(1);
+            assertThat(result.getSchema().getFields().get("arr").getSubFields().getFirst().getName())
+                    .as(sql).isEqualTo("a");
+            FieldValueList record = result.iterateAll().iterator().next().get("arr")
+                    .getRepeatedValue().getFirst().getRecordValue();
+            assertThat(record.get(0).getLongValue()).as(sql).isEqualTo(6);
+            assertThat(record.get(1).getLongValue()).as(sql).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void structStarReplacementsPreserveNamesAndSourceOrderingThroughTheSdk() throws InterruptedException {
+        TableResult collision = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT t.s.* REPLACE(t.id AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 7 AS _floci_source_0) s, 9 AS id) t").build());
+        assertThat(collision.getSchema().getFields()).extracting(Field::getName)
+                .containsExactly("a", "_floci_source_0");
+        FieldValueList row = collision.iterateAll().iterator().next();
+        assertThat(row.get("a").getLongValue()).isEqualTo(9);
+        assertThat(row.get("_floci_source_0").getLongValue()).isEqualTo(7);
+
+        TableResult ordered = bigquery.query(QueryJobConfiguration.newBuilder(
+                "SELECT t.s.* REPLACE(-t.s.a AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 9 AS id UNION ALL SELECT STRUCT(2 AS a), 1) t"
+                        + " ORDER BY id LIMIT 1").build());
+        assertThat(ordered.getSchema().getFields()).extracting(Field::getName).containsExactly("a");
+        assertThat(ordered.iterateAll().iterator().next().get("a").getLongValue()).isEqualTo(-2);
+    }
+
+    @Test
     void structOffsetsExposeFieldsAndWholeRecordsThroughTheSdk() throws InterruptedException {
         TableResult result = bigquery.query(QueryJobConfiguration.newBuilder(
                 "SELECT *, item AS whole FROM UNNEST([STRUCT(1 AS x)]) AS item WITH OFFSET AS pos").build());

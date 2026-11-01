@@ -1,6 +1,8 @@
 package io.floci.gcp.services.compute;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
@@ -43,7 +45,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         String root = root(), policies = root + REGION + "/resourcePolicies";
         done(root, post(policies, instanceSchedule("schedule")));
         done(root, post(policies, snapshotSchedule("snapshots")));
-        var schedule = given().get(policies + "/schedule").then().statusCode(200).extract().jsonPath();
+        JsonPath schedule = given().get(policies + "/schedule").then().statusCode(200).extract().jsonPath();
         assertEquals("compute#resourcePolicy", schedule.getString("kind"));
         assertEquals("READY", schedule.getString("status"));
         assertEquals("0 7 * * 1-5", schedule.getString("instanceSchedulePolicy.vmStartSchedule.schedule"));
@@ -52,13 +54,13 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         assertTrue(schedule.getString("selfLink").endsWith(REGION + "/resourcePolicies/schedule"));
         assertNotNull(schedule.getString("id"));
         assertNotNull(schedule.getString("creationTimestamp"));
-        var snapshots = given().get(policies + "/snapshots").jsonPath();
+        JsonPath snapshots = given().get(policies + "/snapshots").jsonPath();
         assertEquals("KEEP_AUTO_SNAPSHOTS", snapshots.getString("snapshotSchedulePolicy.retentionPolicy.onSourceDiskDelete"));
         assertEquals("04:00", snapshots.getString("snapshotSchedulePolicy.schedule.dailySchedule.startTime"));
-        var list = given().get(policies).then().statusCode(200).extract().jsonPath();
+        JsonPath list = given().get(policies).then().statusCode(200).extract().jsonPath();
         assertEquals("compute#resourcePolicyList", list.getString("kind"));
         assertEquals(List.of("schedule", "snapshots"), list.getList("items.name"));
-        var aggregated = given().get(root + "/aggregated/resourcePolicies").jsonPath();
+        JsonPath aggregated = given().get(root + "/aggregated/resourcePolicies").jsonPath();
         assertEquals("compute#resourcePolicyAggregatedList", aggregated.getString("kind"));
         assertEquals(2, aggregated.getList("items.'regions/us-central1'.resourcePolicies").size());
         post(policies, instanceSchedule("schedule")).then().statusCode(409);
@@ -109,7 +111,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         String link = given().get(policies + "/schedule").jsonPath().getString("selfLink");
         assertEquals(List.of(link), given().get(instances + "/vm").jsonPath().getList("resourcePolicies"));
         assertEquals(List.of(link), given().get(instances).jsonPath().getList("items[0].resourcePolicies"));
-        var blocked = given().delete(policies + "/schedule").then().statusCode(400).extract().jsonPath();
+        JsonPath blocked = given().delete(policies + "/schedule").then().statusCode(400).extract().jsonPath();
         assertEquals("resourceInUseByAnotherResource", blocked.getString("error.errors[0].reason"));
         post(instances + "/vm/addResourcePolicies", Map.of("resourcePolicies", List.of("regions/us-central1/resourcePolicies/schedule"))).then().statusCode(400);
         post(instances + "/vm/addResourcePolicies", Map.of("resourcePolicies", List.of("regions/us-central1/resourcePolicies/other"))).then().statusCode(400);
@@ -222,7 +224,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         done(root, post(instances, body));
         assertEquals(List.of(link), given().get(disks + "/inline").jsonPath().getList("resourcePolicies"));
         assertNull(given().get(instances + "/inline").jsonPath().get("disks[0].initializeParams"));
-        var blocked = given().delete(policies + "/snapshots").then().statusCode(400).extract().jsonPath();
+        JsonPath blocked = given().delete(policies + "/snapshots").then().statusCode(400).extract().jsonPath();
         assertEquals("resourceInUseByAnotherResource", blocked.getString("error.errors[0].reason"));
         done(root, given().delete(instances + "/inline"));
         given().get(disks + "/inline").then().statusCode(404);
@@ -241,24 +243,24 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         given().get(instances + "/bad-inline").then().statusCode(404);
     }
 
-    private io.restassured.response.Response patch(String path, Object body) {
+    private Response patch(String path, Object body) {
         return given().contentType("application/json").body(body).patch(path);
     }
 
     @Test void patchWithoutMaskReplacesSentFieldsLikeTerraform() throws Exception {
         String root = root(), policies = root + REGION + "/resourcePolicies", policy = policies + "/schedule";
         done(root, post(policies, instanceSchedule("schedule")));
-        var before = given().get(policy).jsonPath();
+        JsonPath before = given().get(policy).jsonPath();
         Map<String, Object> body = new HashMap<>();
         body.put("name", "schedule");
         body.put("description", "weekday office hours");
         body.put("instanceSchedulePolicy", Map.of("timeZone", "Europe/London",
                 "vmStartSchedule", Map.of("schedule", "0 8 * * 1-5"), "vmStopSchedule", Map.of("schedule", "0 18 * * 1-5")));
         body.put("diskConsistencyGroupPolicy", null);
-        var op = patch(policy, body);
+        Response op = patch(policy, body);
         assertEquals("update", op.jsonPath().getString("operationType"));
         done(root, op);
-        var after = given().get(policy).jsonPath();
+        JsonPath after = given().get(policy).jsonPath();
         assertEquals("weekday office hours", after.getString("description"));
         assertEquals("Europe/London", after.getString("instanceSchedulePolicy.timeZone"));
         assertEquals("0 18 * * 1-5", after.getString("instanceSchedulePolicy.vmStopSchedule.schedule"));
@@ -274,7 +276,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         done(root, post(policies, instanceSchedule("schedule")));
         done(root, patch(policies + "/schedule", Map.of("name", "schedule",
                 "instanceSchedulePolicy", Map.of("vmStopSchedule", Map.of("schedule", "0 20 * * *")))));
-        var instance = given().get(policies + "/schedule").jsonPath();
+        JsonPath instance = given().get(policies + "/schedule").jsonPath();
         assertEquals("0 20 * * *", instance.getString("instanceSchedulePolicy.vmStopSchedule.schedule"));
         assertEquals("0 7 * * 1-5", instance.getString("instanceSchedulePolicy.vmStartSchedule.schedule"));
         assertEquals("America/Bogota", instance.getString("instanceSchedulePolicy.timeZone"));
@@ -284,14 +286,14 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         String snapshots = policies + "/snapshots";
         done(root, patch(snapshots, Map.of("name", "snapshots",
                 "snapshotSchedulePolicy", Map.of("retentionPolicy", Map.of("maxRetentionDays", 9)))));
-        var retention = given().get(snapshots).jsonPath();
+        JsonPath retention = given().get(snapshots).jsonPath();
         assertEquals(9, retention.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
         assertEquals("KEEP_AUTO_SNAPSHOTS", retention.getString("snapshotSchedulePolicy.retentionPolicy.onSourceDiskDelete"));
         assertEquals("04:00", retention.getString("snapshotSchedulePolicy.schedule.dailySchedule.startTime"));
 
         done(root, patch(snapshots, Map.of("name", "snapshots", "description", "via-gcloud", "snapshotSchedulePolicy",
                 Map.of("schedule", Map.of("hourlySchedule", Map.of("hoursInCycle", 6, "startTime", "02:00"))))));
-        var switched = given().get(snapshots).jsonPath();
+        JsonPath switched = given().get(snapshots).jsonPath();
         assertEquals(6, switched.getInt("snapshotSchedulePolicy.schedule.hourlySchedule.hoursInCycle"));
         assertNull(switched.get("snapshotSchedulePolicy.schedule.dailySchedule"));
         assertEquals(9, switched.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
@@ -309,12 +311,12 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         done(root, post(policies, snapshotSchedule("snapshots")));
         done(root, patch(policy + "?updateMask=description", Map.of("description", "nightly",
                 "snapshotSchedulePolicy", Map.of("schedule", Map.of("dailySchedule", Map.of("daysInCycle", 1, "startTime", "08:00"))))));
-        var masked = given().get(policy).jsonPath();
+        JsonPath masked = given().get(policy).jsonPath();
         assertEquals("nightly", masked.getString("description"));
         assertEquals("04:00", masked.getString("snapshotSchedulePolicy.schedule.dailySchedule.startTime"));
         done(root, patch(policy + "?updateMask=snapshotSchedulePolicy.retentionPolicy.maxRetentionDays",
                 Map.of("snapshotSchedulePolicy", Map.of("retentionPolicy", Map.of("maxRetentionDays", 30)))));
-        var nested = given().get(policy).jsonPath();
+        JsonPath nested = given().get(policy).jsonPath();
         assertEquals(30, nested.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
         assertEquals("KEEP_AUTO_SNAPSHOTS", nested.getString("snapshotSchedulePolicy.retentionPolicy.onSourceDiskDelete"));
         assertEquals("test", nested.getString("snapshotSchedulePolicy.snapshotProperties.labels.env"));
@@ -331,7 +333,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
                 Map.of("snapshotSchedulePolicy", Map.of("retentionPolicy", "flat"))).then().statusCode(400);
         patch(policy + "?updateMask=description", Map.of("description", Map.of())).then().statusCode(400);
         patch(policy, Map.of("description", List.of("a"))).then().statusCode(400);
-        var intact = given().get(policy).jsonPath();
+        JsonPath intact = given().get(policy).jsonPath();
         assertEquals("kept", intact.getString("description"));
         assertEquals(30, intact.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
     }
@@ -346,7 +348,7 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         patch(policy, Map.of("groupPlacementPolicy", Map.of("vmCount", 2))).then().statusCode(501);
         given().contentType("application/json").body(instanceSchedule("schedule")).put(policy).then().statusCode(501);
         patch(policies + "/missing", Map.of("description", "x")).then().statusCode(404);
-        var unchanged = given().get(policy).jsonPath();
+        JsonPath unchanged = given().get(policy).jsonPath();
         assertEquals("start and stop", unchanged.getString("description"));
         assertEquals("0 7 * * 1-5", unchanged.getString("instanceSchedulePolicy.vmStartSchedule.schedule"));
         assertNull(unchanged.get("snapshotSchedulePolicy"));

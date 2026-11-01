@@ -93,7 +93,7 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
         if (patch.isNull()) { target.remove(field); return; }
         JsonNode current = target.get(field);
         if (!patch.isObject() || current == null || !current.isObject()) { target.set(field, patch); return; }
-        for (var entry : patch.properties()) { mergePatch((ObjectNode) current, entry.getKey(), entry.getValue()); }
+        for (Map.Entry<String, JsonNode> entry : patch.properties()) { mergePatch((ObjectNode) current, entry.getKey(), entry.getValue()); }
     }
 
     /** Checks a whole updateMask path before anything changes: a mutable field, and only objects above the leaf. */

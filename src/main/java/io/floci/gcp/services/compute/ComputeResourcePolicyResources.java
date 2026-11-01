@@ -31,7 +31,8 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
     private static final Set<String> UNSUPPORTED_TYPES = Set.of("groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
     private static final List<String> POLICY_TYPES = List.of(INSTANCE_SCHEDULE, SNAPSHOT_SCHEDULE,
             "groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
-    private static final List<String> CADENCES = List.of("hourlySchedule", "dailySchedule", "weeklySchedule");
+    private static final Pattern MASK_PATH = Pattern.compile("[A-Za-z][A-Za-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*)*");
+    private static final List<String> CADENCES =List.of("hourlySchedule", "dailySchedule", "weeklySchedule");
     private static final List<String> MUTABLE =List.of("description", INSTANCE_SCHEDULE, SNAPSHOT_SCHEDULE,
             "groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
     private static final Pattern HOURLY_START = Pattern.compile("([01]?\\d|2[0-3]):00");
@@ -75,7 +76,9 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
                 if (body.has(field)) { mergePatch(r, field, body.get(field)); }
             }
         } else {
-            for (String path : mask.split(",")) { applyMaskPath(r, body, path.trim()); }
+            List<String[]> paths = new ArrayList<>();
+            for (String path : mask.split(",", -1)) { paths.add(maskPath(r, body, path.trim())); }
+            for (String[] path : paths) { applyMaskPath(r, body, path); }
         }
         dropUnsetTypes(r);
         if (!r.has(type) || r.has(type.equals(INSTANCE_SCHEDULE) ? SNAPSHOT_SCHEDULE : INSTANCE_SCHEDULE)) {
@@ -93,17 +96,31 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
         for (var entry : patch.properties()) { mergePatch((ObjectNode) current, entry.getKey(), entry.getValue()); }
     }
 
-    private static void applyMaskPath(ObjectNode r, ObjectNode body, String path) {
+    /** Checks a whole updateMask path before anything changes: a mutable field, and only objects above the leaf. */
+    private static String[] maskPath(ObjectNode r, ObjectNode body, String path) {
+        if (!MASK_PATH.matcher(path).matches()) { throw GcpException.invalidArgument("Invalid updateMask path: " + path); }
         String[] segments = path.split("\\.");
-        if (path.isEmpty() || !MUTABLE.contains(segments[0])) {
+        if (!MUTABLE.contains(segments[0]) || (segments[0].equals("description") && segments.length > 1)) {
             throw GcpException.invalidArgument("Invalid updateMask path: " + path);
         }
+        JsonNode stored = r, sent = body;
+        for (int i = 0; i < segments.length - 1; i++) {
+            stored = stored.path(segments[i]);
+            sent = sent.path(segments[i]);
+            if (!(stored.isMissingNode() || stored.isObject()) || !(sent.isMissingNode() || sent.isObject())) {
+                throw GcpException.invalidArgument("Invalid updateMask path: " + path + "; " + segments[i] + " is not an object");
+            }
+        }
+        return segments;
+    }
+
+    private static void applyMaskPath(ObjectNode r, ObjectNode body, String[] segments) {
         ObjectNode target = r;
         JsonNode source = body;
         for (int i = 0; i < segments.length - 1; i++) {
             source = source.path(segments[i]);
             JsonNode next = target.get(segments[i]);
-            if (next == null || !next.isObject()) { next = target.putObject(segments[i]); }
+            if (next == null) { next = target.putObject(segments[i]); }
             target = (ObjectNode) next;
         }
         String leaf = segments[segments.length - 1];
@@ -119,6 +136,7 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
     }
 
     private static void validate(ObjectNode r) {
+        if (r.has("description") && !r.get("description").isTextual()) { throw GcpException.invalidArgument("description must be a string"); }
         for (String unsupported : UNSUPPORTED_TYPES) {
             if (r.has(unsupported)) { throw GcpException.unimplemented("Resource policy type " + unsupported + " is not implemented"); }
         }

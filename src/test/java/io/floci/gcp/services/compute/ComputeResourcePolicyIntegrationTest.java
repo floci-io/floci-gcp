@@ -322,6 +322,18 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         assertNull(given().get(policy).jsonPath().get("description"));
         patch(policy + "?updateMask=name", Map.of("name", "snapshots")).then().statusCode(400);
         patch(policy + "?updateMask=snapshotSchedulePolicy", Map.of()).then().statusCode(400);
+        done(root, patch(policy + "?updateMask=description", Map.of("description", "kept")));
+        for (String mask : List.of("description.x", ".", "description,", ",description", "description..x",
+                "snapshotSchedulePolicy.schedule.dailySchedule.startTime.hour", "snapshotSchedulePolicy.snapshotProperties.storageLocations.x")) {
+            patch(policy + "?updateMask=" + mask, Map.of()).then().statusCode(400);
+        }
+        patch(policy + "?updateMask=snapshotSchedulePolicy.retentionPolicy.maxRetentionDays",
+                Map.of("snapshotSchedulePolicy", Map.of("retentionPolicy", "flat"))).then().statusCode(400);
+        patch(policy + "?updateMask=description", Map.of("description", Map.of())).then().statusCode(400);
+        patch(policy, Map.of("description", List.of("a"))).then().statusCode(400);
+        var intact = given().get(policy).jsonPath();
+        assertEquals("kept", intact.getString("description"));
+        assertEquals(30, intact.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
     }
 
     @Test void patchRejectsInvalidChangesAndKeepsThePolicy() throws Exception {

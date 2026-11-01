@@ -269,6 +269,41 @@ class ComputeResourcePolicyIntegrationTest extends ComputeTestSupport {
         }
     }
 
+    @Test void patchWithoutMaskMergesGcloudPartialBodies() throws Exception {
+        String root = root(), policies = root + REGION + "/resourcePolicies";
+        done(root, post(policies, instanceSchedule("schedule")));
+        done(root, patch(policies + "/schedule", Map.of("name", "schedule",
+                "instanceSchedulePolicy", Map.of("vmStopSchedule", Map.of("schedule", "0 20 * * *")))));
+        var instance = given().get(policies + "/schedule").jsonPath();
+        assertEquals("0 20 * * *", instance.getString("instanceSchedulePolicy.vmStopSchedule.schedule"));
+        assertEquals("0 7 * * 1-5", instance.getString("instanceSchedulePolicy.vmStartSchedule.schedule"));
+        assertEquals("America/Bogota", instance.getString("instanceSchedulePolicy.timeZone"));
+        assertEquals("start and stop", instance.getString("description"));
+
+        done(root, post(policies, snapshotSchedule("snapshots")));
+        String snapshots = policies + "/snapshots";
+        done(root, patch(snapshots, Map.of("name", "snapshots",
+                "snapshotSchedulePolicy", Map.of("retentionPolicy", Map.of("maxRetentionDays", 9)))));
+        var retention = given().get(snapshots).jsonPath();
+        assertEquals(9, retention.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
+        assertEquals("KEEP_AUTO_SNAPSHOTS", retention.getString("snapshotSchedulePolicy.retentionPolicy.onSourceDiskDelete"));
+        assertEquals("04:00", retention.getString("snapshotSchedulePolicy.schedule.dailySchedule.startTime"));
+
+        done(root, patch(snapshots, Map.of("name", "snapshots", "description", "via-gcloud", "snapshotSchedulePolicy",
+                Map.of("schedule", Map.of("hourlySchedule", Map.of("hoursInCycle", 6, "startTime", "02:00"))))));
+        var switched = given().get(snapshots).jsonPath();
+        assertEquals(6, switched.getInt("snapshotSchedulePolicy.schedule.hourlySchedule.hoursInCycle"));
+        assertNull(switched.get("snapshotSchedulePolicy.schedule.dailySchedule"));
+        assertEquals(9, switched.getInt("snapshotSchedulePolicy.retentionPolicy.maxRetentionDays"));
+        assertEquals("test", switched.getString("snapshotSchedulePolicy.snapshotProperties.labels.env"));
+        assertEquals("via-gcloud", switched.getString("description"));
+
+        Map<String, Object> clear = new HashMap<>();
+        clear.put("description", null);
+        done(root, patch(snapshots, clear));
+        assertNull(given().get(snapshots).jsonPath().get("description"));
+    }
+
     @Test void patchWithMaskChangesOnlyListedPaths() throws Exception {
         String root = root(), policies = root + REGION + "/resourcePolicies", policy = policies + "/snapshots";
         done(root, post(policies, snapshotSchedule("snapshots")));

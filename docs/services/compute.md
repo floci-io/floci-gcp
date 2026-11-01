@@ -94,10 +94,14 @@ expressions and a tz database `timeZone`. A daily snapshot schedule needs
 16:00 or 20:00 (`08:00`, or `13:00-5` with an hour offset). Hourly and weekly
 `startTime` must be on the hour (`HH:00`). `hoursInCycle` takes 1 to 23.
 
-`patch` without `updateMask` replaces each field present in the body (`description`,
-`instanceSchedulePolicy`, `snapshotSchedulePolicy`), as Terraform sends it; with
-`updateMask`, only the listed paths change and a listed path missing from the body is
-cleared. The name and the policy type cannot change, and attached policies stay attached.
+`patch` without `updateMask` applies the body as a JSON merge patch, as for other
+Compute patch methods: objects merge field by field, `null` removes a field and arrays
+are replaced. This is what both clients rely on: gcloud's `update` commands send only
+the changed fields, and Terraform sends whole objects. A snapshot schedule cadence in
+the body (`hourlySchedule`, `dailySchedule` or `weeklySchedule`) replaces the stored
+cadence, so the schedule can switch from daily to hourly. With `updateMask`, only the
+listed paths change and a listed path missing from the body is cleared. The name and
+the policy type cannot change, and attached policies stay attached.
 
 Instances accept instance schedule policies and disks accept snapshot schedule policies,
 either in `resourcePolicies` on insert (including disk `initializeParams`) or through

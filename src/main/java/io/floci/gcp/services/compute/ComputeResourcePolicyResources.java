@@ -31,7 +31,8 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
     private static final Set<String> UNSUPPORTED_TYPES = Set.of("groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
     private static final List<String> POLICY_TYPES = List.of(INSTANCE_SCHEDULE, SNAPSHOT_SCHEDULE,
             "groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
-    private static final List<String> MUTABLE = List.of("description", INSTANCE_SCHEDULE, SNAPSHOT_SCHEDULE,
+    private static final List<String> CADENCES = List.of("hourlySchedule", "dailySchedule", "weeklySchedule");
+    private static final List<String> MUTABLE =List.of("description", INSTANCE_SCHEDULE, SNAPSHOT_SCHEDULE,
             "groupPlacementPolicy", "workloadPolicy", "diskConsistencyGroupPolicy");
     private static final Pattern HOURLY_START = Pattern.compile("([01]?\\d|2[0-3]):00");
     private static final Pattern DAILY_START = Pattern.compile("([01]?\\d|2[0-3]):00([+-](?:1[0-4]|0?\\d))?");
@@ -51,8 +52,9 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
     }
 
     /**
-     * resourcePolicies.patch. Without updateMask every mutable field in the body replaces the stored one, as
-     * Terraform sends it; with updateMask only the listed paths change, and a listed path absent from the body is cleared.
+     * resourcePolicies.patch. Without updateMask the body is a JSON merge patch, as gcloud sends only the changed
+     * fields; a snapshot schedule cadence in the body replaces the stored cadence. With updateMask only the listed
+     * paths change, and a listed path absent from the body is cleared.
      */
     public void update(ComputeService.Context c, ObjectNode r, ObjectNode body, String verb) {
         if (!verb.equals("PATCH")) { ComputeResourceHandler.super.update(c, r, body, verb); return; }
@@ -63,9 +65,14 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
         String type = r.has(INSTANCE_SCHEDULE) ? INSTANCE_SCHEDULE : SNAPSHOT_SCHEDULE;
         String mask = c.option("updateMask", "");
         if (mask.isBlank()) {
+            JsonNode cadences = body.path(SNAPSHOT_SCHEDULE).path("schedule");
+            if (cadences.isObject() && r.path(SNAPSHOT_SCHEDULE).path("schedule").isObject()
+                    && CADENCES.stream().anyMatch(cadences::has)) {
+                ((ObjectNode) r.path(SNAPSHOT_SCHEDULE).path("schedule")).retain(
+                        CADENCES.stream().filter(cadences::has).toList());
+            }
             for (String field : MUTABLE) {
-                if (!body.has(field)) { continue; }
-                if (body.get(field).isNull()) { r.remove(field); } else { r.set(field, body.get(field)); }
+                if (body.has(field)) { mergePatch(r, field, body.get(field)); }
             }
         } else {
             for (String path : mask.split(",")) { applyMaskPath(r, body, path.trim()); }
@@ -76,6 +83,14 @@ public class ComputeResourcePolicyResources implements ComputeResourceHandler {
         }
         validate(r);
         r.put("status", "READY");
+    }
+
+    /** JSON merge patch (RFC 7396): objects merge recursively, null removes, anything else replaces. */
+    private static void mergePatch(ObjectNode target, String field, JsonNode patch) {
+        if (patch.isNull()) { target.remove(field); return; }
+        JsonNode current = target.get(field);
+        if (!patch.isObject() || current == null || !current.isObject()) { target.set(field, patch); return; }
+        for (var entry : patch.properties()) { mergePatch((ObjectNode) current, entry.getKey(), entry.getValue()); }
     }
 
     private static void applyMaskPath(ObjectNode r, ObjectNode body, String path) {

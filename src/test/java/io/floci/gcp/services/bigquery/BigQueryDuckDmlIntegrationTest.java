@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -481,21 +483,31 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(BASE + "/datasets/shop/tables/optioned_expr_copy").then().statusCode(404);
 
         query("CREATE TABLE shop.optioned_params (x INT64)").then().statusCode(200);
-        for (Map.Entry<String, List<String>> positional : List.of(
-                Map.entry("description=?, friendly_name=?", List.of("first", "second")),
-                Map.entry("description=CONCAT(?, ?), friendly_name=UPPER(?)", List.of("a", "b", "c")))) {
-            List<Map<String, Object>> parameters = positional.getValue().stream()
+        // The Java SDK sends unnamed parameters without a parameterMode; they bind positionally too.
+        String[][] positionalCases = {
+                {"description=?, friendly_name=?", "first,second", "POSITIONAL", "first", "second"},
+                {"description=CONCAT(?, ?), friendly_name=UPPER(?)", "a,b,c", "POSITIONAL", "ab", "C"},
+                {"description=?, friendly_name=?", "third,fourth", "", "third", "fourth"},
+                {"description=CONCAT(?, ?), friendly_name=UPPER(?)", "d,e,f", "", "de", "F"},
+        };
+        for (String[] c : positionalCases) {
+            List<Map<String, Object>> parameters = Arrays.stream(c[1].split(","))
                     .map(v -> Map.<String, Object>of("parameterType", Map.of("type", "STRING"),
                             "parameterValue", Map.of("value", v)))
                     .toList();
-            given().contentType("application/json")
-                    .body(Map.of("query", "ALTER TABLE shop.optioned_params SET OPTIONS(" + positional.getKey() + ")",
-                            "useLegacySql", false, "parameterMode", "POSITIONAL", "queryParameters", parameters))
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("query", "ALTER TABLE shop.optioned_params SET OPTIONS(" + c[0] + ")");
+            request.put("useLegacySql", false);
+            request.put("queryParameters", parameters);
+            if (!c[2].isEmpty()) {
+                request.put("parameterMode", c[2]);
+            }
+            given().contentType("application/json").body(request)
                     .when().post(BASE + "/queries").then().statusCode(200);
+            given().when().get(BASE + "/datasets/shop/tables/optioned_params").then().statusCode(200)
+                    .body("description", equalTo(c[3]))
+                    .body("friendlyName", equalTo(c[4]));
         }
-        given().when().get(BASE + "/datasets/shop/tables/optioned_params").then().statusCode(200)
-                .body("description", equalTo("ab"))
-                .body("friendlyName", equalTo("C"));
     }
 
     @Test

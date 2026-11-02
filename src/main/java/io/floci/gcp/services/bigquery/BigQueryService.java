@@ -1051,11 +1051,20 @@ public class BigQueryService {
         return evaluated;
     }
 
-    /** The query options with only the positional parameters an option expression binds, in statement order. */
+    /**
+     * The query options with only the positional parameters an option expression binds, in statement order.
+     * Parameters bind positionally in {@code POSITIONAL} mode and, as the SDKs send them, when they have no name
+     * and no mode is given, the same rule {@code QueryParameters} follows.
+     */
     private static QueryOptions expressionParameters(QueryOptions options,
                                                      SqlDialectTranslator.OptionExpression expression) {
         List<Map<String, Object>> parameters = options.queryParameters();
-        if (!"POSITIONAL".equalsIgnoreCase(options.parameterMode()) || parameters == null) {
+        if (parameters == null || parameters.isEmpty()) {
+            return options;
+        }
+        boolean positional = "POSITIONAL".equalsIgnoreCase(options.parameterMode())
+                || parameters.getFirst().get("name") == null;
+        if (!positional) {
             return options;
         }
         int from = Math.min(expression.firstParameter(), parameters.size());

@@ -2,9 +2,22 @@ package io.floci.gcp.services.cloudkms;
 
 import io.floci.gcp.core.common.GcpException;
 import org.bouncycastle.asn1.ASN1BitString;
+import org.bouncycastle.asn1.ASN1Encoding;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.DERNull;
+import org.bouncycastle.asn1.nist.NISTObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x9.ECNamedCurveTable;
 import org.bouncycastle.asn1.x9.X9ECParameters;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
+import org.bouncycastle.crypto.engines.RSABlindedEngine;
+import org.bouncycastle.crypto.params.ParametersWithRandom;
+import org.bouncycastle.crypto.signers.PSSSigner;
+import org.bouncycastle.crypto.util.PrivateKeyFactory;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -36,11 +49,14 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Real local crypto backing Cloud KMS operations. Symmetric keys use AES-256-GCM; asymmetric
- * keys use standard JCA RSA/EC primitives; MAC keys are random HMAC keys the size of the hash output. Key material is generated at version-create time and
- * stored Base64-encoded (PKCS8 private, X.509 public) on the {@code StoredCryptoKeyVersion}.
+ * keys use standard JCA RSA/EC primitives, and BouncyCastle for RSA-PSS over a precomputed
+ * digest; MAC keys are random HMAC keys the size of the hash output. Key material is generated at
+ * version-create time and stored Base64-encoded (PKCS8 private, X.509 public) on the {@code StoredCryptoKeyVersion}.
  *
  * <p>The symmetric envelope is {@code versionNumber(4 bytes BE) || IV(12 bytes) || ciphertext+tag}.
  * Embedding the version number lets {@code Decrypt} locate the deciphering version; a different
@@ -55,11 +71,36 @@ final class KmsCrypto {
     private static final int GCM_IV_BYTES = 12;
     private static final int GCM_TAG_BITS = 128;
 
-    /** Standard DER DigestInfo prefix for a SHA-256 digest (RSASSA-PKCS1-v1_5). */
-    private static final byte[] SHA256_DIGEST_INFO_PREFIX = {
-            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, (byte) 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
-    };
+    private static final String EC_SIGN_ALGORITHM = "EC_SIGN_P256_SHA256";
+
+    private enum RsaScheme { PSS, PKCS1, OAEP }
+
+    /**
+     * Modulus size, hash (JCA name) and padding of each RSA algorithm. As on Cloud KMS, PSS and OAEP
+     * use the same hash for MGF1, and PSS a salt as long as the hash.
+     */
+    private record RsaSpec(int bits, String hash, RsaScheme scheme) {}
+
+    private static final Map<String, RsaSpec> RSA_SPECS = Map.ofEntries(
+            Map.entry("RSA_SIGN_PSS_2048_SHA256", new RsaSpec(2048, "SHA-256", RsaScheme.PSS)),
+            Map.entry("RSA_SIGN_PSS_3072_SHA256", new RsaSpec(3072, "SHA-256", RsaScheme.PSS)),
+            Map.entry("RSA_SIGN_PSS_4096_SHA256", new RsaSpec(4096, "SHA-256", RsaScheme.PSS)),
+            Map.entry("RSA_SIGN_PSS_4096_SHA512", new RsaSpec(4096, "SHA-512", RsaScheme.PSS)),
+            Map.entry("RSA_SIGN_PKCS1_2048_SHA256", new RsaSpec(2048, "SHA-256", RsaScheme.PKCS1)),
+            Map.entry("RSA_SIGN_PKCS1_3072_SHA256", new RsaSpec(3072, "SHA-256", RsaScheme.PKCS1)),
+            Map.entry("RSA_SIGN_PKCS1_4096_SHA256", new RsaSpec(4096, "SHA-256", RsaScheme.PKCS1)),
+            Map.entry("RSA_SIGN_PKCS1_4096_SHA512", new RsaSpec(4096, "SHA-512", RsaScheme.PKCS1)),
+            Map.entry("RSA_DECRYPT_OAEP_2048_SHA256", new RsaSpec(2048, "SHA-256", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_3072_SHA256", new RsaSpec(3072, "SHA-256", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_4096_SHA256", new RsaSpec(4096, "SHA-256", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_4096_SHA512", new RsaSpec(4096, "SHA-512", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_2048_SHA1", new RsaSpec(2048, "SHA-1", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_3072_SHA1", new RsaSpec(3072, "SHA-1", RsaScheme.OAEP)),
+            Map.entry("RSA_DECRYPT_OAEP_4096_SHA1", new RsaSpec(4096, "SHA-1", RsaScheme.OAEP)));
+
+    static final Set<String> SIGN_ALGORITHMS = Stream.concat(Stream.of(EC_SIGN_ALGORITHM),
+            rsaAlgorithms(RsaScheme.PSS, RsaScheme.PKCS1).stream()).collect(Collectors.toUnmodifiableSet());
+    static final Set<String> DECRYPT_ALGORITHMS = rsaAlgorithms(RsaScheme.OAEP);
 
     /** JCA name and key length in bytes per HMAC algorithm; Cloud KMS sizes the key to the hash output. */
     private record HmacSpec(String jcaName, int keyBytes) {}
@@ -86,17 +127,18 @@ final class KmsCrypto {
                     SecretKey key = gen.generateKey();
                     yield new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()), null);
                 }
-                case "RSA_SIGN_PKCS1_2048_SHA256", "RSA_DECRYPT_OAEP_2048_SHA256" -> {
-                    KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
-                    gen.initialize(2048);
-                    yield encodePair(gen.generateKeyPair());
-                }
-                case "EC_SIGN_P256_SHA256" -> {
+                case EC_SIGN_ALGORITHM -> {
                     KeyPairGenerator gen = KeyPairGenerator.getInstance("EC");
                     gen.initialize(new ECGenParameterSpec("secp256r1"));
                     yield encodePair(gen.generateKeyPair());
                 }
                 default -> {
+                    RsaSpec rsa = RSA_SPECS.get(algorithm);
+                    if (rsa != null) {
+                        KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
+                        gen.initialize(rsa.bits());
+                        yield encodePair(gen.generateKeyPair());
+                    }
                     HmacSpec hmac = HMAC_SPECS.get(algorithm);
                     if (hmac == null) {
                         throw GcpException.invalidArgument("Unsupported algorithm: " + algorithm);
@@ -202,21 +244,7 @@ final class KmsCrypto {
                     }
                     yield new GeneratedKey(Base64.getEncoder().encodeToString(material), null);
                 }
-                case "RSA_SIGN_PKCS1_2048_SHA256", "RSA_DECRYPT_OAEP_2048_SHA256" -> {
-                    KeyFactory factory = KeyFactory.getInstance("RSA");
-                    if (!(factory.generatePrivate(new PKCS8EncodedKeySpec(material)) instanceof RSAPrivateCrtKey key)) {
-                        throw new IllegalArgumentException("expected a PKCS#8 RSA private key with CRT parameters");
-                    }
-                    if (key.getModulus().bitLength() != 2048) {
-                        throw new IllegalArgumentException(
-                                "expected a 2048-bit RSA key, got " + key.getModulus().bitLength() + " bits");
-                    }
-                    PublicKey publicKey = factory.generatePublic(
-                            new RSAPublicKeySpec(key.getModulus(), key.getPublicExponent()));
-                    yield new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()),
-                            Base64.getEncoder().encodeToString(publicKey.getEncoded()));
-                }
-                case "EC_SIGN_P256_SHA256" -> {
+                case EC_SIGN_ALGORITHM -> {
                     KeyFactory factory = KeyFactory.getInstance("EC");
                     if (!(factory.generatePrivate(new PKCS8EncodedKeySpec(material)) instanceof ECPrivateKey key)
                             || !P256.getN().equals(key.getParams().getOrder())) {
@@ -237,13 +265,33 @@ final class KmsCrypto {
                     yield new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()),
                             Base64.getEncoder().encodeToString(publicKey.getEncoded()));
                 }
-                default -> throw GcpException.invalidArgument("Unsupported algorithm for import: " + algorithm);
+                default -> {
+                    RsaSpec rsa = RSA_SPECS.get(algorithm);
+                    if (rsa == null) {
+                        throw GcpException.invalidArgument("Unsupported algorithm for import: " + algorithm);
+                    }
+                    yield importRsaKey(rsa, material);
+                }
             };
         } catch (GcpException | IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
             throw new IllegalArgumentException("key material is not a valid " + algorithm + " key", e);
         }
+    }
+
+    private static GeneratedKey importRsaKey(RsaSpec rsa, byte[] material) throws GeneralSecurityException {
+        KeyFactory factory = KeyFactory.getInstance("RSA");
+        if (!(factory.generatePrivate(new PKCS8EncodedKeySpec(material)) instanceof RSAPrivateCrtKey key)) {
+            throw new IllegalArgumentException("expected a PKCS#8 RSA private key with CRT parameters");
+        }
+        if (key.getModulus().bitLength() != rsa.bits()) {
+            throw new IllegalArgumentException(
+                    "expected a " + rsa.bits() + "-bit RSA key, got " + key.getModulus().bitLength() + " bits");
+        }
+        PublicKey publicKey = factory.generatePublic(new RSAPublicKeySpec(key.getModulus(), key.getPublicExponent()));
+        return new GeneratedKey(Base64.getEncoder().encodeToString(key.getEncoded()),
+                Base64.getEncoder().encodeToString(publicKey.getEncoded()));
     }
 
     // ── Symmetric (AES-256-GCM) ──────────────────────────────────────────────
@@ -303,41 +351,77 @@ final class KmsCrypto {
 
     // ── Asymmetric ───────────────────────────────────────────────────────────
 
-    static byte[] sign(String algorithm, String privateKeyBase64, byte[] digestSha256) {
+    /** The hash, by JCA name, whose digest a signing algorithm signs. */
+    static String signingHash(String algorithm) {
+        if (EC_SIGN_ALGORITHM.equals(algorithm)) {
+            return "SHA-256";
+        }
+        RsaSpec rsa = RSA_SPECS.get(algorithm);
+        if (rsa == null || rsa.scheme() == RsaScheme.OAEP) {
+            throw GcpException.invalidArgument("Algorithm does not support signing: " + algorithm);
+        }
+        return rsa.hash();
+    }
+
+    static byte[] sign(String algorithm, String privateKeyBase64, byte[] digest) {
+        String hash = signingHash(algorithm);
         try {
             byte[] der = Base64.getDecoder().decode(privateKeyBase64);
-            return switch (algorithm) {
-                case "EC_SIGN_P256_SHA256" -> {
-                    PrivateKey key = KeyFactory.getInstance("EC")
-                            .generatePrivate(new PKCS8EncodedKeySpec(der));
-                    Signature sig = Signature.getInstance("NONEwithECDSA");
-                    sig.initSign(key);
-                    sig.update(digestSha256);
-                    yield sig.sign();
-                }
-                case "RSA_SIGN_PKCS1_2048_SHA256" -> {
-                    PrivateKey key = KeyFactory.getInstance("RSA")
-                            .generatePrivate(new PKCS8EncodedKeySpec(der));
-                    byte[] digestInfo = new byte[SHA256_DIGEST_INFO_PREFIX.length + digestSha256.length];
-                    System.arraycopy(SHA256_DIGEST_INFO_PREFIX, 0, digestInfo, 0, SHA256_DIGEST_INFO_PREFIX.length);
-                    System.arraycopy(digestSha256, 0, digestInfo, SHA256_DIGEST_INFO_PREFIX.length, digestSha256.length);
-                    Signature sig = Signature.getInstance("NONEwithRSA");
-                    sig.initSign(key);
-                    sig.update(digestInfo);
-                    yield sig.sign();
-                }
-                default -> throw GcpException.invalidArgument(
-                        "Algorithm does not support signing: " + algorithm);
-            };
-        } catch (GcpException e) {
-            throw e;
+            if (EC_SIGN_ALGORITHM.equals(algorithm)) {
+                PrivateKey key = KeyFactory.getInstance("EC").generatePrivate(new PKCS8EncodedKeySpec(der));
+                Signature sig = Signature.getInstance("NONEwithECDSA");
+                sig.initSign(key);
+                sig.update(digest);
+                return sig.sign();
+            }
+            return RSA_SPECS.get(algorithm).scheme() == RsaScheme.PSS
+                    ? signPss(hash, der, digest)
+                    : signPkcs1(hash, der, digest);
         } catch (Exception e) {
             throw GcpException.internal("Signing failed: " + e.getMessage());
         }
     }
 
+    /** RSASSA-PSS over a digest the caller already computed, which the JCA signatures cannot take. */
+    private static byte[] signPss(String hash, byte[] privateKeyDer, byte[] digest) throws Exception {
+        Digest content = bcDigest(hash);
+        PSSSigner signer = PSSSigner.createRawSigner(new RSABlindedEngine(), content, bcDigest(hash),
+                content.getDigestSize(), PSSSigner.TRAILER_IMPLICIT);
+        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKeyDer), RANDOM));
+        signer.update(digest, 0, digest.length);
+        return signer.generateSignature();
+    }
+
+    /** RSASSA-PKCS1-v1_5: the digest wrapped in its DER DigestInfo, then padded and signed. */
+    private static byte[] signPkcs1(String hash, byte[] privateKeyDer, byte[] digest) throws Exception {
+        PrivateKey key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(privateKeyDer));
+        byte[] digestInfo = new DigestInfo(new AlgorithmIdentifier(hashOid(hash), DERNull.INSTANCE), digest)
+                .getEncoded(ASN1Encoding.DER);
+        Signature sig = Signature.getInstance("NONEwithRSA");
+        sig.initSign(key);
+        sig.update(digestInfo);
+        return sig.sign();
+    }
+
+    private static Digest bcDigest(String hash) {
+        return switch (hash) {
+            case "SHA-256" -> new SHA256Digest();
+            case "SHA-512" -> new SHA512Digest();
+            default -> throw new IllegalArgumentException("No signing digest for " + hash);
+        };
+    }
+
+    private static ASN1ObjectIdentifier hashOid(String hash) {
+        return switch (hash) {
+            case "SHA-256" -> NISTObjectIdentifiers.id_sha256;
+            case "SHA-512" -> NISTObjectIdentifiers.id_sha512;
+            default -> throw new IllegalArgumentException("No signing digest for " + hash);
+        };
+    }
+
     static byte[] asymmetricDecrypt(String algorithm, String privateKeyBase64, byte[] ciphertext) {
-        if (!"RSA_DECRYPT_OAEP_2048_SHA256".equals(algorithm)) {
+        RsaSpec rsa = RSA_SPECS.get(algorithm);
+        if (rsa == null || rsa.scheme() != RsaScheme.OAEP) {
             throw GcpException.invalidArgument("Algorithm does not support asymmetric decryption: " + algorithm);
         }
         try {
@@ -345,7 +429,7 @@ final class KmsCrypto {
             PrivateKey key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(der));
             Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
             cipher.init(Cipher.DECRYPT_MODE, key, new OAEPParameterSpec(
-                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT));
+                    rsa.hash(), "MGF1", new MGF1ParameterSpec(rsa.hash()), PSource.PSpecified.DEFAULT));
             return cipher.doFinal(ciphertext);
         } catch (Exception e) {
             throw GcpException.invalidArgument("Asymmetric decryption failed: the ciphertext is invalid");
@@ -379,6 +463,14 @@ final class KmsCrypto {
             pem.append(publicKeyBase64, i, Math.min(i + 64, publicKeyBase64.length())).append('\n');
         }
         return pem.append("-----END PUBLIC KEY-----\n").toString();
+    }
+
+    private static Set<String> rsaAlgorithms(RsaScheme... schemes) {
+        Set<RsaScheme> wanted = Set.of(schemes);
+        return RSA_SPECS.entrySet().stream()
+                .filter(e -> wanted.contains(e.getValue().scheme()))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     static byte[] randomBytes(int length) {

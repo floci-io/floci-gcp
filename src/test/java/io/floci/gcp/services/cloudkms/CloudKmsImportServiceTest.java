@@ -395,7 +395,7 @@ class CloudKmsImportServiceTest {
 
     private boolean verifies(String jcaAlgorithm, PublicKey publicKey, String versionName) throws Exception {
         byte[] data = "signed-by-imported-key".getBytes(StandardCharsets.UTF_8);
-        byte[] signature = service.asymmetricSign(versionName, MessageDigest.getInstance("SHA-256").digest(data));
+        byte[] signature = service.asymmetricSign(versionName, null, new byte[0], data);
         Signature verifier = Signature.getInstance(jcaAlgorithm);
         verifier.initVerify(publicKey);
         verifier.update(data);

@@ -13,6 +13,7 @@ import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.List;
@@ -247,6 +248,34 @@ class CloudKmsRestIntegrationTest {
                 .then().statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));
         json().body("{\"data\": \"not*base64\"}")
+                .when().post(version + ":asymmetricSign")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    @Test
+    void asymmetricSignTakesASha512DigestForASha512Key() throws Exception {
+        String version = createKey("sign-512", "ASYMMETRIC_SIGN", "RSA_SIGN_PSS_4096_SHA512") + "/cryptoKeyVersions/1";
+        byte[] data = "payload".getBytes(StandardCharsets.UTF_8);
+        byte[] sha512 = MessageDigest.getInstance("SHA-512").digest(data);
+
+        String signature = json()
+                .body("{\"digest\": {\"sha512\": \"" + b64(sha512) + "\"}, \"digestCrc32c\": \"" + crc32c(sha512) + "\"}")
+                .when().post(version + ":asymmetricSign")
+                .then().statusCode(200)
+                .body("verifiedDigestCrc32c", equalTo(true))
+                .extract().path("signature");
+        String pem = given().when().get(version + "/publicKey").then().statusCode(200).extract().path("pem");
+        Signature verifier = Signature.getInstance("RSASSA-PSS");
+        verifier.setParameter(new PSSParameterSpec("SHA-512", "MGF1", MGF1ParameterSpec.SHA512, 64,
+                PSSParameterSpec.TRAILER_FIELD_BC));
+        verifier.initVerify(KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
+                Base64.getMimeDecoder().decode(pem.replaceAll("-----[A-Z ]+-----", "")))));
+        verifier.update(data);
+        assertTrue(verifier.verify(Base64.getDecoder().decode(signature)), "the signature covers the SHA-512 digest");
+
+        byte[] sha256 = MessageDigest.getInstance("SHA-256").digest(data);
+        json().body("{\"digest\": {\"sha256\": \"" + b64(sha256) + "\"}}")
                 .when().post(version + ":asymmetricSign")
                 .then().statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));

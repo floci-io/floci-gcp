@@ -21,6 +21,8 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -40,9 +42,6 @@ public class CloudKmsService {
     private final Object[] locks = createLocks();
 
     private static final String SYMMETRIC_ALGORITHM = "GOOGLE_SYMMETRIC_ENCRYPTION";
-    private static final Set<String> SIGN_ALGORITHMS =
-            Set.of("EC_SIGN_P256_SHA256", "RSA_SIGN_PKCS1_2048_SHA256");
-    private static final String DECRYPT_ALGORITHM = "RSA_DECRYPT_OAEP_2048_SHA256";
     private static final Set<String> IMPORT_PROTECTION_LEVELS = Set.of("SOFTWARE", "HSM");
     private static final Duration IMPORT_JOB_LIFETIME = Duration.ofDays(3);
 
@@ -529,12 +528,47 @@ public class CloudKmsService {
         return version;
     }
 
-    public byte[] asymmetricSign(String versionName, byte[] digestSha256) {
+    /**
+     * Signs {@code digest}, supplied in the request field of hash {@code digestHash} (JCA name, so
+     * {@code "SHA-256"} for {@code digest.sha256}), or else the digest of {@code data}. As on GCP, a
+     * supplied digest must be in the hash the version's algorithm names, and only one of the two
+     * may be set. {@code digestHash} is null when the request carries no digest.
+     */
+    public byte[] asymmetricSign(String versionName, String digestHash, byte[] digest, byte[] data) {
+        if (digestHash != null && data.length > 0) {
+            throw GcpException.invalidArgument("Only one of digest or data may be supplied for AsymmetricSign");
+        }
         StoredCryptoKeyVersion version = getCryptoKeyVersion(versionName);
         StoredCryptoKey key = getCryptoKey(cryptoKeyOf(versionName));
         requirePurpose(key, "ASYMMETRIC_SIGN");
         requireEnabled(version);
-        return KmsCrypto.sign(version.getAlgorithm(), version.getKeyMaterialBase64(), digestSha256);
+        String hash = KmsCrypto.signingHash(version.getAlgorithm());
+        MessageDigest messageDigest = messageDigest(hash);
+        byte[] toSign;
+        if (digestHash != null) {
+            if (!hash.equals(digestHash)) {
+                throw GcpException.invalidArgument("The digest of a " + version.getAlgorithm()
+                        + " key must be " + hash + ", not " + digestHash);
+            }
+            toSign = digest;
+        } else if (data.length > 0) {
+            toSign = messageDigest.digest(data);
+        } else {
+            throw GcpException.invalidArgument("A digest or data is required for AsymmetricSign");
+        }
+        if (toSign.length != messageDigest.getDigestLength()) {
+            throw GcpException.invalidArgument("The " + hash + " digest must be "
+                    + messageDigest.getDigestLength() + " bytes, got " + toSign.length);
+        }
+        return KmsCrypto.sign(version.getAlgorithm(), version.getKeyMaterialBase64(), toSign);
+    }
+
+    private static MessageDigest messageDigest(String hash) {
+        try {
+            return MessageDigest.getInstance(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw GcpException.internal("Digest computation failed: " + e.getMessage());
+        }
     }
 
     public byte[] asymmetricDecrypt(String versionName, byte[] ciphertext) {
@@ -585,13 +619,13 @@ public class CloudKmsService {
                 if (unspecified) {
                     throw GcpException.invalidArgument("Algorithm is required for ASYMMETRIC_SIGN");
                 }
-                if (SIGN_ALGORITHMS.contains(algorithm)) {
+                if (KmsCrypto.SIGN_ALGORITHMS.contains(algorithm)) {
                     return algorithm;
                 }
                 throw GcpException.invalidArgument("Unsupported ASYMMETRIC_SIGN algorithm: " + algorithm);
             }
             case "ASYMMETRIC_DECRYPT" -> {
-                if (DECRYPT_ALGORITHM.equals(algorithm)) {
+                if (KmsCrypto.DECRYPT_ALGORITHMS.contains(algorithm)) {
                     return algorithm;
                 }
                 throw GcpException.invalidArgument("Unsupported ASYMMETRIC_DECRYPT algorithm: " + algorithm);

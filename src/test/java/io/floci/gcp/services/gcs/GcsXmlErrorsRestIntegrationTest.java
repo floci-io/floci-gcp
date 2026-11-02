@@ -56,7 +56,7 @@ class GcsXmlErrorsRestIntegrationTest {
         xml(given().header("Range", "bytes=100-").get("/" + bucket + "/object").then(), 416, "InvalidRange");
         xml(given().header("Range", "invalid").get("/" + bucket + "/object").then(), 400, "InvalidArgument");
         xml(given().get("/" + bucket + "?uploads&max-uploads=invalid").then(), 400, "InvalidArgument");
-        xml(given().get("/" + bucket + "?uploads&delimiter=/").then(), 400, "NotImplemented");
+        xml(given().get("/" + bucket + "?uploads&encoding-type=foo").then(), 400, "InvalidArgument");
     }
 
     @Test

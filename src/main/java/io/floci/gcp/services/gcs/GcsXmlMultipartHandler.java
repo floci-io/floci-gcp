@@ -129,22 +129,9 @@ public class GcsXmlMultipartHandler {
         }
     }
     private Response list(String bucket, MultivaluedMap<String,String> query) {
-        String prefix = Optional.ofNullable(query.getFirst("prefix")).orElse("");
-        String delimiter = query.getFirst("delimiter");
-        if (delimiter != null && !delimiter.isEmpty()) { throw GcpException.unimplemented("Multipart upload delimiter grouping is not implemented"); }
-        String keyMarker = Optional.ofNullable(query.getFirst("key-marker")).orElse("");
-        String idMarker = query.getFirst("upload-id-marker");
-        int max = number(Optional.ofNullable(query.getFirst("max-uploads")).orElse("1000"), 1, 1000);
-        List<GcsMultipartUpload> all = service.list(bucket, prefix).stream().filter(u -> u.object.compareTo(keyMarker) > 0
-                || u.object.equals(keyMarker) && idMarker != null && u.id.compareTo(idMarker) > 0).toList();
-        List<GcsMultipartUpload> page = all.subList(0, Math.min(all.size(), max));
-        XmlBuilder xml = new XmlBuilder().start("ListMultipartUploadsResult", NS).elem("Bucket", bucket).elem("Prefix", prefix)
-                .elem("KeyMarker", keyMarker).elem("UploadIdMarker", idMarker).elem("MaxUploads", max).elem("IsTruncated", all.size() > max);
-        if (all.size() > max) { xml.elem("NextKeyMarker", page.getLast().object).elem("NextUploadIdMarker", page.getLast().id); }
-        for (GcsMultipartUpload upload : page) {
-            xml.start("Upload").elem("Key", upload.object).elem("UploadId", upload.id).elem("Initiated", upload.initiated).elem("StorageClass", "STANDARD").end("Upload");
-        }
-        return xml(xml.end("ListMultipartUploadsResult"));
+        GcsXmlUploadListing.Query listing = GcsXmlUploadListing.Query.of(query);
+        String prefix = listing.prefix() == null ? "" : listing.prefix();
+        return GcsXmlUploadListing.respond(bucket, service.list(bucket, prefix), listing);
     }
     private static Response xml(XmlBuilder xml) { return Response.ok(xml.build(), MediaType.APPLICATION_XML).build(); }
     private static int number(String text, int min, int max) {

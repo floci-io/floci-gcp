@@ -436,10 +436,25 @@ roles, conditions, bootstrap administration, and intentional exclusions.
 ## XML multipart uploads
 
 Native XML object routes support POST `?uploads`, PUT `?uploadId=...&partNumber=...`,
-GET parts, POST completion and DELETE abort. Bucket GET `?uploads` lists pending
-uploads with prefix and key/upload-ID markers. Parts and sessions use StorageFactory
+GET parts, POST completion and DELETE abort. Parts and sessions use StorageFactory
 and survive graceful restarts in persistent, hybrid and WAL modes. Incomplete
 uploads do not appear in ordinary object inventory.
+
+Bucket GET `?uploads` answers with `ListMultipartUploadsResult` the way GCS does, as
+`text/html`: `Bucket`, `KeyMarker`, `UploadIdMarker`, `NextKeyMarker`, then `Prefix` and
+`Delimiter` when they were sent, `NextUploadIdMarker`, `MaxUploads`, `IsTruncated`, every
+`Upload` entry (`Key`, `UploadId`, `StorageClass`, `Initiated`), every `CommonPrefixes` entry,
+and `EncodingType` under `encoding-type=url`. A page holds at most `max-uploads` entries,
+uploads and common prefixes together, in key order. The default and the ceiling are 1000.
+`max-uploads=0` returns an empty page that is not truncated. A negative, empty or
+non-numeric `max-uploads`, an empty `upload-id-marker` and any `encoding-type` other than
+the lower-case `url` return HTTP 400 `InvalidArgument`. `key-marker` skips every upload up to
+and including that key. With `upload-id-marker` it skips only the uploads of that key up to
+that ID. An `upload-id-marker` without a `key-marker` is ignored. `encoding-type=url` encodes
+`KeyMarker`, `NextKeyMarker`, `Prefix`, `Delimiter`, every `Key` and every common prefix the
+way [object listing](#xml-api-object-listing) does. When a truncated page would end on a
+common prefix, GCS answers HTTP 400 `InvalidArgument` without `Details`, and so does the
+emulator. An empty `key-marker`, which GCS answers with HTTP 500, is treated as not sent.
 
 Part numbers range from 1 to 10000. Completion validates increasing order, ETags
 and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
@@ -450,8 +465,8 @@ sends it: as `text/html`, with the ETag in the body only, a `Location` that is t
 URL of the object, and the `x-goog-stored-content-length`, `x-goog-hash`,
 `x-goog-generation` and `x-goog-metageneration` headers. Completed objects have CRC32C
 and the multipart ETag described under [XML API entity tags](#xml-api-entity-tags),
-but no MD5 hash. Multipart upload delimiter grouping, customer-supplied encryption,
-upload preconditions and lifecycle expiry of incomplete sessions are unsupported. The
+but no MD5 hash. Customer-supplied encryption, upload preconditions and lifecycle expiry
+of incomplete sessions are unsupported. The
 emulator buffers parts and completed bytes in memory. Object publication and session
 removal are separate checkpoints; crash-atomic completion across those stores is not
 guaranteed.

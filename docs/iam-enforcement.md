@@ -41,6 +41,8 @@ REST and gRPC; see the [sink IAM inventory](services/logging.md#sink-management-
    and the existing policy storage key. Return empty for resources owned by other
    adapters. Use `IamResource.projectChild` for project inheritance; do not expose
    internal policy keys to CEL. Versioned resources can have a parent policy key.
+   Set `IamResource.inheritOrganizationPolicy` only when recorded organization
+   ancestry is supported by the service. It defaults to false for existing adapters.
 6. Contribute a finite predefined role map and exact `basicRoles` slices. Basic-role
    permissions are explicitly contributed by each service, never inferred by the
    shared catalog. Do not use wildcard permission grants. Bindings with roles outside
@@ -55,6 +57,9 @@ REST and gRPC; see the [sink IAM inventory](services/logging.md#sink-management-
    every resource the adapter registers.
    A service using different policy storage needs a reviewed integration before
    advertising enforcement; registering a resource factory alone is insufficient.
+   Override `permissionDenied` when upstream evidence requires a service-specific
+   denial response. Override `supportsIamPolicyMethod` to reject policy methods
+   that the upstream service does not expose.
 8. Add the service to the documentation and coverage matrix. Startup coverage is
    derived from registered adapters. Update the explicit exclusions in the startup
    message when expanding beyond the current scope.
@@ -111,8 +116,6 @@ across authorization and the subsequent service mutation. Other service integrat
 must use the service-level ordered-lock entry point when that consistency is required.
 Cloud Logging holds its sink lock before acquiring the ordered destination policy locks
 and GCS bucket/object locks, serializing delivery with sink configuration changes.
-IAM sink existence checks read the concurrent sink store without acquiring the sink lock,
-so policy methods cannot reverse that lock order.
 Secret Manager holds the secret lock before the ordered project and secret policy
 locks across authorization and the secret or version operation.
 Custom-role definitions are serialized among themselves but not with these policy
@@ -244,11 +247,17 @@ for local condition semantics and unsupported targets.
 
 - [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto)
   and [Cloud Logging access control](https://cloud.google.com/logging/docs/access-control).
+- The [Logging v2 discovery document](https://logging.googleapis.com/$discovery/rest?version=v2),
+  revision `20261023`, exposes only create, delete, get, list, patch, and update on sinks. The
+  [service configuration](https://github.com/googleapis/googleapis/blob/aa87617d67/google/logging/v2/logging_v2.yaml)
+  declares no IAM policy mixin. Sink IAM policy methods therefore fail closed in enforce mode.
 - [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks)
   and the [official Java REST SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-logging/v2/2.0.0/com/google/api/services/logging/v2/Logging.java).
 - `gcloud iam roles describe` metadata for all eleven `roles/logging.*` predefined roles:
   admin and configWriter grant all five sink permissions, viewer and privateLogViewer grant
-  get and list, and the other seven grant no sink permissions.
+  get and list, and the other seven grant no sink permissions. The published
+  [Logging roles reference](https://docs.cloud.google.com/iam/docs/roles-permissions/logging)
+  also lists these four supported role slices.
 - Basic-role metadata: owner grants all five sink permissions; editor and viewer grant
   only get and list.
 - Live project checks with the official Java REST and gRPC clients showed that
@@ -283,9 +292,11 @@ requests. `LoggingSinkIamEnforcementTest` uses the official Java gRPC client;
 `LoggingSinkRestIamEnforcementTest` uses the official Java REST discovery client.
 Both exercise project and organization parents, conditional create grants, resource-name
 scoping for sink and parent operations, unbound and insufficient-role denials, unchanged resources and
-policies after denials, filtered `testIamPermissions`, and disabled-mode controls.
-The gRPC suite also verifies that sink policy reads and writes fail closed in
-enforce mode. Trusted setup can write organization parent policies through the shared
+policies after denials, and disabled-mode controls.
+The gRPC suite also verifies that sink policy reads, writes, and permission queries fail closed
+for existing and missing sinks in enforce mode. Running that rejection test against a
+disabled-mode server with enforce-mode expectations fails because the request succeeds.
+Trusted setup can write organization parent policies through the shared
 IAM mixin; evaluated callers retain the existing `FAILED_PRECONDITION` for bare
 organization policy reads and writes.
 Temporarily removing the create permission check made the conditional-create denial

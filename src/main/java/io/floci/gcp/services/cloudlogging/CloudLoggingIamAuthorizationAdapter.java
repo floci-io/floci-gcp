@@ -7,6 +7,7 @@ import com.google.logging.v2.GetSinkRequest;
 import com.google.logging.v2.ListSinksRequest;
 import com.google.logging.v2.UpdateSinkRequest;
 import com.google.protobuf.Message;
+import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -81,14 +82,13 @@ public class CloudLoggingIamAuthorizationAdapter implements IamAuthorizationAdap
             case "GetSink" -> "logging.sinks.get";
             case "UpdateSink" -> "logging.sinks.update";
             case "DeleteSink" -> "logging.sinks.delete";
-            case "TestIamPermissions" -> null;
             default -> throw unsupported("operation " + operation.name());
         };
         IamResource target = switch (operation.name()) {
             case "ListSinks" -> listResource(operation.resource());
             default -> requireResource(operation.resource());
         };
-        return permission == null ? List.of() : List.of(new IamPermissionCheck(permission, target));
+        return List.of(new IamPermissionCheck(permission, target));
     }
 
     @Override
@@ -96,7 +96,7 @@ public class CloudLoggingIamAuthorizationAdapter implements IamAuthorizationAdap
         if (name != null && name.matches(SINK)) {
             String parent = name.substring(0, name.indexOf("/sinks/"));
             return Optional.of(new IamResource("logging.googleapis.com", "logging.googleapis.com/LogSink",
-                    name, parent, parent.startsWith("projects/") ? parent : null));
+                    name, parent, parent.startsWith("projects/") ? parent : null, true));
         }
         return Optional.empty();
     }
@@ -109,7 +109,16 @@ public class CloudLoggingIamAuthorizationAdapter implements IamAuthorizationAdap
 
     @Override
     public boolean supportsIamPolicyMethod(String method, String resource) {
-        return method.equals("TestIamPermissions");
+        return false;
+    }
+
+    @Override
+    public GcpException permissionDenied(IamPermissionCheck check) {
+        String resource = check.resource().name();
+        String message = "Permission '" + check.permission() + "' denied on resource '//"
+                + check.resource().service() + "/" + resource + "' (or it may not exist).";
+        return GcpException.permissionDenied(message).withErrorInfo("IAM_PERMISSION_DENIED",
+                "iam.googleapis.com", Map.of("permission", check.permission(), "resource", resource));
     }
 
     @Override
@@ -131,6 +140,6 @@ public class CloudLoggingIamAuthorizationAdapter implements IamAuthorizationAdap
     private IamResource listResource(String name) {
         parentResource(name);
         return new IamResource("logging.googleapis.com", "logging.googleapis.com/LogSink",
-                name, name, name.startsWith("projects/") ? name : null);
+                name, name, name.startsWith("projects/") ? name : null, true);
     }
 }

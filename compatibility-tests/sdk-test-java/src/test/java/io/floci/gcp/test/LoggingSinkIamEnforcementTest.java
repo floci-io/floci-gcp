@@ -62,6 +62,59 @@ class LoggingSinkIamEnforcementTest {
     }
 
     @Test
+    void sinkPolicyMethodsFailClosedForExistingAndMissingSinks() throws Exception {
+        String id = TestFixtures.uniqueName("logging-no-policy");
+        String email = "reconciler@" + id + ".iam.gserviceaccount.com";
+        URI endpoint = URI.create(TestFixtures.endpoint());
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext().build();
+        try (ConfigClient admin = client(null)) {
+            IAMPolicyGrpc.IAMPolicyBlockingStub policies = IAMPolicyGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(10, TimeUnit.SECONDS);
+            Metadata headers = new Metadata();
+            headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
+                    "Bearer " + token(email));
+            IAMPolicyGrpc.IAMPolicyBlockingStub restricted = policies
+                    .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers));
+            for (String parent : List.of("projects/" + id, "organizations/" + id)) {
+                policies.setIamPolicy(policy(parent, email, "roles/logging.admin", null));
+                Policy parentPolicy = policies.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(parent).build());
+                LogSink sink = admin.createSink(create(parent, "existing"));
+                for (String resource : List.of(parent + "/sinks/existing", parent + "/sinks/missing")) {
+                    TestIamPermissionsRequest query = TestIamPermissionsRequest.newBuilder()
+                            .setResource(resource).addPermissions("logging.sinks.get").build();
+                    for (IAMPolicyGrpc.IAMPolicyBlockingStub stub : List.of(policies, restricted)) {
+                        if (enforce) {
+                            assertThatThrownBy(() -> stub.getIamPolicy(GetIamPolicyRequest.newBuilder()
+                                    .setResource(resource).build())).isInstanceOf(StatusRuntimeException.class)
+                                    .satisfies(error -> assertThat(Status.fromThrowable(error).getCode())
+                                            .isEqualTo(Status.Code.FAILED_PRECONDITION));
+                            assertThatThrownBy(() -> stub.setIamPolicy(policy(resource, email,
+                                    "roles/logging.admin", null))).isInstanceOf(StatusRuntimeException.class)
+                                    .satisfies(error -> assertThat(Status.fromThrowable(error).getCode())
+                                            .isEqualTo(Status.Code.FAILED_PRECONDITION));
+                            assertThatThrownBy(() -> stub.testIamPermissions(query))
+                                    .isInstanceOf(StatusRuntimeException.class)
+                                    .satisfies(error -> assertThat(Status.fromThrowable(error).getCode())
+                                            .isEqualTo(Status.Code.FAILED_PRECONDITION));
+                        } else {
+                            assertThat(stub.testIamPermissions(query).getPermissionsList())
+                                    .containsExactly("logging.sinks.get");
+                        }
+                    }
+                }
+                assertThat(admin.getSink(GetSinkRequest.newBuilder()
+                        .setSinkName(parent + "/sinks/existing").build())).isEqualTo(sink);
+                assertThat(policies.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(parent).build()))
+                        .isEqualTo(parentPolicy);
+                admin.deleteSink(parent + "/sinks/existing");
+            }
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void projectBasicRolesFollowPublishedSinkPermissions() throws Exception {
         String id = TestFixtures.uniqueName("logging-basic");
         String parent = "projects/" + id;
@@ -133,17 +186,6 @@ class LoggingSinkIamEnforcementTest {
             if (enforce) {
                 assertThatThrownBy(() -> caller.getSink(GetSinkRequest.newBuilder().setSinkName(sibling).build()))
                         .isInstanceOf(PermissionDeniedException.class);
-                Metadata headers = new Metadata();
-                headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-                        "Bearer " + token(email));
-                IAMPolicyGrpc.IAMPolicyBlockingStub restricted = IAMPolicyGrpc.newBlockingStub(channel)
-                        .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers));
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(sibling).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .isEmpty();
             }
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
@@ -191,14 +233,6 @@ class LoggingSinkIamEnforcementTest {
                         .noneMatch(sink -> sink.getName().equals("condition-denied"));
             }
             caller.createSink(create(parent, "allowed"));
-            if (enforce) {
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(sibling).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .isEmpty();
-            }
             assertThat(caller.getSink(GetSinkRequest.newBuilder().setSinkName(allowed).build()).getName())
                     .isEqualTo("allowed");
             assertThat(caller.updateSink(update(allowed)).getDescription()).isEqualTo("updated");
@@ -273,16 +307,6 @@ class LoggingSinkIamEnforcementTest {
                         .isEmpty();
                 assertThat(policies.getIamPolicy(GetIamPolicyRequest.newBuilder()
                         .setResource(parent).build())).isEqualTo(policyBeforeDenials);
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addAllPermissions(List.of("logging.sinks.get", "logging.sinks.update",
-                                "logging.sinks.delete", "logging.sinks.unknown")).build()).getPermissionsList())
-                        .containsExactlyInAnyOrder("logging.sinks.get", "logging.sinks.update", "logging.sinks.delete");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(sibling).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(outsideSink).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .isEmpty();
                 if (organization || id.contains(":")) {
                     assertThatThrownBy(() -> restricted.getIamPolicy(GetIamPolicyRequest
                             .newBuilder().setResource(parent).build())).isInstanceOf(StatusRuntimeException.class)
@@ -312,10 +336,6 @@ class LoggingSinkIamEnforcementTest {
                         .isInstanceOf(PermissionDeniedException.class);
                 assertThatThrownBy(() -> caller.updateSink(update(allowed)))
                         .isInstanceOf(PermissionDeniedException.class);
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addAllPermissions(List.of("logging.sinks.get",
-                                "logging.sinks.update")).build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
                 policies.setIamPolicy(policy(parent, email, "roles/logging.configWriter", expression));
             }
             assertThat(caller.getSink(GetSinkRequest.newBuilder().setSinkName(sibling).build()).getName())

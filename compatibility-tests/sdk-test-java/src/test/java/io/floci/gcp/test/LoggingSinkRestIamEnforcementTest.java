@@ -14,7 +14,6 @@ import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.IAMPolicyGrpc;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.SetIamPolicyRequest;
-import com.google.iam.v1.TestIamPermissionsRequest;
 import com.google.protobuf.Duration;
 import com.google.type.Expr;
 import io.grpc.ManagedChannel;
@@ -119,17 +118,6 @@ class LoggingSinkRestIamEnforcementTest {
             assertThat(get(caller, false, sinkName).getName()).isEqualTo("allowed");
             if (enforce) {
                 denied(() -> get(caller, false, siblingName));
-                Metadata headers = new Metadata();
-                headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
-                        "Bearer " + token(email));
-                IAMPolicyGrpc.IAMPolicyBlockingStub restricted = IAMPolicyGrpc.newBlockingStub(channel)
-                        .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers));
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(sinkName).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(siblingName).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .isEmpty();
             }
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
@@ -175,14 +163,6 @@ class LoggingSinkRestIamEnforcementTest {
                         .doesNotContain("condition-denied");
             }
             create(caller, organization, parent, "allowed");
-            if (enforce) {
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(sibling).addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .isEmpty();
-            }
             assertThat(get(caller, organization, allowed).getName()).isEqualTo("allowed");
             assertThat(update(caller, organization, allowed).getDescription()).isEqualTo("updated");
             assertThat(patch(caller, organization, allowed).getDescription()).isEqualTo("patched");
@@ -229,15 +209,6 @@ class LoggingSinkRestIamEnforcementTest {
                 assertThat(get(admin, organization, allowed).getDescription()).isNull();
                 assertThat(policies.getIamPolicy(GetIamPolicyRequest.newBuilder()
                         .setResource(parent).build())).isEqualTo(policyBeforeDenials);
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(allowed)
-                        .addAllPermissions(List.of("logging.sinks.get", "logging.sinks.update", "logging.sinks.delete",
-                                "logging.sinks.unknown")).build()).getPermissionsList())
-                        .containsExactlyInAnyOrder("logging.sinks.get", "logging.sinks.update", "logging.sinks.delete");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(sibling)
-                        .addPermissions("logging.sinks.get").build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder().setResource(outsideSink)
-                        .addPermissions("logging.sinks.get").build()).getPermissionsList()).isEmpty();
                 if (organization || id.contains(":")) {
                     assertThatThrownBy(() -> restricted.getIamPolicy(GetIamPolicyRequest
                             .newBuilder().setResource(parent).build())).isInstanceOf(StatusRuntimeException.class)
@@ -263,10 +234,6 @@ class LoggingSinkRestIamEnforcementTest {
                 denied(() -> update(caller, organization, allowed));
                 denied(() -> patch(caller, organization, allowed));
                 denied(() -> delete(caller, organization, allowed));
-                assertThat(restricted.testIamPermissions(TestIamPermissionsRequest.newBuilder()
-                        .setResource(allowed).addAllPermissions(List.of("logging.sinks.get",
-                                "logging.sinks.update")).build()).getPermissionsList())
-                        .containsExactly("logging.sinks.get");
                 policies.setIamPolicy(policy(parent, email, "roles/logging.configWriter", condition));
             }
             assertThat(get(caller, organization, sibling).getName()).isEqualTo("sibling");

@@ -1,6 +1,7 @@
 package io.floci.gcp.core.common;
 
 import com.google.rpc.ErrorInfo;
+import com.google.rpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
 import org.junit.jupiter.api.Test;
@@ -27,7 +28,7 @@ class GcpExceptionMapperTest {
                 wrapper.error().details().getFirst().get("metadata"));
 
         StatusRuntimeException grpc = GcpGrpcController.grpcException(error);
-        com.google.rpc.Status status = StatusProto.fromThrowable(grpc);
+        Status status = StatusProto.fromThrowable(grpc);
         assertNotNull(status);
         assertEquals(7, status.getCode());
         assertEquals(message, status.getMessage());

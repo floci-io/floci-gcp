@@ -144,16 +144,7 @@ public class IamAuthorizationService {
         }
         for (IamPermissionCheck check : checks) {
             if (!allowed(resolution.principal(), check.permission(), check.resource())) {
-                if ("logging".equals(adapter.serviceName())
-                        && check.permission().startsWith("logging.sinks.")) {
-                    String resource = check.resource().name();
-                    String message = "Permission '" + check.permission() + "' denied on resource '//"
-                            + check.resource().service() + "/" + resource + "' (or it may not exist).";
-                    throw GcpException.permissionDenied(message).withErrorInfo("IAM_PERMISSION_DENIED",
-                            "iam.googleapis.com", Map.of("permission", check.permission(), "resource", resource));
-                }
-                throw GcpException.permissionDenied("Permission " + check.permission()
-                        + " denied on " + check.resource().name());
+                throw adapter.permissionDenied(check);
             }
         }
     }

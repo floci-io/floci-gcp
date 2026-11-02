@@ -74,7 +74,7 @@ class CloudLoggingIamAuthorizationAdapterServiceTest {
         assertThrows(RuntimeException.class,
                 () -> adapter.restOperation("futureMethod", Map.of(), new ObjectMapper().createObjectNode()));
         String sink = "projects/test-project/sinks/one";
-        assertTrue(adapter.supportsIamPolicyMethod("TestIamPermissions", sink));
+        assertFalse(adapter.supportsIamPolicyMethod("TestIamPermissions", sink));
         assertFalse(adapter.supportsIamPolicyMethod("GetIamPolicy", sink));
         assertFalse(adapter.supportsIamPolicyMethod("SetIamPolicy", sink));
         assertTrue(adapter.resource("organizations/123").isEmpty());
@@ -87,6 +87,8 @@ class CloudLoggingIamAuthorizationAdapterServiceTest {
                 "logging.sinks.create", "projects/example.com:my-project/sinks/one");
         assertThrows(RuntimeException.class,
                 () -> adapter.checks(new IamOperation("SetIamPolicy", sink)));
+        assertThrows(RuntimeException.class,
+                () -> adapter.checks(new IamOperation("TestIamPermissions", sink)));
     }
 
     private void assertCheck(IamOperation operation, String permission, String resource) {

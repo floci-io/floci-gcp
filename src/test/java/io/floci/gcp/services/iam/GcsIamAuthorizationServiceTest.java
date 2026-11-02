@@ -288,6 +288,7 @@ class GcsIamAuthorizationServiceTest {
                 IamPrincipal.anonymous(), IamIdentityKind.ANONYMOUS));
         GcsIamAuthorizationAdapter adapter = mock(GcsIamAuthorizationAdapter.class);
         when(adapter.requiresPolicyEvaluation(IamIdentityKind.ANONYMOUS)).thenReturn(true);
+        when(adapter.permissionDenied(any())).thenCallRealMethod();
         when(adapter.bucketResource(anyString())).thenAnswer(invocation ->
                 IamResource.gcsBucket(invocation.getArgument(0), "test-project"));
         when(adapter.objectResource(anyString(), anyString())).thenAnswer(invocation ->

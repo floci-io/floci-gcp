@@ -312,9 +312,10 @@ in October 2026. The organization checks covered all five RPCs and all six REST 
 forms, including both PUT and PATCH, with exact sink-name, parent-name, service, and type
 conditions. These observations apply to the tested API version and principals; they do not
 establish general IAM Conditions or Organization Policy equivalence.
-`testIamPermissions` on an existing sink, through the shared IAM gRPC mixin, returns
-only permissions granted for that sink resource. Sink policy reads and writes through that mixin are
-unsupported in enforce mode; a sink inherits its parent policy rather than storing a sink policy.
+Sinks expose no IAM policy methods in the Logging v2 API. Calls to `GetIamPolicy`,
+`SetIamPolicy`, or `TestIamPermissions` on a sink through the shared IAM gRPC mixin fail
+with `FAILED_PRECONDITION` in enforce mode. A sink inherits its parent policy rather
+than storing a sink policy.
 Sink permission denials use HTTP 403 or gRPC `PERMISSION_DENIED`, with the observed
 `IAM_PERMISSION_DENIED` error detail naming the denied permission and resource.
 An evaluated caller's organization policy read or write through the mixin retains the shared IAM

@@ -48,6 +48,12 @@ public interface IamAuthorizationAdapter {
 
     Map<String, Set<String>> roles();
 
+    /** Builds the service's permission-denied response for a failed check. */
+    default GcpException permissionDenied(IamPermissionCheck check) {
+        return GcpException.permissionDenied("Permission " + check.permission()
+                + " denied on " + check.resource().name());
+    }
+
     /** Whether the shared IAM gRPC mixin implements this method for the resource. */
     default boolean supportsIamPolicyMethod(String method, String resource) {
         return true;

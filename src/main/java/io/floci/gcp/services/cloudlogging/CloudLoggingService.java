@@ -11,11 +11,9 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
-import io.floci.gcp.services.iam.IamService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -41,17 +39,14 @@ public class CloudLoggingService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final CloudLoggingSinkService sinkService;
-    private final Instance<IamService> iamService;
 
     @Inject
     public CloudLoggingService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager, CloudLoggingSinkService sinkService,
-            Instance<IamService> iamService) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, CloudLoggingSinkService sinkService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.sinkService = sinkService;
-        this.iamService = iamService;
         this.entryStore = storageFactory.createGlobal("cloudlogging-entries", "cloudlogging-entries.json",
                 new TypeReference<Map<String, StoredLogEntry>>() {});
     }
@@ -62,12 +57,9 @@ public class CloudLoggingService {
         this.config = null;
         this.grpcServerManager = null;
         this.sinkService = null;
-        this.iamService = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
-        iamService.get().registerPolicyResourceResolver("projects/*/sinks/*", sinkService::requireSinkExists);
-        iamService.get().registerPolicyResourceResolver("organizations/*/sinks/*", sinkService::requireSinkExists);
         serviceRegistry.register(ServiceDescriptor.builder("logging")
                 .enabled(config.services().logging().enabled())
                 .storageKey("logging")

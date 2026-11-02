@@ -29,7 +29,7 @@ public class IamResourceHierarchy {
         if (project != null && !project.equals(resource.policyResource())) {
             resources.add(projectPolicy(project));
         }
-        if (projects != null && "logging.googleapis.com".equals(resource.service()) && project != null) {
+        if (projects != null && resource.inheritOrganizationPolicy() && project != null) {
             projects.find(project.substring("projects/".length()))
                     .filter(ProjectRecord::hasParent)
                     .filter(record -> "organization".equals(record.getParentType()))

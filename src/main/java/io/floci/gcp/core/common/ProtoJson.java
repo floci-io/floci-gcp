@@ -42,6 +42,7 @@ public final class ProtoJson {
             .add(com.google.api.serviceusage.v1.DisableServiceResponse.getDescriptor())
             .add(com.google.api.serviceusage.v1.BatchEnableServicesResponse.getDescriptor())
             .add(com.google.api.serviceusage.v1.OperationMetadata.getDescriptor())
+            .add(com.google.api.serviceusage.v1beta1.ServiceIdentity.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()

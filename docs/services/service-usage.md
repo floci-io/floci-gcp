@@ -1,6 +1,7 @@
 # Service Usage
 
-floci-gcp emulates the Service Usage API (`serviceusage.googleapis.com` v1) over REST JSON.
+floci-gcp emulates the Service Usage API (`serviceusage.googleapis.com` v1, and v1beta1
+`generateServiceIdentity`) over REST JSON.
 The API enables and lists a project's GCP services. It is the first thing most IaC
 tooling touches: Terraform's `google_project_service` and Pulumi's `gcp.projects.Service`
 call it before managing any other resource, and `gcloud services` is built on it.
@@ -31,11 +32,39 @@ enable/disable state matter.
 | `POST` | `/v1/projects/{project}/services:batchEnable` |
 | `GET` | `/v1/projects/{project}/services:batchGet?names=...` |
 | `GET` | `/v1/operations/{operation}`, `/v1/operations` |
+| `POST` | `/v1beta1/projects/{project}/services/{service}:generateServiceIdentity` |
+| `GET` | `/v1beta1/operations/{operation}` |
 
 `enable`, `disable`, and `batchEnable` return an already-completed
 `google.longrunning.Operation` (`done: true`) whose `response` carries the proto response
 type, so SDK operation futures resolve immediately. Disabling a service that is not
 enabled returns `FAILED_PRECONDITION`, matching real GCP.
+
+Every method resolves `{project}` through the [project registry](resource-manager.md). A
+project number that belongs to no known project, such as the `00000000000` the Google
+provider probes before it creates a project with a billing account, returns `403
+PERMISSION_DENIED`, as GCP answers for a project the caller cannot see. In
+[strict mode](resource-manager.md#strict-mode) an unknown project ID does too.
+
+## Service identities
+
+`generateServiceIdentity` returns the service agent of a service in a project, as Terraform's
+`google_project_service_identity` and Pulumi's `gcp.projects.ServiceIdentity` read it. The
+method exists only in v1beta1, as in GCP, so a provider that calls it needs its Service Usage
+endpoint set to `<endpoint>/v1beta1/`; `/v1/...:generateServiceIdentity` returns 404. The call
+returns a completed operation whose `response` is a `ServiceIdentity`:
+
+```json
+{"email": "service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com", "uniqueId": "1..."}
+```
+
+The email is `service-{projectNumber}@gcp-sa-{service}.iam.gserviceaccount.com`, or the
+agent's own domain for the services that have one: `compute-system` (Compute Engine),
+`container-engine-robot` (GKE), `gs-project-accounts` (Cloud Storage), `serverless-robot-prod`
+(Cloud Run), `gcf-admin-robot` (Cloud Functions) and `gcp-sa-cloud-sql` (Cloud SQL). The
+`uniqueId` is derived from the email, so repeated calls return the same identity. No service
+account is created in IAM. Only `projects/{project}` parents are served, not folders or
+organizations.
 
 ## Enforcing API enablement
 

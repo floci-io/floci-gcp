@@ -1,5 +1,6 @@
 package io.floci.gcp.services.serviceusage;
 
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -10,6 +11,9 @@ import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class ServiceUsageRestIntegrationTest {
+
+    /** The dummy project the Google provider probes before creating a project with billing. */
+    private static final String UNKNOWN_PROJECT_NUMBER = "00000000000";
 
     @Test
     void enableGetDisableRoundtripUsesServiceUsageShapes() {
@@ -138,5 +142,81 @@ class ServiceUsageRestIntegrationTest {
                 .body("services", hasSize(2))
                 .body("services[0].state", equalTo("ENABLED"))
                 .body("services[1].state", equalTo("DISABLED"));
+    }
+
+    @Test
+    void getOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .when().get("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services/serviceusage.googleapis.com")
+                .then()
+                .statusCode(403)
+                .body("error.code", equalTo(403))
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void listOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .when().get("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void batchGetOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .urlEncodingEnabled(false)
+                .queryParam("names", "projects/" + UNKNOWN_PROJECT_NUMBER + "/services/run.googleapis.com")
+                .when().get("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services:batchGet")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void enableOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services/run.googleapis.com:enable")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void disableOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services/run.googleapis.com:disable")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void batchEnableOnUnknownProjectNumberReturnsPermissionDenied() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"serviceIds\": [\"run.googleapis.com\"]}")
+                .when().post("/v1/projects/" + UNKNOWN_PROJECT_NUMBER + "/services:batchEnable")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void getOnKnownProjectNumberStillResolves() {
+        String number = ProjectNumbers.of("test-project");
+        given()
+                .when().get("/v1/projects/" + number + "/services/compute.googleapis.com")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("projects/" + number + "/services/compute.googleapis.com"));
     }
 }

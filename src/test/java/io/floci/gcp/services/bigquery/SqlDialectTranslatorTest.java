@@ -2284,9 +2284,16 @@ class SqlDialectTranslatorTest {
 
         SqlDialectTranslator.Statement expressions = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT('a', 'b'),"
                 + " expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))");
-        assertEquals(new SqlDialectTranslator.OptionExpression("CONCAT ( 'a' , 'b' )"), expressions.options().get("description"));
-        assertEquals(new SqlDialectTranslator.OptionExpression("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )"),
+        assertEquals(new SqlDialectTranslator.OptionExpression("CONCAT ( 'a' , 'b' )", 0, 0),
+                expressions.options().get("description"));
+        assertEquals(new SqlDialectTranslator.OptionExpression("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )", 0, 0),
                 expressions.options().get("expiration_timestamp"));
+        SqlDialectTranslator.Statement positional = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT(?, ?),"
+                + " friendly_name=UPPER(?))");
+        assertEquals(new SqlDialectTranslator.OptionExpression("CONCAT ( ? , ? )", 0, 2),
+                positional.options().get("description"));
+        assertEquals(new SqlDialectTranslator.OptionExpression("UPPER ( ? )", 2, 1),
+                positional.options().get("friendly_name"));
     }
 
     @Test

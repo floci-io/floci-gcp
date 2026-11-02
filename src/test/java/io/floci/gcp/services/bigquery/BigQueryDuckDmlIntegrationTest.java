@@ -479,6 +479,23 @@ class BigQueryDuckDmlIntegrationTest {
                 .body("friendlyName", equalTo("X"))
                 .body("expirationTime", equalTo("1894060800000"));
         given().when().get(BASE + "/datasets/shop/tables/optioned_expr_copy").then().statusCode(404);
+
+        query("CREATE TABLE shop.optioned_params (x INT64)").then().statusCode(200);
+        for (Map.Entry<String, List<String>> positional : List.of(
+                Map.entry("description=?, friendly_name=?", List.of("first", "second")),
+                Map.entry("description=CONCAT(?, ?), friendly_name=UPPER(?)", List.of("a", "b", "c")))) {
+            List<Map<String, Object>> parameters = positional.getValue().stream()
+                    .map(v -> Map.<String, Object>of("parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", v)))
+                    .toList();
+            given().contentType("application/json")
+                    .body(Map.of("query", "ALTER TABLE shop.optioned_params SET OPTIONS(" + positional.getKey() + ")",
+                            "useLegacySql", false, "parameterMode", "POSITIONAL", "queryParameters", parameters))
+                    .when().post(BASE + "/queries").then().statusCode(200);
+        }
+        given().when().get(BASE + "/datasets/shop/tables/optioned_params").then().statusCode(200)
+                .body("description", equalTo("ab"))
+                .body("friendlyName", equalTo("C"));
     }
 
     @Test

@@ -905,9 +905,11 @@ final class SqlDialectTranslator {
 
     /**
      * An option value given as a constant expression ({@code CONCAT('a', 'b')}), as GoogleSQL text. The
-     * service evaluates it with the SQL engine and checks its type before applying the option.
+     * service evaluates it with the SQL engine and checks its type before applying the option. A positional
+     * parameter binds in statement order, so the expression's {@code ?} are the {@code parameterCount}
+     * parameters from {@code firstParameter} on.
      */
-    public record OptionExpression(String sql) {
+    public record OptionExpression(String sql, int firstParameter, int parameterCount) {
     }
 
     /** Options supported by ALTER SET OPTIONS and CREATE TABLE COPY. */
@@ -958,12 +960,15 @@ final class SqlDialectTranslator {
         Map<String, Object> values = new LinkedHashMap<>();
         int depth = 0;
         int start = open + 1;
+        int positionalBefore = 0;
         for (int k = open + 1; k <= close; k++) {
             Token t = tokens.get(k);
             if (k == close || (depth == 0 && t.isPunct(","))) {
                 List<Token> item = significant(start, k);
                 if (!item.isEmpty()) {
-                    readOption(item, values);
+                    readOption(item, values, positionalBefore);
+                    positionalBefore += (int) item.stream()
+                            .filter(token -> token.kind == Kind.POSITIONAL_PARAM).count();
                 }
                 start = k + 1;
             } else if (t.isPunct("(") || t.isPunct("[")) {
@@ -975,7 +980,7 @@ final class SqlDialectTranslator {
         return values;
     }
 
-    private static void readOption(List<Token> item, Map<String, Object> values) {
+    private static void readOption(List<Token> item, Map<String, Object> values, int positionalBefore) {
         if (item.size() < 3 || item.get(0).kind != Kind.IDENT || !item.get(1).isPunct("=")) {
             throw invalidQuery("Syntax error: Expected an option assignment in OPTIONS");
         }
@@ -993,10 +998,10 @@ final class SqlDialectTranslator {
         }
         switch (name) {
             case "description", "friendly_name" -> values.put(name, isLiteral(value) ? stringOption(name, value)
-                    : optionExpression(name, value));
+                    : optionExpression(name, value, positionalBefore));
             case "labels" -> values.put(name, labelsOption(value));
             default -> values.put(name, isLiteral(value) || isTimestampLiteral(value) ? timestampOption(value)
-                    : optionExpression(name, value));
+                    : optionExpression(name, value, positionalBefore));
         }
     }
 
@@ -1014,7 +1019,7 @@ final class SqlDialectTranslator {
      * A value BigQuery evaluates as a constant expression; a subquery is not a constant one, and a query clause
      * after the expression is a syntax error ({@code IS [NOT] DISTINCT FROM} is an operator, not a clause).
      */
-    private static OptionExpression optionExpression(String name, List<Token> value) {
+    private static OptionExpression optionExpression(String name, List<Token> value, int firstParameter) {
         if (value.stream().anyMatch(t -> t.isKeyword("SELECT"))) {
             throw invalidQuery("Expected constant expression but found unsupported statement or clause; failed to"
                     + " evaluate '" + name + "' in table OPTIONS");
@@ -1039,7 +1044,8 @@ final class SqlDialectTranslator {
             }
             sql.append(t.text);
         }
-        return new OptionExpression(sql.toString());
+        int parameterCount = (int) value.stream().filter(token -> token.kind == Kind.POSITIONAL_PARAM).count();
+        return new OptionExpression(sql.toString(), firstParameter, parameterCount);
     }
 
     private static String stringOption(String name, List<Token> value) {

@@ -1018,7 +1018,8 @@ public class BigQueryService {
                 continue;
             }
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
-                    "SELECT " + expression.sql(), queryOptions, false), tables(projectId, jobLocation));
+                    "SELECT " + expression.sql(), expressionParameters(queryOptions, expression), false),
+                    tables(projectId, jobLocation));
             TableFieldSchema field = result.schema().getFields().getFirst();
             Object value = result.rows().isEmpty() ? null : result.rows().getFirst().get(field.getName());
             String type = switch (field.getType()) {
@@ -1048,6 +1049,21 @@ public class BigQueryService {
             }
         }
         return evaluated;
+    }
+
+    /** The query options with only the positional parameters an option expression binds, in statement order. */
+    private static QueryOptions expressionParameters(QueryOptions options,
+                                                     SqlDialectTranslator.OptionExpression expression) {
+        List<Map<String, Object>> parameters = options.queryParameters();
+        if (!"POSITIONAL".equalsIgnoreCase(options.parameterMode()) || parameters == null) {
+            return options;
+        }
+        int from = Math.min(expression.firstParameter(), parameters.size());
+        int to = Math.min(expression.firstParameter() + expression.parameterCount(), parameters.size());
+        return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters.subList(from, to),
+                options.parameterMode(), options.dryRun(), options.useLegacySql(), options.destinationTable(),
+                options.writeDisposition(), options.createDisposition(), options.schemaUpdateOptions(),
+                options.timePartitioning(), options.rangePartitioning(), options.defaultProjectId());
     }
 
     private static void applyTableOptions(Table table, Map<String, Object> options) {

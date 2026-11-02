@@ -430,6 +430,9 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT DISTINCT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 2]) x ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
                 {"SELECT x, STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY x DESC) AS r FROM UNNEST([2, 1]) x ORDER BY s.n", "rows.collect { it.f[2].v }", "2,1"},
                 {"SELECT ARRAY(SELECT y FROM UNNEST([3, 1]) y ORDER BY y) AS a, STRUCT(x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.n", "rows.collect { it.f[1].v.f[0].v }", "1,2"},
+                {"SELECT UPPER(w) AS w, STRUCT(w AS raw) AS s FROM UNNEST(['b', 'C', 'a']) w ORDER BY s.raw", "rows.collect { it.f[0].v }", "C,A,B"},
+                {"SELECT -x AS x, STRUCT(x AS n) AS s FROM UNNEST([1, 2, 3]) x ORDER BY s.n", "rows.collect { it.f[0].v }", "-1,-2,-3"},
+                {"SELECT x, STRUCT(1 AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.n, x DESC", "rows.collect { it.f[0].v }", "3,2,1"},
         };
         for (String[] c : cases) {
             query(Map.of("query", c[0], "useLegacySql", false))

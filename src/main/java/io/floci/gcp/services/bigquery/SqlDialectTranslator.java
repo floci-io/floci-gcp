@@ -3488,7 +3488,7 @@ final class SqlDialectTranslator {
             if (aliases.isEmpty()) {
                 continue;
             }
-            replaceStructAliasFields(having + 1, clauseEnd(having + 1, depth), aliases);
+            replaceStructAliasFields(having + 1, clauseEnd(having + 1, depth), aliases, false);
         }
     }
 
@@ -3514,7 +3514,7 @@ final class SqlDialectTranslator {
                     || tokens.get(quantifier).isKeyword("ALL")) ? quantifier : select;
             Map<String, Map<String, List<Token>>> aliases = structSelectAliases(listStart, order, depth);
             if (!aliases.isEmpty()) {
-                replaceStructAliasFields(by + 1, clauseEnd(by + 1, depth), aliases);
+                replaceStructAliasFields(by + 1, clauseEnd(by + 1, depth), aliases, true);
             }
         }
     }
@@ -3536,8 +3536,13 @@ final class SqlDialectTranslator {
         return false;
     }
 
-    /** Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression. */
-    private void replaceStructAliasFields(int start, int end, Map<String, Map<String, List<Token>>> aliases) {
+    /**
+     * Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression. In
+     * ORDER BY, DuckDB reads a bare name as a select alias and an integer literal as a column position, so the
+     * expression is wrapped in {@code list_extract([...], 1)}, which keeps its value and type.
+     */
+    private void replaceStructAliasFields(int start, int end, Map<String, Map<String, List<Token>>> aliases,
+                                          boolean orderBy) {
         boolean[] nestedQuery = nestedQueryPositions(start, end);
         for (int i = end - 1; i >= start; i--) {
             if (nestedQuery[i]) {
@@ -3559,9 +3564,9 @@ final class SqlDialectTranslator {
                 continue;
             }
             List<Token> replacement = new ArrayList<>();
-            replacement.add(Token.raw("("));
+            replacement.add(Token.raw(orderBy ? "list_extract([" : "("));
             replacement.addAll(expression);
-            replacement.add(Token.raw(")"));
+            replacement.add(Token.raw(orderBy ? "], 1)" : ")"));
             tokens.subList(i, field + 1).clear();
             tokens.addAll(i, replacement);
         }

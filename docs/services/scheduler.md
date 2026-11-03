@@ -27,6 +27,9 @@ overriding the API endpoint / transport channel and disabling credentials:
 - Jobs: `CreateJob`, `GetJob`, `ListJobs`, `UpdateJob`, `DeleteJob`, `PauseJob`, `ResumeJob`, `RunJob`.
 - Targets: `PubsubTarget` (publishes into the local Pub/Sub backend), `HttpTarget` (real outbound
   HTTP request), `AppEngineHttpTarget` (recorded: there is no App Engine backend to dispatch to).
+  `HttpTarget.oauth_token` and `oidc_token` are stored and returned, and `UpdateJob` masks reach
+  each token field; no token is minted or attached to the outbound request. `HttpTarget.uri` must
+  begin with `http://` or `https://`.
 - `schedule` is standard five-field unix-cron, interpreted in `time_zone` (default UTC).
 - Output-only `state`, `schedule_time`, `last_attempt_time`, and `status` are populated.
 
@@ -104,7 +107,7 @@ Policies are inherited from `projects/{project}`. Job-level policy methods and
 Scheduler `testIamPermissions` are not implemented. Calls to the shared IAM mixin
 on Scheduler jobs fail closed for restricted credentials in enforce mode.
 
-OAuth/OIDC HTTP target configuration and token delivery are not implemented.
+OAuth/OIDC HTTP targets are stored, but token delivery is not implemented.
 Restricted callers configuring these targets in enforce mode receive
 `FAILED_PRECONDITION` before mutation, rather than an act-as guarantee. Target
 service authorization, background-dispatch identity, `fullView` redaction,

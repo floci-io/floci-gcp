@@ -13,6 +13,7 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
+import io.grpc.StatusRuntimeException;
 import io.quarkus.grpc.GlobalInterceptor;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -105,6 +106,10 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                                                 "IAM enforcement has no resource mapping: " + resource);
                                     }
                                 } else {
+                                    if (!adapter.get().supportsIamPolicyMethod(method, resource)) {
+                                        throw adapter.get().unsupported("IAM policy method " + method
+                                                + " on resource " + resource);
+                                    }
                                     operation = new IamOperation(method, resource);
                                 }
                             } else {
@@ -124,7 +129,8 @@ public class IamGrpcAuthorizationInterceptor implements ServerInterceptor {
                         }
                     } catch (Exception e) {
                         rejected = true;
-                        call.close(GcpGrpcController.grpcException(e).getStatus(), new Metadata());
+                        StatusRuntimeException error = GcpGrpcController.grpcException(e);
+                        call.close(error.getStatus(), error.getTrailers() == null ? new Metadata() : error.getTrailers());
                         // Release streaming listeners already registered by previous messages.
                         super.onCancel();
                         return;

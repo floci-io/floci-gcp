@@ -70,7 +70,8 @@ public class IamAuthorizationService {
                         + "Identity handling is service-specific; GCS bucket policies evaluate anonymous callers. "
                         + "Enforce mode covers IAM service-account/key REST operations and IAM Credentials "
                         + "generateAccessToken/signBlob/signJwt and service-account policies over REST/shared IAM gRPC, Cloud Run v2 service/revision REST and shared IAM gRPC, "
-                        + "Cloud Scheduler job REST/gRPC, Pub/Sub REST/gRPC, Secret Manager REST/gRPC, Resource Manager REST/project IAM gRPC, Cloud Billing project billingInfo get REST, "
+                        + "Cloud Scheduler job REST/gRPC, Cloud Logging project/organization sink REST/gRPC, "
+                        + "Pub/Sub REST/gRPC, Secret Manager REST/gRPC, Resource Manager REST/project IAM gRPC, Cloud Billing project billingInfo get REST, "
                         + "IAM project/organization custom-role REST management, and supported GCS REST "
                         + "bucket/object operations. Custom-role bindings grant their stored permissions except in GCS "
                         + "bucket policies. Cloud Run "
@@ -143,8 +144,7 @@ public class IamAuthorizationService {
         }
         for (IamPermissionCheck check : checks) {
             if (!allowed(resolution.principal(), check.permission(), check.resource())) {
-                throw GcpException.permissionDenied("Permission " + check.permission()
-                        + " denied on " + check.resource().name());
+                throw adapter.permissionDenied(check);
             }
         }
     }

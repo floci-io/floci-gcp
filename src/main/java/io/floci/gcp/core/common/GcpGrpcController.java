@@ -1,7 +1,10 @@
 package io.floci.gcp.core.common;
 
+import com.google.protobuf.Any;
+import com.google.rpc.ErrorInfo;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
 
@@ -30,6 +33,16 @@ public abstract class GcpGrpcController {
 
     public static StatusRuntimeException grpcException(Throwable t) {
         if (t instanceof GcpException ex) {
+            if (ex.getErrorInfo() != null) {
+                GcpException.ErrorInfoDetail info = ex.getErrorInfo();
+                ErrorInfo detail = ErrorInfo.newBuilder().setReason(info.reason()).setDomain(info.domain())
+                        .putAllMetadata(info.metadata()).build();
+                // com.google.rpc.Status is the wire detail; io.grpc.Status handles ordinary errors here.
+                com.google.rpc.Status status = com.google.rpc.Status.newBuilder()
+                        .setCode(ex.getGrpcCode().value()).setMessage(ex.getMessage())
+                        .addDetails(Any.pack(detail)).build();
+                return StatusProto.toStatusRuntimeException(status);
+            }
             return ex.getGrpcCode().toStatus()
                     .withDescription(ex.getMessage())
                     .asRuntimeException();

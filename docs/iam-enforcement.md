@@ -7,7 +7,8 @@ The global-interceptor annotation also covers Quarkus-managed registrations.
 An annotation alone does not cover the dynamically bound controllers.
 
 Resource Manager projects, Cloud Billing project billing-info reads, Cloud Run v2 services and revisions, Secret Manager
-secrets and versions, Pub/Sub, Cloud Scheduler jobs, IAM service-account/key management and direct access-token
+secrets and versions, Pub/Sub, Cloud Scheduler jobs, Cloud Logging project and organization
+sink management, IAM service-account/key management and direct access-token
 issuance, IAM project and organization custom-role management, and GCS bucket/object
 operations are integrated. Bindings to stored custom roles grant their `includedPermissions`
 through every adapter except in GCS bucket policies; see [Custom roles](services/iam.md#custom-roles). IAM policy methods also
@@ -18,7 +19,8 @@ policy methods work over REST and gRPC. GCS invokes the shared evaluator from it
 service-level authorization path so JSON filtering does not bypass its
 lock-sensitive lifecycle coordination. Cloud Logging GCS export uses the same GCS service path
 with the persisted sink writer as a trusted internal principal. It uses no request credential
-bypass; sink management caller authorization is a separate integration.
+bypass. Sink management checks the caller's emulator-issued service-account credential over
+REST and gRPC; see the [sink IAM inventory](services/logging.md#sink-management-iam).
 
 ## Service extension contract
 
@@ -39,6 +41,8 @@ bypass; sink management caller authorization is a separate integration.
    and the existing policy storage key. Return empty for resources owned by other
    adapters. Use `IamResource.projectChild` for project inheritance; do not expose
    internal policy keys to CEL. Versioned resources can have a parent policy key.
+   Set `IamResource.inheritOrganizationPolicy` only when recorded organization
+   ancestry is supported by the service. It defaults to false for existing adapters.
 6. Contribute a finite predefined role map and exact `basicRoles` slices. Basic-role
    permissions are explicitly contributed by each service, never inferred by the
    shared catalog. Do not use wildcard permission grants. Bindings with roles outside
@@ -53,6 +57,9 @@ bypass; sink management caller authorization is a separate integration.
    every resource the adapter registers.
    A service using different policy storage needs a reviewed integration before
    advertising enforcement; registering a resource factory alone is insufficient.
+   Override `permissionDenied` when upstream evidence requires a service-specific
+   denial response. Override `supportsIamPolicyMethod` to reject policy methods
+   that the upstream service does not expose.
 8. Add the service to the documentation and coverage matrix. Startup coverage is
    derived from registered adapters. Update the explicit exclusions in the startup
    message when expanding beyond the current scope.
@@ -235,3 +242,64 @@ assertions, observed Pub/Sub delivery after permitted/denied runs, JSON null
 normalization, domain-scoped project names, and disabled-mode controls. The compatibility workflow includes it
 in the isolated enforcing native run. See the [Scheduler inventory](services/scheduler.md#iam-enforcement)
 for local condition semantics and unsupported targets.
+
+### Cloud Logging sink evidence
+
+- [ConfigServiceV2 proto](https://github.com/googleapis/googleapis/blob/master/google/logging/v2/logging_config.proto)
+  and [Cloud Logging access control](https://cloud.google.com/logging/docs/access-control).
+- The [Logging v2 discovery document](https://logging.googleapis.com/$discovery/rest?version=v2),
+  revision `20261023`, exposes only create, delete, get, list, patch, and update on sinks. The
+  [service configuration](https://github.com/googleapis/googleapis/blob/aa87617d67/google/logging/v2/logging_v2.yaml)
+  declares no IAM policy mixin. Sink IAM policy methods therefore fail closed in enforce mode.
+- [Logging v2 REST sink methods](https://cloud.google.com/logging/docs/reference/v2/rest/v2/organizations.sinks)
+  and the [official Java REST SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-logging/v2/2.0.0/com/google/api/services/logging/v2/Logging.java).
+- `gcloud iam roles describe` metadata for all eleven `roles/logging.*` predefined roles:
+  admin and configWriter grant all five sink permissions, viewer and privateLogViewer grant
+  get and list, and the other seven grant no sink permissions. The published
+  [Logging roles reference](https://docs.cloud.google.com/iam/docs/roles-permissions/logging)
+  also lists these four supported role slices.
+- Basic-role metadata: owner grants all five sink permissions; editor and viewer grant
+  only get and list.
+- Live project checks with the official Java REST and gRPC clients showed that
+  create evaluates the future sink name, list evaluates the project parent, and get, update,
+  and delete evaluate the existing sink name. A `resource.service` condition matched
+  `logging.googleapis.com`; a `resource.type` condition matched
+  `logging.googleapis.com/LogSink` for create, get, and list. Live organization checks
+  confirmed all five RPCs and six REST forms with sink-name, parent-name,
+  service, and type conditions. Organization REST denials returned HTTP 403 with
+  `PERMISSION_DENIED`, `IAM_PERMISSION_DENIED` in `google.rpc.ErrorInfo`, and the denied
+  permission and resource in metadata; gRPC returned `PERMISSION_DENIED`.
+
+| Parent | REST JSON v2 | ConfigServiceV2 gRPC | Live authorization target |
+|---|---|---|---|
+| Project | Create, list, get, PUT, PATCH, delete | Create, list, get, update, delete | Future sink for create, parent for list, named sink otherwise |
+| Organization | Create, list, get, PUT, PATCH, delete | Create, list, get, update, delete | Future sink for create, parent for list, named sink otherwise |
+
+The live organization probe also confirmed that every method denies an unbound service account
+after IAM propagation. The Java SDK checks use disabled sinks with a non-delivering destination;
+they do not require log traffic. The emulator matches the observed authorization decisions and
+transport status classes. Logging sink permission denials include the observed message,
+legacy REST `forbidden` reason, and `google.rpc.ErrorInfo` permission and resource metadata
+on REST and gRPC. Other error fields and headers have not been checked for exact parity.
+An additional live project sink probe under a test organization was
+denied over REST and gRPC with no binding. An organization-level
+`roles/logging.configWriter` binding then permitted the same `GetSink` calls without a project
+binding. The emulator applies this inheritance to Logging sinks when Resource Manager has
+recorded the project-to-organization parent relationship.
+
+`CloudLoggingIamAuthorizationAdapterServiceTest` inventories REST handlers and gRPC
+requests. `LoggingSinkIamEnforcementTest` uses the official Java gRPC client;
+`LoggingSinkRestIamEnforcementTest` uses the official Java REST discovery client.
+Both exercise project and organization parents, conditional create grants, resource-name
+scoping for sink and parent operations, unbound and insufficient-role denials, unchanged resources and
+policies after denials, and disabled-mode controls.
+The gRPC suite also verifies that sink policy reads, writes, and permission queries fail closed
+for existing and missing sinks in enforce mode. Running that rejection test against a
+disabled-mode server with enforce-mode expectations fails because the request succeeds.
+Trusted setup can write organization parent policies through the shared
+IAM mixin; evaluated callers retain the existing `FAILED_PRECONDITION` for bare
+organization policy reads and writes.
+Temporarily removing the create permission check made the conditional-create denial
+assertion fail with a successful request; restoring the check made the suite pass.
+The compatibility workflow includes both in its isolated enforcing native stage.
+See the [sink IAM inventory](services/logging.md#sink-management-iam).

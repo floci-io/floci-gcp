@@ -8,7 +8,8 @@ import java.util.Objects;
  * <p>The policy lookup key is deliberately distinct from the IAM resource name. Storage keys
  * remain an implementation detail and must not be exposed to CEL expressions.</p>
  */
-public record IamResource(String service, String type, String name, String policyResource, String projectResource) {
+public record IamResource(String service, String type, String name, String policyResource, String projectResource,
+        boolean inheritOrganizationPolicy) {
 
     private static final String STORAGE_SERVICE = "storage.googleapis.com";
     private static final String BUCKET_TYPE = STORAGE_SERVICE + "/Bucket";
@@ -19,6 +20,10 @@ public record IamResource(String service, String type, String name, String polic
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(policyResource, "policyResource");
+    }
+
+    public IamResource(String service, String type, String name, String policyResource, String projectResource) {
+        this(service, type, name, policyResource, projectResource, false);
     }
 
     public IamResource(String service, String type, String name, String policyResource) {

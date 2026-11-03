@@ -1725,6 +1725,8 @@ class SqlDialectTranslatorTest {
         String borrowed = sql("SELECT ARRAY(SELECT STRUCT(y AS n) AS s FROM UNNEST([1]) y) AS a,"
                 + " ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
         assertTrue(borrowed.contains("OVER (ORDER BY s.n)"), borrowed);
+        String qualified = sql("SELECT STRUCT(0 AS n) AS s FROM ds.t AS t ORDER BY t.s.n");
+        assertTrue(qualified.endsWith("ORDER BY t.s.n"), qualified);
         String window = sql("SELECT STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
         assertTrue(window.contains("OVER (ORDER BY s.n)"), window);
         String aggregate = sql("SELECT STRUCT(x AS n) AS s, ARRAY_AGG(x ORDER BY s.n) AS a FROM ds.t GROUP BY s");

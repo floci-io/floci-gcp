@@ -3537,7 +3537,8 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression. In
+     * Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression; the tail
+     * of a qualified path such as {@code t.s.n} is a column of {@code t}, not the alias, and is left alone. In
      * ORDER BY, DuckDB reads a bare name as a select alias and an integer literal as a column position, so the
      * expression is wrapped in {@code list_extract([...], 1)}, which keeps its value and type.
      */
@@ -3549,6 +3550,10 @@ final class SqlDialectTranslator {
                 continue;
             }
             Token alias = tokens.get(i);
+            int before = previousSignificantBefore(i);
+            if (before >= start && tokens.get(before).isPunct(".")) {
+                continue;
+            }
             int dot = nextSignificant(i + 1, end);
             int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
             if ((alias.kind != Kind.IDENT && alias.kind != Kind.QIDENT) || dot < 0 || field < 0

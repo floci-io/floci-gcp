@@ -60,7 +60,8 @@ returns a completed operation whose `response` is a `ServiceIdentity`:
 
 The email is `service-{projectNumber}@gcp-sa-{service}.iam.gserviceaccount.com`, or the
 agent's own domain for the services that have one: `compute-system` (Compute Engine),
-`container-engine-robot` (GKE), `gs-project-accounts` (Cloud Storage), `serverless-robot-prod`
+`container-engine-robot` (GKE), `gs-project-accounts` (Cloud Storage, the same address as
+Cloud Storage's `projects.serviceAccount`), `serverless-robot-prod`
 (Cloud Run), `gcf-admin-robot` (Cloud Functions) and `gcp-sa-cloud-sql` (Cloud SQL). The
 `uniqueId` is derived from the email, so repeated calls return the same identity. No service
 account is created in IAM. Only `projects/{project}` parents are served, not folders or

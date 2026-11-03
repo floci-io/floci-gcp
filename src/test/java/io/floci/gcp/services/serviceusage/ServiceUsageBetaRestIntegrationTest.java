@@ -50,6 +50,18 @@ class ServiceUsageBetaRestIntegrationTest {
     }
 
     @Test
+    void storageServiceIdentityMatchesTheGcsProjectServiceAccount() {
+        String gcsAgent = given()
+                .when().get("/storage/v1/projects/su-identity-gcs/serviceAccount")
+                .then().statusCode(200)
+                .extract().path("email_address");
+
+        generateServiceIdentity("su-identity-gcs", "storage.googleapis.com")
+                .statusCode(200)
+                .body("response.email", equalTo(gcsAgent));
+    }
+
+    @Test
     void generateServiceIdentityByProjectNumberNamesTheSameAgent() {
         String number = ProjectNumbers.of("test-project");
 

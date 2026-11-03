@@ -678,7 +678,8 @@ set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
 service-account tokens. This enforces Resource Manager v1 project metadata/policies,
 Cloud Run v2 service and revision REST operations and service policies, Secret
 Manager REST and gRPC operations, Pub/Sub REST and gRPC operations, Cloud Scheduler job
-REST and gRPC operations, IAM service-account, key, credential, and custom-role
+REST and gRPC operations, Cloud Logging project and organization sink management over
+REST and gRPC, IAM service-account, key, credential, and custom-role
 management, and supported GCS REST
 bucket and object operations through one shared evaluator. Bindings to API-created
 custom roles grant their stored permissions within the role's project or organization;

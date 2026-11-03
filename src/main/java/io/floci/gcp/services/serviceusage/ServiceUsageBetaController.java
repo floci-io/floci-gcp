@@ -32,11 +32,12 @@ public class ServiceUsageBetaController {
         this.operations = operations;
     }
 
+    // The request has no body fields; the Java SDK posts an empty form-encoded body.
     @POST
     @Path("/projects/{project}/services/{service}:generateServiceIdentity")
+    @Consumes(MediaType.WILDCARD)
     public Response generateServiceIdentity(@PathParam("project") String project,
-                                            @PathParam("service") String serviceId,
-                                            String body) {
+                                            @PathParam("service") String serviceId) {
         return json(ProtoJson.print(service.generateServiceIdentity(project, serviceId)));
     }
 

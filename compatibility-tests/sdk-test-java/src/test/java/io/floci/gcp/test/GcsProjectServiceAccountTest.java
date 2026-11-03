@@ -34,9 +34,9 @@ class GcsProjectServiceAccountTest {
         ServiceAccount account = storage.getServiceAccount(TestFixtures.projectId());
 
         assertThat(account).isNotNull();
+        // GCP names the Cloud Storage agent by project number, not project ID.
         assertThat(account.getEmail())
-                .contains(TestFixtures.projectId())
-                .endsWith("gs-project-accounts.iam.gserviceaccount.com");
+                .matches("service-\\d{12}@gs-project-accounts\\.iam\\.gserviceaccount\\.com");
     }
 
     @Test

@@ -86,6 +86,17 @@ class ServiceUsageBetaRestIntegrationTest {
     }
 
     @Test
+    void generateServiceIdentityAcceptsTheEmptyFormBodyTheJavaSdkSends() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/x-www-form-urlencoded")
+                .when().post("/v1beta1/projects/su-identity-form/services/pubsub.googleapis.com:generateServiceIdentity")
+                .then()
+                .statusCode(200)
+                .body("done", equalTo(true));
+    }
+
+    @Test
     void generateServiceIdentityOnUnknownProjectNumberReturnsPermissionDenied() {
         generateServiceIdentity("00000000000", "pubsub.googleapis.com")
                 .statusCode(403)

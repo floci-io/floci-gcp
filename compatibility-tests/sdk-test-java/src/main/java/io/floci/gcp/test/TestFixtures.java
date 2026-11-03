@@ -578,4 +578,14 @@ public final class TestFixtures {
                         .build();
         return com.google.api.serviceusage.v1.ServiceUsageClient.create(settings);
     }
+
+    // v1 and v1beta1 both name their client ServiceUsageClient, so both stay qualified here.
+    public static com.google.api.serviceusage.v1beta1.ServiceUsageClient serviceUsageBetaClient() throws IOException {
+        com.google.api.serviceusage.v1beta1.ServiceUsageSettings settings =
+                com.google.api.serviceusage.v1beta1.ServiceUsageSettings.newHttpJsonBuilder()
+                        .setEndpoint(endpoint())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build();
+        return com.google.api.serviceusage.v1beta1.ServiceUsageClient.create(settings);
+    }
 }

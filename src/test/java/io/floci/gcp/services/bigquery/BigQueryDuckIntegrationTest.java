@@ -345,6 +345,16 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
         query("""
+                {"query": "SELECT ARRAY<INT64>[][0] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 0 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT ARRAY<INT64>[][SAFE_OFFSET(0)] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query("""
                 {"query": "SELECT [10, 20, 30][2] AS a, [10, 20, 30][0] AS b, ['x', 'y'][1] AS c, [10, 20][CAST(NULL AS INT64)] AS n", "useLegacySql": false}
                 """)
                 .then().statusCode(200)

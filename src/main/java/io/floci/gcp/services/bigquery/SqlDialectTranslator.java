@@ -2890,22 +2890,17 @@ final class SqlDialectTranslator {
             }
             List<Token> type = tokens.subList(i, closeAngle + 1).stream()
                     .filter(token -> token.kind != Kind.SPACE).toList();
-            if (nextSignificant(openBracket + 1, closeBracket) == -1) {
-                String literal = "CAST([] AS " + translateType(type) + ")";
-                tokens.subList(i, closeBracket + 1).clear();
-                tokens.add(i, Token.raw(literal));
-            } else {
-                // DuckDB infers anonymous struct member names for e.g. [(id_type, company_id)].
-                // Keep the GoogleSQL element type as a cast so ARRAY<STRUCT<type STRING,
-                // company_id INT64>>[(...)] retains its declared field names.
-                String translatedType = translateType(type);
-                tokens.subList(i, openBracket).clear();
-                tokens.add(i, new Token(Kind.IDENT, "CAST", "CAST"));
-                tokens.add(i + 1, new Token(Kind.PUNCT, "(", null));
-                int castEnd = matchingBracket(i + 2) + 1;
-                tokens.add(castEnd, Token.raw(" AS " + translatedType));
-                tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
-            }
+            // DuckDB infers anonymous struct member names for e.g. [(id_type, company_id)].
+            // Keep the GoogleSQL element type as a cast so ARRAY<STRUCT<type STRING,
+            // company_id INT64>>[(...)] retains its declared field names. An empty literal
+            // keeps the same tokens, so a subscript on it is still read as an OFFSET.
+            String translatedType = translateType(type);
+            tokens.subList(i, openBracket).clear();
+            tokens.add(i, new Token(Kind.IDENT, "CAST", "CAST"));
+            tokens.add(i + 1, new Token(Kind.PUNCT, "(", null));
+            int castEnd = matchingBracket(i + 2) + 1;
+            tokens.add(castEnd, Token.raw(" AS " + translatedType));
+            tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
         }
     }
 

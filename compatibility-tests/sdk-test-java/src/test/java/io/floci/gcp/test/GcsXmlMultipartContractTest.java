@@ -56,4 +56,33 @@ class GcsXmlMultipartContractTest {
             storage.delete(bucket, key); storage.delete(bucket);
         }
     }
+
+    @Test void listUploadsGroupsKeysByDelimiter() throws Exception {
+        HttpStorageOptions options = StorageOptions.http().setHost(TestFixtures.endpoint()).setProjectId("test-project").setCredentials(NoCredentials.getInstance()).build();
+        Storage storage = options.getService();
+        MultipartUploadClient client = MultipartUploadClient.create(MultipartUploadSettings.of(options));
+        String bucket = TestFixtures.uniqueName("java-xml-delim");
+        storage.create(BucketInfo.of(bucket));
+        String top = null, nested = null;
+        try {
+            top = client.createMultipartUpload(CreateMultipartUploadRequest.builder().bucket(bucket).key("top.bin").build()).uploadId();
+            nested = client.createMultipartUpload(CreateMultipartUploadRequest.builder().bucket(bucket).key("dir/nested.bin").build()).uploadId();
+            ListMultipartUploadsResponse grouped = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).delimiter("/").build());
+            assertThat(grouped.delimiter()).isEqualTo("/");
+            assertThat(grouped.uploads()).extracting(MultipartUpload::key).containsExactly("top.bin");
+            assertThat(grouped.commonPrefixes()).containsExactly("dir/");
+            assertThat(grouped.truncated()).isFalse();
+            ListMultipartUploadsResponse under = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).prefix("dir/").delimiter("/").build());
+            assertThat(under.prefix()).isEqualTo("dir/");
+            assertThat(under.uploads()).extracting(MultipartUpload::uploadId).containsExactly(nested);
+            assertThat(under.commonPrefixes()).isEmpty();
+            ListMultipartUploadsResponse flat = client.listMultipartUploads(ListMultipartUploadsRequest.builder().bucket(bucket).build());
+            assertThat(flat.uploads()).extracting(MultipartUpload::key).containsExactly("dir/nested.bin", "top.bin");
+            assertThat(flat.commonPrefixes()).isEmpty();
+        } finally {
+            if (top != null) { client.abortMultipartUpload(AbortMultipartUploadRequest.builder().bucket(bucket).key("top.bin").uploadId(top).build()); }
+            if (nested != null) { client.abortMultipartUpload(AbortMultipartUploadRequest.builder().bucket(bucket).key("dir/nested.bin").uploadId(nested).build()); }
+            storage.delete(bucket);
+        }
+    }
 }

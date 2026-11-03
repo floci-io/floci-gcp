@@ -68,16 +68,12 @@ final class GcsXmlObjectListing {
                 .sorted(Comparator.comparing(GcsObjectMeta::getName))
                 .toList();
         for (GcsObjectMeta meta : matching) {
-            if (delimiter != null) {
-                String rest = meta.getName().substring(prefix.length());
-                int idx = rest.indexOf(delimiter);
-                if (idx >= 0) {
-                    String common = prefix + rest.substring(0, idx + delimiter.length());
-                    if (seenPrefixes.add(common)) {
-                        entryKeys.add(common);
-                    }
-                    continue;
+            String common = GcsXmlDelimiterRollup.commonPrefix(meta.getName(), prefix, delimiter);
+            if (common != null) {
+                if (seenPrefixes.add(common)) {
+                    entryKeys.add(common);
                 }
+                continue;
             }
             objectsByKey.put(meta.getName(), meta);
             entryKeys.add(meta.getName());

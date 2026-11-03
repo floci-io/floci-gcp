@@ -59,16 +59,12 @@ final class GcsXmlUploadListing {
                 .sorted(Comparator.comparing((GcsMultipartUpload u) -> u.object).thenComparing(u -> u.id))
                 .toList();
         for (GcsMultipartUpload upload : matching) {
-            if (delimiter != null) {
-                String rest = upload.object.substring(prefix.length());
-                int idx = rest.indexOf(delimiter);
-                if (idx >= 0) {
-                    String common = prefix + rest.substring(0, idx + delimiter.length());
-                    if (seenPrefixes.add(common)) {
-                        entries.add(new Entry(common, null));
-                    }
-                    continue;
+            String common = GcsXmlDelimiterRollup.commonPrefix(upload.object, prefix, delimiter);
+            if (common != null) {
+                if (seenPrefixes.add(common)) {
+                    entries.add(new Entry(common, null));
                 }
+                continue;
             }
             entries.add(new Entry(upload.object, upload));
         }

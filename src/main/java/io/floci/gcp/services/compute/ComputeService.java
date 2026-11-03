@@ -434,7 +434,7 @@ public class ComputeService {
     }
     /** Compute IAM policies live in the shared IAM policy store; the flat body is the API's deprecated form. */
     private ObjectNode setIamPolicy(String policyName, ObjectNode body) {
-        ObjectNode policy = body.path("policy").isObject() ? (ObjectNode) body.get("policy") : body;
+        ObjectNode policy = body.has("policy") ? requireObject(body.get("policy"), "policy") : body;
         if (policy.has("version") && !policy.get("version").isIntegralNumber()) {
             throw GcpException.invalidArgument("Policy version must be an integer");
         }
@@ -456,15 +456,22 @@ public class ComputeService {
     }
     /**
      * Each policy goes away under its IAM policy lock together with the saved resource removal, so no policy write
-     * can land between the two and survive for a recreated name.
+     * can land between the two and survive for a recreated name. All the locks are taken up front, in the shared
+     * order, because other IAM calls hold several of them too.
      */
     private void saveDroppingPolicies(String project, ComputeProject state, List<String> policies) {
+        iamService.withPolicyLocks(policies, () -> {
+            saveDroppingLockedPolicies(project, state, policies);
+            return null;
+        });
+    }
+    private void saveDroppingLockedPolicies(String project, ComputeProject state, List<String> policies) {
         if (policies.isEmpty()) {
             save(project, state);
             return;
         }
         iamService.deleteResourceAndPolicy(policies.getFirst(),
-                () -> saveDroppingPolicies(project, state, policies.subList(1, policies.size())));
+                () -> saveDroppingLockedPolicies(project, state, policies.subList(1, policies.size())));
     }
     public synchronized ObjectNode project(String project) {
         Context c = context(project, "global/operations", state(project));

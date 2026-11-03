@@ -116,6 +116,14 @@ class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
         post(disk + "/setIamPolicy", Map.of("policy", Map.of("bindings", List.of("none")))).then().statusCode(400);
     }
 
+    @Test void aPolicyFieldThatIsNotAnObjectLeavesTheBindingsAlone() throws Exception {
+        String root = root(), disk = root + ZONE + "/disks/data";
+        disk(root, "data");
+        bind(disk);
+        post(disk + "/setIamPolicy", Map.of("policy", "invalid")).then().statusCode(400);
+        assertBound(disk);
+    }
+
     @Test void numericIdReachesTheSamePolicy() throws Exception {
         String root = root(), disk = root + ZONE + "/disks/data";
         disk(root, "data");

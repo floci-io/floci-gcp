@@ -1216,6 +1216,8 @@ class SqlDialectTranslatorTest {
                 + " ' %%F %m/%d/%y %%R'))), 1) AS y",
                 sql("SELECT FORMAT_DATE('%F %%F %D %R', d) AS y"));
         assertEquals("SELECT CAST(strptime(s, '%Y-%m-%d') AS DATE) AS y", sql("SELECT PARSE_DATE('%F', s) AS y"));
+        assertTrue(sql("SELECT FORMAT_DATE('%Y', '0099-01-02') AS y").contains("CAST('0099-01-02' AS DATE)"));
+        assertTrue(sql("SELECT FORMAT_TIMESTAMP('%Y', NULL) AS y").contains("CAST(NULL AS TIMESTAMPTZ)"));
         assertEquals("SELECT list_extract(list_transform([(d)], _floci_format_value -> (lpad(CAST(day(_floci_format_value)"
                 + " AS VARCHAR), 2, ' ') || strftime(_floci_format_value, '/%m ') || CAST(quarter(_floci_format_value)"
                 + " AS VARCHAR))), 1) AS y", sql("SELECT FORMAT_DATE('%e/%m %Q', d) AS y"));

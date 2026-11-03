@@ -82,6 +82,7 @@ public class SchedulerService {
             throw GcpException.alreadyExists("Job already exists: " + name);
         }
         validateSchedule(job.getSchedule());
+        validateHttpTarget(job);
 
         String now = Instant.now().toString();
         job.setName(name);
@@ -117,11 +118,28 @@ public class SchedulerService {
                 .orElseThrow(() -> GcpException.notFound("Job not found: " + name));
 
         boolean all = updateMask == null || updateMask.isEmpty();
+        boolean replaceTarget = all || maskHasTargetUpdate(updateMask);
+        boolean httpSubPaths = !replaceTarget && maskHasHttpSubPath(updateMask);
+
+        // Everything that can reject the update runs first: storage may hand back the live job.
+        if (all || maskHas(updateMask, "schedule")) {
+            validateSchedule(incoming.getSchedule());
+        }
+        if (replaceTarget) {
+            validateHttpTarget(incoming);
+        } else if (httpSubPaths) {
+            if (!"HTTP".equals(existing.getTargetType())) {
+                throw GcpException.invalidArgument("update_mask http_target.* requires a job with an HTTP target");
+            }
+            if (httpMask(updateMask, "uri", "uri")) {
+                validateHttpUri(incoming.getHttpUri());
+            }
+        }
+
         if (all || maskHas(updateMask, "description")) {
             existing.setDescription(incoming.getDescription());
         }
         if (all || maskHas(updateMask, "schedule")) {
-            validateSchedule(incoming.getSchedule());
             existing.setSchedule(incoming.getSchedule());
         }
         if (all || maskHas(updateMask, "time_zone", "timeZone")) {
@@ -137,8 +155,10 @@ public class SchedulerService {
         if (all || maskHas(updateMask, "attempt_deadline", "attemptDeadline")) {
             existing.setAttemptDeadlineSeconds(incoming.getAttemptDeadlineSeconds());
         }
-        if (all || maskHasTargetUpdate(updateMask)) {
+        if (replaceTarget) {
             copyTarget(incoming, existing);
+        } else if (httpSubPaths) {
+            applyHttpTargetSubPaths(incoming, existing, updateMask);
         }
 
         existing.setUserUpdateTime(Instant.now().toString());
@@ -208,6 +228,18 @@ public class SchedulerService {
         }
     }
 
+    private static void validateHttpTarget(StoredJob job) {
+        if ("HTTP".equals(job.getTargetType())) {
+            validateHttpUri(job.getHttpUri());
+        }
+    }
+
+    private static void validateHttpUri(String uri) {
+        if (uri == null || !(uri.startsWith("http://") || uri.startsWith("https://"))) {
+            throw GcpException.invalidArgument("HttpTarget.uri must begin with http:// or https://");
+        }
+    }
+
     private String computeNextScheduleTime(StoredJob job, Instant from) {
         if (job.getSchedule() == null || job.getSchedule().isBlank()) {
             return null;
@@ -229,6 +261,10 @@ public class SchedulerService {
         to.setHttpMethod(from.getHttpMethod());
         to.setHttpHeaders(from.getHttpHeaders());
         to.setHttpBody(from.getHttpBody());
+        to.setHttpOauthServiceAccountEmail(from.getHttpOauthServiceAccountEmail());
+        to.setHttpOauthScope(from.getHttpOauthScope());
+        to.setHttpOidcServiceAccountEmail(from.getHttpOidcServiceAccountEmail());
+        to.setHttpOidcAudience(from.getHttpOidcAudience());
         to.setAppEngineHttpMethod(from.getAppEngineHttpMethod());
         to.setAppEngineRelativeUri(from.getAppEngineRelativeUri());
         to.setAppEngineHeaders(from.getAppEngineHeaders());
@@ -237,6 +273,62 @@ public class SchedulerService {
         to.setAppEngineVersion(from.getAppEngineVersion());
         to.setAppEngineInstance(from.getAppEngineInstance());
         to.setAppEngineHost(from.getAppEngineHost());
+    }
+
+    /**
+     * Applies {@code http_target.*} masks, down to single token fields as gcloud sends them. A masked field missing
+     * from the request is cleared. The tokens stay a oneof: setting one clears the other.
+     */
+    private static void applyHttpTargetSubPaths(StoredJob from, StoredJob to, List<String> mask) {
+        if (httpMask(mask, "uri", "uri")) {
+            to.setHttpUri(from.getHttpUri());
+        }
+        if (httpMask(mask, "http_method", "httpMethod")) {
+            to.setHttpMethod(from.getHttpMethod());
+        }
+        if (httpMask(mask, "headers", "headers")) {
+            to.setHttpHeaders(from.getHttpHeaders());
+        }
+        if (httpMask(mask, "body", "body")) {
+            to.setHttpBody(from.getHttpBody());
+        }
+        boolean oauthToken = httpMask(mask, "oauth_token", "oauthToken");
+        boolean oidcToken = httpMask(mask, "oidc_token", "oidcToken");
+        boolean oauthEmail = oauthToken || httpMask(mask, "oauth_token.service_account_email", "oauthToken.serviceAccountEmail");
+        boolean oauthScope = oauthToken || httpMask(mask, "oauth_token.scope", "oauthToken.scope");
+        boolean oidcEmail = oidcToken || httpMask(mask, "oidc_token.service_account_email", "oidcToken.serviceAccountEmail");
+        boolean oidcAudience = oidcToken || httpMask(mask, "oidc_token.audience", "oidcToken.audience");
+        if (oauthEmail) {
+            to.setHttpOauthServiceAccountEmail(from.getHttpOauthServiceAccountEmail());
+        }
+        if (oauthScope) {
+            to.setHttpOauthScope(from.getHttpOauthScope());
+        }
+        if (oidcEmail) {
+            to.setHttpOidcServiceAccountEmail(from.getHttpOidcServiceAccountEmail());
+        }
+        if (oidcAudience) {
+            to.setHttpOidcAudience(from.getHttpOidcAudience());
+        }
+        boolean oauthSet = (oauthEmail && from.getHttpOauthServiceAccountEmail() != null)
+                || (oauthScope && from.getHttpOauthScope() != null);
+        boolean oidcSet = (oidcEmail && from.getHttpOidcServiceAccountEmail() != null)
+                || (oidcAudience && from.getHttpOidcAudience() != null);
+        if (oauthSet) {
+            to.setHttpOidcServiceAccountEmail(null);
+            to.setHttpOidcAudience(null);
+        } else if (oidcSet) {
+            to.setHttpOauthServiceAccountEmail(null);
+            to.setHttpOauthScope(null);
+        }
+    }
+
+    private static boolean httpMask(List<String> mask, String snakePath, String camelPath) {
+        return maskHas(mask, "http_target." + snakePath, "httpTarget." + camelPath);
+    }
+
+    private static boolean maskHasHttpSubPath(List<String> mask) {
+        return mask.stream().anyMatch(p -> p.startsWith("http_target.") || p.startsWith("httpTarget."));
     }
 
     private static boolean maskHas(List<String> mask, String... paths) {

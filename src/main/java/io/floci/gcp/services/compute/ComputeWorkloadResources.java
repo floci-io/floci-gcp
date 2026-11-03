@@ -234,6 +234,7 @@ public class ComputeWorkloadResources implements ComputeResourceHandler {
                 String diskKey = c.path(disk.path("source").asText());
                 c.state.resources.remove(diskKey);
                 c.state.diskImages.remove(diskKey);
+                c.dropIamPolicy(diskKey);
             }
         }
         for (JsonNode nic : r.path("networkInterfaces")) {

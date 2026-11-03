@@ -55,6 +55,36 @@ Public interfaces follow the [Compute REST reference](https://docs.cloud.google.
 Credential acceptance retains the emulator's existing auth bypass; resource
 isolation is not IAM enforcement.
 
+## IAM policies
+
+Instances, disks, images, snapshots, subnetworks and resource policies support
+`getIamPolicy`, `setIamPolicy` and `testIamPermissions`. These return directly, without
+an operation. `setIamPolicy` takes `{"policy": ...}` or the deprecated flat `bindings`
+and `etag`, and a stale `etag` fails with 409. A numeric ID reaches the same policy as
+the resource name. Deleting a resource deletes its policy, including a boot disk removed
+with its instance, so a recreated name starts empty.
+
+Policies are stored but not enforced: Compute calls are never denied because of them, and
+`testIamPermissions` returns every permission requested. Public images have no policies:
+these methods return 403 on them. Other collections return 501.
+
+## Machine types
+
+`machineTypes` serves a fixed catalog with the published vCPU and memory values:
+
+| Series | Types |
+|---|---|
+| E2 | `e2-micro`, `e2-small`, `e2-medium`; `e2-standard` 2 to 32; `e2-highmem` 2 to 16; `e2-highcpu` 2 to 32 |
+| N1 | `n1-standard` 1 to 96 |
+| N2 | `n2-standard` 2 to 128; `n2-highmem` 2 to 128; `n2-highcpu` 2 to 96 |
+| N2D | `n2d-standard` 2 to 224 |
+| T2D | `t2d-standard` 1 to 60 |
+| C3 | `c3-standard` 4 to 176 |
+| G2 | `g2-standard` 4 to 96, each with its NVIDIA L4 count |
+
+`isSharedCpu` is true for the `e2-micro`, `e2-small` and `e2-medium` types. Custom machine
+types and `-lssd` variants are not available, so an instance using one fails with 404.
+
 ## Instances and disks
 
 Zonal instances support insert/get/list/aggregatedList/start/stop/reset/delete,
@@ -80,7 +110,7 @@ Regional `resourcePolicies` support insert/get/list/aggregatedList/patch/delete 
 `retentionPolicy`, `snapshotProperties`). Exactly one policy type is required; other
 types (group placement, workload) fail explicitly. Policies are stored as sent and
 report `status` READY; hourly and weekly `startTime` values such as `9:00` come back
-zero-padded (`09:00`). IAM methods are not implemented.
+zero-padded (`09:00`).
 
 Schedules are validated but never executed, in both modes: no VM is started or stopped
 and no snapshot is taken, even when instances run as

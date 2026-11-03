@@ -3,6 +3,7 @@ package io.floci.gcp.services.compute;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
@@ -14,6 +15,9 @@ import io.floci.gcp.core.storage.ProjectAwareStorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.compute.model.ComputeOperation;
 import io.floci.gcp.services.compute.model.ComputeProject;
+import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -34,6 +38,7 @@ public class ComputeService {
     private static final Pattern METADATA_KEY = Pattern.compile("[a-zA-Z0-9-_]{1,128}");
     private static final int METADATA_VALUE_MAX_BYTES = 262144;
     private static final Set<String> LABELLED = Set.of("instances", "disks", "images", "snapshots", "addresses", "forwardingRules");
+    private static final Set<String> IAM_POLICY_COLLECTIONS = Set.of("instances", "disks", "images", "snapshots", "subnetworks", "resourcePolicies");
     private final ProjectAwareStorageBackend<ComputeProject> store;
     private final EmulatorConfig config;
     private final ServiceRegistry registry;
@@ -43,11 +48,12 @@ public class ComputeService {
     static final Set<String> STARTED = Set.of("PROVISIONING", "STAGING", "RUNNING");
     private final ComputeInstanceRuntime runtime;
     private final ComputeImageCatalog images;
+    private final IamService iamService;
 
     @Inject
     public ComputeService(StorageFactory factory, EmulatorConfig config, ServiceRegistry registry,
                           Instance<ComputeResourceHandler> handlers, LocationCatalog locations,
-                          ComputeInstanceRuntime runtime, ComputeImageCatalog images) {
+                          ComputeInstanceRuntime runtime, ComputeImageCatalog images, IamService iamService) {
         this.store = (ProjectAwareStorageBackend<ComputeProject>) factory.<ComputeProject>create("compute", "compute.json", new TypeReference<Map<String, ComputeProject>>() {});
         this.config = config;
         this.registry = registry;
@@ -55,6 +61,7 @@ public class ComputeService {
         this.locations = locations;
         this.runtime = runtime;
         this.images = images;
+        this.iamService = iamService;
     }
     void start(@Observes StartupEvent event) {
         config.services().compute().regions().ifPresent(allowed -> allowed.stream()
@@ -66,6 +73,21 @@ public class ComputeService {
         runtime.sshKeys(this::instanceSshKeys);
         runtime.cloudInit(this::instanceCloudInit);
         runtime.reconcile(this::instanceStatus, this::instanceGuestMetadata);
+        // The shared IAM endpoint (gRPC and REST) only accepts policies for Compute resources that exist.
+        for (String pattern : List.of("projects/*/zones/*/instances/*", "projects/*/zones/*/disks/*",
+                "projects/*/global/images/*", "projects/*/global/snapshots/*",
+                "projects/*/regions/*/subnetworks/*", "projects/*/regions/*/resourcePolicies/*")) {
+            iamService.registerPolicyResourceResolver(pattern, this::requireIamResourceExists);
+        }
+    }
+    /**
+     * Existence check for the shared IAM store. It reads the last saved state without taking this service's
+     * monitor: delete paths hold the monitor and then the IAM policy lock, so locking here would invert the order.
+     */
+    private void requireIamResourceExists(String resource) {
+        String[] parts = resource.split("/", 3);
+        boolean exists = store.getForProject(parts[1], "state").map(saved -> saved.resources.containsKey(parts[2])).orElse(false);
+        if (!exists) { throw GcpException.notFound("Resource not found: " + resource); }
     }
     /** What the metadata server needs about one instance: copies, so callers cannot change stored state. */
     public record MetadataView(ObjectNode instance, ObjectNode projectMetadata, ObjectNode subnet, String bootImage) {}
@@ -296,6 +318,9 @@ public class ComputeService {
                     .orElseThrow(() -> GcpException.notFound("Image family not found")).deepCopy();
         }
         if (c.collection().equals("instances") && "serialPort".equals(c.action)) { return serialPort(c, query); }
+        if ("getIamPolicy".equals(c.action) && IAM_POLICY_COLLECTIONS.contains(c.collection())) {
+            return JSON.valueToTree(iamService.getPolicy(policyName(project, c.require(c.key()))));
+        }
         if (c.action != null) { throw GcpException.unimplemented("Unsupported read action: " + c.action); }
         if (c.name() != null) { return c.require(c.key()).deepCopy(); }
         List<ObjectNode> resources = c.state.resources.entrySet().stream()
@@ -345,6 +370,11 @@ public class ComputeService {
             result.put("kind", "compute#networkEndpointGroupsListNetworkEndpoints");
             return result;
         }
+        if (verb.equals("POST") && IAM_POLICY_COLLECTIONS.contains(c.collection())
+                && ("setIamPolicy".equals(c.action) || "testIamPermissions".equals(c.action))) {
+            String policyName = policyName(project, c.require(c.key()));
+            return "setIamPolicy".equals(c.action) ? setIamPolicy(policyName, body) : testIamPermissions(policyName, body);
+        }
         String requestId = query.get("requestId");
         String requestKey = requestKey(verb, path, requestId);
         ObjectNode prior = priorOperation(c.state, requestKey);
@@ -382,6 +412,7 @@ public class ComputeService {
                 c.noReferences(resource.path("selfLink").asText(), c.key());
                 c.state.resources.remove(c.key());
                 c.state.diskImages.remove(c.key());
+                if (IAM_POLICY_COLLECTIONS.contains(c.collection())) { c.dropIamPolicy(c.key()); }
                 operationType = "delete";
             } else if (verb.equals("POST") && "setLabels".equals(c.action) && LABELLED.contains(c.collection())) {
                 checkFingerprint(resource, body, "labelFingerprint");
@@ -396,6 +427,51 @@ public class ComputeService {
             } else { throw GcpException.unimplemented("Unsupported Compute method"); }
         }
         return operation(c, resource, operationType, requestId, requestKey);
+    }
+    /** The policy name is canonical, so a numeric ID and a resource name reach the same policy. */
+    private static String policyName(String project, ObjectNode resource) {
+        return "projects/" + project + "/" + localPath(project, resource.path("selfLink").asText());
+    }
+    /** Compute IAM policies live in the shared IAM policy store; the flat body is the API's deprecated form. */
+    private ObjectNode setIamPolicy(String policyName, ObjectNode body) {
+        ObjectNode policy = body.has("policy") ? requireObject(body.get("policy"), "policy") : body;
+        if (policy.has("version") && !policy.get("version").isIntegralNumber()) {
+            throw GcpException.invalidArgument("Policy version must be an integer");
+        }
+        if (policy.has("etag") && !policy.get("etag").isTextual()) {
+            throw GcpException.invalidArgument("Policy etag must be a string");
+        }
+        objectArray(policy, "bindings");
+        Map<String, Object> values = JSON.convertValue(policy, new TypeReference<Map<String, Object>>() {});
+        StoredPolicy stored = IamPolicyCodec.fromJsonMap(values);
+        return JSON.valueToTree(iamService.setPolicy(policyName, stored));
+    }
+    private ObjectNode testIamPermissions(String policyName, ObjectNode body) {
+        List<String> requested = new ArrayList<>();
+        body.path("permissions").forEach(permission -> requested.add(permission.asText()));
+        ObjectNode result = object();
+        ArrayNode granted = result.putArray("permissions");
+        iamService.testPermissions(policyName, requested).forEach(granted::add);
+        return result;
+    }
+    /**
+     * Each policy goes away under its IAM policy lock together with the saved resource removal, so no policy write
+     * can land between the two and survive for a recreated name. All the locks are taken up front, in the shared
+     * order, because other IAM calls hold several of them too.
+     */
+    private void saveDroppingPolicies(String project, ComputeProject state, List<String> policies) {
+        iamService.withPolicyLocks(policies, () -> {
+            saveDroppingLockedPolicies(project, state, policies);
+            return null;
+        });
+    }
+    private void saveDroppingLockedPolicies(String project, ComputeProject state, List<String> policies) {
+        if (policies.isEmpty()) {
+            save(project, state);
+            return;
+        }
+        iamService.deleteResourceAndPolicy(policies.getFirst(),
+                () -> saveDroppingLockedPolicies(project, state, policies.subList(1, policies.size())));
     }
     public synchronized ObjectNode project(String project) {
         Context c = context(project, "global/operations", state(project));
@@ -490,7 +566,7 @@ public class ComputeService {
         if (c.scope().startsWith("regions/")) { op.response.put("region", c.link(c.scope())); }
         if (requestId != null) { op.response.put("clientOperationId", requestId); c.state.requests.put(requestKey, operationKey); }
         c.state.operations.put(operationKey, op);
-        save(c.project, c.state);
+        saveDroppingPolicies(c.project, c.state, c.droppedPolicies);
         if (op.awaitRuntime) { runtime.submit(operationKey, List.copyOf(c.intents)); }
         return op.response.deepCopy();
     }
@@ -634,6 +710,7 @@ public class ComputeService {
         public final ComputeProject state;
         private Map<String, String> finalStates = new LinkedHashMap<>();
         private List<ComputeInstanceRuntime.Intent> intents = new ArrayList<>();
+        private List<String> droppedPolicies = new ArrayList<>();
         private Map<String, String> query = Map.of();
         Context(String project, String scope, String collection, String name, String action, ComputeProject state) {
             this.project = project; this.scope = scope; this.collection = collection; this.name = name; this.action = action; this.state = state;
@@ -647,10 +724,13 @@ public class ComputeService {
         public ObjectNode object() { return ComputeService.object(); }
         public String link(String path) { return "https://www.googleapis.com/compute/v1/projects/" + project + "/" + path; }
         public String path(String ref) { return localPath(project, ref); }
+        /** Removes the IAM policy of a resource this mutation deletes, once the mutation is saved. */
+        public void dropIamPolicy(String key) { droppedPolicies.add("projects/" + project + "/" + key); }
         public Context child(String path) {
             Context child = context(project, path, state);
             child.finalStates = finalStates;
             child.intents = intents;
+            child.droppedPolicies = droppedPolicies;
             return child;
         }
         public ObjectNode require(String ref) {
@@ -697,12 +777,10 @@ public class ComputeService {
                 ports = ComputeFirewallPorts.forInstance(state, instance);
                 image = bootDockerImage(instance);
                 String machine = instance.path("machineType").asText();
-                machine = machine.substring(machine.lastIndexOf('/') + 1);
-                try {
-                    cpus = Integer.parseInt(machine.substring(machine.lastIndexOf('-') + 1));
-                    memoryMb = cpus * 4096;
-                } catch (NumberFormatException e) {
-                    cpus = 0;
+                Optional<ComputeCatalog.MachineShape> shape = ComputeCatalog.machineShape(machine.substring(machine.lastIndexOf('/') + 1));
+                if (shape.isPresent()) {
+                    cpus = shape.get().cpus();
+                    memoryMb = shape.get().memoryMb();
                 }
             }
             String zone = instance.path("zone").asText(scope);

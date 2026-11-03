@@ -16,9 +16,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
@@ -313,6 +318,83 @@ class CloudKmsServiceTest {
         StoredCryptoKey stored = service.getCryptoKey(key.getName());
         assertNull(stored.getLabels());
         assertNull(stored.getRotationPeriod());
+    }
+
+    @Test
+    void aScheduleUpdateWaitsForALabelsUpdateAndBothLand() throws Exception {
+        StoredCryptoKey key = symmetricKey("serialized");
+        service.updateCryptoKey(key.getName(), new CloudKmsService.CryptoKeyFields(
+                        Duration.ofDays(30), Instant.parse("2027-01-01T00:00:00Z"), null, null), null,
+                Set.of("rotation_period", "next_rotation_time"));
+
+        runUpdateWhileALabelsUpdateHoldsTheKey(key.getName(), () -> service.updateCryptoKey(key.getName(),
+                new CloudKmsService.CryptoKeyFields(
+                        Duration.ofDays(60), Instant.parse("2028-01-01T00:00:00Z"), null, null), null,
+                Set.of("rotation_period", "next_rotation_time")));
+
+        StoredCryptoKey stored = service.getCryptoKey(key.getName());
+        assertEquals(Map.of("team", "a"), stored.getLabels());
+        assertEquals("5184000s", stored.getRotationPeriod());
+        assertEquals("2028-01-01T00:00:00Z", stored.getNextRotationTime());
+    }
+
+    @Test
+    void anAlgorithmUpdateWaitsForALabelsUpdateAndBothLand() throws Exception {
+        service.createKeyRing(LOCATION, "kr");
+        StoredCryptoKey key = service.createCryptoKey(LOCATION + "/keyRings/kr", "signer", "ASYMMETRIC_SIGN",
+                "EC_SIGN_P256_SHA256", false);
+
+        runUpdateWhileALabelsUpdateHoldsTheKey(key.getName(), () -> service.updateCryptoKey(key.getName(),
+                CloudKmsService.CryptoKeyFields.NONE, "RSA_SIGN_PKCS1_2048_SHA256",
+                Set.of("version_template.algorithm")));
+
+        StoredCryptoKey stored = service.getCryptoKey(key.getName());
+        assertEquals(Map.of("team", "a"), stored.getLabels());
+        assertEquals("RSA_SIGN_PKCS1_2048_SHA256", stored.getAlgorithm());
+    }
+
+    /**
+     * Starts a labels-only update of the key and holds it after it has read the stored key and before it
+     * writes. Runs {@code otherUpdate} on a second thread, requires that thread to block on the key while
+     * the labels update is held, then lets both finish.
+     */
+    private void runUpdateWhileALabelsUpdateHoldsTheKey(String name, Runnable otherUpdate) throws Exception {
+        CountDownLatch labelsUpdateReadTheKey = new CountDownLatch(1);
+        CountDownLatch releaseLabelsUpdate = new CountDownLatch(1);
+        Map<String, String> labels = new HashMap<>(Map.of("team", "a")) {
+            @Override
+            public boolean isEmpty() {
+                labelsUpdateReadTheKey.countDown();
+                try {
+                    assertTrue(releaseLabelsUpdate.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                return super.isEmpty();
+            }
+        };
+        CompletableFuture<StoredCryptoKey> labelsUpdate = CompletableFuture.supplyAsync(() ->
+                service.updateCryptoKey(name,
+                        new CloudKmsService.CryptoKeyFields(null, null, null, labels), null, Set.of("labels")));
+        assertTrue(labelsUpdateReadTheKey.await(10, TimeUnit.SECONDS));
+
+        FutureTask<Void> other = new FutureTask<>(otherUpdate, null);
+        Thread otherThread = new Thread(other, "other-update");
+        otherThread.start();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (otherThread.getState() != Thread.State.BLOCKED && !other.isDone()
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(Thread.State.BLOCKED, otherThread.getState(),
+                    "the other update must wait for the labels update to release the key");
+        } finally {
+            releaseLabelsUpdate.countDown();
+        }
+        labelsUpdate.get(10, TimeUnit.SECONDS);
+        other.get(10, TimeUnit.SECONDS);
     }
 
     @Test

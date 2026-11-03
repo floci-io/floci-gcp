@@ -128,17 +128,11 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     @Override
     public void createCryptoKey(CreateCryptoKeyRequest request, StreamObserver<CryptoKey> responseObserver) {
         LOG.infof("createCryptoKey parent=%s cryptoKeyId=%s", request.getParent(), request.getCryptoKeyId());
-        try {
-            CryptoKey input = request.getCryptoKey();
-            String algorithm = input.getVersionTemplate().getAlgorithm().name();
-            StoredCryptoKey stored = service.createCryptoKey(request.getParent(), request.getCryptoKeyId(),
-                    input.getPurpose().name(), algorithm, request.getSkipInitialVersionCreation(),
-                    cryptoKeyFields(input), input.getImportOnly());
-            responseObserver.onNext(toProto(stored));
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            GcpGrpcController.grpcError(responseObserver, e);
-        }
+        CryptoKey input = request.getCryptoKey();
+        // The initial version may be a 3072/4096-bit RSA key, up to ~1.5 s to generate: keep it off the event loop.
+        runBlocking(responseObserver, () -> toProto(service.createCryptoKey(request.getParent(),
+                request.getCryptoKeyId(), input.getPurpose().name(), input.getVersionTemplate().getAlgorithm().name(),
+                request.getSkipInitialVersionCreation(), cryptoKeyFields(input), input.getImportOnly())));
     }
 
     @Override
@@ -207,12 +201,8 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     public void createCryptoKeyVersion(CreateCryptoKeyVersionRequest request,
             StreamObserver<CryptoKeyVersion> responseObserver) {
         LOG.infof("createCryptoKeyVersion parent=%s", request.getParent());
-        try {
-            responseObserver.onNext(toProto(service.createCryptoKeyVersion(request.getParent())));
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            GcpGrpcController.grpcError(responseObserver, e);
-        }
+        // Same as createCryptoKey: the new version may be a large RSA key.
+        runBlocking(responseObserver, () -> toProto(service.createCryptoKeyVersion(request.getParent())));
     }
 
     @Override

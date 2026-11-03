@@ -888,6 +888,19 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void generateTimestampArrayBecomesATimestampSeries() {
+        assertEquals("SELECT (CASE WHEN (INTERVAL 1 DAY) = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
+                + " ELSE CAST(generate_series(CAST(a AS TIMESTAMPTZ), CAST(b AS TIMESTAMPTZ), INTERVAL 1 DAY)"
+                + " AS TIMESTAMPTZ[]) END) AS t FROM \"ds\".\"t\"",
+                sql("SELECT GENERATE_TIMESTAMP_ARRAY(a, b, INTERVAL 1 DAY) AS t FROM ds.t"));
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT GENERATE_TIMESTAMP_ARRAY(a, b) FROM ds.t")).getReason(),
+                "the step is required");
+        assertEquals("invalidQuery", assertThrows(GcpException.class,
+                () -> sql("SELECT GENERATE_TIMESTAMP_ARRAY(a, b, INTERVAL 1 DAY, c) FROM ds.t")).getReason());
+    }
+
+    @Test
     void structDotStarBecomesUnnest() {
         assertEquals("SELECT unnest(t.s), t.n FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.s.*, t.n FROM ds.t t"));
         assertEquals("SELECT unnest(t.s.inr) FROM \"ds\".\"t\" AS \"t\"", sql("SELECT t.s.inr.* FROM ds.t t"));

@@ -26,7 +26,7 @@ which mode is active and the supported service list.
 | GCS objects | Supported REST JSON and XML reads, writes, updates, deletes, listing, compose, copy, rewrite, move, restore, resumable uploads, and XML multipart uploads |
 | Pub/Sub | REST JSON and gRPC topic, subscription, snapshot, and policy methods; `testIamPermissions` filters its response |
 | Cloud Scheduler | REST JSON and gRPC job create/get/list/update/delete/pause/resume/run; project policy inheritance. See [Scheduler IAM enforcement](scheduler.md#iam-enforcement) |
-| Cloud Logging sinks | REST JSON and gRPC create/get/list/update/delete for project and organization sinks. Folder and billing-account parents and sink IAM policy methods fail closed for evaluated callers. See the [Cloud Logging guide](logging.md) |
+| Cloud Logging sinks | REST JSON and gRPC create/get/list/update/delete for project and organization sinks. Folder and billing-account parents fail closed for evaluated callers; sink IAM policy methods fail closed in enforce mode. See [Sink management IAM](logging.md#sink-management-iam) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `signBlob`, and `signJwt` |
 | IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
@@ -41,7 +41,7 @@ For plaintext gRPC, Google credentials may refuse an insecure channel before the
 request reaches the emulator; use a fixed authorization header with the SDK's
 no-credentials provider, or use the emulator's TLS transport.
 Anonymous requests and external credentials bypass Resource Manager, Cloud Run,
-Secret Manager, Pub/Sub, and IAM service-account evaluation.
+Cloud Logging sinks, Secret Manager, Pub/Sub, and IAM service-account evaluation.
 GCS evaluation treats those callers as anonymous so `allUsers` policies
 work. In enforce mode, an unknown or expired Floci-issued token receives
 `UNAUTHENTICATED`; an evaluated caller without a matching grant receives

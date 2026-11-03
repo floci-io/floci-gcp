@@ -86,6 +86,20 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         assertEquals("debian:12", intents.getAllValues().getFirst().getFirst().image());
     }
 
+    @Test void limitsFollowTheMachineTypeCatalog() throws Exception {
+        String root = network();
+        Map<String, Object> highcpu = new HashMap<>(vm("vm", null));
+        highcpu.put("machineType", "zones/us-central1-a/machineTypes/e2-highcpu-2");
+        done(root, post(root + ZONE + "/instances", highcpu));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Intent>> intents = ArgumentCaptor.forClass(List.class);
+        verify(runtime).submit(anyString(), intents.capture());
+        Intent launch = intents.getValue().getFirst();
+        assertEquals(2, launch.cpus());
+        assertEquals(2048, launch.memoryMb());
+    }
+
     @Test void publicBootImagesPickTheirFamilysDockerImage() throws Exception {
         String root = network();
         done(root, post(root + ZONE + "/instances", vm("family-vm", "projects/debian-cloud/global/images/family/debian-12")));

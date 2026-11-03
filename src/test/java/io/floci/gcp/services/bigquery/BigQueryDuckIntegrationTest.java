@@ -376,6 +376,49 @@ class BigQueryDuckIntegrationTest {
                 .body("error.message", containsString("Array index 5 is out of bounds (overflow)"));
     }
 
+    @Test
+    @Order(5)
+    void yearElementsDropLeadingZerosLikeBigQuery() {
+        query(Map.of("query", "SELECT d, FORMAT_DATE('%Y', d) e0, FORMAT_DATE('%G', d) e1, FORMAT_DATE('%C', d) e2, FORMAT_DATE('%y', d) e3, FORMAT_DATE('%g', d) e4, FORMAT_DATE('%F', d) e5, FORMAT_DATE('%c', d) e6, FORMAT_DATE('%x', d) e7, FORMAT_DATE('%D', d) e8, FORMAT_DATE('%E4Y', d) e9 FROM UNNEST([DATE '0009-01-05', DATE '0099-01-02', DATE '0999-12-31', DATE '1000-01-01', DATE '2024-03-05']) d ORDER BY d",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("0009-01-05", "9", "9", "0", "09", "09", "9-01-05", "%c", "01/05/09", "01/05/09", "0009"),
+                        List.of("0099-01-02", "99", "99", "0", "99", "99", "99-01-02", "%c", "01/02/99", "01/02/99", "0099"),
+                        List.of("0999-12-31", "999", "1000", "9", "99", "00", "999-12-31", "%c", "12/31/99", "12/31/99", "0999"),
+                        List.of("1000-01-01", "1000", "1000", "10", "00", "00", "1000-01-01", "%c", "01/01/00", "01/01/00", "1000"),
+                        List.of("2024-03-05", "2024", "2024", "20", "24", "24", "2024-03-05", "%c", "03/05/24", "03/05/24", "2024"))));
+        query(Map.of("query", "SELECT FORMAT_TIMESTAMP('%Y', t) e0, FORMAT_TIMESTAMP('%G', t) e1, FORMAT_TIMESTAMP('%C', t) e2, FORMAT_TIMESTAMP('%y', t) e3, FORMAT_TIMESTAMP('%g', t) e4, FORMAT_TIMESTAMP('%F', t) e5, FORMAT_TIMESTAMP('%c', t) e6, FORMAT_TIMESTAMP('%x', t) e7, FORMAT_TIMESTAMP('%D', t) e8, FORMAT_TIMESTAMP('%E4Y', t) e9 FROM UNNEST([TIMESTAMP '0099-01-02 03:04:05+00', TIMESTAMP '0009-01-05 03:04:05+00']) t ORDER BY t",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("9", "9", "0", "09", "09", "9-01-05", "Mon Jan  5 03:04:05 9", "01/05/09", "01/05/09", "0009"),
+                        List.of("99", "99", "0", "99", "99", "99-01-02", "Fri Jan  2 03:04:05 99", "01/02/99", "01/02/99", "0099"))));
+        query(Map.of("query", "SELECT FORMAT_DATETIME('%Y', DATETIME '0099-01-02 03:04:05') e0, FORMAT_DATETIME('%G', DATETIME '0099-01-02 03:04:05') e1, FORMAT_DATETIME('%C', DATETIME '0099-01-02 03:04:05') e2, FORMAT_DATETIME('%y', DATETIME '0099-01-02 03:04:05') e3, FORMAT_DATETIME('%g', DATETIME '0099-01-02 03:04:05') e4, FORMAT_DATETIME('%F', DATETIME '0099-01-02 03:04:05') e5, FORMAT_DATETIME('%c', DATETIME '0099-01-02 03:04:05') e6, FORMAT_DATETIME('%x', DATETIME '0099-01-02 03:04:05') e7, FORMAT_DATETIME('%D', DATETIME '0099-01-02 03:04:05') e8, FORMAT_DATETIME('%E4Y', DATETIME '0099-01-02 03:04:05') e9", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("99", "99", "0", "99", "99", "99-01-02", "Fri Jan  2 03:04:05 99", "01/02/99", "01/02/99", "0099")));
+        query(Map.of("query", "SELECT f, FORMAT_DATE(f, DATE '0099-01-02') v FROM UNNEST(['%Y', '%G', '%C', '%y', '%g', '%F', '%c', '%x', '%D', '%E4Y']) f WITH OFFSET o ORDER BY o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%Y", "99"),
+                        List.of("%G", "99"),
+                        List.of("%C", "0"),
+                        List.of("%y", "99"),
+                        List.of("%g", "99"),
+                        List.of("%F", "99-01-02"),
+                        List.of("%c", "%c"),
+                        List.of("%x", "01/02/99"),
+                        List.of("%D", "01/02/99"),
+                        List.of("%E4Y", "0099"))));
+        query(Map.of("query", "SELECT FORMAT_DATE('%E10S|%E9S|%E007S', DATE '2024-03-05') v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("00.0000000000|%E9S|00.0000000"));
+        query(Map.of("query", "SELECT f, FORMAT_DATE(f, DATE '2024-03-05') v FROM UNNEST(['%E0S', '%E7S', '%E9S', '%E10S', '%E007S', '%E07S', '%E20S', '%E100S', '%E00S']) f WITH OFFSET o ORDER BY o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("%E0S", "%E0S"), List.of("%E7S", "%E7S"), List.of("%E9S", "%E9S"),
+                        List.of("%E10S", "00.0000000000"), List.of("%E007S", "00.0000000"), List.of("%E07S", "00.0000000"),
+                        List.of("%E20S", "00.000000000000000000"), List.of("%E100S", "00.000000000000000000"), List.of("%E00S", "00"))));
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

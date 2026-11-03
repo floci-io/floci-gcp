@@ -5,12 +5,21 @@ rights on the topic. It used to 404 even though notificationConfigs itself worke
 that setup path.
 """
 
+import json
+import urllib.request
 
-def test_project_exposes_its_storage_service_account(storage_client, project_id):
+
+def _project_number(endpoint, project_id):
+    with urllib.request.urlopen(f"{endpoint}/v1/projects/{project_id}") as response:
+        return json.load(response)["projectNumber"]
+
+
+def test_project_exposes_its_storage_service_account(storage_client, endpoint, project_id):
     email = storage_client.get_service_account_email()
 
-    assert project_id in email
-    assert email.endswith("gs-project-accounts.iam.gserviceaccount.com")
+    # GCP names the Cloud Storage agent by project number, not project ID.
+    number = _project_number(endpoint, project_id)
+    assert email == f"service-{number}@gs-project-accounts.iam.gserviceaccount.com"
 
 
 def test_service_account_is_stable_across_calls(storage_client):

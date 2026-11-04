@@ -2563,8 +2563,25 @@ final class SqlDialectTranslator {
             }
         }
         int aliasNumber = 0;
+        // BigQuery suffixes a duplicate output name in select-list order: the first use keeps the name.
+        Set<String> claimedNames = new HashSet<>();
+        boolean renamesReplacedField = false;
         for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
             String outputName = outputNames.get(itemIndex);
+            if (itemIndex == targetItem) {
+                for (String replaced : replaceTargetNames(replaceOpen, replaceClose)) {
+                    String key = replaced.toLowerCase(Locale.ROOT);
+                    if (excludedNames.contains(key) || claimedNames.add(key)) {
+                        continue;
+                    }
+                    String renameTo = suffixedName(replaced, outputTakenNames);
+                    structStarTakenNames.add(renameTo.toLowerCase(Locale.ROOT));
+                    renamesReplacedField = true;
+                    outputRenames.add(DuckTypes.quoteIdentifier(replaced) + " AS "
+                            + DuckTypes.quoteIdentifier(renameTo));
+                }
+                continue;
+            }
             if (outputName == null || !collidingNames.contains(outputName.toLowerCase(Locale.ROOT))) {
                 continue;
             }
@@ -2577,8 +2594,9 @@ final class SqlDialectTranslator {
             projectionAliases.put(itemIndex, projectionAlias);
             String renameTo = outputName;
             if (replacedNames.contains(renameTo.toLowerCase(Locale.ROOT))
-                    && !excludedNames.contains(renameTo.toLowerCase(Locale.ROOT))) {
-                // The star keeps the replaced field under its own name, so the item needs BigQuery's suffix.
+                    && !excludedNames.contains(renameTo.toLowerCase(Locale.ROOT))
+                    && !claimedNames.add(renameTo.toLowerCase(Locale.ROOT))) {
+                // The name is already an earlier output, so this item needs BigQuery's suffix.
                 renameTo = suffixedName(renameTo, outputTakenNames);
                 structStarTakenNames.add(renameTo.toLowerCase(Locale.ROOT));
             }
@@ -2644,7 +2662,7 @@ final class SqlDialectTranslator {
             rewritten.addAll(replacement);
             rewritten.add(Token.raw(")"));
         }
-        if (!outputRenames.isEmpty()) {
+        if (!outputRenames.isEmpty() && !renamesReplacedField) {
             rewritten.add(Token.raw(" RENAME (" + String.join(", ", outputRenames) + ")"));
         }
         // DuckDB cannot unnest a scalar subquery, so an operand that is itself a query is materialized as a
@@ -2739,6 +2757,11 @@ final class SqlDialectTranslator {
         if (!tail.outside().isEmpty()) {
             rewritten.add(Token.raw(" "));
             rewritten.addAll(tail.outside());
+        }
+        if (renamesReplacedField) {
+            // DuckDB cannot REPLACE and RENAME one column of a star, so the renames apply one level up.
+            rewritten.addFirst(Token.raw("SELECT * RENAME (" + String.join(", ", outputRenames) + ") FROM ("));
+            rewritten.add(Token.raw(") AS " + DuckTypes.quoteIdentifier(structStarName("_floci_renamed"))));
         }
         tokens.subList(select, end).clear();
         tokens.addAll(select, rewritten);
@@ -4637,6 +4660,15 @@ final class SqlDialectTranslator {
     /** The field names a REPLACE list targets, from the {@code AS <name>} of each of its entries. */
     private Set<String> replaceTargets(int open, int close) {
         Set<String> names = new HashSet<>();
+        for (String name : replaceTargetNames(open, close)) {
+            names.add(name.toLowerCase(Locale.ROOT));
+        }
+        return names;
+    }
+
+    /** The fields a REPLACE list names, as written and in order. */
+    private List<String> replaceTargetNames(int open, int close) {
+        List<String> names = new ArrayList<>();
         if (open < 0) {
             return names;
         }
@@ -4657,7 +4689,7 @@ final class SqlDialectTranslator {
             }
             int name = nextSignificant(i + 1, close);
             if (name >= 0 && isName(tokens.get(name))) {
-                names.add(tokens.get(name).identifierText().toLowerCase(Locale.ROOT));
+                names.add(tokens.get(name).identifierText());
             }
         }
         return names;

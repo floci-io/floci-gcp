@@ -531,6 +531,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   columns in replacements, aggregate replacements with `GROUP BY t.s` or a named key such as
   `GROUP BY t.id`, and a non-aggregate
   struct star with both `GROUP BY ALL` and `QUALIFY` can fail with `invalidQuery`.
+  Under a positional `GROUP BY` or `GROUP BY ALL`, a sibling that shares a replaced field's name
+  fails with `Duplicate column names in the result are not supported` instead of taking BigQuery's
+  `_1` suffix.
   Without `REPLACE` or `DISTINCT`, a bare `ORDER BY` name can still bind to a same-named
   source column instead of the expanded field.
   See the GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)

@@ -312,6 +312,50 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void structStarReplacementSuffixesDuplicateNamesInSelectOrder() {
+        Map<String, List<List<String>>> expected = new LinkedHashMap<>();
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT t.s.* REPLACE(10 AS a), 99 AS a FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1"), List.of("10", "99")));
+        expected.put("SELECT 99 AS a, 98 AS a_1, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1", "a_2"), List.of("99", "98", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(10 AS a), 97 AS a FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1", "a_2"), List.of("99", "10", "97")));
+        expected.put("SELECT 99 AS A, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("A", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* EXCEPT(b) REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t",
+                List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY 2 LIMIT 1",
+                List.of(List.of("a", "a_1"), List.of("99", "-2")));
+        expected.put("WITH c AS (SELECT 99 AS a, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t)"
+                + " SELECT * FROM c", List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a) FROM (SELECT STRUCT(1 AS a) s"
+                + " UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY 2 DESC LIMIT 1 OFFSET 1",
+                List.of(List.of("a", "a_1"), List.of("99", "-2")));
+        expected.put("SELECT DISTINCT 99 AS a, t.s.* REPLACE(t.s.a * 0 AS a) FROM (SELECT STRUCT(1 AS a) s"
+                + " UNION ALL SELECT STRUCT(2 AS a)) t", List.of(List.of("a", "a_1"), List.of("99", "0")));
+        expected.put("SELECT t.id AS a, t.s.* REPLACE(t.id + 1 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t"
+                + " WHERE t.id > 0", List.of(List.of("a", "a_1"), List.of("5", "6")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x",
+                List.of(List.of("a", "a_1", "x"), List.of("99", "7", "2")));
+        for (Map.Entry<String, List<List<String>>> entry : expected.entrySet()) {
+            query(Map.of("query", entry.getKey(), "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(entry.getValue().get(0)))
+                    .body("rows[0].f.v", equalTo(entry.getValue().get(1)));
+        }
+        query(Map.of("query", "SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY t.s.a DESC",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows.f.v", equalTo(List.of(List.of("99", "-2"), List.of("99", "-1"))));
+    }
+
+    @Test
+    @Order(2)
     void structStarReplacementPreservesAnOuterColumnShadowedByAField() {
         query(Map.of("query", """
                 SELECT ARRAY(

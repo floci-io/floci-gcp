@@ -80,7 +80,7 @@ public class KafkaService {
                 .enabled(config.services().kafka().enabled())
                 .storageKey("kafka")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(KafkaController.class, KafkaConnectController.class)
+                .resourceClasses(KafkaController.class, KafkaConnectController.class, SchemaRegistryController.class)
                 .api("managedkafka.googleapis.com", "Managed Service for Apache Kafka API")
                 .build());
         if (!config.services().kafka().mock()) {

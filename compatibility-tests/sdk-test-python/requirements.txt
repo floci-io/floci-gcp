@@ -5,6 +5,7 @@ google-cloud-datastore>=2.19.0
 google-cloud-secret-manager>=2.20.0
 google-cloud-logging>=3.0.0
 google-cloud-kms>=2.21.0
+google-cloud-managedkafka-schemaregistry>=0.4.2
 cryptography>=42.0.0
 pytest>=8.0.0
 pytest-timeout>=2.3.0

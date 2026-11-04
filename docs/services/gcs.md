@@ -357,7 +357,10 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 **Project resources (REST JSON):**
 
 - `GetServiceAccount` (`/storage/v1/projects/{project}/serviceAccount`), the principal
-  Cloud Storage publishes as; grant it publish rights before wiring notifications
+  Cloud Storage publishes as; grant it publish rights before wiring notifications. It is
+  `service-{projectNumber}@gs-project-accounts.iam.gserviceaccount.com`, the same address
+  Service Usage's `generateServiceIdentity` returns for `storage.googleapis.com`, and an
+  unknown project number returns 400 with `Unknown project id: {project}` and reason `invalid`
 - `hmacKeys` create/list/get/update/delete (`/storage/v1/projects/{project}/hmacKeys`), the
   credentials S3-compatible clients present to GCS; the secret is returned once on create,
   and a key must be INACTIVE before it can be deleted

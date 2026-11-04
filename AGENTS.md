@@ -615,6 +615,7 @@ Pre-compiled stub artifacts used (do not add raw `.proto` codegen), all under `c
 - `proto-google-cloud-functions-v2`
 - `proto-google-cloud-run-v2`
 - `proto-google-cloud-service-usage-v1`
+- `proto-google-cloud-service-usage-v1beta1`
 - `proto-google-common-protos`
 
 Source of truth: the `com.google.api.grpc` dependencies in `pom.xml`. Update this list when you add or remove one.

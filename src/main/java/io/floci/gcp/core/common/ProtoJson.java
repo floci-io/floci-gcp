@@ -1,5 +1,6 @@
 package io.floci.gcp.core.common;
 
+import com.google.api.serviceusage.v1beta1.ServiceIdentity;
 import com.google.cloud.kms.v1.LocationMetadata;
 import com.google.cloud.run.v2.Execution;
 import com.google.cloud.run.v2.Instance;
@@ -42,6 +43,7 @@ public final class ProtoJson {
             .add(com.google.api.serviceusage.v1.DisableServiceResponse.getDescriptor())
             .add(com.google.api.serviceusage.v1.BatchEnableServicesResponse.getDescriptor())
             .add(com.google.api.serviceusage.v1.OperationMetadata.getDescriptor())
+            .add(ServiceIdentity.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()

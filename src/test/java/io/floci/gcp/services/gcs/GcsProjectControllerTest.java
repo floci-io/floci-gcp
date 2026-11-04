@@ -1,5 +1,6 @@
 package io.floci.gcp.services.gcs;
 
+import io.floci.gcp.core.common.ProjectNumbers;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -16,6 +17,26 @@ class GcsProjectControllerTest {
                 .then().statusCode(200)
                 .body("kind", equalTo("storage#serviceAccount"))
                 .body("email_address", containsString("@"));
+    }
+
+    @Test
+    void serviceAccountIsNamedByProjectNumber() {
+        String number = ProjectNumbers.of("test-project");
+
+        given().when().get("/storage/v1/projects/test-project/serviceAccount")
+                .then().statusCode(200)
+                .body("email_address", equalTo("service-" + number + "@gs-project-accounts.iam.gserviceaccount.com"));
+        given().when().get("/storage/v1/projects/" + number + "/serviceAccount")
+                .then().statusCode(200)
+                .body("email_address", equalTo("service-" + number + "@gs-project-accounts.iam.gserviceaccount.com"));
+    }
+
+    @Test
+    void serviceAccountOnUnknownProjectNumberReturnsInvalid() {
+        given().when().get("/storage/v1/projects/00000000000/serviceAccount")
+                .then().statusCode(400)
+                .body("error.message", equalTo("Unknown project id: 00000000000"))
+                .body("error.errors[0].reason", equalTo("invalid"));
     }
 
     @Test

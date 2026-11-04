@@ -11,7 +11,9 @@ import com.google.api.serviceusage.v1.OperationMetadata;
 import com.google.api.serviceusage.v1.Service;
 import com.google.api.serviceusage.v1.ServiceConfig;
 import com.google.api.serviceusage.v1.State;
+import com.google.api.serviceusage.v1beta1.ServiceIdentity;
 import com.google.longrunning.Operation;
+import com.google.protobuf.Empty;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
@@ -32,6 +34,10 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -48,6 +54,22 @@ public class ServiceUsageService implements ServiceStateProvider {
     private static final int MAX_PAGE_SIZE = 200;
     private static final int MAX_BATCH_ENABLE = 20;
     private static final int MAX_BATCH_GET = 30;
+
+    private static final String GOOGLEAPIS_SUFFIX = ".googleapis.com";
+    private static final BigInteger UNIQUE_ID_BASE = new BigInteger("100000000000000000000");
+    private static final BigInteger UNIQUE_ID_RANGE = new BigInteger("900000000000000000000");
+
+    /**
+     * Service agents whose domain is not {@code gcp-sa-<service>.iam.gserviceaccount.com}, from
+     * https://cloud.google.com/iam/docs/service-agents.
+     */
+    private static final Map<String, String> SERVICE_AGENT_DOMAINS = Map.of(
+            "compute.googleapis.com", "compute-system.iam.gserviceaccount.com",
+            "container.googleapis.com", "container-engine-robot.iam.gserviceaccount.com",
+            "storage.googleapis.com", "gs-project-accounts.iam.gserviceaccount.com",
+            "run.googleapis.com", "serverless-robot-prod.iam.gserviceaccount.com",
+            "cloudfunctions.googleapis.com", "gcf-admin-robot.iam.gserviceaccount.com",
+            "sqladmin.googleapis.com", "gcp-sa-cloud-sql.iam.gserviceaccount.com");
 
     private final StorageBackend<String, String> stateStore;
     private final LongRunningOperationsService operations;
@@ -96,7 +118,8 @@ public class ServiceUsageService implements ServiceStateProvider {
                 .enabled(config.services().serviceusage().enabled())
                 .storageKey("serviceusage")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(ServiceUsageController.class, ServiceUsageOperationsController.class)
+                .resourceClasses(ServiceUsageController.class, ServiceUsageOperationsController.class,
+                        ServiceUsageBetaController.class, ServiceUsageBetaOperationsController.class)
                 .api("serviceusage.googleapis.com", "Service Usage API")
                 .build());
     }
@@ -107,6 +130,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Operation enable(String project, String serviceId) {
+        requireProject(project);
         requireServiceId(serviceId);
         Service service = writeState(project, serviceId, State.ENABLED);
         LOG.infof("enable service name=%s", service.getName());
@@ -114,6 +138,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Operation disable(String project, String serviceId) {
+        requireProject(project);
         requireServiceId(serviceId);
         String name = serviceName(project, serviceId);
         if (readState(project, serviceId) != State.ENABLED) {
@@ -126,11 +151,13 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Service get(String project, String serviceId) {
+        requireProject(project);
         requireServiceId(serviceId);
         return buildService(project, serviceId, readState(project, serviceId));
     }
 
     public ListServicesResponse list(String project, int pageSize, String pageToken, String filter) {
+        requireProject(project);
         State wanted = parseFilter(filter);
         if (pageSize > MAX_PAGE_SIZE) {
             throw GcpException.invalidArgument("Requested page size cannot exceed " + MAX_PAGE_SIZE + ".");
@@ -156,6 +183,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Operation batchEnable(String project, String body) {
+        requireProject(project);
         BatchEnableServicesRequest request = ProtoJson.merge(body, BatchEnableServicesRequest.newBuilder()).build();
         List<String> serviceIds = request.getServiceIdsList();
         if (serviceIds.isEmpty()) {
@@ -178,6 +206,7 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public BatchGetServicesResponse batchGet(String project, List<String> names) {
+        requireProject(project);
         if (names == null || names.isEmpty()) {
             throw GcpException.invalidArgument("names must not be empty.");
         }
@@ -196,6 +225,62 @@ public class ServiceUsageService implements ServiceStateProvider {
             response.addServices(buildService(project, serviceId, readState(project, serviceId)));
         }
         return response.build();
+    }
+
+    /**
+     * The service agent of {@code serviceId} in the project, as v1beta1
+     * {@code services.generateServiceIdentity} returns it: an already-completed operation whose
+     * response is the agent's email and a unique ID that stays the same on every call.
+     */
+    public Operation generateServiceIdentity(String project, String serviceId) {
+        String projectNumber = requireProjectNumber(project);
+        requireServiceId(serviceId);
+        String email = "service-" + projectNumber + "@" + serviceAgentDomain(serviceId);
+        ServiceIdentity identity = ServiceIdentity.newBuilder()
+                .setEmail(email)
+                .setUniqueId(uniqueId(email))
+                .build();
+        LOG.infof("generate service identity service=%s email=%s", serviceName(project, serviceId), email);
+        return operations.done("", identity, Empty.getDefaultInstance());
+    }
+
+    /**
+     * Fails the way GCP does for a project the caller cannot see: an unknown project number, or
+     * any unknown project in strict mode. Without a registry (unit tests) every project exists.
+     */
+    private void requireProject(String project) {
+        if (projectRegistry != null) {
+            projectRegistry.require(project);
+        }
+    }
+
+    /** {@link #requireProject}, returning the project's number. */
+    private String requireProjectNumber(String project) {
+        if (projectRegistry != null) {
+            return projectRegistry.require(project).getProjectNumber();
+        }
+        return ProjectRegistry.isNumber(project) ? project : ProjectNumbers.of(project);
+    }
+
+    private static String serviceAgentDomain(String serviceId) {
+        String known = SERVICE_AGENT_DOMAINS.get(serviceId);
+        if (known != null) {
+            return known;
+        }
+        String shortName = serviceId.endsWith(GOOGLEAPIS_SUFFIX)
+                ? serviceId.substring(0, serviceId.length() - GOOGLEAPIS_SUFFIX.length())
+                : serviceId;
+        return "gcp-sa-" + shortName + ".iam.gserviceaccount.com";
+    }
+
+    /** A 21-digit ID derived from the email, so the same agent always has the same ID. */
+    private static String uniqueId(String email) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(email.getBytes(StandardCharsets.UTF_8));
+            return UNIQUE_ID_BASE.add(new BigInteger(1, digest).mod(UNIQUE_ID_RANGE)).toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     private Operation done(com.google.protobuf.Message response, String... resourceNames) {

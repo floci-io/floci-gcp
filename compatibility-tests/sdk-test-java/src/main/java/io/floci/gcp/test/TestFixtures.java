@@ -2,6 +2,8 @@ package io.floci.gcp.test;
 
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
+import com.google.api.serviceusage.v1.ServiceUsageClient;
+import com.google.api.serviceusage.v1.ServiceUsageSettings;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.NoCredentials;
@@ -570,12 +572,22 @@ public final class TestFixtures {
         return com.google.cloud.eventarc.v1.EventarcClient.create(settings);
     }
 
-    public static com.google.api.serviceusage.v1.ServiceUsageClient serviceUsageClient() throws IOException {
-        com.google.api.serviceusage.v1.ServiceUsageSettings settings =
-                com.google.api.serviceusage.v1.ServiceUsageSettings.newHttpJsonBuilder()
+    public static ServiceUsageClient serviceUsageClient() throws IOException {
+        ServiceUsageSettings settings =
+                ServiceUsageSettings.newHttpJsonBuilder()
                         .setEndpoint(endpoint())
                         .setCredentialsProvider(NoCredentialsProvider.create())
                         .build();
-        return com.google.api.serviceusage.v1.ServiceUsageClient.create(settings);
+        return ServiceUsageClient.create(settings);
+    }
+
+    // v1beta1 reuses the names ServiceUsageClient and ServiceUsageSettings, imported above for v1.
+    public static com.google.api.serviceusage.v1beta1.ServiceUsageClient serviceUsageBetaClient() throws IOException {
+        com.google.api.serviceusage.v1beta1.ServiceUsageSettings settings =
+                com.google.api.serviceusage.v1beta1.ServiceUsageSettings.newHttpJsonBuilder()
+                        .setEndpoint(endpoint())
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .build();
+        return com.google.api.serviceusage.v1beta1.ServiceUsageClient.create(settings);
     }
 }

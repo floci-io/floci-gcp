@@ -1,5 +1,7 @@
 package io.floci.gcp.services.gcs;
 
+import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,10 +40,23 @@ public class GcsProjectController {
     public Response getServiceAccount(@PathParam("project") String project) {
         // Named by project number, as in GCP, so the address matches the Cloud Storage agent
         // Service Usage's generateServiceIdentity returns for the same project.
-        String projectNumber = projectRegistry.require(project).getProjectNumber();
+        String projectNumber = requireProject(project).getProjectNumber();
         String email = "service-" + projectNumber + "@gs-project-accounts.iam.gserviceaccount.com";
         return Response.ok(Map.of(
                 "kind", "storage#serviceAccount",
                 "email_address", email)).build();
+    }
+
+    // Cloud Storage answers a project it cannot resolve with 400 invalid, where Service Usage
+    // and Resource Manager answer 403.
+    private ProjectRecord requireProject(String project) {
+        try {
+            return projectRegistry.require(project);
+        } catch (GcpException e) {
+            if (!"PERMISSION_DENIED".equals(e.getGcpStatus())) {
+                throw e;
+            }
+            throw GcpException.invalidArgument("Unknown project id: " + project);
+        }
     }
 }

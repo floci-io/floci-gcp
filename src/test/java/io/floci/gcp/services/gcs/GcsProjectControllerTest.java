@@ -32,10 +32,11 @@ class GcsProjectControllerTest {
     }
 
     @Test
-    void serviceAccountOnUnknownProjectNumberReturnsPermissionDenied() {
+    void serviceAccountOnUnknownProjectNumberReturnsInvalid() {
         given().when().get("/storage/v1/projects/00000000000/serviceAccount")
-                .then().statusCode(403)
-                .body("error.status", equalTo("PERMISSION_DENIED"));
+                .then().statusCode(400)
+                .body("error.message", equalTo("Unknown project id: 00000000000"))
+                .body("error.errors[0].reason", equalTo("invalid"));
     }
 
     @Test

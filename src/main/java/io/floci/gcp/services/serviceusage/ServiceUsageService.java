@@ -119,7 +119,7 @@ public class ServiceUsageService implements ServiceStateProvider {
                 .storageKey("serviceusage")
                 .protocol(ServiceProtocol.REST)
                 .resourceClasses(ServiceUsageController.class, ServiceUsageOperationsController.class,
-                        ServiceUsageBetaController.class)
+                        ServiceUsageBetaController.class, ServiceUsageBetaOperationsController.class)
                 .api("serviceusage.googleapis.com", "Service Usage API")
                 .build());
     }

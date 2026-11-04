@@ -71,4 +71,22 @@ class GcsXmlPutObjectRestIntegrationTest {
                 .header("x-goog-stored-content-length", equalTo("0"))
                 .body(emptyString());
     }
+
+    @Test
+    void bucketNamedLikeServiceUsageVersionStaysReachable() {
+        String versionBucket = "v1beta1";
+        given().contentType("application/json").queryParam("project", "test-project")
+                .body(Map.of("name", versionBucket)).post("/storage/v1/b").then().statusCode(200);
+        try {
+            given().contentType("text/plain").body("beta\n".getBytes(StandardCharsets.UTF_8))
+                    .when().put("/{bucket}/obj.txt", versionBucket)
+                    .then().statusCode(200);
+            given().when().get("/{bucket}/obj.txt", versionBucket)
+                    .then().statusCode(200)
+                    .body(equalTo("beta\n"));
+        } finally {
+            given().delete("/storage/v1/b/{bucket}/o/obj.txt", versionBucket);
+            given().delete("/storage/v1/b/{bucket}", versionBucket);
+        }
+    }
 }

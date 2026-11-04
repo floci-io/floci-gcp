@@ -14,7 +14,11 @@ class GcsXmlMultipartIntegrationTest {
         given().contentType("application/json").body("{\"name\":\"" + name + "\"}").post("/storage/v1/b?project=test-project").then().statusCode(200);
         return name;
     }
-    String initiate(String path) { return given().post(path + "?uploads").then().statusCode(200).extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId"); }
+    // GCS answers an initiation as text/html (probed live on 2026-11-04).
+    String initiate(String path) {
+        return given().post(path + "?uploads").then().statusCode(200).header("Content-Type", "text/html; charset=UTF-8")
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+    }
     @Test void orderedPartsByteIntegrityAndAbort() {
         String bucket = bucket(), path = "/" + bucket + "/nested/file";
         String id = initiate(path);

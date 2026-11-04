@@ -2107,6 +2107,37 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void generateTimestampArrayMatchesBigQuery() {
+        query("""
+                {"query": "SELECT GENERATE_TIMESTAMP_ARRAY(TIMESTAMP '2026-01-01 00:00:00+00', TIMESTAMP '2026-01-03 00:00:00+00', INTERVAL 1 DAY) a, GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', '2016-10-05 00:00:02', INTERVAL 1 SECOND) b, GENERATE_TIMESTAMP_ARRAY('2016-10-06 00:00:00', '2016-10-01 00:00:00', INTERVAL -2 DAY) c, GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', '2016-10-01 00:00:00', INTERVAL 1 DAY) d, GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', NULL, INTERVAL 1 DAY) n", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("TIMESTAMP", "TIMESTAMP", "TIMESTAMP", "TIMESTAMP", "TIMESTAMP")))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("1767225600", "1767312000", "1767398400")))
+                .body("rows[0].f[1].v.v", equalTo(List.of("1475625600", "1475625601", "1475625602")))
+                .body("rows[0].f[2].v.v", equalTo(List.of("1475712000", "1475539200", "1475366400")))
+                .body("rows[0].f[3].v", equalTo(List.of()))
+                .body("rows[0].f[4].v", equalTo(List.of()));
+        query("""
+                {"query": "SELECT GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', NULL, INTERVAL 1 DAY) IS NULL, ARRAY_LENGTH(GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', '2016-10-01 00:00:00', INTERVAL 1 DAY))", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "0")));
+        query("""
+                {"query": "SELECT t FROM UNNEST(GENERATE_TIMESTAMP_ARRAY(TIMESTAMP '2026-01-01 00:00:00+00', TIMESTAMP '2026-01-01 12:00:00+00', INTERVAL 6 HOUR)) t ORDER BY t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1767225600"), List.of("1767247200"), List.of("1767268800"))));
+        query("""
+                {"query": "SELECT GENERATE_TIMESTAMP_ARRAY('2016-10-05 00:00:00', '2016-10-07 00:00:00', INTERVAL 0 DAY)", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("step cannot be 0"));
+    }
+
+    @Test
+    @Order(5)
     void structDotStarExpandsLikeBigQuery() {
         query("""
                 {"query": "SELECT t.s.*, t.n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 7 n) t", "useLegacySql": false}

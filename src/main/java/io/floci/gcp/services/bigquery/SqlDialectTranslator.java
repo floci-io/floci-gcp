@@ -83,7 +83,7 @@ final class SqlDialectTranslator {
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF", "CONCAT",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "ARRAY_AGG", "ARRAY_CONCAT_AGG", "CONTAINS_SUBSTR",
             "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP", "ANY_VALUE",
-            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
+            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
@@ -5972,6 +5972,7 @@ final class SqlDialectTranslator {
             case "RAND" -> args(a, 0, name, "random()");
             case "GENERATE_ARRAY" -> "generate_series(" + String.join(", ", a) + ")";
             case "GENERATE_DATE_ARRAY" -> generateDateArray(a);
+            case "GENERATE_TIMESTAMP_ARRAY" -> generateTimestampArray(a);
             case "SPLIT" -> a.size() == 1 ? "string_split(" + a.getFirst() + ", ',')"
                     : "string_split(" + String.join(", ", a) + ")";
             case "FORMAT" -> "printf(" + String.join(", ", a) + ")";
@@ -6057,6 +6058,23 @@ final class SqlDialectTranslator {
         return "(CASE WHEN (" + step + ") = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
                 + " ELSE CAST(generate_series(CAST(CAST(" + a.get(0) + " AS DATE) AS TIMESTAMP),"
                 + " CAST(CAST(" + a.get(1) + " AS DATE) AS TIMESTAMP), " + step + ") AS DATE[])"
+                + " END)";
+    }
+
+    /**
+     * {@code GENERATE_TIMESTAMP_ARRAY(start, end, INTERVAL n part)}: every timestamp from start to end, both
+     * included. Unlike the date form the step is required. The series runs over TIMESTAMPTZ so the elements
+     * stay BigQuery TIMESTAMPs, with the same NULL and zero-step handling as {@link #generateDateArray}.
+     */
+    private static String generateTimestampArray(List<String> a) {
+        if (a.size() != 3) {
+            throw invalidQuery("No matching signature for function GENERATE_TIMESTAMP_ARRAY with " + a.size()
+                    + " arguments");
+        }
+        String step = a.get(2);
+        return "(CASE WHEN (" + step + ") = INTERVAL 0 DAY THEN error('GENERATE_ARRAY step cannot be 0.')"
+                + " ELSE CAST(generate_series(CAST(" + a.get(0) + " AS TIMESTAMPTZ), CAST(" + a.get(1)
+                + " AS TIMESTAMPTZ), " + step + ") AS TIMESTAMPTZ[])"
                 + " END)";
     }
 

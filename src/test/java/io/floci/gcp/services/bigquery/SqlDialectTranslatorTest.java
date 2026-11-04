@@ -1075,6 +1075,95 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void multipleStructStarsExpandThroughTheirOwnDerivedTables() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'a': 1, 'c': 10} AS \"s\") t, (SELECT {'b': 2, 'd': 20} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\", (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 10 AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"));
+        assertEquals("SELECT \"_floci_star_0\".* REPLACE (10 AS a), \"_floci_star_1\".* REPLACE (20 AS b)"
+                        + " FROM (SELECT {'a': 1, 'c': 5} AS \"s\") t, (SELECT {'b': 2, 'd': 6} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\", (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* REPLACE(10 AS a), u.s.* REPLACE(20 AS b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 5 AS c) s) t, (SELECT STRUCT(2 AS b, 6 AS d) s) u"));
+        assertEquals("SELECT t.*, \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'b': 2, 'd': 8} AS \"s\", 7 AS id) u, (SELECT 1 AS x) t,"
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.*, u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(2 AS b, 8 AS d) s, 7 AS id) u, (SELECT 1 AS x) t"));
+    }
+
+    @Test
+    void bareAndDottedStructStarsBothExpandThroughDerivedTables() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"x\"), \"_floci_star_1\".* EXCLUDE (\"y\")"
+                        + " RENAME (\"c\" AS \"c_1\") FROM (SELECT {'x': 1, 'c': 5} AS \"s\") t,"
+                        + " (SELECT {'y': 2, 'c': 6} AS \"t\") u, (SELECT unnest(s)) AS \"_floci_star_0\","
+                        + " (SELECT unnest(u.t)) AS \"_floci_star_1\"",
+                sql("SELECT s.* EXCEPT(x), u.t.* EXCEPT(y)"
+                        + " FROM (SELECT STRUCT(1 AS x, 5 AS c) s) t, (SELECT STRUCT(2 AS y, 6 AS c) t) u"));
+    }
+
+    @Test
+    void multipleStructStarsSuffixCollisionsInSelectOrder() {
+        assertEquals("SELECT 99 AS c, \"_floci_star_1\".* EXCLUDE (\"a\") RENAME (\"c\" AS \"c_1\"),"
+                        + " \"_floci_star_2\".* EXCLUDE (\"b\") RENAME (\"c\" AS \"c_2\")"
+                        + " FROM (SELECT {'a': 1, 'c': 5} AS \"s\") t, (SELECT {'b': 2, 'c': 6} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_1\", (SELECT unnest(u.s)) AS \"_floci_star_2\"",
+                sql("SELECT 99 AS c, t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 5 AS c) s) t, (SELECT STRUCT(2 AS b, 6 AS c) s) u"));
+    }
+
+    @Test
+    void multipleStructStarReplaceQualifiesTheSourceOfABareName() {
+        assertEquals("SELECT \"_floci_star_0\".* REPLACE (\"v\".\"x\" AS a),"
+                        + " \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'a': 1, 'x': 2} AS \"s\") t, (SELECT {'b': 2, 'd': 8} AS \"s\") u,"
+                        + " (SELECT 5 AS x) v, (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* REPLACE(x AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u,"
+                        + " (SELECT 5 AS x) v"));
+    }
+
+    @Test
+    void multipleStructStarsKeepGroupByAllReadableWithQualify() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\"),"
+                        + " COUNT(*) AS n FROM (SELECT {'a': 1, 'c': 'x'} AS \"s\") t,"
+                        + " (SELECT {'b': 2, 'd': 20} AS \"s\") u , (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\" GROUP BY 1, 2"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(1 AS a, 'x' AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"
+                        + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1"));
+    }
+
+    @Test
+    void multipleStructStarsStayInOneSetOperationArm() {
+        String translated = sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                + " FROM (SELECT STRUCT(1 AS a, 10 AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"
+                + " UNION ALL SELECT 3, 4");
+        assertTrue(translated.endsWith("(SELECT unnest(u.s)) AS \"_floci_star_1\"  UNION ALL SELECT 3, 4"),
+                translated);
+    }
+
+    @Test
+    void multipleStructStarsRejectAStarTheStructDoesNotHave() {
+        assertEquals("Column z in SELECT * EXCEPT list does not exist",
+                invalid("SELECT t.s.* EXCEPT(z), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Column z in SELECT * REPLACE list does not exist",
+                invalid("SELECT t.s.* REPLACE(10 AS z), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Column a cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT t.s.* EXCEPT(a) REPLACE(10 AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Unrecognized name: x",
+                invalid("SELECT t.s.* REPLACE(x AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u")
+                        .getMessage());
+    }
+
+    @Test
     void structStarReplaceResolvesColumnsOfTheQuerySources() {
         SqlDialectTranslator.TableRef table = new SqlDialectTranslator.TableRef("ds", "t");
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\", \"_floci_source_1\")"

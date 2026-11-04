@@ -32,6 +32,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
     private static final String ZONE = "/zones/us-central1-a";
     private static final String REGION = "/regions/us-central1";
+    private static final int POLICY_LOCK_COUNT = 64;
     private static final String ROLE = "roles/compute.instanceAdmin.v1";
     private static final String MEMBER = "serviceAccount:sa@p.iam.gserviceaccount.com";
     private static final Map<String, Object> BINDING = Map.of("role", ROLE, "members", List.of(MEMBER));
@@ -248,7 +250,11 @@ class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
 
     /** Mirrors IamService's lock striping, which is what lets a test pick names on either side of the order. */
     private static int policyLockIndex(String policy) {
-        return Math.floorMod(("policy:" + policy).hashCode(), 64);
+        return Math.floorMod(("policy:" + policy).hashCode(), POLICY_LOCK_COUNT);
+    }
+
+    private static String instancePolicy(String root) {
+        return root.substring("/compute/v1/".length()) + ZONE + "/instances/vm";
     }
 
     private static String restPath(String policy) {
@@ -263,9 +269,14 @@ class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
     }
 
     private OrderedVm orderedVm(boolean instanceLockFirst) throws Exception {
-        String root = root(), project = root.substring(root.lastIndexOf('/') + 1);
+        // The disk's lock must sort on the requested side, and the last or first stripe has nothing beyond it.
+        int stripeWithNoRoom = instanceLockFirst ? POLICY_LOCK_COUNT - 1 : 0;
+        String root = Stream.generate(this::root)
+                .filter(candidate -> policyLockIndex(instancePolicy(candidate)) != stripeWithNoRoom)
+                .findFirst().orElseThrow();
+        String project = root.substring(root.lastIndexOf('/') + 1);
         String prefix = "projects/" + project + ZONE;
-        String instancePolicy = prefix + "/instances/vm";
+        String instancePolicy = instancePolicy(root);
         int instanceLock = policyLockIndex(instancePolicy);
         String diskName = IntStream.range(0, 1000).mapToObj(i -> "boot-" + i)
                 .filter(name -> {

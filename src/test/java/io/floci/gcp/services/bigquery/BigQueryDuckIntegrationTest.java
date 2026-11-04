@@ -492,6 +492,10 @@ class BigQueryDuckIntegrationTest {
                 "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null, null, null, null, null)));
+        query(Map.of("query", "SELECT FORMAT_DATE('%Y', null) a, FORMAT_DATE('%Y', (NULL)) b, FORMAT_DATE('%F', ((null))) c,"
+                + " FORMAT_TIMESTAMP('%Y', Null) d, FORMAT_TIME('%H', (null)) e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null)));
     }
 
     private static void assertNullElementError(String sql, String field) {

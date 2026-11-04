@@ -6566,11 +6566,16 @@ final class SqlDialectTranslator {
 
     /**
      * The value of a {@code FORMAT_*} call. BigQuery coerces a STRING literal or parameter to the function's type,
-     * as {@link #temporalOperand} does for the date functions, and a bare NULL is a NULL of that type.
+     * as {@link #temporalOperand} does for the date functions, and a bare NULL (in any case, with or without
+     * redundant parentheses) is a NULL of that type.
      */
     private static String formatValue(String value, String function) {
         String type = function.substring("FORMAT_".length());
-        if (value.strip().equals("NULL")) {
+        String bare = value.strip();
+        while (wrappedInParentheses(bare)) {
+            bare = bare.substring(1, bare.length() - 1).strip();
+        }
+        if (bare.equalsIgnoreCase("NULL")) {
             String duckType = switch (type) {
                 case "DATETIME" -> "TIMESTAMP";
                 case "TIMESTAMP" -> "TIMESTAMPTZ";

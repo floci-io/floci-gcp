@@ -30,8 +30,6 @@ import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
@@ -59,6 +57,9 @@ import java.util.zip.CRC32C;
 public class CloudKmsHttpController {
 
     private static final Logger LOG = Logger.getLogger(CloudKmsHttpController.class);
+    /** The JCA hash of each {@code Digest} field an AsymmetricSign request may carry. */
+    private static final Map<String, String> DIGEST_HASHES =
+            Map.of("sha256", "SHA-256", "sha384", "SHA-384", "sha512", "SHA-512");
     private static final ObjectMapper EXACT_NUMBERS = new ObjectMapper()
             .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
@@ -403,27 +404,27 @@ public class CloudKmsHttpController {
 
     @POST
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions/{version}:asymmetricSign")
-    @SuppressWarnings("unchecked")
     public Response asymmetricSign(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
             @PathParam("version") String version, String rawBody) {
         try {
             Map<String, Object> body = parseBody(rawBody);
+            String digestField = null;
             byte[] digest = new byte[0];
-            boolean digestSupplied = false;
             if (body != null && body.get("digest") instanceof Map<?, ?> d) {
-                Object sha256 = ((Map<String, Object>) d).get("sha256");
-                if (sha256 instanceof String s) {
-                    digest = ProtoJsonBytes.decode(s, "digest.sha256");
+                for (String field : DIGEST_HASHES.keySet()) {
+                    if (d.get(field) instanceof String s && !s.isEmpty()) {
+                        digestField = field;
+                        digest = ProtoJsonBytes.decode(s, "digest." + field);
+                        break;
+                    }
                 }
-                digestSupplied = List.of("sha256", "sha384", "sha512").stream()
-                        .anyMatch(k -> d.get(k) instanceof String s && !s.isEmpty());
             }
             byte[] data = decodeField(body, "data");
             boolean verifiedDigest = verifyCrc32c(body, "digestCrc32c", digest);
             boolean verifiedData = verifyCrc32c(body, "dataCrc32c", data);
-            byte[] signature = service.asymmetricSign(
-                    versionName(project, location, keyRing, cryptoKey, version), resolveDigest(digest, digestSupplied, data));
+            byte[] signature = service.asymmetricSign(versionName(project, location, keyRing, cryptoKey, version),
+                    digestField == null ? null : DIGEST_HASHES.get(digestField), digest, data);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("name", versionName(project, location, keyRing, cryptoKey, version));
             response.put("signature", Base64.getEncoder().encodeToString(signature));
@@ -749,27 +750,6 @@ public class CloudKmsHttpController {
         } catch (JsonProcessingException e) {
             throw GcpException.invalidArgument("Invalid JSON payload received: " + e.getOriginalMessage());
         }
-    }
-
-    /**
-     * The digest to sign: the one supplied, else the SHA-256 of the data, as the gRPC controller does.
-     * The proto lets a request carry one or the other, never both, whichever digest variant it is.
-     */
-    private static byte[] resolveDigest(byte[] digest, boolean digestSupplied, byte[] data) {
-        if (digestSupplied && data.length > 0) {
-            throw GcpException.invalidArgument("Only one of digest or data may be supplied for AsymmetricSign");
-        }
-        if (digest.length > 0) {
-            return digest;
-        }
-        if (data.length > 0) {
-            try {
-                return MessageDigest.getInstance("SHA-256").digest(data);
-            } catch (NoSuchAlgorithmException e) {
-                throw GcpException.internal("Digest computation failed: " + e.getMessage());
-            }
-        }
-        throw GcpException.invalidArgument("A SHA-256 digest or data is required for AsymmetricSign");
     }
 
     /** proto3 JSON leaves a false bool out, so a verified flag only appears when it is true. */

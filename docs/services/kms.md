@@ -26,9 +26,14 @@ API endpoint / transport channel and disabling credentials:
 | Purpose | Algorithm | Operations |
 |---|---|---|
 | `ENCRYPT_DECRYPT` | `GOOGLE_SYMMETRIC_ENCRYPTION` (AES-256-GCM) | `Encrypt`, `Decrypt` |
-| `ASYMMETRIC_SIGN` | `EC_SIGN_P256_SHA256`, `RSA_SIGN_PKCS1_2048_SHA256` | `AsymmetricSign`, `GetPublicKey` |
-| `ASYMMETRIC_DECRYPT` | `RSA_DECRYPT_OAEP_2048_SHA256` | `AsymmetricDecrypt`, `GetPublicKey` |
+| `ASYMMETRIC_SIGN` | `EC_SIGN_P256_SHA256`; `RSA_SIGN_PSS_2048_SHA256`, `RSA_SIGN_PSS_3072_SHA256`, `RSA_SIGN_PSS_4096_SHA256`, `RSA_SIGN_PSS_4096_SHA512`; `RSA_SIGN_PKCS1_2048_SHA256`, `RSA_SIGN_PKCS1_3072_SHA256`, `RSA_SIGN_PKCS1_4096_SHA256`, `RSA_SIGN_PKCS1_4096_SHA512` | `AsymmetricSign`, `GetPublicKey` |
+| `ASYMMETRIC_DECRYPT` | `RSA_DECRYPT_OAEP_2048_SHA256`, `RSA_DECRYPT_OAEP_3072_SHA256`, `RSA_DECRYPT_OAEP_4096_SHA256`, `RSA_DECRYPT_OAEP_4096_SHA512`, `RSA_DECRYPT_OAEP_2048_SHA1`, `RSA_DECRYPT_OAEP_3072_SHA1`, `RSA_DECRYPT_OAEP_4096_SHA1` | `AsymmetricDecrypt`, `GetPublicKey` |
 | `MAC` | `HMAC_SHA256`, `HMAC_SHA1`, `HMAC_SHA384`, `HMAC_SHA512`, `HMAC_SHA224` | `MacSign`, `MacVerify` |
+
+As on GCP, RSA-PSS and RSA-OAEP use the algorithm's hash for MGF1 too, and RSA-PSS a salt as long
+as that hash. `AsymmetricSign` takes a digest in the algorithm's hash (`digest.sha512` for the
+`*_SHA512` algorithms, `digest.sha256` for the others) or `data`, which it hashes the same way; a
+digest in another hash, or of the wrong length, is `INVALID_ARGUMENT`.
 
 A `MAC` key needs `version_template.algorithm`, like an `ASYMMETRIC_SIGN` key. Each version holds a
 random HMAC key the size of its hash output (32 bytes for `HMAC_SHA256`). `MacVerify` returns
@@ -197,8 +202,8 @@ the key material with its public key, and import it into a `CryptoKey`, usually 
 | `RSA_OAEP_3072_SHA256`, `RSA_OAEP_4096_SHA256` | The target key encrypted directly with RSA-OAEP (SHA-256) |
 
 Target key material is the raw 32 bytes for `GOOGLE_SYMMETRIC_ENCRYPTION` and a PKCS#8 DER
-private key for the asymmetric algorithms listed above. The public key of an imported asymmetric
-version is derived from the private key.
+private key for the asymmetric algorithms listed above, of the size the algorithm names for RSA. The
+public key of an imported asymmetric version is derived from the private key.
 
 Behavior to be aware of:
 
@@ -228,5 +233,5 @@ Behavior to be aware of:
 
 ## Not Yet Supported
 
-`RawEncrypt`/`RawDecrypt`, re-importing key versions, RSA-PSS signing, post-quantum
+`RawEncrypt`/`RawDecrypt`, re-importing key versions, raw PKCS#1 signing (`RSA_SIGN_RAW_PKCS1_*`), post-quantum
 algorithms, HSM/EXTERNAL protection levels, and IAM policy storage.

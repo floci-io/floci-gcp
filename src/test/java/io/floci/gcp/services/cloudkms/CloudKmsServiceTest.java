@@ -142,7 +142,7 @@ class CloudKmsServiceTest {
 
         byte[] data = "message-to-sign".getBytes(StandardCharsets.UTF_8);
         byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
-        byte[] signature = service.asymmetricSign(versionName, digest);
+        byte[] signature = service.asymmetricSign(versionName, "SHA-256", digest, new byte[0]);
 
         PublicKey publicKey = publicKeyFrom(service.getPublicKeyVersion(versionName), "EC");
         Signature verifier = Signature.getInstance("SHA256withECDSA");
@@ -160,7 +160,7 @@ class CloudKmsServiceTest {
 
         byte[] data = "rsa-message".getBytes(StandardCharsets.UTF_8);
         byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
-        byte[] signature = service.asymmetricSign(versionName, digest);
+        byte[] signature = service.asymmetricSign(versionName, "SHA-256", digest, new byte[0]);
 
         PublicKey publicKey = publicKeyFrom(service.getPublicKeyVersion(versionName), "RSA");
         Signature verifier = Signature.getInstance("SHA256withRSA");

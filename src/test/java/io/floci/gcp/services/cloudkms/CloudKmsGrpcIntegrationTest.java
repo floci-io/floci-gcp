@@ -10,6 +10,7 @@ import com.google.cloud.kms.v1.DecryptRequest;
 import com.google.cloud.kms.v1.Digest;
 import com.google.cloud.kms.v1.EncryptRequest;
 import com.google.cloud.kms.v1.GetCryptoKeyRequest;
+import com.google.cloud.kms.v1.GetPublicKeyRequest;
 import com.google.cloud.kms.v1.KeyManagementServiceGrpc;
 import com.google.cloud.kms.v1.MacSignRequest;
 import com.google.cloud.kms.v1.MacSignResponse;
@@ -34,7 +35,13 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.Signature;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -152,6 +159,37 @@ class CloudKmsGrpcIntegrationTest {
 
         assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
                 () -> kms.asymmetricSign(sign)).getStatus().getCode());
+    }
+
+    @Test
+    void asymmetricSignTakesASha512DigestForASha512Key() throws Exception {
+        kms.createKeyRing(CreateKeyRingRequest.newBuilder().setParent(LOCATION).setKeyRingId("sign-512-ring").build());
+        String key = kms.createCryptoKey(CreateCryptoKeyRequest.newBuilder()
+                .setParent(LOCATION + "/keyRings/sign-512-ring").setCryptoKeyId("pss-512")
+                .setCryptoKey(CryptoKey.newBuilder().setPurpose(CryptoKey.CryptoKeyPurpose.ASYMMETRIC_SIGN)
+                        .setVersionTemplate(CryptoKeyVersionTemplate.newBuilder()
+                                .setAlgorithm(CryptoKeyVersion.CryptoKeyVersionAlgorithm.RSA_SIGN_PSS_4096_SHA512)))
+                .build()).getName();
+        String version = key + "/cryptoKeyVersions/1";
+        byte[] data = "payload".getBytes(StandardCharsets.UTF_8);
+        ByteString sha512 = ByteString.copyFrom(MessageDigest.getInstance("SHA-512").digest(data));
+
+        ByteString signature = kms.asymmetricSign(AsymmetricSignRequest.newBuilder().setName(version)
+                .setDigest(Digest.newBuilder().setSha512(sha512))
+                .setDigestCrc32C(Int64Value.of(crc32c(sha512))).build()).getSignature();
+        String pem = kms.getPublicKey(GetPublicKeyRequest.newBuilder().setName(version).build()).getPem();
+        Signature verifier = Signature.getInstance("RSASSA-PSS");
+        verifier.setParameter(new PSSParameterSpec("SHA-512", "MGF1", MGF1ParameterSpec.SHA512, 64,
+                PSSParameterSpec.TRAILER_FIELD_BC));
+        verifier.initVerify(KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
+                Base64.getMimeDecoder().decode(pem.replaceAll("-----[A-Z ]+-----", "")))));
+        verifier.update(data);
+        assertTrue(verifier.verify(signature.toByteArray()), "the signature covers the SHA-512 digest");
+
+        ByteString sha256 = ByteString.copyFrom(MessageDigest.getInstance("SHA-256").digest(data));
+        assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                () -> kms.asymmetricSign(AsymmetricSignRequest.newBuilder().setName(version)
+                        .setDigest(Digest.newBuilder().setSha256(sha256)).build())).getStatus().getCode());
     }
 
     @Test

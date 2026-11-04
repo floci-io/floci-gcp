@@ -62,7 +62,6 @@ import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import org.jboss.logging.Logger;
 
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
@@ -129,17 +128,11 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     @Override
     public void createCryptoKey(CreateCryptoKeyRequest request, StreamObserver<CryptoKey> responseObserver) {
         LOG.infof("createCryptoKey parent=%s cryptoKeyId=%s", request.getParent(), request.getCryptoKeyId());
-        try {
-            CryptoKey input = request.getCryptoKey();
-            String algorithm = input.getVersionTemplate().getAlgorithm().name();
-            StoredCryptoKey stored = service.createCryptoKey(request.getParent(), request.getCryptoKeyId(),
-                    input.getPurpose().name(), algorithm, request.getSkipInitialVersionCreation(),
-                    cryptoKeyFields(input), input.getImportOnly());
-            responseObserver.onNext(toProto(stored));
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            GcpGrpcController.grpcError(responseObserver, e);
-        }
+        CryptoKey input = request.getCryptoKey();
+        // The initial version may be a 3072/4096-bit RSA key, up to ~1.5 s to generate: keep it off the event loop.
+        runBlocking(responseObserver, () -> toProto(service.createCryptoKey(request.getParent(),
+                request.getCryptoKeyId(), input.getPurpose().name(), input.getVersionTemplate().getAlgorithm().name(),
+                request.getSkipInitialVersionCreation(), cryptoKeyFields(input), input.getImportOnly())));
     }
 
     @Override
@@ -208,12 +201,8 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     public void createCryptoKeyVersion(CreateCryptoKeyVersionRequest request,
             StreamObserver<CryptoKeyVersion> responseObserver) {
         LOG.infof("createCryptoKeyVersion parent=%s", request.getParent());
-        try {
-            responseObserver.onNext(toProto(service.createCryptoKeyVersion(request.getParent())));
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            GcpGrpcController.grpcError(responseObserver, e);
-        }
+        // Same as createCryptoKey: the new version may be a large RSA key.
+        runBlocking(responseObserver, () -> toProto(service.createCryptoKeyVersion(request.getParent())));
     }
 
     @Override
@@ -411,12 +400,14 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
     @Override
     public void asymmetricSign(AsymmetricSignRequest request, StreamObserver<AsymmetricSignResponse> responseObserver) {
         try {
-            byte[] digest = resolveDigest(request);
+            Digest digest = request.getDigest();
+            byte[] digestBytes = digestBytes(digest);
             boolean verifiedDigest = verifyCrc32c(request.hasDigestCrc32C(),
-                    request.getDigestCrc32C().getValue(), digestBytes(request));
+                    request.getDigestCrc32C().getValue(), digestBytes);
             boolean verifiedData = verifyCrc32c(request.hasDataCrc32C(),
                     request.getDataCrc32C().getValue(), request.getData().toByteArray());
-            byte[] signature = service.asymmetricSign(request.getName(), digest);
+            byte[] signature = service.asymmetricSign(request.getName(), digestHash(digest), digestBytes,
+                    request.getData().toByteArray());
             responseObserver.onNext(AsymmetricSignResponse.newBuilder()
                     .setSignature(ByteString.copyFrom(signature))
                     .setSignatureCrc32C(Int64Value.of(crc32c(signature)))
@@ -679,25 +670,22 @@ public class CloudKmsController extends KeyManagementServiceGrpc.KeyManagementSe
         return true;
     }
 
-    private static byte[] digestBytes(AsymmetricSignRequest request) {
-        return request.getDigest().getSha256().toByteArray();
+    /** The JCA name of the hash the request's digest is in, or null when it carries none. */
+    private static String digestHash(Digest digest) {
+        return switch (digest.getDigestCase()) {
+            case SHA256 -> "SHA-256";
+            case SHA384 -> "SHA-384";
+            case SHA512 -> "SHA-512";
+            default -> null;
+        };
     }
 
-    private static byte[] resolveDigest(AsymmetricSignRequest request) {
-        if (request.getDigest().getDigestCase() != Digest.DigestCase.DIGEST_NOT_SET && !request.getData().isEmpty()) {
-            throw GcpException.invalidArgument("Only one of digest or data may be supplied for AsymmetricSign");
-        }
-        ByteString sha256 = request.getDigest().getSha256();
-        if (!sha256.isEmpty()) {
-            return sha256.toByteArray();
-        }
-        if (!request.getData().isEmpty()) {
-            try {
-                return MessageDigest.getInstance("SHA-256").digest(request.getData().toByteArray());
-            } catch (Exception e) {
-                throw GcpException.internal("Digest computation failed: " + e.getMessage());
-            }
-        }
-        throw GcpException.invalidArgument("A SHA-256 digest or data is required for AsymmetricSign");
+    private static byte[] digestBytes(Digest digest) {
+        return switch (digest.getDigestCase()) {
+            case SHA256 -> digest.getSha256().toByteArray();
+            case SHA384 -> digest.getSha384().toByteArray();
+            case SHA512 -> digest.getSha512().toByteArray();
+            default -> new byte[0];
+        };
     }
 }

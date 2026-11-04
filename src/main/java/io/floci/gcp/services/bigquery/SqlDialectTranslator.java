@@ -2368,12 +2368,14 @@ final class SqlDialectTranslator {
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
         expandHavingStructAliasFields();
+        expandQualifyStructAliasFields();
         expandOrderByStructAliasFields();
         rewritePivotSyntax();
         rewriteSelectAsStruct();
         rewriteIndexedStructWildcards();
         quoteImplicitSelectAliases();
         expandHavingStructAliasFields();
+        expandQualifyStructAliasFields();
         expandOrderByStructAliasFields();
         rewritePivotSyntax();
         nameAnonymousColumns();
@@ -5862,6 +5864,27 @@ final class SqlDialectTranslator {
     }
 
     /**
+     * QUALIFY sees the select aliases too, including in a window's {@code OVER (ORDER BY s.n)}, so a STRUCT
+     * alias field there is expanded as in ORDER BY.
+     */
+    private void expandQualifyStructAliasFields() {
+        for (int qualify = tokens.size() - 1; qualify >= 0; qualify--) {
+            if (!tokens.get(qualify).isKeyword("QUALIFY")) {
+                continue;
+            }
+            int depth = parenthesisDepth(qualify);
+            int select = precedingSelect(qualify, depth);
+            if (select < 0) {
+                continue;
+            }
+            Map<String, Map<String, List<Token>>> aliases = structSelectAliases(select, qualify, depth);
+            if (!aliases.isEmpty()) {
+                replaceStructAliasFields(qualify + 1, clauseEnd(qualify + 1, depth), aliases, true);
+            }
+        }
+    }
+
+    /**
      * BigQuery's ORDER BY also resolves {@code s.n} to a field of a STRUCT select alias {@code s}, ahead of an
      * input column of the same name, while DuckDB reads {@code s} as a table. Expand those fields as in HAVING.
      * An ORDER BY inside a call or {@code OVER (...)} is skipped, as is one after a set operation, whose
@@ -5914,8 +5937,9 @@ final class SqlDialectTranslator {
     private void replaceStructAliasFields(int start, int end, Map<String, Map<String, List<Token>>> aliases,
                                           boolean orderBy) {
         boolean[] nestedQuery = nestedQueryPositions(start, end);
+        boolean[] inlined = inlinedFieldPositions(start, end);
         for (int i = end - 1; i >= start; i--) {
-            if (nestedQuery[i]) {
+            if (nestedQuery[i] || inlined[i]) {
                 continue;
             }
             Token alias = tokens.get(i);
@@ -5944,6 +5968,25 @@ final class SqlDialectTranslator {
             tokens.subList(i, field + 1).clear();
             tokens.addAll(i, replacement);
         }
+    }
+
+    /**
+     * Marks tokens inside a field expression an earlier pass already inlined, so that a field reading a source
+     * struct of the same name ({@code STRUCT(s.n * -1 AS n) AS s}) is not expanded a second time.
+     */
+    private boolean[] inlinedFieldPositions(int start, int end) {
+        boolean[] inlined = new boolean[end];
+        int depth = 0;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.RAW && (token.text.equals("(") || token.text.equals("list_extract(["))) {
+                depth++;
+            } else if (token.kind == Kind.RAW && (token.text.equals(")") || token.text.equals("], 1)"))) {
+                depth--;
+            }
+            inlined[i] = depth > 0;
+        }
+        return inlined;
     }
 
     /** Marks tokens that belong to a query nested inside the current clause. */
@@ -6092,6 +6135,9 @@ final class SqlDialectTranslator {
             }
             close = matchingParen(parenthesis);
             fields = googleSqlStructFields(parenthesis, close);
+        } else if (tokens.get(open).isPunct("(") && plainSelectAsStruct(open) >= 0) {
+            close = matchingParen(open);
+            fields = googleSqlStructFields(plainSelectAsStruct(open), close);
         } else {
             return;
         }
@@ -6101,6 +6147,30 @@ final class SqlDialectTranslator {
         if (!fields.isEmpty()) {
             aliases.put(tokens.get(alias).identifierText().toLowerCase(Locale.ROOT), fields);
         }
+    }
+
+    /**
+     * The STRUCT keyword of a scalar {@code (SELECT AS STRUCT expr AS name, ...)} with no FROM or other clause,
+     * whose fields read the enclosing row and can be inlined like {@code STRUCT(...)}; -1 for anything else.
+     */
+    private int plainSelectAsStruct(int open) {
+        int close = matchingParen(open);
+        int select = nextSignificant(open + 1, close);
+        int as = select < 0 ? -1 : nextSignificant(select + 1, close);
+        int struct = as < 0 ? -1 : nextSignificant(as + 1, close);
+        if (struct < 0 || !tokens.get(select).isKeyword("SELECT") || !tokens.get(as).isKeyword("AS")
+                || !tokens.get(struct).isKeyword("STRUCT")) {
+            return -1;
+        }
+        int depth = parenthesisDepth(struct);
+        for (int i = struct + 1; i < close; i++) {
+            Token token = tokens.get(i);
+            if (parenthesisDepth(i) == depth && token.kind == Kind.IDENT
+                    && (token.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(token.upper()))) {
+                return -1;
+            }
+        }
+        return struct;
     }
 
     private int matchingBrace(int open) {

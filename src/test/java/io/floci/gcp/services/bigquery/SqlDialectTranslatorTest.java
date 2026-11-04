@@ -2528,6 +2528,12 @@ class SqlDialectTranslatorTest {
         assertTrue(borrowed.contains("OVER (ORDER BY s.n)"), borrowed);
         String qualified = sql("SELECT STRUCT(0 AS n) AS s FROM ds.t AS t ORDER BY t.s.n");
         assertTrue(qualified.endsWith("ORDER BY t.s.n"), qualified);
+        String sameNamed = sql("SELECT STRUCT(s.n * -1 AS n) AS s FROM ds.t ORDER BY s.n");
+        assertTrue(sameNamed.endsWith("ORDER BY list_extract([s.n * -1], 1)"), sameNamed);
+        String qualify = sql("SELECT x, STRUCT(x AS n) AS s FROM ds.t QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2");
+        assertTrue(qualify.contains("OVER (ORDER BY list_extract([x], 1))"), qualify);
+        String subquery = sql("SELECT (SELECT AS STRUCT y AS n FROM ds.u) AS s FROM ds.t ORDER BY s.n");
+        assertTrue(subquery.endsWith("ORDER BY s.n"), subquery);
         String window = sql("SELECT STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
         assertTrue(window.contains("OVER (ORDER BY s.n)"), window);
         String aggregate = sql("SELECT STRUCT(x AS n) AS s, ARRAY_AGG(x ORDER BY s.n) AS a FROM ds.t GROUP BY s");

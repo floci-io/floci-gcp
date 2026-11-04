@@ -2419,6 +2419,28 @@ final class SqlDialectTranslator {
         return tokens.size();
     }
 
+    /** The token index that starts a top-level set operation, or {@code end} when the query has none. */
+    private int structStarArmEnd(int tailStart, int end, int queryDepth) {
+        for (int i = tailStart; i < end; i++) {
+            if (parenthesisDepth(i) != queryDepth || isPrecededByDot(i)) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (token.kind == Kind.IDENT && (token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+                    || token.isKeyword("EXCEPT"))) {
+                // The star's own EXCEPT list sits before FROM, so an EXCEPT here can only join two queries.
+                // Keep the whitespace that follows this arm in place so the rewritten select still separates
+                // from the operator.
+                int armEnd = i;
+                while (armEnd > tailStart && tokens.get(armEnd - 1).kind == Kind.SPACE) {
+                    armEnd--;
+                }
+                return armEnd;
+            }
+        }
+        return end;
+    }
+
     private boolean rewriteStructStarExclusion(int select) {
         int end = structStarQueryEnd(select);
         int queryDepth = parenthesisDepth(select);
@@ -2499,6 +2521,9 @@ final class SqlDialectTranslator {
             return false;
         }
         int tailStart = items.getLast()[1];
+        // A set operation is not part of this query's tail: each arm is rewritten on its own and the
+        // operator stays between the wrapped selects.
+        end = structStarArmEnd(tailStart, end, queryDepth);
         // An aggregate star only needs the aggregate structure when the query has no grouping key of its
         // own (GROUP BY ALL or no GROUP BY) and every sibling is an aggregate, which is the shape whose
         // aggregations all run at once. Anything else keeps a structure that already handles it.
@@ -2602,12 +2627,6 @@ final class SqlDialectTranslator {
             }
             outputRenames.add(DuckTypes.quoteIdentifier(projectionAlias) + " AS "
                     + DuckTypes.quoteIdentifier(renameTo));
-        }
-        for (int i = items.getLast()[1]; i < end; i++) {
-            if (parenthesisDepth(i) == queryDepth && tokens.get(i).kind == Kind.IDENT
-                    && Set.of("UNION", "INTERSECT", "EXCEPT").contains(tokens.get(i).upper())) {
-                throw unsupportedStructStarExclusion();
-            }
         }
         Map<String, String> renameTargets = new HashMap<>();
         for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {

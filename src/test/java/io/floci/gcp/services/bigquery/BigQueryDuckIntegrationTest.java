@@ -292,6 +292,67 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void structStarSetOperationArmsExecuteIndependently() {
+        String star = "SELECT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t";
+        query(Map.of("query", star + " UNION ALL SELECT 3, 6", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "id")))
+                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("3", "6"))));
+        query(Map.of("query", star + " UNION ALL SELECT u.s.* EXCEPT(b), u.id"
+                        + " FROM (SELECT STRUCT(3 AS b, 4 AS d) s, 7 AS id) u", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "id")))
+                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("4", "7"))));
+        query(Map.of("query", star + " UNION ALL SELECT 3, 6 ORDER BY 1 DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("3", "6"), List.of("2", "5"))));
+        query(Map.of("query", star + " UNION ALL SELECT 3, 6 LIMIT 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("totalRows", equalTo("1"))
+                .body("rows[0].f.v", equalTo(List.of("2", "5")));
+        query(Map.of("query", "(" + star + ") UNION ALL (SELECT 3, 6)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("3", "6"))));
+        query(Map.of("query", "WITH c AS (" + star + " UNION ALL SELECT 3, 6)"
+                        + " SELECT * FROM c ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("3", "6"))));
+        query(Map.of("query", "SELECT 3, 6 UNION ALL " + star, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_", "f1_")))
+                .body("rows.f.v", equalTo(List.of(List.of("3", "6"), List.of("2", "5"))));
+        String oneColumn = "SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t";
+        query(Map.of("query", oneColumn + " INTERSECT DISTINCT SELECT 2", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"))));
+        query(Map.of("query", oneColumn + " EXCEPT DISTINCT SELECT 2", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"));
+        query(Map.of("query", oneColumn + " UNION DISTINCT SELECT 2", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"))));
+        query(Map.of("query", "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t GROUP BY ALL"
+                        + " UNION ALL SELECT 2, 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2", "1"), List.of("2", "1"))));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t GROUP BY 1"
+                        + " UNION ALL SELECT 2, 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2", "1"), List.of("2", "1"))));
+        query(Map.of("query", "SELECT t.s.* REPLACE(10 AS a), t.id FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t"
+                        + " UNION ALL SELECT 2, 7", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("10", "5"), List.of("2", "7"))));
+        query(Map.of("query", "SELECT * FROM (" + oneColumn + " UNION ALL SELECT 2) q ORDER BY c",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"), List.of("2"))));
+    }
+
+    @Test
+    @Order(2)
     void starReplacementsRejectDirectWindowsButPreserveSubqueryWindows() {
         List<String> invalidQueries = List.of(
                 "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(COUNT(*) OVER () AS a)"

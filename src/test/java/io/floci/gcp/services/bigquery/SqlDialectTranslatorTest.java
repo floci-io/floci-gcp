@@ -1052,6 +1052,29 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void structStarSetOperationArmsRewriteIndependently() {
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" UNION ALL SELECT 2",
+                sql("SELECT t.s.* EXCEPT (a) FROM ds.t t UNION ALL SELECT 2"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t) AS \"_expanded\""
+                        + " UNION ALL SELECT * EXCLUDE (\"b\") FROM (SELECT unnest(u.s), u.id"
+                        + " FROM (SELECT {'b': 3, 'd': 4} AS \"s\", 7 AS id) u) AS \"_expanded\"",
+                sql("SELECT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t"
+                        + " UNION ALL SELECT u.s.* EXCEPT(b), u.id"
+                        + " FROM (SELECT STRUCT(3 AS b, 4 AS d) s, 7 AS id) u"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\") t) AS \"_expanded\" EXCEPT SELECT 2",
+                sql("SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t"
+                        + " EXCEPT DISTINCT SELECT 2"));
+        assertEquals("WITH c AS (SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\") t) AS \"_expanded\" UNION ALL SELECT 2 AS \"$col1\")"
+                        + " SELECT * FROM \"c\" ORDER BY c",
+                sql("WITH c AS (SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t"
+                        + " UNION ALL SELECT 2) SELECT * FROM c ORDER BY c"));
+    }
+
+    @Test
     void structStarReplaceResolvesColumnsOfTheQuerySources() {
         SqlDialectTranslator.TableRef table = new SqlDialectTranslator.TableRef("ds", "t");
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\", \"_floci_source_1\")"

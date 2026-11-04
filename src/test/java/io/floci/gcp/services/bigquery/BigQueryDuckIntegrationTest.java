@@ -446,6 +446,49 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scalarSubqueryStructStarsExecute() {
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(3 AS b, 4 AS d)).* EXCEPT(b)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "d")))
+                .body("rows[0].f.v", equalTo(List.of("2", "4")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(3 AS b, 4 AS d) s) u", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "d")))
+                .body("rows[0].f.v", equalTo(List.of("2", "4")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(t.id AS n)).*, u.s.* EXCEPT(b)"
+                        + " FROM (SELECT 5 AS id) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("n", "d")))
+                .body("rows[0].f.v", equalTo(List.of("5", "8")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a)).* REPLACE(10 AS a),"
+                        + " (SELECT STRUCT(2 AS b)).* REPLACE(20 AS b)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("10", "20")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 5 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(2 AS b, 6 AS c)).* EXCEPT(b)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "c_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "6")));
+        query(Map.of("query", "SELECT (SELECT AS STRUCT 1 AS a, 2 AS c).* EXCEPT(a),"
+                        + " (SELECT AS STRUCT 3 AS b, 4 AS d).* EXCEPT(b)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "d")))
+                .body("rows[0].f.v", equalTo(List.of("2", "4")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c")))
+                .body("rows[0].f.v", equalTo(List.of("2")));
+        query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a) UNION ALL SELECT 4",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"), List.of("4"))));
+    }
+
+    @Test
+    @Order(2)
     void multipleStructStarsRejectInvalidStarListsAndASiblingStar() {
         String bases = " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u";
         query(Map.of("query", "SELECT t.s.* EXCEPT(z), u.s.* EXCEPT(b)" + bases, "useLegacySql", false))

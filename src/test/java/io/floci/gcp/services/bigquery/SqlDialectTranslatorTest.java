@@ -1185,6 +1185,29 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void scalarSubqueryStructStarsMaterializeTheirOperand() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT (SELECT {'a': 1, 'c': 2} AS \"$col1\") AS \"_floci_operand_0\")"
+                        + " AS \"_floci_operand_source_0\","
+                        + " (SELECT unnest(\"_floci_operand_source_0\".\"_floci_operand_0\")) AS \"_floci_star_0\","
+                        + " (SELECT (SELECT {'b': 3, 'd': 4} AS \"$col1\") AS \"_floci_operand_1\")"
+                        + " AS \"_floci_operand_source_1\","
+                        + " (SELECT unnest(\"_floci_operand_source_1\".\"_floci_operand_1\")) AS \"_floci_star_1\"",
+                sql("SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(3 AS b, 4 AS d)).* EXCEPT(b)"));
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"),"
+                        + " \"_floci_star_1\".* EXCLUDE (\"b\") RENAME (\"c\" AS \"c_1\")"
+                        + " FROM (SELECT (SELECT {'a': 1, 'c': 5} AS \"$col1\") AS \"_floci_operand_0\")"
+                        + " AS \"_floci_operand_source_0\","
+                        + " (SELECT unnest(\"_floci_operand_source_0\".\"_floci_operand_0\")) AS \"_floci_star_0\","
+                        + " (SELECT (SELECT {'b': 2, 'c': 6} AS \"$col1\") AS \"_floci_operand_1\")"
+                        + " AS \"_floci_operand_source_1\","
+                        + " (SELECT unnest(\"_floci_operand_source_1\".\"_floci_operand_1\")) AS \"_floci_star_1\"",
+                sql("SELECT (SELECT STRUCT(1 AS a, 5 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(2 AS b, 6 AS c)).* EXCEPT(b)"));
+    }
+
+    @Test
     void multipleStructStarsSuffixCollisionsInSelectOrder() {
         assertEquals("SELECT 99 AS c, \"_floci_star_1\".* EXCLUDE (\"a\") RENAME (\"c\" AS \"c_1\"),"
                         + " \"_floci_star_2\".* EXCLUDE (\"b\") RENAME (\"c\" AS \"c_2\")"

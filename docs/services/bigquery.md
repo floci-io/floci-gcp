@@ -527,8 +527,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 ## Deviations from real BigQuery
 
 - Struct-star `EXCEPT` / `REPLACE` translation does not support every combination:
-  a sibling unqualified `*` and multiple stars over scalar-subquery operands can fail with
-  `invalidQuery`.
+  a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
   See the GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries).
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than

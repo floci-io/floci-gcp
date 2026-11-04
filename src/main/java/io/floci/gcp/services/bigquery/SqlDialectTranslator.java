@@ -3319,14 +3319,6 @@ final class SqlDialectTranslator {
                 break;
             }
         }
-        if (from < 0) {
-            throw unsupportedStructStarExclusion();
-        }
-        for (SelectStructStar star : stars) {
-            if (isQueryOperand(star.operandStart(), star.dot())) {
-                throw unsupportedStructStarExclusion();
-            }
-        }
         reserveStructStarNames(select, end);
         Set<String> reserved = new HashSet<>(structStarTakenNames);
         Map<Integer, SelectStructStar> starsByItem = new HashMap<>();
@@ -3349,7 +3341,8 @@ final class SqlDialectTranslator {
                 reserved.add(name.toLowerCase(Locale.ROOT));
             }
         }
-        int fromEnd = structStarFromEnd(from, end, queryDepth);
+        int fromEnd = from >= 0 ? structStarFromEnd(from, end, queryDepth)
+                : structStarClauseBoundary(tailStart, end, queryDepth);
         replaceMultiStarGroupByAll(fromEnd, end, queryDepth, items, starsByItem);
         Set<String> claimed = new HashSet<>();
         List<List<Token>> outputItems = new ArrayList<>();
@@ -3377,17 +3370,53 @@ final class SqlDialectTranslator {
             }
             outputItems.add(withoutTrailingSpace(tokens.subList(nextSignificant(item[0], item[1]), item[1])));
         }
-        List<Token> fromTokens = new ArrayList<>(tokens.subList(from, fromEnd));
+        List<List<Token>> derivedSources = new ArrayList<>();
         for (int index = 0; index < items.size(); index++) {
             SelectStructStar star = starsByItem.get(index);
             if (star == null) {
                 continue;
             }
-            fromTokens.addAll(new Lexer(", (SELECT unnest(").tokenize());
-            fromTokens.addAll(tokens.subList(star.operandStart(), star.dot()));
-            fromTokens.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
+            // DuckDB cannot unnest a scalar subquery, so a query operand is materialized as a column of an
+            // extra derived table and expanded from there.
+            if (isQueryOperand(star.operandStart(), star.dot())) {
+                String operandAlias = structStarName("_floci_operand_" + index);
+                String sourceAlias = structStarName("_floci_operand_source_" + index);
+                List<Token> operand = new ArrayList<>();
+                operand.addAll(new Lexer("(SELECT ").tokenize());
+                operand.addAll(tokens.subList(star.operandStart(), star.dot()));
+                operand.addAll(new Lexer(" AS `" + operandAlias + "`) AS `" + sourceAlias + "`").tokenize());
+                derivedSources.add(operand);
+                List<Token> expansion = new ArrayList<>();
+                expansion.addAll(new Lexer("(SELECT unnest(").tokenize());
+                expansion.add(Token.raw(DuckTypes.quoteIdentifier(sourceAlias) + "."
+                        + DuckTypes.quoteIdentifier(operandAlias)));
+                expansion.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
+                derivedSources.add(expansion);
+                continue;
+            }
+            List<Token> source = new ArrayList<>();
+            source.addAll(new Lexer("(SELECT unnest(").tokenize());
+            source.addAll(tokens.subList(star.operandStart(), star.dot()));
+            source.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
+            derivedSources.add(source);
         }
-        if (!starAliases.isEmpty()) {
+        List<Token> fromTokens = new ArrayList<>();
+        if (from >= 0) {
+            fromTokens.addAll(tokens.subList(from, fromEnd));
+            for (List<Token> source : derivedSources) {
+                fromTokens.addAll(new Lexer(", ").tokenize());
+                fromTokens.addAll(source);
+            }
+        } else {
+            fromTokens.addAll(new Lexer("FROM ").tokenize());
+            for (int index = 0; index < derivedSources.size(); index++) {
+                if (index > 0) {
+                    fromTokens.addAll(new Lexer(", ").tokenize());
+                }
+                fromTokens.addAll(derivedSources.get(index));
+            }
+        }
+        if (!derivedSources.isEmpty()) {
             fromTokens.add(Token.raw(" "));
         }
         List<Token> rewritten = new ArrayList<>();
@@ -3489,6 +3518,9 @@ final class SqlDialectTranslator {
                     }
                 } else {
                     fields = operandFields(select, operandStart, dot);
+                    if (fields == null && isQueryOperand(operandStart, dot)) {
+                        fields = structLiteralFieldsInQuery(operandStart, dot);
+                    }
                 }
                 int exceptOpen = -1;
                 int exceptClose = -1;
@@ -3560,6 +3592,35 @@ final class SqlDialectTranslator {
             }
         }
         return end;
+    }
+
+    /** The token index of the first top-level clause after a select list that has no FROM. */
+    private int structStarClauseBoundary(int start, int end, int queryDepth) {
+        for (int i = start; i < end; i++) {
+            if (parenthesisDepth(i) == queryDepth && startsStructStarClause(i)) {
+                return i;
+            }
+        }
+        return end;
+    }
+
+    /** The fields of a STRUCT literal returned by a scalar-subquery operand, or null when it is not one. */
+    private Set<String> structLiteralFieldsInQuery(int start, int end) {
+        for (int i = start; i < end; i++) {
+            if (!tokens.get(i).isKeyword("STRUCT")) {
+                continue;
+            }
+            int open = nextSignificant(i + 1, end);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParen(open);
+            Set<String> fields = structLiteralFields(i, close + 1);
+            if (fields != null) {
+                return fields;
+            }
+        }
+        return null;
     }
 
     /** One star expansion in the multi-star structure, with its own EXCLUDE, REPLACE and RENAME lists. */
@@ -5333,8 +5394,8 @@ final class SqlDialectTranslator {
             if (open < 0 || open < select) {
                 return false;
             }
-            int next = nextSignificant(open + 1, tokens.size());
-            if (next >= 0 && (tokens.get(next).isKeyword("SELECT") || tokens.get(next).isKeyword("WITH"))) {
+            int next = nextNonSpace(open + 1, tokens.size());
+            if (next >= 0 && startsQuery(tokens.get(next))) {
                 return true;
             }
             position = open;
@@ -5876,13 +5937,25 @@ final class SqlDialectTranslator {
         return projection.alias();
     }
 
+    /** True for a SELECT or WITH token, including a rewritten select list kept as one raw token. */
+    private static boolean startsQuery(Token token) {
+        if (token.isKeyword("SELECT") || token.isKeyword("WITH")) {
+            return true;
+        }
+        if (token.kind != Kind.RAW) {
+            return false;
+        }
+        String text = token.text.strip().toUpperCase(Locale.ROOT);
+        return text.startsWith("SELECT") || text.startsWith("WITH");
+    }
+
     /**
      * The closing parenthesis of a nested query that starts at {@code open}, or -1 when the parenthesis
      * opens something else. A nested query resolves its own names, so the rewrite leaves it untouched.
      */
     private int nestedQueryClose(int open, int end) {
-        int next = nextSignificant(open + 1, end);
-        if (next < 0 || !tokens.get(next).isKeyword("SELECT") && !tokens.get(next).isKeyword("WITH")) {
+        int next = nextNonSpace(open + 1, end);
+        if (next < 0 || !startsQuery(tokens.get(next))) {
             return -1;
         }
         int close = matchingParen(open);
@@ -9019,11 +9092,11 @@ final class SqlDialectTranslator {
     }
 
     private boolean isQuery(int start, int end) {
-        int first = nextSignificant(start, end);
+        int first = nextNonSpace(start, end);
         if (first < 0) {
             return false;
         }
-        if (tokens.get(first).isKeyword("SELECT") || tokens.get(first).isKeyword("WITH")) {
+        if (startsQuery(tokens.get(first))) {
             return true;
         }
         if (!tokens.get(first).isPunct("(")) {
@@ -10966,6 +11039,16 @@ final class SqlDialectTranslator {
                 if (depth == 0) {
                     return k;
                 }
+            }
+        }
+        return -1;
+    }
+
+    /** The next token that is not a space, including a raw token such as a rewritten select list. */
+    private int nextNonSpace(int from, int end) {
+        for (int k = from; k < end; k++) {
+            if (tokens.get(k).kind != Kind.SPACE) {
+                return k;
             }
         }
         return -1;

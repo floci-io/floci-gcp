@@ -1268,6 +1268,28 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
+        assertEquals("MAX is not defined for arguments of type STRUCT",
+                invalid("SELECT MAX(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("MAX is not defined for arguments of type STRUCT",
+                invalid("SELECT MAX(t.s).*" + base).getMessage());
+        assertEquals("MIN is not defined for arguments of type STRUCT",
+                invalid("SELECT MIN(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for type INT64",
+                invalid("SELECT COUNT(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for type ARRAY",
+                invalid("SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for the aggregate expression",
+                invalid("SELECT MAX(t.s.a).*" + base).getMessage());
+        // ANY_VALUE keeps its input type, so it can still expand a STRUCT.
+        assertTrue(sql("SELECT ANY_VALUE(t.s).* EXCEPT(a)" + base + " GROUP BY ALL")
+                .contains("ANY_VALUE(t.s) AS \"_floci_star\""));
+        assertTrue(sql("SELECT g, ANY_VALUE(s).*, MAX(x) AS m FROM ds.t GROUP BY g")
+                .contains("unnest(ANY_VALUE(s))"));
+    }
+
+    @Test
     void structStarReplaceResolvesColumnsOfTheQuerySources() {
         SqlDialectTranslator.TableRef table = new SqlDialectTranslator.TableRef("ds", "t");
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\", \"_floci_source_1\")"

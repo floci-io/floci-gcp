@@ -513,6 +513,30 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
+        String[][] cases = {
+                {"SELECT MAX(t.s).* EXCEPT(a)" + base, "MAX is not defined for arguments of type STRUCT"},
+                {"SELECT MAX(t.s).*" + base, "MAX is not defined for arguments of type STRUCT"},
+                {"SELECT MIN(t.s).* EXCEPT(a)" + base, "MIN is not defined for arguments of type STRUCT"},
+                {"SELECT COUNT(t.s).* EXCEPT(a)" + base, "Dot-star is not supported for type INT64"},
+                {"SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base, "Dot-star is not supported for type ARRAY"},
+                {"SELECT MAX(t.s.a).*" + base, "Dot-star is not supported for the aggregate expression"},
+        };
+        for (String[] c : cases) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"))
+                    .body("error.message", equalTo(c[1]));
+        }
+        query(Map.of("query", "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n" + base + " GROUP BY ALL",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")));
+    }
+
+    @Test
+    @Order(2)
     void groupedStructStarReplacementsExecute() {
         String one = "(SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6)";
         String data = "(SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id"

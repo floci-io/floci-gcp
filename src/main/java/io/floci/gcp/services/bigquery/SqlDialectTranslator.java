@@ -2555,6 +2555,7 @@ final class SqlDialectTranslator {
         if (targetItem < 0) {
             return false;
         }
+        validateAggregateStarOperand(select, targetStart, targetDot);
         int tailStart = items.getLast()[1];
         // A set operation is not part of this query's tail: each arm is rewritten on its own and the
         // operator stays between the wrapped selects.
@@ -3561,6 +3562,7 @@ final class SqlDialectTranslator {
                         }
                     }
                 }
+                validateAggregateStarOperand(select, operandStart, dot);
                 stars.add(new SelectStructStar(itemIndex, operandStart, dot, exceptOpen, exceptClose, exceptNames,
                         excludedFields, replaceOpen, replaceClose, replaceTargets(replaceOpen, replaceClose),
                         fields));
@@ -5318,6 +5320,40 @@ final class SqlDialectTranslator {
             "APPROX_COUNT_DISTINCT", "APPROX_QUANTILES", "APPROX_TOP_COUNT", "APPROX_TOP_SUM", "STDDEV",
             "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE", "CORR", "COVAR_POP", "COVAR_SAMP");
 
+    /**
+     * Rejects a star over an aggregate that cannot produce a STRUCT. BigQuery errors before expansion, and
+     * letting DuckDB do it would return rows for {@code MAX(t.s).*} instead.
+     */
+    private void validateAggregateStarOperand(int select, int start, int end) {
+        int[] operand = unwrappedOperand(start, end);
+        int first = nextSignificant(operand[0], operand[1]);
+        if (first < 0) {
+            return;
+        }
+        Token token = tokens.get(first);
+        if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
+                || token.isKeyword("ANY_VALUE")) {
+            return;
+        }
+        int open = nextSignificant(first + 1, operand[1]);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return;
+        }
+        String name = token.upper();
+        if (name.equals("COUNT") || name.equals("COUNTIF")) {
+            throw invalidQuery("Dot-star is not supported for type INT64");
+        }
+        if (name.equals("ARRAY_AGG") || name.equals("ARRAY_CONCAT_AGG")) {
+            throw invalidQuery("Dot-star is not supported for type ARRAY");
+        }
+        int close = matchingParen(open);
+        Set<String> fields = operandFields(select, open + 1, close);
+        if (fields != null) {
+            throw invalidQuery(name + " is not defined for arguments of type STRUCT");
+        }
+        throw invalidQuery("Dot-star is not supported for the aggregate expression");
+    }
+
     /** The operand without parentheses that wrap all of it: {@code (ANY_VALUE(t.s))} is {@code ANY_VALUE(t.s)}. */
     private int[] unwrappedOperand(int start, int end) {
         int first = nextSignificant(start, end);
@@ -6317,6 +6353,10 @@ final class SqlDialectTranslator {
         }
         int pathEnd = significantBefore(dot);
         int pathStart = starOperandStart(pathEnd);
+        int select = precedingSelect(start, parenthesisDepth(start));
+        if (select >= 0) {
+            validateAggregateStarOperand(select, pathStart, dot);
+        }
         boolean dottedPath = false;
         for (int i = pathStart; i >= 0 && i <= pathEnd; i++) {
             dottedPath |= tokens.get(i).isPunct(".");
@@ -6405,6 +6445,10 @@ final class SqlDialectTranslator {
                     && !first.identifierText().contains(".");
             if (bareName) {
                 continue;
+            }
+            int select = precedingSelect(i, parenthesisDepth(i));
+            if (select >= 0) {
+                validateAggregateStarOperand(select, start, dot);
             }
             int after = nextSignificant(i + 1, tokens.size());
             int afterNext = after >= 0 ? nextSignificant(after + 1, tokens.size()) : -1;

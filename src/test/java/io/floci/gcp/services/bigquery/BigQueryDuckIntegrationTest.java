@@ -449,6 +449,30 @@ class BigQueryDuckIntegrationTest {
                         List.of("%E20S", "00.000000000000000000"), List.of("%E100S", "00.000000000000000000"), List.of("%E00S", "00"))));
     }
 
+    @Test
+    @Order(5)
+    void orderByReadsAStructSelectAliasFieldLikeBigQuery() {
+        String[][] cases = {
+                {"SELECT x = 1 AS d, STRUCT(x AS n) AS s FROM UNNEST([1, 2]) x ORDER BY s.n DESC", "rows.collect { it.f[1].v.f[0].v }", "2,1"},
+                {"SELECT STRUCT(x AS n, x * 10 AS m) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.m", "rows.collect { it.f[0].v.f[1].v }", "10,20,30"},
+                {"SELECT STRUCT(MAX(x) AS n) AS s, MOD(x, 2) AS k FROM UNNEST([1, 2, 3]) x GROUP BY k ORDER BY s.n DESC", "rows.collect { it.f[0].v.f[0].v }", "3,2"},
+                {"SELECT STRUCT(x * -1 AS n) AS x FROM UNNEST([3, 1, 2]) x ORDER BY x.n", "rows.collect { it.f[0].v.f[0].v }", "-3,-2,-1"},
+                {"SELECT DISTINCT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 2]) x ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
+                {"SELECT x, STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY x DESC) AS r FROM UNNEST([2, 1]) x ORDER BY s.n", "rows.collect { it.f[2].v }", "2,1"},
+                {"SELECT ARRAY(SELECT y FROM UNNEST([3, 1]) y ORDER BY y) AS a, STRUCT(x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.n", "rows.collect { it.f[1].v.f[0].v }", "1,2"},
+                {"SELECT UPPER(w) AS w, STRUCT(w AS raw) AS s FROM UNNEST(['b', 'C', 'a']) w ORDER BY s.raw", "rows.collect { it.f[0].v }", "C,A,B"},
+                {"SELECT -x AS x, STRUCT(x AS n) AS s FROM UNNEST([1, 2, 3]) x ORDER BY s.n", "rows.collect { it.f[0].v }", "-1,-2,-3"},
+                {"SELECT x, STRUCT(1 AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.n, x DESC", "rows.collect { it.f[0].v }", "3,2,1"},
+                {"SELECT t.s.n AS m, STRUCT(0 AS n) AS s FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t ORDER BY t.s.n", "rows.collect { it.f[0].v }", "1,2,3"},
+                {"SELECT STRUCT(MAX(t.s.n) AS n) AS s, t.s.n AS k FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t GROUP BY k HAVING t.s.n > 1 ORDER BY k", "rows.collect { it.f[1].v }", "2,3"},
+        };
+        for (String[] c : cases) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body(c[1], equalTo(List.of(c[2].split(","))));
+        }
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

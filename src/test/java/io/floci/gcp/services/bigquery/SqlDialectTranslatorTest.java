@@ -1721,6 +1721,22 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void orderByExpandsStructSelectAliasFieldsOnlyInItsOwnQuery() {
+        assertTrue(sql("SELECT STRUCT(x * -1 AS n) AS x FROM ds.t ORDER BY x.n").endsWith("ORDER BY list_extract([x * -1], 1)"));
+        String borrowed = sql("SELECT ARRAY(SELECT STRUCT(y AS n) AS s FROM UNNEST([1]) y) AS a,"
+                + " ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
+        assertTrue(borrowed.contains("OVER (ORDER BY s.n)"), borrowed);
+        String qualified = sql("SELECT STRUCT(0 AS n) AS s FROM ds.t AS t ORDER BY t.s.n");
+        assertTrue(qualified.endsWith("ORDER BY t.s.n"), qualified);
+        String window = sql("SELECT STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
+        assertTrue(window.contains("OVER (ORDER BY s.n)"), window);
+        String aggregate = sql("SELECT STRUCT(x AS n) AS s, ARRAY_AGG(x ORDER BY s.n) AS a FROM ds.t GROUP BY s");
+        assertTrue(aggregate.contains("ORDER BY s.n)"), aggregate);
+        String union = sql("SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(3 AS n) ORDER BY s.n DESC");
+        assertTrue(union.endsWith("ORDER BY s.n DESC"), union);
+    }
+
+    @Test
     void havingStructAliasDoesNotCaptureAnAliasInsideANestedQuery() {
         String translated = sql("SELECT STRUCT(MAX(x) AS n) AS s FROM UNNEST([1,2]) x"
                 + " HAVING (SELECT s.n FROM (SELECT STRUCT(0 AS n) AS s)) = 0");

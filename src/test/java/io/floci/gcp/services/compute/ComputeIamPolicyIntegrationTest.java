@@ -5,6 +5,8 @@ import com.google.iam.v1.GetIamPolicyRequest;
 import com.google.iam.v1.IAMPolicyGrpc;
 import com.google.iam.v1.Policy;
 import com.google.iam.v1.SetIamPolicyRequest;
+import io.floci.gcp.services.iam.IamPolicyCodec;
+import io.floci.gcp.services.iam.IamService;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
@@ -12,11 +14,24 @@ import io.grpc.StatusRuntimeException;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.net.URI;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.stream.IntStream;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,6 +44,14 @@ class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
     private static final Map<String, Object> BINDING = Map.of("role", ROLE, "members", List.of(MEMBER));
 
     @TestHTTPResource URI endpoint;
+    @Inject IamService iamService;
+
+    /** An instance and its auto-delete boot disk, with their policy names in the order their locks are taken. */
+    private record OrderedVm(String root, String diskName, String firstLock, String secondLock) {
+        String instance() { return root + ZONE + "/instances/vm"; }
+    }
+
+    private record Race<W>(Future<Response> delete, Future<W> write) {}
 
     private static Policy policy() {
         return Policy.newBuilder().addBindings(Binding.newBuilder().setRole(ROLE).addMembers(MEMBER)).build();
@@ -220,6 +243,174 @@ class ComputeIamPolicyIntegrationTest extends ComputeTestSupport {
             assertEquals(0, stub.getIamPolicy(GetIamPolicyRequest.newBuilder().setResource(diskName).build()).getBindingsCount());
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Mirrors IamService's lock striping, which is what lets a test pick names on either side of the order. */
+    private static int policyLockIndex(String policy) {
+        return Math.floorMod(("policy:" + policy).hashCode(), 64);
+    }
+
+    private static String restPath(String policy) {
+        return "/compute/v1/" + policy;
+    }
+
+    private Map<String, Object> vmWithBootDisk(String diskName) {
+        return Map.of("name", "vm", "machineType", "zones/us-central1-a/machineTypes/e2-medium",
+                "networkInterfaces", List.of(Map.of("subnetwork", "regions/us-central1/subnetworks/subnet")),
+                "disks", List.of(Map.of("boot", true, "autoDelete", true,
+                        "initializeParams", Map.of("diskName", diskName, "diskSizeGb", "20"))));
+    }
+
+    private OrderedVm orderedVm(boolean instanceLockFirst) throws Exception {
+        String root = root(), project = root.substring(root.lastIndexOf('/') + 1);
+        String prefix = "projects/" + project + ZONE;
+        String instancePolicy = prefix + "/instances/vm";
+        int instanceLock = policyLockIndex(instancePolicy);
+        String diskName = IntStream.range(0, 1000).mapToObj(i -> "boot-" + i)
+                .filter(name -> {
+                    int diskLock = policyLockIndex(prefix + "/disks/" + name);
+                    return instanceLockFirst ? instanceLock < diskLock : diskLock < instanceLock;
+                })
+                .findFirst().orElseThrow();
+        String diskPolicy = prefix + "/disks/" + diskName;
+        network(root);
+        done(root, post(root + ZONE + "/instances", vmWithBootDisk(diskName)));
+        return instanceLockFirst
+                ? new OrderedVm(root, diskName, instancePolicy, diskPolicy)
+                : new OrderedVm(root, diskName, diskPolicy, instancePolicy);
+    }
+
+    private void assertRecreatedVmHasNoPolicies(OrderedVm vm) throws Exception {
+        given().get(restPath(vm.firstLock()) + "/getIamPolicy").then().statusCode(404);
+        given().get(restPath(vm.secondLock()) + "/getIamPolicy").then().statusCode(404);
+        done(vm.root(), post(vm.root() + ZONE + "/instances", vmWithBootDisk(vm.diskName())));
+        assertUnbound(restPath(vm.firstLock()));
+        assertUnbound(restPath(vm.secondLock()));
+    }
+
+    private <T> T holdingPolicyLock(String policy, Callable<T> steps) {
+        return iamService.withPolicyLock(policy, () -> {
+            try {
+                return steps.call();
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        });
+    }
+
+    private static void awaitBlocked(String description, Predicate<StackTraceElement[]> stack) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (true) {
+            ThreadInfo[] threads = ManagementFactory.getThreadMXBean().dumpAllThreads(false, false);
+            if (Arrays.stream(threads).anyMatch(thread -> thread.getThreadState() == Thread.State.BLOCKED && stack.test(thread.getStackTrace()))) {
+                return;
+            }
+            assertTrue(System.nanoTime() < deadline, "No thread blocked " + description);
+            Thread.sleep(10);
+        }
+    }
+
+    private static void awaitBlockedInside(Class<?> type, String method) throws InterruptedException {
+        awaitBlocked("inside " + method, stack -> Arrays.stream(stack)
+                .anyMatch(frame -> frame.getClassName().equals(type.getName()) && frame.getMethodName().equals(method)));
+    }
+
+    private static void awaitBlockedOnComputeMonitor() throws InterruptedException {
+        awaitBlocked("entering ComputeService.mutate", stack -> stack.length > 0
+                && stack[0].getClassName().equals(ComputeService.class.getName()) && stack[0].getMethodName().equals("mutate"));
+    }
+
+    /**
+     * The test holds the later lock, so a delete using the shared order has the earlier one and waits. A write to the
+     * earlier policy can then only run once the delete has finished, which is the delete-wins outcome. A delete taking
+     * its locks in any other order would hold nothing and let the write through.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void sharedApiWriteWaitingOnADeleteGetsNotFound(boolean instanceLockFirst) throws Exception {
+        OrderedVm vm = orderedVm(instanceLockFirst);
+        bind(restPath(vm.firstLock()));
+        bind(restPath(vm.secondLock()));
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()).usePlaintext().build();
+        try (ExecutorService requests = Executors.newFixedThreadPool(2)) {
+            IAMPolicyGrpc.IAMPolicyBlockingStub stub = IAMPolicyGrpc.newBlockingStub(channel).withDeadlineAfter(60, TimeUnit.SECONDS);
+            Race<Policy> race = holdingPolicyLock(vm.secondLock(), () -> {
+                Future<Response> delete = requests.submit(() -> given().delete(vm.instance()));
+                awaitBlockedInside(ComputeService.class, "saveDroppingPolicies");
+                Future<Policy> write = requests.submit(() -> stub.setIamPolicy(
+                        SetIamPolicyRequest.newBuilder().setResource(vm.firstLock()).setPolicy(policy()).build()));
+                awaitBlockedInside(IamService.class, "setPolicy");
+                return new Race<>(delete, write);
+            });
+
+            done(vm.root(), race.delete().get(30, TimeUnit.SECONDS));
+            ExecutionException failure = assertThrows(ExecutionException.class, () -> race.write().get(30, TimeUnit.SECONDS));
+            assertEquals(Status.Code.NOT_FOUND, ((StatusRuntimeException) failure.getCause()).getStatus().getCode());
+            assertRecreatedVmHasNoPolicies(vm);
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** The write lands while the delete waits for the lock, so the delete has to remove what it just wrote. */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void sharedApiWriteAheadOfADeleteIsRemovedWithTheResource(boolean instanceLockFirst) throws Exception {
+        OrderedVm vm = orderedVm(instanceLockFirst);
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            Future<Response> delete = holdingPolicyLock(vm.secondLock(), () -> {
+                Future<Response> pending = requests.submit(() -> given().delete(vm.instance()));
+                awaitBlockedInside(ComputeService.class, "saveDroppingPolicies");
+                iamService.setPolicy(vm.secondLock(), IamPolicyCodec.fromJsonMap(Map.of("bindings", List.of(BINDING))));
+                assertFalse(iamService.getPolicy(vm.secondLock()).getBindings().isEmpty());
+                return pending;
+            });
+
+            done(vm.root(), delete.get(30, TimeUnit.SECONDS));
+            assertRecreatedVmHasNoPolicies(vm);
+        }
+    }
+
+    /** The delete holds the Compute monitor while it waits for the policy lock, and a REST write needs that monitor. */
+    @Test void restWriteWaitingOnADeleteGetsNotFound() throws Exception {
+        String root = root(), project = root.substring(root.lastIndexOf('/') + 1), disk = root + ZONE + "/disks/data";
+        disk(root, "data");
+        bind(disk);
+        try (ExecutorService requests = Executors.newFixedThreadPool(2)) {
+            Race<Response> race = holdingPolicyLock("projects/" + project + ZONE + "/disks/data", () -> {
+                Future<Response> delete = requests.submit(() -> given().delete(disk));
+                awaitBlockedInside(ComputeService.class, "saveDroppingPolicies");
+                Future<Response> write = requests.submit(() -> post(disk + "/setIamPolicy", Map.of("policy", Map.of("bindings", List.of(BINDING)))));
+                awaitBlockedOnComputeMonitor();
+                return new Race<>(delete, write);
+            });
+
+            done(root, race.delete().get(30, TimeUnit.SECONDS));
+            race.write().get(30, TimeUnit.SECONDS).then().statusCode(404);
+            disk(root, "data");
+            assertUnbound(disk);
+        }
+    }
+
+    /** The write holds the Compute monitor while it waits for the policy lock, so it finishes before the delete starts. */
+    @Test void restWriteAheadOfADeleteIsRemovedWithTheResource() throws Exception {
+        String root = root(), project = root.substring(root.lastIndexOf('/') + 1), disk = root + ZONE + "/disks/data";
+        disk(root, "data");
+        try (ExecutorService requests = Executors.newFixedThreadPool(2)) {
+            Race<Response> race = holdingPolicyLock("projects/" + project + ZONE + "/disks/data", () -> {
+                Future<Response> write = requests.submit(() -> post(disk + "/setIamPolicy", Map.of("policy", Map.of("bindings", List.of(BINDING)))));
+                awaitBlockedInside(IamService.class, "setPolicy");
+                Future<Response> delete = requests.submit(() -> given().delete(disk));
+                awaitBlockedOnComputeMonitor();
+                return new Race<>(delete, write);
+            });
+
+            race.write().get(30, TimeUnit.SECONDS).then().statusCode(200);
+            done(root, race.delete().get(30, TimeUnit.SECONDS));
+            given().get(disk + "/getIamPolicy").then().statusCode(404);
+            disk(root, "data");
+            assertUnbound(disk);
         }
     }
 }

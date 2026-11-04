@@ -678,14 +678,16 @@ set `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce` and use Floci-issued
 service-account tokens. This enforces Resource Manager v1 project metadata/policies,
 Cloud Run v2 service and revision REST operations and service policies, Secret
 Manager REST and gRPC operations, Pub/Sub REST and gRPC operations, Cloud Scheduler job
-REST and gRPC operations, IAM service-account, key, credential, and custom-role
-management, and supported GCS REST
-bucket and object operations through one shared evaluator. Bindings to API-created
-custom roles grant their stored permissions within the role's project or organization;
-custom-role bindings in GCS bucket policies grant nothing. Project and Cloud Run service policies
-also use the shared IAM gRPC API. Resource Manager, Cloud Run, Secret Manager,
-Pub/Sub, Cloud Scheduler, and IAM bypass anonymous/external credentials; GCS evaluates them as
-anonymous so `allUsers` bindings work. Cloud Run jobs, worker pools, instances,
+REST and gRPC operations, Cloud Logging project and organization sink management over
+REST and gRPC, IAM service-account, key, credential, and custom-role management,
+and supported GCS REST bucket and object operations through one shared evaluator.
+Bindings to API-created custom roles grant their stored permissions within the role's
+project or organization; custom-role bindings in GCS bucket policies grant nothing.
+Project and Cloud Run service policies also use the shared IAM gRPC API.
+Resource Manager, Cloud Run, Secret Manager,
+Pub/Sub, Cloud Scheduler, Cloud Logging sinks, and IAM bypass anonymous/external
+credentials; GCS evaluates them as anonymous so `allUsers` bindings work.
+Cloud Run jobs, worker pools, instances,
 invocation and operations, GCS ACLs, GCS gRPC, and all other services remain
 unenforced. Read the
 [coverage and limitations](docs/services/iam.md#opt-in-enforcement) before treating a

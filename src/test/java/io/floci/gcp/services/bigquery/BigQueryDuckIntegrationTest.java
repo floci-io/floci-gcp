@@ -470,6 +470,103 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void groupedStructStarReplacementsExecute() {
+        String one = "(SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6)";
+        String data = "(SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id"
+                + " UNION ALL SELECT STRUCT(1 AS a, 3 AS c), 6 UNION ALL SELECT STRUCT(2 AS a, 4 AS c), 7)";
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a) FROM " + one + " t GROUP BY t.s",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f.v", equalTo(List.of("11")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a), COUNT(*) AS n"
+                        + " FROM " + data + " t GROUP BY t.s ORDER BY a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "n")))
+                .body("rows.f.v", equalTo(List.of(List.of("5", "1"), List.of("6", "1"), List.of("7", "1"))));
+        query(Map.of("query", "SELECT t.id, t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + data + " t GROUP BY t.id ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "a")))
+                .body("rows.f.v", equalTo(List.of(List.of("5", "5"), List.of("6", "6"), List.of("7", "7"))));
+        query(Map.of("query", "SELECT 99 AS a, t.s.* REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + one + " t GROUP BY t.s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("99", "11")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM " + one + " t GROUP BY t.s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("11", "99")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + data + " t GROUP BY t.s HAVING a > 6", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("7")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + data + " t GROUP BY t.s"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(t.id) DESC) = 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("7")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + data + " t GROUP BY t.s ORDER BY MAX(t.id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("5"), List.of("6"), List.of("7"))));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a), MOD(t.id, 2) AS k"
+                        + " FROM " + data + " t GROUP BY t.s, k ORDER BY a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "k")))
+                .body("rows.f.v", equalTo(List.of(List.of("5", "1"), List.of("6", "0"), List.of("7", "1"))));
+        query(Map.of("query", "SELECT t.id, t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a), COUNT(*) AS n"
+                        + " FROM " + data + " t GROUP BY 1 ORDER BY 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "a", "n")))
+                .body("rows.f.v", equalTo(List.of(List.of("5", "5", "1"), List.of("6", "6", "1"),
+                        List.of("7", "7", "1"))));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM " + data + " t GROUP BY ALL", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("18")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a, MAX(t.id) AS c), t.id"
+                        + " FROM " + data + " t GROUP BY 3 ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "c", "id")))
+                .body("rows[0].f.v", equalTo(List.of("5", "5", "5")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.s.c) AS a)"
+                        + " FROM " + data + " t GROUP BY t.s ORDER BY a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("2"), List.of("3"), List.of("4"))));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a) FROM " + one + " t GROUP BY t.s"
+                        + " UNION ALL SELECT 3", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("11"), List.of("3"))));
+        query(Map.of("query", "CREATE TABLE shop.grouped_star AS SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 3 AS c), 6", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM shop.grouped_star t GROUP BY t.s ORDER BY a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("5"), List.of("6"))));
+    }
+
+    @Test
+    @Order(2)
+    void groupedStructStarReplacementsRejectInvalidStarLists() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s";
+        query(Map.of("query", "SELECT t.s.* EXCEPT(z) REPLACE(SUM(t.id) AS a)" + base, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", equalTo("Column z in SELECT * EXCEPT list does not exist"));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS z)" + base, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("Column z in SELECT * REPLACE list does not exist"));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a) REPLACE(SUM(t.id) AS a)" + base, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("Column a cannot occur in both SELECT * EXCEPT and REPLACE"));
+    }
+
+    @Test
+    @Order(2)
     void starReplacementsRejectDirectWindowsButPreserveSubqueryWindows() {
         List<String> invalidQueries = List.of(
                 "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(COUNT(*) OVER () AS a)"

@@ -1075,6 +1075,87 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void groupedStructStarReplacementGroupsTheSourcesAndExpandsOutside() {
+        assertEquals("SELECT \"_floci_star_fields\".* REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id) t GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.s.* REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t GROUP BY t.s"));
+        assertEquals("SELECT \"id\", \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT t.id, ANY_VALUE(t.s) AS \"_floci_star\","
+                        + " SUM(t.id) AS \"_floci_replacement_0\" FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.id) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.id, t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.id"));
+    }
+
+    @Test
+    void groupedStructStarReplacementSuffixesACollidingField() {
+        assertEquals("SELECT * RENAME (\"_floci_projection_0\" AS \"a\", \"a\" AS \"a_1\") FROM ("
+                        + "SELECT \"_floci_projection_0\", \"_floci_star_fields\".*"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT 99 AS \"_floci_projection_0\", ANY_VALUE(t.s) AS \"_floci_star\","
+                        + " SUM(t.id) AS \"_floci_replacement_0\" FROM (SELECT {'a': 1} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\")"
+                        + " AS \"_floci_renamed_groups\"",
+                sql("SELECT 99 AS a, t.s.* REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t GROUP BY t.s"));
+    }
+
+    @Test
+    void groupedStructStarReplacementPointsQualifyAggregatesAtTheHelpers() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\""
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY \"_floci_replacement_0\" DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(t.id) DESC) = 1"));
+    }
+
+    @Test
+    void groupedStructStarReplacementPointsAHavingAliasAtTheHelper() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t GROUP BY t.s"
+                        + " HAVING \"_floci_replacement_0\" > 6) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s HAVING a > 6"));
+    }
+
+    @Test
+    void groupedStructStarReplacementProjectsATailAggregate() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\","
+                        + " MAX(t.id) AS \"_floci_aggregate_0\" FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\""
+                        + " ORDER BY \"_floci_aggregate_0\"",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s ORDER BY MAX(t.id)"));
+    }
+
+    @Test
+    void groupedStructStarReplacementValidatesItsStarLists() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t";
+        assertEquals("Column z in SELECT * EXCEPT list does not exist",
+                invalid("SELECT t.s.* EXCEPT(z) REPLACE(SUM(t.id) AS a)" + base + " GROUP BY t.s").getMessage());
+        assertEquals("Column z in SELECT * REPLACE list does not exist",
+                invalid("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS z)" + base + " GROUP BY t.s").getMessage());
+        assertEquals("Column a cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT t.s.* EXCEPT(a) REPLACE(SUM(t.id) AS a)" + base + " GROUP BY t.s").getMessage());
+    }
+
+    @Test
     void multipleStructStarsExpandThroughTheirOwnDerivedTables() {
         assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
                         + " FROM (SELECT {'a': 1, 'c': 10} AS \"s\") t, (SELECT {'b': 2, 'd': 20} AS \"s\") u,"

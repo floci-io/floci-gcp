@@ -2821,7 +2821,7 @@ final class SqlDialectTranslator {
             }
             String name = tokens.get(i).upper();
             if (group < 0 || !name.equals("BY")) {
-                if (STRUCT_STAR_CLAUSES.contains(name) && !name.equals("WHERE")) {
+                if (startsStructStarClause(i) && !name.equals("WHERE")) {
                     groupEnd = i;
                     break;
                 }
@@ -3365,7 +3365,8 @@ final class SqlDialectTranslator {
                 int column = dot < 0 ? -1 : nextSignificant(dot + 1, end);
                 boolean qualified = dot >= 0 && tokens.get(dot).isPunct(".") && column >= 0
                         && isName(tokens.get(column))
-                        && sources.aliases().contains(qualifier.toLowerCase(Locale.ROOT));
+                        && sources.aliases().contains(qualifier.toLowerCase(Locale.ROOT))
+                        && !sources.rangeVariables().contains(qualifier.toLowerCase(Locale.ROOT));
                 if (qualified) {
                     out.add(Token.raw(projectedPath(qualifier, tokens.get(column).identifierText(), column, end,
                             sources, itemColumns, sourceReferences)));
@@ -3383,6 +3384,13 @@ final class SqlDialectTranslator {
                         out.add(Token.raw(DuckTypes.quoteIdentifier(reference) + tail.text()));
                         substitutions[0]++;
                         i = tail.lastIndex() < 0 ? i : tail.lastIndex();
+                        continue;
+                    }
+                    PathTail rowValue = clauses ? null : fromRowValue(i, end, sources, structProjections);
+                    if (rowValue != null) {
+                        out.add(Token.raw(rowValue.text()));
+                        substitutions[0]++;
+                        i = rowValue.lastIndex();
                         continue;
                     }
                     if (!clauses && sources.allKnown() && !STRUCT_STAR_SYNTAX_WORDS.contains(token.upper())) {
@@ -3443,7 +3451,7 @@ final class SqlDialectTranslator {
             boolean named = isPrecededByDot(i)
                     || previous >= 0 && (tokens.get(previous).isPunct(".") || tokens.get(previous).isKeyword("AS"));
             if (parenthesisDepth(i) == queryDepth && token.kind == Kind.IDENT && !named
-                    && STRUCT_STAR_CLAUSES.contains(token.upper())) {
+                    && startsStructStarClause(i)) {
                 keywords.add(i);
             }
         }
@@ -3562,6 +3570,16 @@ final class SqlDialectTranslator {
 
     private static final Set<String> STRUCT_STAR_CLAUSES = Set.of("WHERE", "GROUP", "HAVING", "QUALIFY",
             "WINDOW", "ORDER", "LIMIT", "OFFSET");
+
+    /** True when the keyword at {@code index} opens a clause, not the {@code OFFSET} of {@code UNNEST ... WITH OFFSET}. */
+    private boolean startsStructStarClause(int index) {
+        Token token = tokens.get(index);
+        if (!STRUCT_STAR_CLAUSES.contains(token.upper())) {
+            return false;
+        }
+        int previous = significantBefore(index);
+        return !token.isKeyword("OFFSET") || previous < 0 || !tokens.get(previous).isKeyword("WITH");
+    }
 
     private static final String ALL = "ALL";
 
@@ -3727,7 +3745,8 @@ final class SqlDialectTranslator {
                 int column = dot < 0 ? -1 : nextSignificant(dot + 1, close);
                 boolean qualified = dot >= 0 && tokens.get(dot).isPunct(".") && column >= 0
                         && isName(tokens.get(column))
-                        && sources.aliases().contains(qualifier.toLowerCase(Locale.ROOT));
+                        && sources.aliases().contains(qualifier.toLowerCase(Locale.ROOT))
+                        && !sources.rangeVariables().contains(qualifier.toLowerCase(Locale.ROOT));
                 if (qualified) {
                     body.add(Token.raw(projectedPath(qualifier, tokens.get(column).identifierText(), column, close,
                             sources, itemColumns, sourceReferences)));
@@ -3744,6 +3763,12 @@ final class SqlDialectTranslator {
                         i = tail.lastIndex() < 0 ? i : tail.lastIndex();
                         continue;
                     }
+                    PathTail rowValue = fromRowValue(i, close, sources, structProjections);
+                    if (rowValue != null) {
+                        body.add(Token.raw(rowValue.text()));
+                        i = rowValue.lastIndex();
+                        continue;
+                    }
                     if (sources.allKnown() && !STRUCT_STAR_SYNTAX_WORDS.contains(token.upper())) {
                         throw invalidQuery("Unrecognized name: " + qualifier);
                     }
@@ -3752,6 +3777,32 @@ final class SqlDialectTranslator {
             body.add(token);
         }
         return body;
+    }
+
+    /**
+     * Projects a bare name that the {@code FROM} row supplies but no known source column names: an
+     * {@code UNNEST} range variable or its offset, a source alias read as a whole row, or a column of a source
+     * whose columns are unknown, such as a subquery without an alias. BigQuery reads it from the row, so it is
+     * evaluated next to the expansion, where a same-named field of the struct cannot shadow it. Returns the
+     * projection with any {@code .field} path, or null when the name is not such a value.
+     */
+    private PathTail fromRowValue(int index, int end, StructStarSources sources,
+                                  Map<String, StructProjection> projections) {
+        Token token = tokens.get(index);
+        boolean sourceAlias = sources.aliases().contains(token.identifierText().toLowerCase(Locale.ROOT));
+        if (!sourceAlias && (sources.allKnown()
+                || token.kind != Kind.QIDENT && STRUCT_STAR_SYNTAX_WORDS.contains(token.upper()))) {
+            return null;
+        }
+        PathTail tail = pathTail(nextSignificant(index + 1, end), end);
+        int last = tail.lastIndex() < 0 ? index : tail.lastIndex();
+        int after = nextSignificant(last + 1, end);
+        if (after >= 0 && tokens.get(after).isPunct("(")) {
+            // A dotted call such as SAFE.PARSE_DATE(...) names a function, not a value.
+            return null;
+        }
+        String alias = projectionFor(List.of(token), projections);
+        return new PathTail(DuckTypes.quoteIdentifier(alias) + tail.text(), last);
     }
 
     /** A {@code .field...} path that follows a name, or an empty text with no index. */
@@ -4004,7 +4055,7 @@ final class SqlDialectTranslator {
      * {@code FROM} row, so those names decide what the wrapper has to project and what it must reject.
      */
     private record StructStarSources(Map<String, Set<String>> columnsByAlias, Set<String> aliases,
-                                     boolean allKnown) {
+                                     Set<String> rangeVariables, boolean allKnown) {
 
         /** The same view without the aliases a nested query declares itself, which shadow the outer ones. */
         StructStarSources without(Set<String> shadowed) {
@@ -4019,7 +4070,9 @@ final class SqlDialectTranslator {
             }
             Set<String> remaining = new HashSet<>(aliases);
             remaining.removeAll(shadowed);
-            return new StructStarSources(columns, remaining, allKnown);
+            Set<String> remainingRanges = new HashSet<>(rangeVariables);
+            remainingRanges.removeAll(shadowed);
+            return new StructStarSources(columns, remaining, remainingRanges, allKnown);
         }
     }
 
@@ -4077,10 +4130,11 @@ final class SqlDialectTranslator {
             }
         }
         if (from < 0) {
-            return new StructStarSources(Map.of(), Set.of(), false);
+            return new StructStarSources(Map.of(), Set.of(), Set.of(), false);
         }
         Map<String, Set<String>> columnsByAlias = new LinkedHashMap<>();
         Set<String> aliases = new HashSet<>();
+        Set<String> rangeVariables = new HashSet<>();
         boolean allKnown = true;
         for (ProjectionSource source : projectionSources(from, queryDepth)) {
             if (source.alias() == null) {
@@ -4090,6 +4144,9 @@ final class SqlDialectTranslator {
             }
             String alias = source.alias().toLowerCase(Locale.ROOT);
             aliases.add(alias);
+            if (tokens.get(source.startToken()).isKeyword("UNNEST")) {
+                rangeVariables.add(alias);
+            }
             Set<String> columns = sourceColumns(source);
             if (columns == null) {
                 allKnown = false;
@@ -4097,7 +4154,7 @@ final class SqlDialectTranslator {
             }
             columnsByAlias.put(alias, columns);
         }
-        return new StructStarSources(columnsByAlias, aliases, allKnown);
+        return new StructStarSources(columnsByAlias, aliases, rangeVariables, allKnown);
     }
 
     private static final Set<String> STRUCT_STAR_AGGREGATES = Set.of("COUNT", "COUNTIF", "SUM", "AVG", "MIN", "MAX",

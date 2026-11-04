@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -274,6 +275,38 @@ class BigQueryDuckIntegrationTest {
                     .body("rows[0].f[0].v.v.size()", equalTo(2))
                     .body("rows[0].f[0].v.v[0].f[0].v", equalTo("2"))
                     .body("rows[0].f[0].v.v[1].f[0].v", equalTo("2"));
+        }
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementReadsRangeVariablesAndAliaslessSourcesFromTheRow() {
+        Map<String, List<String>> expected = new LinkedHashMap<>();
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x",
+                List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x)", List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x) u", List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(o AS a) FROM (SELECT STRUCT(1 AS a, 2 AS o) s) t,"
+                + " UNNEST([7]) AS x WITH OFFSET o", List.of("0", "2"));
+        expected.put("SELECT t.s.* REPLACE(x.f AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t,"
+                + " UNNEST([STRUCT(7 AS f)]) x", List.of("7", "2"));
+        expected.put("SELECT t.id, t.s.* EXCEPT(x) REPLACE(SUM(x) AS a)"
+                + " FROM (SELECT 1 AS id, STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7, 8]) x GROUP BY 1",
+                List.of("1", "15"));
+        expected.put("SELECT t.id, t.s.* EXCEPT(x) REPLACE(SUM(x) AS a)"
+                + " FROM (SELECT 1 AS id, STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x UNION ALL SELECT 8) GROUP BY 1", List.of("1", "15"));
+        expected.put("SELECT t.s.* EXCEPT(x), x, COUNT(*) AS n"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x GROUP BY ALL",
+                List.of("1", "7", "1"));
+        expected.put("SELECT t.s.* EXCEPT(a), x FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t,"
+                + " UNNEST([7]) AS x WITH OFFSET o", List.of("2", "7"));
+        for (Map.Entry<String, List<String>> entry : expected.entrySet()) {
+            query(Map.of("query", entry.getKey(), "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows[0].f.v", equalTo(entry.getValue()));
         }
     }
 

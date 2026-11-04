@@ -172,6 +172,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
   query's own sources that an aggregate still needs is projected next to the expansion.
   Replacement expressions read the original query's sources, including correlated columns.
+  A bare name in a replacement, such as an `UNNEST` range variable, its `WITH OFFSET` alias or a
+  column of a subquery without an alias, reads the `FROM` row, not a same-named field of the struct.
   Struct-field references remain bound to the original struct, not same-named sibling outputs or replaced fields.
   Like BigQuery, `REPLACE` rejects analytic functions directly in its expressions. Compute windows in a
   source query or a scalar subquery instead.
@@ -526,7 +528,8 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 - Struct-star `EXCEPT` / `REPLACE` translation does not support every combination:
   multiple struct stars or a sibling `*`, set operations beside a struct star, bare `USING`
-  columns in replacements, aggregate replacements with `GROUP BY t.s`, and a non-aggregate
+  columns in replacements, aggregate replacements with `GROUP BY t.s` or a named key such as
+  `GROUP BY t.id`, and a non-aggregate
   struct star with both `GROUP BY ALL` and `QUALIFY` can fail with `invalidQuery`.
   Without `REPLACE` or `DISTINCT`, a bare `ORDER BY` name can still bind to a same-named
   source column instead of the expanded field.

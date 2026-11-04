@@ -527,15 +527,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 ## Deviations from real BigQuery
 
 - Struct-star `EXCEPT` / `REPLACE` translation does not support every combination:
-  multiple struct stars or a sibling `*`, set operations beside a struct star, bare `USING`
-  columns in replacements, aggregate replacements with `GROUP BY t.s` or a named key such as
-  `GROUP BY t.id`, and a non-aggregate
-  struct star with both `GROUP BY ALL` and `QUALIFY` can fail with `invalidQuery`.
-  Under a positional `GROUP BY` or `GROUP BY ALL`, a sibling that shares a replaced field's name
-  fails with `Duplicate column names in the result are not supported` instead of taking BigQuery's
-  `_1` suffix.
-  Without `REPLACE` or `DISTINCT`, a bare `ORDER BY` name can still bind to a same-named
-  source column instead of the expanded field.
+  multiple struct stars or a sibling `*`, set operations beside a struct star, and aggregate
+  replacements with `GROUP BY t.s` or a named key such as `GROUP BY t.id` can fail with
+  `invalidQuery`.
   See the GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries).
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than

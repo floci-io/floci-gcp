@@ -244,6 +244,54 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void structStarOrderingGroupingAndJoinColumnsMatchBigQuery() {
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 9 AS b"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'y' AS b), 1) t ORDER BY b DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows.f.v", equalTo(List.of(List.of("y"), List.of("x"))));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 5 AS id) t"
+                        + " ORDER BY UPPER(b)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "id")))
+                .body("rows[0].f.v", equalTo(List.of("x", "5")));
+        query(Map.of("query", "SELECT t.s.* REPLACE (c AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS c) t"
+                        + " JOIN (SELECT 5 AS c) u USING (c)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f.v", equalTo(List.of("5")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(2 AS a), 3) t"
+                        + " ORDER BY a.n DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("5"))
+                .body("rows[1].f[0].v.f[0].v", equalTo("3"));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'x' AS b)"
+                        + " UNION ALL SELECT STRUCT(4 AS a, 'y' AS b)) t GROUP BY ALL"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "3")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'y' AS b)) t GROUP BY ALL HAVING COUNT(*) > 0"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("y", "1")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t"
+                        + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (PARTITION BY b ORDER BY n DESC) = 1 ORDER BY b",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows.f.v", equalTo(List.of(List.of("x", "2"), List.of("y", "1"))));
+    }
+
+    @Test
+    @Order(2)
     void starReplacementsRejectDirectWindowsButPreserveSubqueryWindows() {
         List<String> invalidQueries = List.of(
                 "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(COUNT(*) OVER () AS a)"

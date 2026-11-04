@@ -1711,6 +1711,62 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void structStarOrderByReadsAnExpandedFieldOutsideTheWrapper() {
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 5 AS id) t) AS \"_expanded\" ORDER BY b",
+                sql("SELECT t.s.* EXCEPT (a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 5 AS id) t"
+                        + " ORDER BY b"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 5 AS id) t) AS \"_expanded\""
+                        + " ORDER BY UPPER(b)",
+                sql("SELECT t.s.* EXCEPT (a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 5 AS id) t"
+                        + " ORDER BY UPPER(b)"));
+        // The expanded field wins over a source column of the same name, as BigQuery's output alias does.
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 9 AS b) t) AS \"_expanded\" ORDER BY b DESC",
+                sql("SELECT t.s.* EXCEPT (a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 9 AS b) t ORDER BY b DESC"));
+    }
+
+    @Test
+    void structStarOrderByReplacedFieldPathSortsByTheReplacement() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE ({'n': \"_floci_source_0\"} AS a)"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id UNION ALL SELECT {'a': 2} AS \"$col1\", 3 AS \"$col2\") t)"
+                        + " AS \"_expanded\" ORDER BY ({'n': \"_floci_source_0\"}).n DESC",
+                sql("SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(2 AS a), 3) t"
+                        + " ORDER BY a.n DESC"));
+    }
+
+    @Test
+    void structStarReplaceResolvesAUsingJoinColumn() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"c\" AS \"_floci_source_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS c) t JOIN (SELECT 5 AS c) u USING (c))"
+                        + " AS \"_expanded\"",
+                sql("SELECT t.s.* REPLACE (c AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS c) t"
+                        + " JOIN (SELECT 5 AS c) u USING (c)"));
+    }
+
+    @Test
+    void structStarGroupByAllKeepsQualifyWithExplicitGroupingPositions() {
+        assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'x'} AS \"$col1\""
+                        + " UNION ALL SELECT {'a': 3, 'b': 'y'} AS \"$col1\") t) AS \"_expanded\" GROUP BY 1"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t"
+                        + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1"));
+        assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'y'} AS \"$col1\") t)"
+                        + " AS \"_expanded\" GROUP BY 1 HAVING COUNT(*) > 0"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1",
+                sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'y' AS b)) t GROUP BY ALL HAVING COUNT(*) > 0"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1"));
+    }
+
+    @Test
     void generatedColumnNamesAvoidTheQuerysOwnOutputs() {
         String translated = sql("SELECT t.s.* REPLACE(t.amount AS a), 99 AS _floci_source_0"
                 + " FROM (SELECT STRUCT(1 AS a) s, 5 AS amount) t");

@@ -524,8 +524,8 @@ final class SqlDialectTranslator {
     }
 
     /** Functions that always return an ARRAY, so a bare subscript on a call to one is an array subscript. */
-    private static final Set<String> ARRAY_FUNCTIONS = Set.of("ARRAY_AGG", "ARRAY_CONCAT", "ARRAY_REVERSE", "SPLIT",
-            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY");
+    private static final Set<String> ARRAY_FUNCTIONS = Set.of("ARRAY_AGG", "ARRAY_CONCAT", "ARRAY_CONCAT_AGG",
+            "ARRAY_REVERSE", "SPLIT", "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY");
 
     /**
      * True when the operand from {@code start} to {@code last} is an array by its own tokens: an array literal,
@@ -539,7 +539,7 @@ final class SqlDialectTranslator {
             int innerLast = previousSignificantBefore(last);
             return innerStart >= 0 && innerLast >= innerStart && isVisiblyArray(innerStart, innerLast);
         }
-        if (first.isPunct("[") || first.isKeyword("ARRAY")) {
+        if (first.isPunct("[") || first.isKeyword("ARRAY") || isArrayCast(start, last)) {
             return true;
         }
         if (first.kind != Kind.IDENT || !ARRAY_FUNCTIONS.contains(first.upper()) || !tokens.get(last).isPunct(")")) {
@@ -556,6 +556,26 @@ final class SqlDialectTranslator {
         int over = nextSignificant(close + 1, last + 1);
         int window = over >= 0 && tokens.get(over).isKeyword("OVER") ? nextSignificant(over + 1, last + 1) : -1;
         return window >= 0 && tokens.get(window).isPunct("(") && matchingParen(window) == last;
+    }
+
+    /**
+     * A whole {@code CAST(... AS T[])}, which is how {@link #rewriteTypedArrayLiterals} renders a typed array
+     * literal such as {@code ARRAY<INT64>[1, 2, 3]} before subscripts are rewritten.
+     */
+    private boolean isArrayCast(int start, int last) {
+        if (!tokens.get(start).isKeyword("CAST") || !tokens.get(last).isPunct(")")) {
+            return false;
+        }
+        int open = nextSignificant(start + 1, last + 1);
+        if (open < 0 || !tokens.get(open).isPunct("(") || matchingParen(open) != last) {
+            return false;
+        }
+        int type = previousSignificantBefore(last);
+        if (type < 0 || tokens.get(type).kind != Kind.RAW) {
+            return false;
+        }
+        String text = tokens.get(type).text.trim();
+        return text.startsWith("AS ") && text.endsWith("[]");
     }
 
     /** True when {@code t} can end an array value, so a {@code [} right after it is a subscript. */
@@ -2870,22 +2890,17 @@ final class SqlDialectTranslator {
             }
             List<Token> type = tokens.subList(i, closeAngle + 1).stream()
                     .filter(token -> token.kind != Kind.SPACE).toList();
-            if (nextSignificant(openBracket + 1, closeBracket) == -1) {
-                String literal = "CAST([] AS " + translateType(type) + ")";
-                tokens.subList(i, closeBracket + 1).clear();
-                tokens.add(i, Token.raw(literal));
-            } else {
-                // DuckDB infers anonymous struct member names for e.g. [(id_type, company_id)].
-                // Keep the GoogleSQL element type as a cast so ARRAY<STRUCT<type STRING,
-                // company_id INT64>>[(...)] retains its declared field names.
-                String translatedType = translateType(type);
-                tokens.subList(i, openBracket).clear();
-                tokens.add(i, new Token(Kind.IDENT, "CAST", "CAST"));
-                tokens.add(i + 1, new Token(Kind.PUNCT, "(", null));
-                int castEnd = matchingBracket(i + 2) + 1;
-                tokens.add(castEnd, Token.raw(" AS " + translatedType));
-                tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
-            }
+            // DuckDB infers anonymous struct member names for e.g. [(id_type, company_id)].
+            // Keep the GoogleSQL element type as a cast so ARRAY<STRUCT<type STRING,
+            // company_id INT64>>[(...)] retains its declared field names. An empty literal
+            // keeps the same tokens, so a subscript on it is still read as an OFFSET.
+            String translatedType = translateType(type);
+            tokens.subList(i, openBracket).clear();
+            tokens.add(i, new Token(Kind.IDENT, "CAST", "CAST"));
+            tokens.add(i + 1, new Token(Kind.PUNCT, "(", null));
+            int castEnd = matchingBracket(i + 2) + 1;
+            tokens.add(castEnd, Token.raw(" AS " + translatedType));
+            tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
         }
     }
 

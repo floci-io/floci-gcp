@@ -864,7 +864,8 @@ class SqlDialectTranslatorTest {
         assertTrue(literal.startsWith("SELECT (list_transform([struct_pack(a := [10, 20, 30], i := 2)], lambda _s:")
                 && literal.contains("ELSE _s.a[_s.i + 1] END)[1]) AS v"), literal);
         for (String visible : List.of("([10, 20, 30])[1]", "((SPLIT(s)))[1]", "ARRAY_AGG(x) OVER (ORDER BY x)[0]", "SPLIT(s)[1]", "ARRAY(SELECT 1)[0]", "GENERATE_ARRAY(1, 5)[0]",
-                "ARRAY_AGG(x ORDER BY x)[1]")) {
+                "ARRAY_AGG(x ORDER BY x)[1]", "ARRAY_CONCAT_AGG(a)[0]", "ARRAY<INT64>[1, 2, 3][1]",
+                "ARRAY<STRUCT<n INT64>>[(1)][0]", "ARRAY<INT64>[][0]")) {
             String rendered = sql("SELECT " + visible + " AS v FROM ds.t");
             assertTrue(rendered.startsWith("SELECT (list_transform([struct_pack(a := ") && rendered.contains("_s.a[_s.i + 1]"),
                     visible + " -> " + rendered);

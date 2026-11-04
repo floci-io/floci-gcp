@@ -325,6 +325,36 @@ class BigQueryDuckIntegrationTest {
     @Order(5)
     void bareSubscriptOnAVisibleArrayIsZeroBased() {
         query("""
+                {"query": "SELECT ARRAY_CONCAT_AGG(a)[0] AS f, ARRAY_CONCAT_AGG(a)[2] AS t FROM UNNEST([STRUCT([1, 2] AS a), STRUCT([3])])", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "3")));
+        query("""
+                {"query": "SELECT ARRAY_CONCAT_AGG(a)[3] AS f FROM UNNEST([STRUCT([1, 2] AS a), STRUCT([3])])", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT ARRAY<INT64>[1, 2, 3][1] AS t, ARRAY<STRING>['a', 'b'][0] AS s", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2", "a")));
+        query("""
+                {"query": "SELECT ARRAY<INT64>[1, 2, 3][3] AS t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT ARRAY<INT64>[][0] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 0 is out of bounds (overflow)"));
+        query("""
+                {"query": "SELECT ARRAY<INT64>[][SAFE_OFFSET(0)] AS a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", nullValue());
+        query("""
                 {"query": "SELECT [10, 20, 30][2] AS a, [10, 20, 30][0] AS b, ['x', 'y'][1] AS c, [10, 20][CAST(NULL AS INT64)] AS n", "useLegacySql": false}
                 """)
                 .then().statusCode(200)

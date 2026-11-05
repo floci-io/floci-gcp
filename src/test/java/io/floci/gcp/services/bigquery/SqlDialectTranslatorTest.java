@@ -1253,6 +1253,18 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void multipleStructStarReplacementHandlesAnArrayLiteralTarget() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"z\"),"
+                        + " \"_floci_star_1\".* REPLACE ([10,20] AS \"x_1\")"
+                        + " FROM (SELECT {'x': 1, 'z': 0} AS \"s\") t, (SELECT {'x': 2} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"x\" AS \"x_1\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(z), u.s.* REPLACE([10,20] AS x)"
+                        + " FROM (SELECT STRUCT(1 AS x, 0 AS z) s) t, (SELECT STRUCT(2 AS x) s) u"));
+    }
+
+    @Test
     void structStarReplaceReadsAMergedUsingColumn() {
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
                         + " FROM (SELECT unnest(u.s), COALESCE(\"t\".\"c\", \"u\".\"c\") AS \"_floci_source_0\""

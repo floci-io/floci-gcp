@@ -2895,7 +2895,7 @@ final class SqlDialectTranslator {
 
     /** True when a REPLACE list contains an aggregate call at the top level of an expression. */
     private boolean replacementHasAggregate(int open, int close) {
-        for (int[] range : topLevelRanges(open + 1, close, parenthesisDepth(open) + 1)) {
+        for (int[] range : replaceEntryRanges(open + 1, close)) {
             int as = topLevelAs(range[0], range[1]);
             if (structStarAggregates(range[0], as < 0 ? range[1] : as)) {
                 return true;
@@ -3082,7 +3082,7 @@ final class SqlDialectTranslator {
             }
         }
         int helper = 0;
-        for (int[] range : topLevelRanges(replaceOpen + 1, replaceClose, parenthesisDepth(replaceOpen) + 1)) {
+        for (int[] range : replaceEntryRanges(replaceOpen + 1, replaceClose)) {
             int as = topLevelAs(range[0], range[1]);
             if (as < 0 || helper >= helperAliases.size()) {
                 return false;
@@ -3285,7 +3285,7 @@ final class SqlDialectTranslator {
         }
         Map<String, String> helperByExpression = new LinkedHashMap<>();
         if (replaceOpen >= 0) {
-            List<int[]> ranges = topLevelRanges(replaceOpen + 1, replaceClose, parenthesisDepth(replaceOpen) + 1);
+            List<int[]> ranges = replaceEntryRanges(replaceOpen + 1, replaceClose);
             for (int index = 0; index < ranges.size() && index < replaceHelpers.size(); index++) {
                 int as = topLevelAs(ranges.get(index)[0], ranges.get(index)[1]);
                 if (structStarAggregates(ranges.get(index)[0], as < 0 ? ranges.get(index)[1] : as)) {
@@ -3802,8 +3802,7 @@ final class SqlDialectTranslator {
                                                 boolean nested, Map<String, String> renamedFields) {
         Set<Integer> targetAliases = new HashSet<>();
         if (!renamedFields.isEmpty()) {
-            int depth = parenthesisDepth(start);
-            for (int[] range : topLevelRanges(start, close, depth)) {
+            for (int[] range : replaceEntryRanges(start, close)) {
                 int as = topLevelAs(range[0], range[1]);
                 int alias = as < 0 ? -1 : nextSignificant(as + 1, range[1]);
                 if (alias >= 0) {
@@ -6325,36 +6324,63 @@ final class SqlDialectTranslator {
 
     /** The expression of the REPLACE entry that writes {@code name}, as an [start, AS) range. */
     private int[] replaceExpressionRange(int open, int close, String name) {
-        int depth = 0;
-        int entryStart = open + 1;
-        for (int i = open + 1; i <= close; i++) {
+        for (int[] range : replaceEntryRanges(open + 1, close)) {
+            int as = topLevelAs(range[0], range[1]);
+            if (as >= 0) {
+                int alias = nextSignificant(as + 1, range[1]);
+                if (alias >= 0 && isName(tokens.get(alias))
+                        && tokens.get(alias).identifierText().equalsIgnoreCase(name)) {
+                    return new int[] {range[0], as};
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Splits a REPLACE list at its top-level commas, keeping array and struct literals together. */
+    private List<int[]> replaceEntryRanges(int start, int close) {
+        List<int[]> ranges = new ArrayList<>();
+        int parens = 0;
+        int brackets = 0;
+        int braces = 0;
+        int entryStart = start;
+        for (int i = start; i <= close; i++) {
             boolean boundary = i == close;
             if (!boundary) {
                 Token token = tokens.get(i);
-                if (token.isPunct("(") || token.isPunct("[")) {
-                    depth++;
+                if (token.isPunct("(")) {
+                    parens++;
                     continue;
                 }
-                if (token.isPunct(")") || token.isPunct("]")) {
-                    depth--;
+                if (token.isPunct(")")) {
+                    parens--;
                     continue;
                 }
-                boundary = depth == 0 && token.isPunct(",");
+                if (token.isPunct("[")) {
+                    brackets++;
+                    continue;
+                }
+                if (token.isPunct("]")) {
+                    brackets--;
+                    continue;
+                }
+                if (token.isPunct("{")) {
+                    braces++;
+                    continue;
+                }
+                if (token.isPunct("}")) {
+                    braces--;
+                    continue;
+                }
+                boundary = parens == 0 && brackets == 0 && braces == 0 && token.isPunct(",");
             }
             if (!boundary) {
                 continue;
             }
-            int as = topLevelAs(entryStart, i);
-            if (as >= 0) {
-                int alias = nextSignificant(as + 1, i);
-                if (alias >= 0 && isName(tokens.get(alias))
-                        && tokens.get(alias).identifierText().equalsIgnoreCase(name)) {
-                    return new int[] {entryStart, as};
-                }
-            }
+            ranges.add(new int[] {entryStart, i});
             entryStart = i + 1;
         }
-        return null;
+        return ranges;
     }
 
     /** Points an unqualified reference to a renamed select output at the projection alias it is stored under. */
@@ -6556,7 +6582,7 @@ final class SqlDialectTranslator {
                 }
                 validateReplacementNames(open + 1, close, enclosingQuerySelect(start));
                 List<String> replacements = new ArrayList<>();
-                for (int[] item : topLevelRanges(open + 1, close, parenthesisDepth(open) + 1)) {
+                for (int[] item : replaceEntryRanges(open + 1, close)) {
                     int as = topLevelAs(item[0], item[1]);
                     int field = as < 0 ? -1 : nextSignificant(as + 1, item[1]);
                     if (field < 0 || !isName(tokens.get(field))) {

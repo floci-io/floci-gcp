@@ -27,8 +27,8 @@ import java.util.Optional;
 @ApplicationScoped
 public class GcsXmlMultipartHandler {
     private static final String NS = "http://s3.amazonaws.com/doc/2006-03-01/";
-    // GCS answers a completion as text/html (probed live on 2026-10-30).
-    private static final String COMPLETION_TYPE = "text/html; charset=UTF-8";
+    // GCS answers an initiation and a completion as text/html (probed live on 2026-10-30 and 2026-11-04).
+    private static final String HTML_TYPE = "text/html; charset=UTF-8";
     private final GcsXmlAuthorization xmlAuthorization;
     private final GcsMultipartService service;
     private final GcsIamAuthorizationService authorizationService;
@@ -62,9 +62,9 @@ public class GcsXmlMultipartHandler {
                 });
                 GcsMultipartUpload upload = service.initiate(
                         bucket, object, headers.getHeaderString("Content-Type"), metadata);
-                return xml(new XmlBuilder().start("InitiateMultipartUploadResult", NS)
+                return Response.ok(new XmlBuilder().start("InitiateMultipartUploadResult", NS)
                         .elem("Bucket", bucket).elem("Key", object).elem("UploadId", upload.id)
-                        .end("InitiateMultipartUploadResult"));
+                        .end("InitiateMultipartUploadResult").build(), HTML_TYPE).build();
             }));
         }
         if (id == null || id.isBlank()) { throw GcpException.invalidArgument("uploadId is required"); }
@@ -88,7 +88,7 @@ public class GcsXmlMultipartHandler {
                 String location = base + "/" + bucket + "/" + GcsXmlUrlEncoding.encode(object);
                 return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", location)
                         .elem("Bucket", bucket).elem("Key", object).elem("ETag", GcsMediaResponses.xmlEtag(meta))
-                        .end("CompleteMultipartUploadResult").build(), COMPLETION_TYPE)
+                        .end("CompleteMultipartUploadResult").build(), HTML_TYPE)
                         .header("x-goog-stored-content-length", meta.getSize())
                         .header("x-goog-hash", "crc32c=" + meta.getCrc32c())
                         .header("x-goog-generation", meta.getGeneration())

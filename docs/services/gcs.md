@@ -463,7 +463,8 @@ Part numbers range from 1 to 10000. Completion validates increasing order, ETags
 and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
 a failed completion preserves the session. A part receipt in the completion is accepted
 with or without its quotes. A receipt that names a part that was not uploaded, or a
-wrong ETag, returns HTTP 404 `NoSuchPart`. The completion result is sent the way GCS
+wrong ETag, returns HTTP 404 `NoSuchPart`. The initiation result is sent as `text/html`,
+as GCS sends it. The completion result is sent the way GCS
 sends it: as `text/html`, with the ETag in the body only, a `Location` that is the XML
 URL of the object, and the `x-goog-stored-content-length`, `x-goog-hash`,
 `x-goog-generation` and `x-goog-metageneration` headers. Completed objects have CRC32C

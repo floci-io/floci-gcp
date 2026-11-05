@@ -516,6 +516,11 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 - `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are
   not stored. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY` metadata is
   stored for the supported expressions documented above.
+- Option values in `ALTER TABLE` / `ALTER VIEW SET OPTIONS` and `CREATE TABLE COPY` are evaluated
+  without BigQuery's limits on the functions they call. BigQuery rejects aggregate functions
+  (`Aggregate function MAX not allowed in option`), analytic functions and some scalar functions such
+  as `LPAD` and `RAND` (`Found unsupported function call`); floci evaluates them. Other scalar functions,
+  including `REPLACE`, `FORMAT` and `UPPER`, work in both.
 - Legacy SQL (`useLegacySql: true`) is rejected. A request that omits `useLegacySql` runs as
   GoogleSQL (the API default is legacy SQL, but every SDK sends `false`).
 - `SELECT * FROM UNNEST(array)` expands `STRUCT` elements into columns; with an alias

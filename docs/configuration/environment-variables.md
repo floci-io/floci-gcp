@@ -95,7 +95,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_IAM_ENABLED` | `true` | IAM |
 | `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE` | `disabled` | `enforce` evaluates stored policies for supported Resource Manager and GCS bucket/object operations. Default `disabled` keeps permissive behavior. [Coverage and limits](../services/iam.md#opt-in-enforcement) |
 | `FLOCI_GCP_SERVICES_IAM_BOOTSTRAP_ADMIN_MEMBER` | unset | Optional IAM member granted `roles/storage.admin` on each newly created bucket |
-| `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED` | `true` | IAM Service Account Credentials (`generateAccessToken`, `signBlob`, `signJwt`) |
+| `FLOCI_GCP_SERVICES_IAMCREDENTIALS_ENABLED` | `true` | IAM Service Account Credentials (`generateAccessToken`, `generateIdToken`, `signBlob`, `signJwt`) |
 | `FLOCI_GCP_SERVICES_STS_ENABLED` | `true` | Security Token Service (STS) |
 | `FLOCI_GCP_SERVICES_LOGGING_ENABLED` | `true` | Cloud Logging |
 | `FLOCI_GCP_SERVICES_KMS_ENABLED` | `true` | Cloud KMS |

@@ -183,6 +183,45 @@ class IamServiceAccountEnforcementIntegrationTest {
     }
 
     @Test
+    void idTokenRequiresOpenIdTokenPermissionAndRejectsDelegation() {
+        iam.createServiceAccount(project, "target", "target", "");
+        String resource = "projects/" + project + "/serviceAccounts/" + targetEmail;
+        String path = "/v1/projects/-/serviceAccounts/" + targetEmail + ":generateIdToken";
+        Map<String, Object> request = Map.of("audience", "https://foo.bar");
+
+        given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                .contentType("application/json").body(request).when().post(path)
+                .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+
+        setPolicy(resource, "roles/iam.serviceAccountTokenCreator", callerEmail, null);
+
+        given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                .contentType("application/json").body(request).when().post(path)
+                .then().statusCode(200).body("token", notNullValue());
+        given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(Map.of("audience", "https://foo.bar", "delegates", List.of(resource))).when().post(path)
+                .then().statusCode(400).body("error.status", equalTo("FAILED_PRECONDITION"));
+        given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(Map.of("permissions", List.of("iam.serviceAccounts.getOpenIdToken", "iam.serviceAccounts.update")))
+                .when().post("/v1/" + resource + ":testIamPermissions")
+                .then().statusCode(200).body("permissions", contains("iam.serviceAccounts.getOpenIdToken"));
+    }
+
+    @Test
+    void idTokenIsDeniedByARoleWithoutTheOpenIdTokenPermission() {
+        iam.createServiceAccount(project, "target", "target", "");
+        setPolicy("projects/" + project + "/serviceAccounts/" + targetEmail, "roles/iam.serviceAccountUser",
+                callerEmail, null);
+
+        given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                .contentType("application/json").body(Map.of("audience", "https://foo.bar"))
+                .when().post("/v1/projects/-/serviceAccounts/" + targetEmail + ":generateIdToken")
+                .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
     void deniedManagementMutationsLeaveAccountsKeysAndPoliciesUnchanged() {
         iam.createServiceAccount(project, "target", "original", "");
         String account = "projects/" + project + "/serviceAccounts/" + targetEmail;

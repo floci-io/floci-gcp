@@ -133,11 +133,15 @@ class IamServiceAccountIamEnforcementTest {
                     .isInstanceOf(PermissionDeniedException.class);
             assertThatThrownBy(() -> caller.signJwt(target, List.of(), "{}"))
                     .isInstanceOf(PermissionDeniedException.class);
+            assertThatThrownBy(() -> caller.generateIdToken(target, List.of(), "https://foo.bar", false))
+                    .isInstanceOf(PermissionDeniedException.class);
         }
         setProjectPolicy("roles/iam.serviceAccountTokenCreator", null);
         assertThat(caller.signBlob(target, List.of(), ByteString.copyFromUtf8("hello")).getSignedBlob().size())
                 .isEqualTo(256);
         assertThat(caller.signJwt(target, List.of(), "{}").getSignedJwt().split("\\.")).hasSize(3);
+        assertThat(caller.generateIdToken(target, List.of(), "https://foo.bar", false).getToken().split("\\."))
+                .hasSize(3);
     }
 
     @Test

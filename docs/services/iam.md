@@ -28,10 +28,10 @@ which mode is active and the supported service list.
 | Cloud Scheduler | REST JSON and gRPC job create/get/list/update/delete/pause/resume/run; project policy inheritance. See [Scheduler IAM enforcement](scheduler.md#iam-enforcement) |
 | Cloud Logging sinks | REST JSON and gRPC create/get/list/update/delete for project and organization sinks. Folder and billing-account parents fail closed for evaluated callers; sink IAM policy methods fail closed in enforce mode. See [Sink management IAM](logging.md#sink-management-iam) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
-| IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `signBlob`, and `signJwt` |
+| IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `generateIdToken`, `signBlob`, and `signJwt` |
 | IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
-| IAM Credentials `generateIdToken`, Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
+| Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
 Valid **Floci-issued service-account tokens** activate IAM evaluation on every
 supported surface. Mint one through the existing IAM Credentials
@@ -163,6 +163,7 @@ at the exact Google API method contract. `P` is `projects/{project}`; `SA` is
 | [testIamPermissions](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/testIamPermissions) | No prerequisite permission; filters requested permissions through the evaluator | SA | REST POST, shared IAM v1 gRPC |
 | [signBlob](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/signBlob) | `iam.serviceAccounts.signBlob` | SA | IAM v1 REST POST |
 | [generateAccessToken](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken) | `iam.serviceAccounts.getAccessToken` | SA | IAM Credentials v1 REST POST |
+| [generateIdToken](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateIdToken) | `iam.serviceAccounts.getOpenIdToken` | SA | IAM Credentials v1 REST POST |
 | [Credentials signBlob](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signBlob) | `iam.serviceAccounts.signBlob` | SA | IAM Credentials v1 REST POST |
 | [Credentials signJwt](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt) | `iam.serviceAccounts.signJwt` | SA | IAM Credentials v1 REST POST |
 
@@ -196,14 +197,14 @@ defines these finite role slices for the implemented permissions:
 | `roles/iam.serviceAccountAdmin` | Service-account create, get, list, update, delete, getIamPolicy, setIamPolicy |
 | `roles/iam.serviceAccountKeyAdmin` | Key create, get, list, delete; service-account get, list |
 | `roles/iam.serviceAccountUser` | Service-account get, list; `actAs` is not an implemented operation |
-| `roles/iam.serviceAccountTokenCreator` | Service-account get, list, getAccessToken, signBlob, signJwt |
+| `roles/iam.serviceAccountTokenCreator` | Service-account get, list, getAccessToken, getOpenIdToken, signBlob, signJwt |
 | `roles/viewer` | Service-account get, list, getIamPolicy; key get, list |
 | `roles/editor` | Viewer slice plus service-account create, update, delete and key create, delete |
 | `roles/owner` | Editor slice plus service-account setIamPolicy |
 
 Each listed predefined IAM role also contributes `resourcemanager.projects.get`
 for the supported Resource Manager adapter. Basic roles do not grant
-`getAccessToken`, `signBlob`, or `signJwt`. These are explicit slices of Google's roles,
+`getAccessToken`, `getOpenIdToken`, `signBlob`, or `signJwt`. These are explicit slices of Google's roles,
 not the full production role catalog.
 
 The local evaluator exposes `resource.service = 'iam.googleapis.com'`,
@@ -223,7 +224,7 @@ or signing response. The existing filters do not hold policy locks across the
 subsequent mutation, so they provide no atomic policy-revocation guarantee.
 
 Service-account enable, disable, undelete, key upload,
-enable/disable, IAM v1 signJwt, and Credentials generateIdToken
+enable/disable, and IAM v1 signJwt
 are unimplemented. Only the shared IAM policy gRPC mixin is exposed;
 IAM admin and IAM Credentials gRPC services are not implemented. Non-empty
 credential delegation chains fail with `FAILED_PRECONDITION` for evaluated
@@ -504,7 +505,7 @@ URL signedUrl = storage.signUrl(
     Storage.SignUrlOption.withV4Signature());
 ```
 
-`SignBlob` (`{"bytesToSign": "<base64>"}`) returns `{"keyId", "signature"}`: an RSASSA-PKCS1-v1_5 SHA-256 signature made with the service account's Google-managed RSA-2048 key. Each account gets one such key the first time it signs, kept until the account is deleted, and the same key signs for the [IAM Credentials](iam-credentials.md) `signBlob` and `signJwt` methods.
+`SignBlob` (`{"bytesToSign": "<base64>"}`) returns `{"keyId", "signature"}`: an RSASSA-PKCS1-v1_5 SHA-256 signature made with the service account's Google-managed RSA-2048 key. Each account gets one such key the first time it signs, kept until the account is deleted, and the same key signs for the [IAM Credentials](iam-credentials.md) `signBlob`, `signJwt` and `generateIdToken` methods.
 
 The signing key is not returned by `ListServiceAccountKeys` (real IAM lists it as a `SYSTEM_MANAGED` key), so its public half cannot be read back and signatures cannot be verified against it locally. Nothing in floci-gcp verifies them: GCS checks a signed URL's expiry, not its signature.
 

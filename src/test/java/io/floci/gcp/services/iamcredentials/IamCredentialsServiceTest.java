@@ -106,6 +106,52 @@ class IamCredentialsServiceTest {
         assertInvalidArgument(() -> signingService.signJwt(SIGNER, "[1,2]"));
     }
 
+    @Test
+    void generateIdTokenSignsItsClaimsWithTheAccountsKeyAndOneHourExpiry() throws Exception {
+        iam.createServiceAccount("p1", "signer", "", "");
+        String uniqueId = iam.getServiceAccount("p1", SIGNER).getUniqueId();
+
+        Map<String, String> response = signingService.generateIdToken(SIGNER, "https://foo.bar", false);
+
+        assertEquals(List.of("token"), List.copyOf(response.keySet()));
+        String[] parts = response.get("token").split("\\.");
+        assertEquals(3, parts.length);
+        StoredSigningKey key = signingKeys.scan(k -> true).get(0);
+        ObjectMapper json = new ObjectMapper();
+        assertEquals(key.getKeyId(), json.readTree(Base64.getUrlDecoder().decode(parts[0])).get("kid").asText());
+        assertTrue(SigningKeyFixtures.verifies(SigningKeyFixtures.publicKey(key),
+                (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII),
+                Base64.getUrlDecoder().decode(parts[2])));
+        assertEquals(json.createObjectNode()
+                        .put("aud", "https://foo.bar")
+                        .put("azp", uniqueId)
+                        .put("exp", NOW.getEpochSecond() + 3600)
+                        .put("iat", NOW.getEpochSecond())
+                        .put("iss", "https://accounts.google.com")
+                        .put("sub", uniqueId)
+                        .toString(),
+                new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void generateIdTokenAddsEmailClaimsOnlyWhenAsked() throws Exception {
+        iam.createServiceAccount("p1", "signer", "", "");
+
+        String token = signingService.generateIdToken(SIGNER, "https://foo.bar", true).get("token");
+
+        JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
+        assertEquals(SIGNER, claims.get("email").asText());
+        assertTrue(claims.get("email_verified").asBoolean());
+    }
+
+    @Test
+    void generateIdTokenRequiresAnAudience() {
+        iam.createServiceAccount("p1", "signer", "", "");
+
+        assertInvalidArgument(() -> signingService.generateIdToken(SIGNER, null, false));
+        assertInvalidArgument(() -> signingService.generateIdToken(SIGNER, "", false));
+    }
+
     private static void assertInvalidArgument(org.junit.jupiter.api.function.Executable call) {
         GcpException e = assertThrows(GcpException.class, call);
         assertEquals(io.grpc.Status.Code.INVALID_ARGUMENT, e.getGrpcCode());

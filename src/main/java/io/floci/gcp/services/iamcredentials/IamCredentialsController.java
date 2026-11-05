@@ -46,6 +46,15 @@ public class IamCredentialsController {
         return Response.ok(response).build();
     }
 
+    @POST
+    @Path("/-/serviceAccounts/{serviceAccount}:generateIdToken")
+    public Response generateIdToken(@PathParam("serviceAccount") String serviceAccount, Map<String, Object> body) {
+        Object audience = body != null ? body.get("audience") : null;
+        boolean includeEmail = body != null && Boolean.TRUE.equals(body.get("includeEmail"));
+        return Response.ok(service.generateIdToken(serviceAccount, audience instanceof String s ? s : null,
+                includeEmail)).build();
+    }
+
     /**
      * iamcredentials {@code signBlob} and IAM v1 {@code serviceAccounts.signBlob} share this path when
      * the project is {@code -}. The request body tells them apart: iamcredentials sends {@code payload},

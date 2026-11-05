@@ -165,7 +165,10 @@ compatibility guarantees.
   and [Credentials proto](https://github.com/googleapis/googleapis/blob/master/google/iam/credentials/v1/iamcredentials.proto).
 - [Credentials signBlob](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signBlob)
   and [signJwt](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt)
-  permission references.
+  permission references; `iam.serviceAccounts.getOpenIdToken` for
+  `generateIdToken` comes from the
+  [Pub/Sub proto](https://github.com/googleapis/googleapis/blob/master/google/pubsub/v1/pubsub.proto)
+  and the [Cloud Run roles](https://docs.cloud.google.com/iam/docs/roles-permissions/run).
 - [IAM REST Java SDK source](https://github.com/googleapis/google-api-java-client-services/blob/main/clients/google-api-services-iam/v1/2.0.0/com/google/api/services/iam/v1/Iam.java)
   and [Credentials HTTP JSON stub](https://github.com/googleapis/google-cloud-java/blob/main/java-iamcredentials/google-cloud-iamcredentials/src/main/java/com/google/cloud/iam/credentials/v1/stub/HttpJsonIamCredentialsStub.java).
 

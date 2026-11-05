@@ -1,5 +1,6 @@
 package io.floci.gcp.test;
 
+import com.google.auth.oauth2.IdToken;
 import com.google.cloud.iam.credentials.v1.GenerateAccessTokenResponse;
 import com.google.cloud.iam.credentials.v1.IamCredentialsClient;
 import com.google.cloud.iam.credentials.v1.SignBlobResponse;
@@ -53,6 +54,23 @@ class IamCredentialsTest {
             assertThat(parts).hasSize(3);
             assertThat(new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8))
                     .contains("\"alg\":\"RS256\"").contains("\"kid\":\"" + blob.getKeyId() + "\"");
+        }
+    }
+
+    @Test
+    void generateIdTokenWithHttpJsonClient() throws Exception {
+        String email = createServiceAccount("compat-id-token");
+        String name = "projects/-/serviceAccounts/" + email;
+
+        try (IamCredentialsClient client = TestFixtures.iamCredentialsClient()) {
+            String withoutEmail = client.generateIdToken(name, List.of(), "https://foo.bar", false).getToken();
+            assertThat(IdToken.create(withoutEmail).getExpirationTime()).isInTheFuture();
+            assertThat(new String(Base64.getUrlDecoder().decode(withoutEmail.split("\\.")[1]), StandardCharsets.UTF_8))
+                    .contains("\"aud\":\"https://foo.bar\"").doesNotContain(email);
+
+            String withEmail = client.generateIdToken(name, List.of(), "https://foo.bar", true).getToken();
+            assertThat(new String(Base64.getUrlDecoder().decode(withEmail.split("\\.")[1]), StandardCharsets.UTF_8))
+                    .contains("\"email\":\"" + email + "\"").contains("\"email_verified\":true");
         }
     }
 

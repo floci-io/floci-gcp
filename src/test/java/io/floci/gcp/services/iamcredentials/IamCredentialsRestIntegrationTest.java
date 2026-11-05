@@ -1,12 +1,16 @@
 package io.floci.gcp.services.iamcredentials;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.common.mapper.TypeRef;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -17,11 +21,13 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class IamCredentialsRestIntegrationTest {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PATH =
             "/v1/projects/-/serviceAccounts/test@test-project.iam.gserviceaccount.com:generateAccessToken";
     private static final Map<String, Object> VALID_BODY = Map.of(
@@ -224,6 +230,80 @@ class IamCredentialsRestIntegrationTest {
         given().urlEncodingEnabled(false).contentType("application/json")
                 .body(Map.of("payload", "aGVsbG8="))
                 .when().post("/v1/projects/-/serviceAccounts/ghost@sign-project.iam.gserviceaccount.com:signBlob")
+                .then()
+                .statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+    }
+
+    @Test
+    void generateIdTokenReturnsAnRs256JwtWithoutEmailByDefault() throws Exception {
+        String sa = createServiceAccount("id-token");
+        String uniqueId = given().urlEncodingEnabled(false)
+                .when().get("/v1/projects/sign-project/serviceAccounts/" + sa)
+                .then().statusCode(200).extract().path("uniqueId");
+        String keyId = given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("payload", "{}"))
+                .when().post("/v1/projects/-/serviceAccounts/" + sa + ":signJwt")
+                .then().statusCode(200).extract().path("keyId");
+
+        Map<String, Object> response = given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("delegates", List.of(), "audience", "https://foo.bar", "includeEmail", false))
+                .when().post("/v1/projects/-/serviceAccounts/" + sa + ":generateIdToken")
+                .then().statusCode(200).extract().as(new TypeRef<Map<String, Object>>() {});
+
+        assertEquals(List.of("token"), List.copyOf(response.keySet()));
+        String[] parts = ((String) response.get("token")).split("\\.");
+        assertEquals(3, parts.length);
+        JsonNode header = JSON.readTree(Base64.getUrlDecoder().decode(parts[0]));
+        assertEquals("RS256", header.get("alg").asText());
+        assertEquals(keyId, header.get("kid").asText());
+        JsonNode claims = JSON.readTree(Base64.getUrlDecoder().decode(parts[1]));
+        assertEquals("https://foo.bar", claims.get("aud").asText());
+        assertEquals("https://accounts.google.com", claims.get("iss").asText());
+        assertEquals(uniqueId, claims.get("sub").asText());
+        assertEquals(uniqueId, claims.get("azp").asText());
+        assertEquals(3600, claims.get("exp").asLong() - claims.get("iat").asLong());
+        assertFalse(claims.has("email"));
+        assertFalse(claims.has("email_verified"));
+    }
+
+    @Test
+    void generateIdTokenWithIncludeEmailAddsTheEmailClaims() throws Exception {
+        String sa = createServiceAccount("id-token-email");
+        String uniqueId = given().urlEncodingEnabled(false)
+                .when().get("/v1/projects/sign-project/serviceAccounts/" + sa)
+                .then().statusCode(200).extract().path("uniqueId");
+
+        String token = given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("audience", "https://foo.bar", "includeEmail", true))
+                .when().post("/v1/projects/-/serviceAccounts/" + uniqueId + ":generateIdToken")
+                .then().statusCode(200).extract().path("token");
+
+        JsonNode claims = JSON.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
+        assertEquals(sa, claims.get("email").asText());
+        assertTrue(claims.get("email_verified").asBoolean());
+        assertEquals(uniqueId, claims.get("sub").asText());
+    }
+
+    @Test
+    void generateIdTokenRequiresAnAudience() {
+        String sa = createServiceAccount("id-token-no-audience");
+        for (Map<String, Object> body : List.<Map<String, Object>>of(Map.of(), Map.of("audience", ""))) {
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body(body)
+                    .when().post("/v1/projects/-/serviceAccounts/" + sa + ":generateIdToken")
+                    .then()
+                    .statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", equalTo("audience is required"));
+        }
+    }
+
+    @Test
+    void generateIdTokenForAMissingAccountIsDenied() {
+        given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("audience", "https://foo.bar"))
+                .when().post("/v1/projects/-/serviceAccounts/ghost@sign-project.iam.gserviceaccount.com:generateIdToken")
                 .then()
                 .statusCode(403)
                 .body("error.status", equalTo("PERMISSION_DENIED"));

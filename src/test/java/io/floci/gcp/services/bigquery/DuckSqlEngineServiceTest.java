@@ -30,6 +30,20 @@ import static org.mockito.Mockito.when;
 class DuckSqlEngineServiceTest {
 
     @Test
+    void starListFailuresUseBigQueryWording() {
+        assertEquals("Column z in SELECT * EXCEPT list does not exist", DuckSqlEngine.queryErrorMessage(
+                "Binder Error: Column \"z\" in EXCLUDE list not found in FROM clause"));
+        assertEquals("Column z in SELECT * REPLACE list does not exist", DuckSqlEngine.queryErrorMessage(
+                "Binder Error: Column \"z\" in REPLACE list not found in FROM clause"));
+        assertEquals("Column a cannot occur in both SELECT * EXCEPT and REPLACE", DuckSqlEngine.queryErrorMessage(
+                "Parser Error: Column \"a\" cannot occur in both EXCLUDE and REPLACE list"));
+        assertEquals("SELECT .* expands to zero columns after applying EXCEPT", DuckSqlEngine.queryErrorMessage(
+                "Binder Error: SELECT list is empty after resolving * expressions!"));
+        assertEquals("Parser Error: syntax error at or near \"from\"",
+                DuckSqlEngine.queryErrorMessage("Parser Error: syntax error at or near \"from\""));
+    }
+
+    @Test
     void callerSqlRunsAfterExternalAccessIsLocked() {
         String setup = setupForAViewQuery(false);
         int staging = setup.indexOf("read_json(");

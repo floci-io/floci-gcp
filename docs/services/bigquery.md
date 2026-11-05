@@ -166,6 +166,24 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   functions, `QUALIFY`, `PIVOT`, `UNNEST` (including `WITH OFFSET`,
   `FROM t, t.array_column AS x`, and `x IN UNNEST(...)`), `SELECT * EXCEPT (...)`, and
   `SELECT * REPLACE (...)`.
+- `SELECT * EXCEPT (...)` and `SELECT * REPLACE (...)` also apply to a `STRUCT` expression
+  (`t.s.* EXCEPT (a)`, `t.s.* REPLACE (expr AS field)`), in the outermost query, a CTE or a
+  subquery. The same item keeps BigQuery's `DISTINCT`, `LIMIT`/`OFFSET` and `ORDER BY` behavior,
+  a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
+  query's own sources that an aggregate still needs is projected next to the expansion.
+  Replacement expressions read the original query's sources, including correlated columns.
+  A bare name in a replacement, such as an `UNNEST` range variable, its `WITH OFFSET` alias or a
+  column of a subquery without an alias, reads the `FROM` row, not a same-named field of the struct.
+  Struct-field references remain bound to the original struct, not same-named sibling outputs or replaced fields.
+  Like BigQuery, `REPLACE` rejects analytic functions directly in its expressions. Compute windows in a
+  source query or a scalar subquery instead.
+  Hoisted ordering can read unselected source columns.
+  Generated projections avoid known field and output names, including fields from stored table schemas.
+  Aggregate struct stars keep `WHERE` in source scope, separate from post-aggregation `HAVING` and `QUALIFY`.
+  Field lookup preserves source aliases and complete nested paths, including stored table schemas,
+  when joined sources expose same-named struct columns.
+  A correlated `SELECT AS STRUCT input.* EXCEPT (id)` hides `_PARTITIONDATE` and `_PARTITIONTIME`
+  in any query whose `FROM` provides `input`.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes
@@ -508,6 +526,18 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
+- Struct-star `EXCEPT` / `REPLACE` translation does not support every combination:
+  multiple struct stars or a sibling `*`, set operations beside a struct star, bare `USING`
+  columns in replacements, aggregate replacements with `GROUP BY t.s` or a named key such as
+  `GROUP BY t.id`, and a non-aggregate
+  struct star with both `GROUP BY ALL` and `QUALIFY` can fail with `invalidQuery`.
+  Under a positional `GROUP BY` or `GROUP BY ALL`, a sibling that shares a replaced field's name
+  fails with `Duplicate column names in the result are not supported` instead of taking BigQuery's
+  `_1` suffix.
+  Without `REPLACE` or `DISTINCT`, a bare `ORDER BY` name can still bind to a same-named
+  source column instead of the expanded field.
+  See the GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
+  and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries).
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
   `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
   yet; they fail with `invalidQuery`.

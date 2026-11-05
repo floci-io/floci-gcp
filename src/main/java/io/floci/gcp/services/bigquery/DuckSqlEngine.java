@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -61,7 +62,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
 
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
@@ -147,7 +148,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
@@ -155,7 +156,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         try {
             arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
         } catch (DuckClient.DuckSqlException e) {
-            throw SqlDialectTranslator.invalidQuery(e.getMessage());
+            throw SqlDialectTranslator.invalidQuery(queryErrorMessage(e.getMessage()));
         }
         if (arrow == null) {
             throw GcpException.failedPrecondition("ARROW reads need a floci-duck image that returns Arrow IPC;"
@@ -286,7 +287,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         try {
             result = client.query(sql, "SET TimeZone = 'UTC';", flociEndpoint);
         } catch (DuckClient.DuckSqlException e) {
-            throw loadError("Error while reading data, error message: " + e.getMessage());
+            throw loadError("Error while reading data, error message: " + queryErrorMessage(e.getMessage()));
         }
         if (result.columns() == null) {
             throw GcpException.failedPrecondition("Load jobs need a floci-duck image that reports column types;"
@@ -534,9 +535,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                     .append(";\n");
         }
         if (viewQuery != null) {
-            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId,
+            SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId, projectId,
                     ref.datasetId(), SqlDialectTranslator.QueryParameters.none(),
-                    dependency -> columnNames(tables, dependency));
+                    dependency -> columnNames(tables, dependency), dependency -> columnFields(tables, dependency));
             unicodeCaseFold[0] |= view.needsUnicodeCaseFold();
             for (SqlDialectTranslator.TableRef dependency : view.tables()) {
                 stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,
@@ -715,20 +716,32 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     /** Lower-cased column names of a table, or null when it does not exist or has no schema. */
     private static Set<String> columnNames(Tables tables, SqlDialectTranslator.TableRef ref) {
+        List<TableFieldSchema> fields = columnFields(tables, ref);
+        if (fields == null) {
+            return null;
+        }
+        Set<String> names = new HashSet<>();
+        for (TableFieldSchema field : fields) {
+            names.add(field.getName().toLowerCase(Locale.ROOT));
+        }
+        return names;
+    }
+
+    private static List<TableFieldSchema> columnFields(Tables tables, SqlDialectTranslator.TableRef ref) {
         Table table;
         try {
             table = tables.table(ref.datasetId(), ref.tableId());
         } catch (GcpException e) {
-            return null;
+            if (e.getHttpStatus() == 404) {
+                // Missing sources stay unknown until staging reports the table's not-found error.
+                return null;
+            }
+            throw e;
         }
         if (table == null || table.getSchema() == null || table.getSchema().getFields() == null) {
             return null;
         }
-        Set<String> names = new HashSet<>();
-        for (TableFieldSchema field : stagingFields(table)) {
-            names.add(field.getName().toLowerCase(Locale.ROOT));
-        }
-        return names;
+        return stagingFields(table);
     }
 
     private static Set<String> dmlColumnNames(Tables tables, SqlDialectTranslator.TableRef ref,
@@ -871,7 +884,33 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         if (text.contains("Out of Memory Error")) {
             return GcpException.internal("The BigQuery SQL engine ran out of memory: " + text);
         }
-        return SqlDialectTranslator.invalidQuery(text);
+        return SqlDialectTranslator.invalidQuery(queryErrorMessage(text));
+    }
+
+    private static final Pattern COLUMN_LIST_MISS = Pattern.compile(
+            "Column \"?(?<column>[^\"]+)\"? in (?:EXCLUDE|REPLACE) list not found in FROM clause");
+    private static final Pattern COLUMN_LIST_KIND = Pattern.compile(" in (EXCLUDE|REPLACE) list not found");
+    private static final Pattern COLUMN_IN_BOTH_LISTS = Pattern.compile(
+            "Column \"?(?<column>[^\"]+)\"? cannot occur in both EXCLUDE and REPLACE list");
+    private static final Pattern EMPTY_STAR_PROJECTION = Pattern.compile(
+            "SELECT list is empty after resolving \\* expressions");
+
+    /** DuckDB reports a star-list failure in its own words; BigQuery names the same failure differently. */
+    static String queryErrorMessage(String message) {
+        Matcher miss = COLUMN_LIST_MISS.matcher(message);
+        Matcher kind = COLUMN_LIST_KIND.matcher(message);
+        if (miss.find() && kind.find()) {
+            String clause = kind.group(1).equals("EXCLUDE") ? "EXCEPT" : "REPLACE";
+            return "Column " + miss.group("column") + " in SELECT * " + clause + " list does not exist";
+        }
+        if (EMPTY_STAR_PROJECTION.matcher(message).find()) {
+            return "SELECT .* expands to zero columns after applying EXCEPT";
+        }
+        Matcher both = COLUMN_IN_BOTH_LISTS.matcher(message);
+        if (both.find()) {
+            return "Column " + both.group("column") + " cannot occur in both SELECT * EXCEPT and REPLACE";
+        }
+        return message;
     }
 
     /**

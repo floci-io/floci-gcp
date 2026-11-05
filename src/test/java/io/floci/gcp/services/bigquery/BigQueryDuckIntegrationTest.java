@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -99,6 +100,15 @@ class BigQueryDuckIntegrationTest {
         given().contentType("application/json").body("""
                 {"tableReference": {"tableId": "empty"}, "schema": {"fields": [{"name": "x", "type": "INT64"}]}}
                 """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "structs"}, "schema": {"fields": [
+                  {"name": "s", "type": "RECORD", "fields": [
+                    {"name": "a", "type": "INT64"},
+                    {"name": "b", "type": "STRING"}
+                  ]},
+                  {"name": "amount", "type": "INT64"}
+                ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
 
         given().contentType("application/json").body("""
                 {"rows": [
@@ -111,12 +121,410 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200).body("insertErrors", nullValue());
         given().contentType("application/json").body("""
                 {"rows": [
+                  {"json": {"s": {"a": 1, "b": "x"}, "amount": 5}},
+                  {"json": {"s": {"a": 2, "b": "x"}, "amount": 7}}
+                ]}
+                """).when().post(BASE + "/datasets/shop/tables/structs/insertAll")
+                .then().statusCode(200).body("insertErrors", nullValue());
+        given().contentType("application/json").body("""
+                {"rows": [
                   {"json": {"user_id": 1, "total": "10.50"}},
                   {"json": {"user_id": 1, "total": "4.25"}},
                   {"json": {"user_id": 2, "total": "1"}}
                 ]}
                 """).when().post(BASE + "/datasets/shop/tables/orders/insertAll")
                 .then().statusCode(200).body("insertErrors", nullValue());
+    }
+
+    @Test
+    @Order(2)
+    void aggregateStructStarResolvesTheCompleteNestedOperandPath() {
+        List<String> queries = List.of(
+                "SELECT ANY_VALUE(t.s.nested).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(1 AS a, 2 AS b) AS nested, 0 AS other) AS s) t",
+                "SELECT ANY_VALUE(s.nested).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(1 AS a, 2 AS b) AS nested, 0 AS other) AS s) t",
+                "SELECT ANY_VALUE(t.s.nested.leaf).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(STRUCT(1 AS a, 2 AS b) AS leaf, 3 AS c)"
+                        + " AS nested, 0 AS other) AS s) t",
+                "SELECT ANY_VALUE(u.s.nested).* EXCEPT(a), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(STRUCT(1 AS a, 9 AS c) AS nested) s) t"
+                        + " CROSS JOIN (SELECT STRUCT(STRUCT(1 AS a, 2 AS b) AS nested) s) u",
+                "WITH t AS (SELECT STRUCT(STRUCT(1 AS a, 2 AS b) AS nested, 0 AS other) AS s)"
+                        + " SELECT ANY_VALUE(t.s.nested).* EXCEPT(a), COUNT(*) AS n FROM t");
+        for (String sql : queries) {
+            for (String grouping : List.of("", " GROUP BY ALL")) {
+                query(Map.of("query", sql + grouping + " QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1",
+                                "useLegacySql", false))
+                        .then().statusCode(200)
+                        .body("schema.fields.name", equalTo(List.of("b", "n")))
+                        .body("rows[0].f.v", equalTo(List.of("2", "1")));
+            }
+        }
+        query(Map.of("query", "SELECT t.s.nested.* REPLACE(t.id AS a)"
+                        + " FROM (SELECT STRUCT(STRUCT(1 AS a, 7 AS _floci_source_0) AS nested, 0 AS other) s,"
+                        + " 9 AS id) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "_floci_source_0")))
+                .body("rows[0].f.v", equalTo(List.of("9", "7")));
+    }
+
+    @Test
+    @Order(2)
+    void aggregateStructStarResolvesFieldsFromItsOwnJoinedSource() {
+        for (String grouping : List.of("", " GROUP BY ALL")) {
+            query(Map.of("query", "SELECT ANY_VALUE(u.s).* EXCEPT(a), COUNT(*) AS n"
+                            + " FROM (SELECT STRUCT(0 AS a, 1 AS c) s) t"
+                            + " CROSS JOIN (SELECT STRUCT(0 AS a, 2 AS b) s) u" + grouping
+                            + " QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1", "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("b", "n")))
+                    .body("rows[0].f.v", equalTo(List.of("2", "1")));
+        }
+        query(Map.of("query", "WITH t AS (SELECT STRUCT(0 AS a, 1 AS c) s),"
+                        + " u AS (SELECT STRUCT(0 AS a, 2 AS b) s)"
+                        + " SELECT ANY_VALUE(u.s).* EXCEPT(a), COUNT(*) AS n FROM t CROSS JOIN u GROUP BY ALL"
+                        + " QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("2", "1")));
+    }
+
+    @Test
+    @Order(2)
+    void aggregateStructStarFiltersSourcesBeforeAggregation() {
+        for (String grouping : List.of("", " GROUP BY ALL")) {
+            String source = "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n"
+                    + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS b) t WHERE b ";
+            query(Map.of("query", source + "> 0" + grouping, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("b", "n")))
+                    .body("rows[0].f.v", equalTo(List.of("2", "1")));
+            query(Map.of("query", source + "< 0" + grouping, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("totalRows", equalTo("1"))
+                    .body("rows[0].f[0].v", nullValue())
+                    .body("rows[0].f[1].v", equalTo("0"));
+            query(Map.of("query", "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS a"
+                            + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS a) t WHERE a > 0" + grouping
+                            + " HAVING a > 0 QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1",
+                            "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("b", "a")))
+                    .body("rows[0].f.v", equalTo(List.of("2", "1")));
+        }
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementKeepsFieldReferencesSeparateFromSiblingOutputs() {
+        query(Map.of("query", "SELECT 99 AS b, t.s.* REPLACE(t.s.b + 1 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("99", "3", "2")));
+        for (String grouping : List.of("", " GROUP BY ALL", " GROUP BY 1, 2")) {
+            query(Map.of("query", "SELECT 99 AS b, t.s.* EXCEPT(b) REPLACE(t.s.b + 1 AS a)"
+                            + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t" + grouping, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("b", "a")))
+                    .body("rows[0].f.v", equalTo(List.of("99", "3")));
+        }
+        query(Map.of("query", "SELECT t.s.* REPLACE(t.s.b + 1 AS a, t.s.a + 1 AS b), 99 AS b"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("3", "2", "99")));
+        query(Map.of("query", "SELECT 99 AS b, t.s.* REPLACE((SELECT t.s.b + 1) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("99", "3", "2")));
+    }
+
+    @Test
+    @Order(2)
+    void starReplacementsRejectDirectWindowsButPreserveSubqueryWindows() {
+        List<String> invalidQueries = List.of(
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(COUNT(*) OVER () AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t) AS arr",
+                "SELECT t.s.* REPLACE(COUNT(*) OVER () AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                "SELECT * REPLACE(COUNT(*) OVER () AS a) FROM (SELECT 1 AS a)",
+                "SELECT * EXCEPT(b) REPLACE(COUNT(*) OVER () AS a) FROM (SELECT 1 AS a, 2 AS b)",
+                "SELECT ARRAY(SELECT AS STRUCT * REPLACE(COUNT(*) OVER () AS a)"
+                        + " FROM (SELECT 1 AS a)) AS arr",
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(ROW_NUMBER() OVER w AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t WINDOW w AS (ORDER BY t.s.a)) AS arr");
+        for (String sql : invalidQueries) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"))
+                    .body("error.message", equalTo("Cannot use analytic functions inside SELECT * REPLACE"));
+        }
+        List<String> validQueries = List.of(
+                "SELECT ARRAY(SELECT AS STRUCT t.s.*"
+                        + " REPLACE((SELECT COUNT(*) OVER () FROM UNNEST([7, 8]) x LIMIT 1) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t) AS arr",
+                "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(t.n AS a)"
+                        + " FROM (SELECT s, COUNT(*) OVER () AS n FROM"
+                        + " (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a))) t) AS arr");
+        for (String sql : validQueries) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields[0].fields.name", equalTo(List.of("a")))
+                    .body("rows[0].f[0].v.v.size()", equalTo(2))
+                    .body("rows[0].f[0].v.v[0].f[0].v", equalTo("2"))
+                    .body("rows[0].f[0].v.v[1].f[0].v", equalTo("2"));
+        }
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementReadsRangeVariablesAndAliaslessSourcesFromTheRow() {
+        Map<String, List<String>> expected = new LinkedHashMap<>();
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x",
+                List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x)", List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x) u", List.of("7", "2"));
+        expected.put("SELECT t.s.* REPLACE(o AS a) FROM (SELECT STRUCT(1 AS a, 2 AS o) s) t,"
+                + " UNNEST([7]) AS x WITH OFFSET o", List.of("0", "2"));
+        expected.put("SELECT t.s.* REPLACE(x.f AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t,"
+                + " UNNEST([STRUCT(7 AS f)]) x", List.of("7", "2"));
+        expected.put("SELECT t.id, t.s.* EXCEPT(x) REPLACE(SUM(x) AS a)"
+                + " FROM (SELECT 1 AS id, STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7, 8]) x GROUP BY 1",
+                List.of("1", "15"));
+        expected.put("SELECT t.id, t.s.* EXCEPT(x) REPLACE(SUM(x) AS a)"
+                + " FROM (SELECT 1 AS id, STRUCT(1 AS a, 2 AS x) s) t"
+                + " CROSS JOIN (SELECT 7 AS x UNION ALL SELECT 8) GROUP BY 1", List.of("1", "15"));
+        expected.put("SELECT t.s.* EXCEPT(x), x, COUNT(*) AS n"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x GROUP BY ALL",
+                List.of("1", "7", "1"));
+        expected.put("SELECT t.s.* EXCEPT(a), x FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t,"
+                + " UNNEST([7]) AS x WITH OFFSET o", List.of("2", "7"));
+        for (Map.Entry<String, List<String>> entry : expected.entrySet()) {
+            query(Map.of("query", entry.getKey(), "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows[0].f.v", equalTo(entry.getValue()));
+        }
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementSuffixesDuplicateNamesInSelectOrder() {
+        Map<String, List<List<String>>> expected = new LinkedHashMap<>();
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT t.s.* REPLACE(10 AS a), 99 AS a FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1"), List.of("10", "99")));
+        expected.put("SELECT 99 AS a, 98 AS a_1, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1", "a_2"), List.of("99", "98", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(10 AS a), 97 AS a FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("a", "a_1", "a_2"), List.of("99", "10", "97")));
+        expected.put("SELECT 99 AS A, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t",
+                List.of(List.of("A", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* EXCEPT(b) REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t",
+                List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY 2 LIMIT 1",
+                List.of(List.of("a", "a_1"), List.of("99", "-2")));
+        expected.put("WITH c AS (SELECT 99 AS a, t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a) s) t)"
+                + " SELECT * FROM c", List.of(List.of("a", "a_1"), List.of("99", "10")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a) FROM (SELECT STRUCT(1 AS a) s"
+                + " UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY 2 DESC LIMIT 1 OFFSET 1",
+                List.of(List.of("a", "a_1"), List.of("99", "-2")));
+        expected.put("SELECT DISTINCT 99 AS a, t.s.* REPLACE(t.s.a * 0 AS a) FROM (SELECT STRUCT(1 AS a) s"
+                + " UNION ALL SELECT STRUCT(2 AS a)) t", List.of(List.of("a", "a_1"), List.of("99", "0")));
+        expected.put("SELECT t.id AS a, t.s.* REPLACE(t.id + 1 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t"
+                + " WHERE t.id > 0", List.of(List.of("a", "a_1"), List.of("5", "6")));
+        expected.put("SELECT 99 AS a, t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x",
+                List.of(List.of("a", "a_1", "x"), List.of("99", "7", "2")));
+        for (Map.Entry<String, List<List<String>>> entry : expected.entrySet()) {
+            query(Map.of("query", entry.getKey(), "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(entry.getValue().get(0)))
+                    .body("rows[0].f.v", equalTo(entry.getValue().get(1)));
+        }
+        query(Map.of("query", "SELECT 99 AS a, t.s.* REPLACE(-t.s.a AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t ORDER BY t.s.a DESC",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows.f.v", equalTo(List.of(List.of("99", "-2"), List.of("99", "-1"))));
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementPreservesAnOuterColumnShadowedByAField() {
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(x + 1 AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t
+                ) AS arr FROM (SELECT 5 AS x) outer_q
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("6", "2")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(x + 1 AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t
+                ) AS arr FROM (SELECT 5 AS x UNION ALL SELECT 8) outer_q ORDER BY x
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("6", "2")))
+                .body("rows[1].f[0].v.v[0].f.v", equalTo(List.of("9", "2")));
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementPreservesColumnsNamedLikeDateParts() {
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(day + 1 AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS day) s, 5 AS day) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("6", "2")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(
+                    DATE_ADD(t.s.d, INTERVAL amount DAY) AS d)
+                  FROM (SELECT STRUCT(DATE '2024-01-01' AS d) s, 2 AS amount, 5 AS day) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("2024-01-03")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(SAFE.PARSE_DATE('%Y-%m-%d', '2024-01-02') AS d)
+                  FROM (SELECT STRUCT(DATE '2024-01-01' AS d) s) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("2024-01-02")));
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementPreservesNestedCorrelatedNames() {
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE((SELECT x + 1) AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS x) s, 5 AS x) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("6", "2")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE((SELECT MAX(x) FROM (SELECT 9 AS x) u WHERE x > 0) AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS x) s, 5 AS x) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("9", "2")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE((
+                    SELECT x FROM (SELECT 0 AS y) u
+                    UNION ALL SELECT x FROM (SELECT 9 AS x) v ORDER BY x DESC LIMIT 1
+                  ) AS a)
+                  FROM (SELECT STRUCT(1 AS a, 2 AS x) s, 5 AS x) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("9", "2")));
+    }
+
+    @Test
+    @Order(2)
+    void structStarReplacementPreservesBareStructPaths() {
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(other.b AS a)
+                  FROM (SELECT STRUCT(1 AS a, STRUCT(2 AS b) AS other) s, STRUCT(5 AS b) other) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f[0].v", equalTo("5"))
+                .body("rows[0].f[0].v.v[0].f[1].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
+    void structStarGeneratedNamesDoNotHideStructFields() {
+        query(Map.of("query", """
+                SELECT t.s.* REPLACE(t.id AS a)
+                FROM (SELECT STRUCT(1 AS a, 7 AS _floci_source_0) s, 9 AS id) t
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "_floci_source_0")))
+                .body("rows[0].f.v", equalTo(List.of("9", "7")));
+        query(Map.of("query", """
+                SELECT ARRAY(
+                  SELECT AS STRUCT t.s.* REPLACE(t.id AS a)
+                  FROM (SELECT STRUCT(1 AS a, 7 AS _floci_replace_0, 8 AS _floci_operand) s, 9 AS id) t
+                ) AS arr
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("a", "_floci_replace_0", "_floci_operand")))
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("9", "7", "8")));
+    }
+
+    @Test
+    @Order(2)
+    void structStarGeneratedNamesRespectStoredStructSchemas() {
+        String tablePath = BASE + "/datasets/shop/tables/star_aliases";
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "star_aliases"}, "schema": {"fields": [
+                  {"name": "s", "type": "RECORD", "fields": [
+                    {"name": "a", "type": "INT64"},
+                    {"name": "_floci_source_0", "type": "INT64"},
+                    {"name": "_floci_projection_0", "type": "INT64"}
+                  ]},
+                  {"name": "id", "type": "INT64"}
+                ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+        try {
+            given().contentType("application/json").body("""
+                    {"rows": [{"json": {"s": {
+                      "a": 1, "_floci_source_0": 7, "_floci_projection_0": 8
+                    }, "id": 9}}]}
+                    """).when().post(tablePath + "/insertAll").then().statusCode(200)
+                    .body("insertErrors", nullValue());
+            query(Map.of("query", "SELECT t.s.* REPLACE(t.id AS a) FROM shop.star_aliases t",
+                            "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("a", "_floci_source_0", "_floci_projection_0")))
+                    .body("rows[0].f.v", equalTo(List.of("9", "7", "8")));
+            query(Map.of("query", "SELECT t.s.* REPLACE(t.id AS a), COUNT(*) AS n"
+                            + " FROM shop.star_aliases t GROUP BY ALL", "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("a", "_floci_source_0", "_floci_projection_0", "n")))
+                    .body("rows[0].f.v", equalTo(List.of("9", "7", "8", "1")));
+            query(Map.of("query", "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS a"
+                            + " FROM shop.star_aliases t GROUP BY ALL", "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields.name", equalTo(List.of("_floci_source_0", "_floci_projection_0", "a")))
+                    .body("rows[0].f.v", equalTo(List.of("7", "8", "1")));
+        } finally {
+            given().when().delete(tablePath).then().statusCode(204);
+        }
+    }
+
+    @Test
+    @Order(2)
+    void structStarOrderingCanReadAnUnselectedBareSourceColumn() {
+        query(Map.of("query", """
+                SELECT t.s.* REPLACE(-t.s.a AS a)
+                FROM (SELECT STRUCT(1 AS a) s, 9 AS id UNION ALL SELECT STRUCT(2 AS a), 1) t
+                ORDER BY id LIMIT 1
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f.v", equalTo(List.of("-2")));
     }
 
     @Test
@@ -2163,6 +2571,109 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void structDotStarReplaceAndNestedQueriesExecute() {
+        query("""
+                {"query": "SELECT t.s.* REPLACE (UPPER(t.s.b) AS b) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "X")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE ('y' AS b) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "y")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT (a) REPLACE ('y' AS b) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f.v", equalTo(List.of("y")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (t.id + 1 AS a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b", "id")))
+                .body("rows[0].f.v", equalTo(List.of("6", "x", "5")));
+        query("""
+                {"query": "WITH c AS (SELECT t.s.* EXCEPT (a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t) SELECT * FROM c", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f.v", equalTo(List.of("x")));
+        query("""
+                {"query": "WITH c AS (SELECT t.s.* REPLACE ('y' AS b) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t) SELECT * FROM c", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "y")));
+        query("""
+                {"query": "SELECT * FROM (SELECT t.s.* EXCEPT (a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s) t)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f.v", equalTo(List.of("x")));
+        query("""
+                {"query": "SELECT (SELECT AS STRUCT input.* REPLACE (UPPER(name) AS name)) AS r FROM (SELECT 'ana' AS name, 'hidden' AS secret) input", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("ANA", "hidden")));
+        query("""
+                {"query": "SELECT DISTINCT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 5 AS b) AS s, 8 AS id UNION ALL SELECT STRUCT(1 AS a, 3 AS b), 7) t ORDER BY t.s.b DESC", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "id")))
+                .body("rows.f.v", equalTo(List.of(List.of("5", "8"), List.of("3", "7"))));
+        query("""
+                {"query": "SELECT DISTINCT t.name FROM (SELECT STRUCT(1 AS a) AS s, 'bo' AS name UNION ALL SELECT STRUCT(1 AS a), 'ana') t ORDER BY UPPER(name)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name")))
+                .body("rows.f.v", equalTo(List.of(List.of("ana"), List.of("bo"))));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (t.amount * 2 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS amount) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (amount * 2 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS amount) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT (c) REPLACE (b * 10 AS b) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS c) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT (z) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", equalTo("Column z in SELECT * EXCEPT list does not exist"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (10 AS z) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", equalTo("Column z in SELECT * REPLACE list does not exist"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT (a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS c) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "c")))
+                .body("rows[0].f.v", equalTo(List.of("2", "3")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (10 AS a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("10", "2")));
+    }
+
+    @Test
+    @Order(5)
     void structDotStarExpandsLikeBigQuery() {
         query("""
                 {"query": "SELECT t.s.*, t.n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 7 n) t", "useLegacySql": false}
@@ -2256,10 +2767,613 @@ class BigQueryDuckIntegrationTest {
                 .body("schema.fields.name", equalTo(List.of("b", "id")))
                 .body("rows.f.v", equalTo(List.of(List.of("2", "7"), List.of("2", "8"))));
         query("""
-                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM UNNEST([STRUCT(1 AS a, 'x' AS b), STRUCT(2 AS a, 'x' AS b)]) t GROUP BY ALL", "useLegacySql": false}
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "2")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("x", "2")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t GROUP BY 1 ORDER BY 2 DESC", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("x", "2"), List.of("y", "1"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t GROUP BY 1 LIMIT 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows", hasSize(1));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s, 5 AS id UNION ALL SELECT STRUCT(2 AS a, 'x' AS b), -1) t WHERE t.id > 0 GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), SUM(t.s.c) AS total FROM (SELECT STRUCT(1 AS a, 'x' AS b, 5 AS c) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b, 7 AS c)) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "c", "total")))
+                .body("rows.f.v", equalTo(List.of(List.of("x", "5", "5"), List.of("x", "7", "7"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), MAX(u.name) AS top FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s, 1 AS id UNION ALL SELECT STRUCT(2 AS a, 'y' AS b), 2) t JOIN (SELECT 1 AS id, 'ana' AS name UNION ALL SELECT 2, 'bo') u ON u.id = t.id GROUP BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "top")))
+                .body("rows.f.v", equalTo(List.of(List.of("x", "ana"), List.of("y", "bo"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1 HAVING n > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("x", "2"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(3 AS a, 'y' AS b) UNION ALL SELECT STRUCT(4 AS a, 'y' AS b)) t GROUP BY 1 ORDER BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("x", "1"), List.of("y", "2"))));
+        query("""
+                {"query": "WITH c AS (SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1) SELECT * FROM c", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "2")));
+        query("""
+                {"query": "SELECT v.s.* EXCEPT(o), COUNT(*) AS o FROM (SELECT STRUCT(1 AS g, 'k' AS o) AS s UNION ALL SELECT STRUCT(1 AS g, 'k' AS o) UNION ALL SELECT STRUCT(2 AS g, 'z' AS o)) v GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("g", "o")))
+                .body("rows.f.v", equalTo(List.of(List.of("1", "2"), List.of("2", "1"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), SUM(amount) AS total FROM (SELECT STRUCT(1 AS a, 'x' AS b) AS s, 5 AS amount) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "total")))
+                .body("rows[0].f.v", equalTo(List.of("x", "5")));
+        query("""
+                {"query": "SELECT t.id, t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT 7 AS id, STRUCT(1 AS a, 'x' AS b) AS s) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("7", "x", "1")));
+        query("""
+                {"query": "SELECT t.id, t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT 7 AS id, STRUCT(1 AS a, 'x' AS b) AS s) t GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("7", "x", "1")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (DATE_ADD(t.s.d, INTERVAL 1 DAY) AS d) FROM (SELECT STRUCT(DATE '2024-01-01' AS d) AS s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("d")))
+                .body("rows[0].f[0].v", equalTo("2024-01-02"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (t.`amount total` * 2 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS `amount total`) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(t.id AS a), t.id + 100 AS id FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "id")))
+                .body("rows[0].f.v", equalTo(List.of("5", "105")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY 1 ORDER BY b", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "WITH c AS (SELECT * FROM (SELECT STRUCT(1 AS a) s, 5 AS amount)) SELECT t.s.* REPLACE (amount * 2 AS a) FROM c t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT (SELECT t.s.* REPLACE (10 AS a) FROM (SELECT STRUCT(1 AS a) s) t) AS r", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("r")))
+                .body("schema.fields.type", equalTo(List.of("INTEGER")))
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "f0_")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "WITH c AS (SELECT 0 AS dummy) SELECT * FROM (WITH c AS (SELECT STRUCT(1 AS a) s, 7 AS amount) SELECT t.s.* REPLACE(amount AS a) FROM c t) q", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v", equalTo("3"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT (a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v", equalTo("3"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT (a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t GROUP BY ALL HAVING n > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[1].v", equalTo("3"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT (a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v", equalTo("3"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT (a), COUNT(*) AS a FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), 1 AS k FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "k")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT sum.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) sum", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("x"));
+        query("""
+                {"query": "SELECT (SELECT ANY_VALUE(s) FROM (SELECT STRUCT(1 AS a, 2 AS b) AS s)).* EXCEPT(a)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), (SELECT COUNT(*) FROM (SELECT 1) z) AS k FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "k")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT (SELECT STRUCT(1 AS a, 2 AS b)).* REPLACE(t.id AS b) FROM (SELECT 9 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "9")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t ORDER BY COUNT(*)", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t ORDER BY n DESC LIMIT 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT (ANY_VALUE(t.s) OVER ()).* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("x"));
+        query("""
+                {"query": "SELECT (ANY_VALUE(t.s)).* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("x"));
+        query("""
+                {"query": "SELECT (SELECT STRUCT(1 AS a, 2 AS b)).* EXCEPT(a), COUNT(*) AS n FROM (SELECT 9 AS id) t GROUP BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("2", "1")));
+        query("""
+                {"query": "SELECT u.s.* REPLACE(amount AS a) FROM (SELECT t.payload.* FROM (SELECT STRUCT(STRUCT(1 AS a) AS s, 5 AS amount) AS payload) t) u", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("5"));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v.v[0].f[0].v", equalTo("2"));
+        query("""
+                {"query": "SELECT (SELECT AS STRUCT t.s.* EXCEPT(a)) AS r FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(3 AS a, 'x' AS b)) t GROUP BY ALL HAVING b = 'x'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING b = 'nope'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT t.s.* REPLACE(other.b AS b) FROM (SELECT STRUCT(1 AS b) s, STRUCT(9 AS b) other) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("9"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(b), MAX(other.b) AS top FROM (SELECT STRUCT(1 AS b, 2 AS c) s, STRUCT(9 AS b) other) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "top")))
+                .body("rows[0].f.v", equalTo(List.of("2", "9")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(DATE_ADD(t.s.d, INTERVAL 1 DAY) AS d) FROM (SELECT STRUCT(DATE '2024-01-01' AS d) s, 5 AS day) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2024-01-02"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(EXTRACT(DAY FROM t.s.d) AS d) FROM (SELECT STRUCT(DATE '2024-01-01' AS d) s, 5 AS day) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(day AS d) FROM (SELECT STRUCT(DATE '2024-01-01' AS d) s, 5 AS day) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(ABS(day) AS a) FROM (SELECT STRUCT(1 AS a) s, -5 AS day) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("5"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(DATE_TRUNC(t.s.d, MONTH) AS d) FROM (SELECT STRUCT(DATE '2024-03-05' AS d) s, 5 AS month) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2024-03-01"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(DATE_DIFF(t.s.d, DATE '2024-01-01', DAY) AS d) FROM (SELECT STRUCT(DATE '2024-03-05' AS d) s, 5 AS day) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("64"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING n > 0 QUALIFY ROW_NUMBER() OVER () > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY ALL QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING COUNT(*) > 0 AND b = 'x'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING COUNT(*) > 0 AND b = 'nope'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING COUNT(*) > 0 AND (SELECT b FROM (SELECT 'x' AS b) u) = 'x'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING COUNT(*) > 0 AND (SELECT b FROM (SELECT 'nope' AS b) u) = 'x'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(10 AS a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("10", "2")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* EXCEPT(a) REPLACE(10 AS b) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("10")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(t.s.a + 100 AS a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("101", "2")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(a + 10 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS a) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("15")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* EXCEPT(a) REPLACE(a + 10 AS b) FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS a) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("15")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE((SELECT MAX(id) FROM (SELECT 9 AS id) AS u) AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("9")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(amount AS a) FROM (SELECT STRUCT(1 AS a) s) t CROSS JOIN (SELECT 5 AS amount) u) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("5")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* EXCEPT(a) REPLACE(amount AS b) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t CROSS JOIN (SELECT 5 AS amount) u) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("5")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(t.s.a + 10 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS a) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("11")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(amount AS a) FROM (SELECT * EXCEPT(amount) FROM (SELECT STRUCT(1 AS a) s, 0 AS amount)) t CROSS JOIN (SELECT 5 AS amount) u", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("5"));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(amount AS a) FROM (SELECT * EXCEPT(amount) FROM (SELECT STRUCT(1 AS a) s, 0 AS amount)) t CROSS JOIN (SELECT 5 AS amount) u) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("5")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(amount AS a) FROM (SELECT * EXCEPT(amount) FROM (SELECT STRUCT(1 AS a) s, 0 AS amount)) t", "useLegacySql": false}
                 """)
                 .then().statusCode(400)
-                .body("error.message", containsString("Dot-star with EXCEPT on a STRUCT expression is not supported"));
+                .body("error.message", equalTo("Unrecognized name: amount"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(-t.s.a AS a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t GROUP BY 1, t.s.a ORDER BY t.s.a LIMIT 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("-1"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(-t.s.a AS a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t GROUP BY 1, t.s.a ORDER BY t.s.a DESC", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("-2"))
+                .body("rows[1].f[0].v", equalTo("-1"));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(a + 10 AS a) FROM (SELECT STRUCT(1 AS a) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", equalTo("Unrecognized name: a"));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(x + 1 AS a) FROM (SELECT STRUCT(1 AS a) s) t) AS arr FROM (SELECT 5 AS x) outer_q", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("6")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE ((SELECT t.s.a FROM (SELECT STRUCT(9 AS a) s) t) AS a) FROM (SELECT STRUCT(1 AS a) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9"));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE ((SELECT t.s.a FROM (SELECT STRUCT(9 AS a) s) t) AS a) FROM (SELECT STRUCT(1 AS a) s) t) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("9")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(amount AS a) FROM (SELECT STRUCT(1 AS a) s) t CROSS JOIN (SELECT 5 AS amount)) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("5")));
+        query("""
+                {"query": "SELECT ARRAY(SELECT AS STRUCT t.s.* REPLACE(x AS a) FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, UNNEST([7]) x) AS arr", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v[0].f.v", equalTo(List.of("7", "2")));
+        query("""
+                {"query": "SELECT (SELECT AS STRUCT t.s.* REPLACE(10 AS a)) AS r FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("10", "2")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", equalTo("SELECT .* expands to zero columns after applying EXCEPT"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL QUALIFY ROW_NUMBER() OVER (PARTITION BY b) = 2", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL HAVING COUNT(*) > 0 AND b = 'x'", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL HAVING COUNT(*) > 0 AND b = 'nope' ORDER BY b", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL HAVING SUM(amount) > 0", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM shop.structs t GROUP BY ALL HAVING SUM(amount) > 100", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("totalRows", equalTo("0"))
+                .body("rows", nullValue());
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), SUM(amount) AS n FROM shop.structs t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[1].v", equalTo("12"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(t.other.b AS b) FROM (SELECT STRUCT(1 AS b) s, STRUCT(9 AS b) other) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("9"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a), MAX(t.other.b) AS top FROM (SELECT STRUCT(1 AS a, 2 AS c) s, STRUCT(9 AS b) other) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c", "top")))
+                .body("rows[0].f.v", equalTo(List.of("2", "9")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS a FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY ALL HAVING a > 0", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a")))
+                .body("rows[0].f.v", equalTo(List.of("x", "1")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS a FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'y' AS b)) t GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY a DESC) = 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a")))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (-t.s.a AS a) FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a) UNION ALL SELECT STRUCT(3 AS a)) t ORDER BY t.s.a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows.f.v", equalTo(List.of(List.of("-1"), List.of("-2"), List.of("-3"))));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (-t.s.a AS a) FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a) UNION ALL SELECT STRUCT(3 AS a)) t ORDER BY a", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("-3"), List.of("-2"), List.of("-1"))));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) REPLACE(t.id AS b), t.id AS a FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a")))
+                .body("rows[0].f.v", equalTo(List.of("5", "5")));
+        query("""
+                {"query": "SELECT t.id AS x, t.id AS y, t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT 5 AS id, STRUCT(1 AS a, 'keep' AS b) s) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "y", "b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("5", "5", "keep", "1")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) REPLACE ((SELECT MAX(id) FROM (SELECT 1 AS id UNION ALL SELECT 9) u) AS b) FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b")))
+                .body("rows[0].f[0].v", equalTo("9"));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) REPLACE ((SELECT MAX(id) FROM (SELECT 1 AS id UNION ALL SELECT 9) u) AS b), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 5 AS id) t GROUP BY 1 HAVING (SELECT MAX(id) FROM (SELECT 1 AS id UNION ALL SELECT 9) u) > 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("9", "1")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE ((SELECT t.id) AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        query("""
+                {"query": "WITH c AS (SELECT STRUCT(1 AS a) s, 5 AS amount) SELECT t.s.* REPLACE (amount * 2 AS a) FROM c t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (-t.s.b AS b) FROM (SELECT STRUCT(1 AS b) s UNION ALL SELECT STRUCT(2 AS b)) t ORDER BY b LIMIT 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("-2"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE(t.amount AS a), 99 AS _floci_source_0 FROM (SELECT STRUCT(1 AS a) s, 5 AS amount) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "_floci_source_0")))
+                .body("rows[0].f.v", equalTo(List.of("5", "99")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (10 AS z), 5 AS z FROM (SELECT STRUCT(1 AS a) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(400)
+                .body("error.message", equalTo("Column z in SELECT * REPLACE list does not exist"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (10 AS a), 5 AS a FROM (SELECT STRUCT(1 AS a) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("10", "5")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE ((SELECT t.id FROM (SELECT 9 AS id) t) AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9"));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (TO_JSON_STRING(t.s) AS b) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f.v", equalTo(List.of("1", "{\"a\":1,\"b\":\"x\"}")));
+        query("""
+                {"query": "SELECT t.s.* EXCEPT(a) REPLACE (TO_JSON_STRING(t.s) AS b), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t GROUP BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("{\"a\":1,\"b\":\"x\"}", "1")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE ((SELECT 7 AS x) AS a), 5 AS x FROM (SELECT STRUCT(1 AS a) s) t", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "x")))
+                .body("rows[0].f.v", equalTo(List.of("7", "5")));
+        query("""
+                {"query": "SELECT t.s.* REPLACE (10 AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t ORDER BY t.id", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v", equalTo("10"));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY ALL", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "n")))
+                .body("rows[0].f.v", equalTo(List.of("x", "2")));
+        query("""
+                {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1", "useLegacySql": false}
+                """)
+                .then().statusCode(400);
         query("""
                 {"query": "SELECT t.s.inr.* FROM (SELECT STRUCT(STRUCT(1 AS c, 2 AS d) AS inr) s) t", "useLegacySql": false}
                 """)

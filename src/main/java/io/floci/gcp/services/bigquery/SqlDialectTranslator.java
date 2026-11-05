@@ -2419,6 +2419,41 @@ final class SqlDialectTranslator {
         return tokens.size();
     }
 
+    /**
+     * True when the SELECT at {@code select} is a later arm of a set operation, so a trailing ORDER BY,
+     * LIMIT or OFFSET after it names the whole result rather than this arm.
+     */
+    private boolean selectFollowsSetOperator(int select) {
+        int position = significantBefore(select);
+        while (position >= 0 && tokens.get(position).isPunct("(")) {
+            position = significantBefore(position);
+        }
+        if (position >= 0 && (tokens.get(position).isKeyword("ALL")
+                || tokens.get(position).isKeyword("DISTINCT"))) {
+            position = significantBefore(position);
+        }
+        return position >= 0 && (tokens.get(position).isKeyword("UNION")
+                || tokens.get(position).isKeyword("INTERSECT") || tokens.get(position).isKeyword("EXCEPT"));
+    }
+
+    /** The end of the arm, before the whole set's trailing ORDER BY, LIMIT or OFFSET. */
+    private int structStarSetOperationTail(int select, int tailStart, int end, int queryDepth) {
+        if (!selectFollowsSetOperator(select)) {
+            return end;
+        }
+        for (String keyword : List.of("ORDER", "LIMIT", "OFFSET")) {
+            int clause = structStarClauseStart(tailStart, end, queryDepth, keyword);
+            if (clause < 0) {
+                continue;
+            }
+            while (clause > tailStart && tokens.get(clause - 1).kind == Kind.SPACE) {
+                clause--;
+            }
+            end = Math.min(end, clause);
+        }
+        return end;
+    }
+
     /** The token index that starts a top-level set operation, or {@code end} when the query has none. */
     private int structStarArmEnd(int tailStart, int end, int queryDepth) {
         for (int i = tailStart; i < end; i++) {
@@ -2558,8 +2593,10 @@ final class SqlDialectTranslator {
         validateAggregateStarOperand(select, targetStart, targetDot);
         int tailStart = items.getLast()[1];
         // A set operation is not part of this query's tail: each arm is rewritten on its own and the
-        // operator stays between the wrapped selects.
+        // operator stays between the wrapped selects. A trailing ORDER BY, LIMIT or OFFSET after the
+        // last arm belongs to the whole set, so it must not move into that arm's wrapper.
         end = structStarArmEnd(tailStart, end, queryDepth);
+        end = structStarSetOperationTail(select, tailStart, end, queryDepth);
         // An aggregate star only needs the aggregate structure when the query has no grouping key of its
         // own (GROUP BY ALL or no GROUP BY) and every sibling is an aggregate, which is the shape whose
         // aggregations all run at once. Anything else keeps a structure that already handles it.
@@ -3093,6 +3130,21 @@ final class SqlDialectTranslator {
             String reference = projection != null ? projection : outputNameText(items.get(index)[0], items.get(index)[1]);
             outer.add(Token.raw(DuckTypes.quoteIdentifier(reference)));
         }
+        List<String> helperColumns = new ArrayList<>();
+        if (!renames.isEmpty()) {
+            // The rename wrapper hides the grouped query, so the helpers the moved tail still names have
+            // to travel through it. They are excluded from the final output.
+            helperColumns.addAll(helperAliases);
+            for (ExtraHelper extra : groupedTail.helpers()) {
+                if (!helperColumns.contains(extra.alias())) {
+                    helperColumns.add(extra.alias());
+                }
+            }
+            for (String helperColumn : helperColumns) {
+                outer.add(Token.raw(", " + DuckTypes.quoteIdentifier(groupAlias) + "."
+                        + DuckTypes.quoteIdentifier(helperColumn)));
+            }
+        }
         outer.addAll(new Lexer(" FROM (").tokenize());
         outer.addAll(inner);
         outer.addAll(new Lexer(") AS").tokenize());
@@ -3103,7 +3155,12 @@ final class SqlDialectTranslator {
         List<Token> rewritten = outer;
         if (!renames.isEmpty()) {
             rewritten = new ArrayList<>();
-            rewritten.addAll(new Lexer("SELECT * RENAME (").tokenize());
+            rewritten.addAll(new Lexer("SELECT *").tokenize());
+            if (!helperColumns.isEmpty()) {
+                rewritten.add(Token.raw(" EXCLUDE (" + helperColumns.stream().map(DuckTypes::quoteIdentifier)
+                        .collect(Collectors.joining(", ")) + ")"));
+            }
+            rewritten.addAll(new Lexer(" RENAME (").tokenize());
             rewritten.add(Token.raw(String.join(", ", renames)));
             rewritten.addAll(new Lexer(") FROM (").tokenize());
             rewritten.addAll(outer);
@@ -3178,7 +3235,7 @@ final class SqlDialectTranslator {
         }
         boolean[] nested = nestedQueryPositions(conditionStart, conditionEnd);
         for (int i = conditionStart; i < conditionEnd; i++) {
-            if (nested[i - conditionStart]) {
+            if (nested[i]) {
                 continue;
             }
             Token token = tail.get(i - start);
@@ -3313,6 +3370,7 @@ final class SqlDialectTranslator {
                                                int queryDepth) {
         int tailStart = items.getLast()[1];
         end = structStarArmEnd(tailStart, end, queryDepth);
+        end = structStarSetOperationTail(select, tailStart, end, queryDepth);
         int from = -1;
         for (int i = tailStart; i < end; i++) {
             if (parenthesisDepth(i) == queryDepth && isFromClause(i)) {
@@ -3348,13 +3406,16 @@ final class SqlDialectTranslator {
         Set<String> claimed = new HashSet<>();
         List<List<Token>> outputItems = new ArrayList<>();
         Map<Integer, String> starAliases = new HashMap<>();
+        Map<Integer, Map<String, String>> starRenames = new HashMap<>();
         for (int index = 0; index < items.size(); index++) {
             int[] item = items.get(index);
             SelectStructStar star = starsByItem.get(index);
             if (star != null) {
                 String alias = structStarName("_floci_star_" + index);
                 starAliases.put(index, alias);
-                outputItems.add(renderExpandedStar(select, star, alias, sources, claimed, reserved));
+                Map<String, String> renames = new LinkedHashMap<>();
+                starRenames.put(index, renames);
+                outputItems.add(renderExpandedStar(select, star, alias, sources, claimed, reserved, renames));
                 continue;
             }
             String name = outputNameText(item[0], item[1]);
@@ -3377,6 +3438,8 @@ final class SqlDialectTranslator {
             if (star == null) {
                 continue;
             }
+            List<Token> expansion = new ArrayList<>();
+            expansion.addAll(new Lexer("SELECT unnest(").tokenize());
             // DuckDB cannot unnest a scalar subquery, so a query operand is materialized as a column of an
             // extra derived table and expanded from there.
             if (isQueryOperand(star.operandStart(), star.dot())) {
@@ -3387,18 +3450,25 @@ final class SqlDialectTranslator {
                 operand.addAll(tokens.subList(star.operandStart(), star.dot()));
                 operand.addAll(new Lexer(" AS `" + operandAlias + "`) AS `" + sourceAlias + "`").tokenize());
                 derivedSources.add(operand);
-                List<Token> expansion = new ArrayList<>();
-                expansion.addAll(new Lexer("(SELECT unnest(").tokenize());
                 expansion.add(Token.raw(DuckTypes.quoteIdentifier(sourceAlias) + "."
                         + DuckTypes.quoteIdentifier(operandAlias)));
-                expansion.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
-                derivedSources.add(expansion);
-                continue;
+            } else {
+                expansion.addAll(tokens.subList(star.operandStart(), star.dot()));
             }
+            expansion.addAll(new Lexer(")").tokenize());
+            Map<String, String> renameFields = starRenames.get(index);
             List<Token> source = new ArrayList<>();
-            source.addAll(new Lexer("(SELECT unnest(").tokenize());
-            source.addAll(tokens.subList(star.operandStart(), star.dot()));
-            source.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
+            if (!renameFields.isEmpty()) {
+                source.addAll(new Lexer("(SELECT * RENAME (").tokenize());
+                source.add(Token.raw(starRenameList(star, renameFields)));
+                source.addAll(new Lexer(") FROM (").tokenize());
+                source.addAll(expansion);
+                source.addAll(new Lexer(")) AS `" + starAliases.get(index) + "`").tokenize());
+            } else {
+                source.addAll(new Lexer("(").tokenize());
+                source.addAll(expansion);
+                source.addAll(new Lexer(") AS `" + starAliases.get(index) + "`").tokenize());
+            }
             derivedSources.add(source);
         }
         List<Token> fromTokens = new ArrayList<>();
@@ -3473,7 +3543,7 @@ final class SqlDialectTranslator {
             int as = topLevelAs(item[0], item[1]);
             int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
             int expressionEnd = alias >= 0 ? alias : item[1];
-            if (!structStarAggregates(first, expressionEnd)) {
+            if (!structStarAggregates(first, expressionEnd) && !hasWindowExpression(item[0], expressionEnd)) {
                 positions.add(position);
             }
             position++;
@@ -3625,10 +3695,10 @@ final class SqlDialectTranslator {
         return null;
     }
 
-    /** One star expansion in the multi-star structure, with its own EXCLUDE, REPLACE and RENAME lists. */
+    /** One star expansion in the multi-star structure, with its own EXCLUDE and REPLACE lists. */
     private List<Token> renderExpandedStar(int select, SelectStructStar star, String alias,
                                            StructStarSources sources, Set<String> claimed,
-                                           Set<String> reserved) {
+                                           Set<String> reserved, Map<String, String> renamedFields) {
         validateStarLists(star);
         List<Token> out = new ArrayList<>();
         out.add(Token.raw(DuckTypes.quoteIdentifier(alias) + ".*"));
@@ -3636,12 +3706,6 @@ final class SqlDialectTranslator {
             out.add(Token.raw(" EXCLUDE (" + star.exceptNames().stream().map(DuckTypes::quoteIdentifier)
                     .collect(Collectors.joining(", ")) + ")"));
         }
-        if (star.replaceOpen() >= 0) {
-            out.add(Token.raw(" REPLACE ("));
-            out.addAll(qualifyReplacementNames(star.replaceOpen() + 1, star.replaceClose(), select, sources, false));
-            out.add(Token.raw(")"));
-        }
-        List<String> renames = new ArrayList<>();
         if (star.fields() != null) {
             for (String field : star.fields()) {
                 if (star.excludedFields().contains(field)) {
@@ -3652,13 +3716,31 @@ final class SqlDialectTranslator {
                 }
                 String renamed = suffixedName(field, reserved);
                 claimed.add(renamed.toLowerCase(Locale.ROOT));
-                renames.add(DuckTypes.quoteIdentifier(field) + " AS " + DuckTypes.quoteIdentifier(renamed));
+                renamedFields.put(field, renamed);
             }
         }
-        if (!renames.isEmpty()) {
-            out.add(Token.raw(" RENAME (" + String.join(", ", renames) + ")"));
+        if (star.replaceOpen() >= 0) {
+            out.add(Token.raw(" REPLACE ("));
+            out.addAll(qualifyReplacementNames(star.replaceOpen() + 1, star.replaceClose(), select, sources, false,
+                    renamedFields));
+            out.add(Token.raw(")"));
         }
         return out;
+    }
+
+    /**
+     * The RENAME list applied inside a star's expansion. Renaming there keeps a replaced field out of
+     * DuckDB's REPLACE and RENAME conflict, and the outer star still expands in field order.
+     */
+    private String starRenameList(SelectStructStar star, Map<String, String> renamedFields) {
+        Map<String, String> written = new LinkedHashMap<>();
+        for (String target : replaceTargetNames(star.replaceOpen(), star.replaceClose())) {
+            written.put(target.toLowerCase(Locale.ROOT), target);
+        }
+        return renamedFields.entrySet().stream()
+                .map(entry -> DuckTypes.quoteIdentifier(written.getOrDefault(entry.getKey(), entry.getKey()))
+                        + " AS " + DuckTypes.quoteIdentifier(entry.getValue()))
+                .collect(Collectors.joining(", "));
     }
 
     /** Rejects a star list name the struct does not have, with BigQuery's wording. */
@@ -3713,7 +3795,7 @@ final class SqlDialectTranslator {
      * supplies is rejected the way BigQuery rejects it, and a nested query keeps its own scope.
      */
     private List<Token> qualifyReplacementNames(int start, int close, int select, StructStarSources sources,
-                                                boolean nested) {
+                                                boolean nested, Map<String, String> renamedFields) {
         List<Token> out = new ArrayList<>();
         for (int i = start; i < close; i++) {
             Token token = tokens.get(i);
@@ -3722,7 +3804,7 @@ final class SqlDialectTranslator {
                 if (nestedEnd >= 0) {
                     out.add(token);
                     out.addAll(qualifyReplacementNames(i + 1, nestedEnd, select,
-                            sources.without(nestedAliases(i + 1, nestedEnd)), true));
+                            sources.without(nestedAliases(i + 1, nestedEnd)), true, Map.of()));
                     out.add(tokens.get(nestedEnd));
                     i = nestedEnd;
                     continue;
@@ -3730,6 +3812,13 @@ final class SqlDialectTranslator {
             }
             int previous = significantBefore(i);
             boolean namesAlias = previous >= 0 && tokens.get(previous).isKeyword("AS");
+            if (!nested && namesAlias && isName(token)) {
+                String renamed = renamedFields.get(token.identifierText().toLowerCase(Locale.ROOT));
+                if (renamed != null) {
+                    out.add(Token.raw(DuckTypes.quoteIdentifier(renamed)));
+                    continue;
+                }
+            }
             if (!nested && isName(token) && !isPrecededByDot(i) && !namesAlias) {
                 String name = token.identifierText();
                 int next = nextSignificant(i + 1, close);
@@ -3742,11 +3831,10 @@ final class SqlDialectTranslator {
                         out.add(token);
                         continue;
                     }
-                    String qualifier = replacementSourceQualifier(select, name, sources);
-                    if (qualifier != null) {
+                    String reference = replacementSourceReference(select, name, sources);
+                    if (reference != null) {
                         PathTail tail = pathTail(next, close);
-                        out.add(Token.raw(DuckTypes.quoteIdentifier(qualifier) + "."
-                                + DuckTypes.quoteIdentifier(name) + tail.text()));
+                        out.add(Token.raw(reference + tail.text()));
                         i = tail.lastIndex() < 0 ? i : tail.lastIndex();
                         continue;
                     }
@@ -3769,18 +3857,33 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * The source alias a bare REPLACE name belongs to: this query's source, else an enclosing query's, else
-     * the statement's. Null when this query's sources are not fully known, so the name may still belong to
-     * one of them.
+     * The source reference a bare REPLACE name belongs to: this query's source, else an enclosing query's,
+     * else the statement's. A USING column becomes the merged value, so an outer join keeps the side that
+     * has a row. Null when this query's sources are not fully known, so the name may still belong to one of
+     * them.
      */
+    private String replacementSourceReference(int select, String name, StructStarSources sources) {
+        String key = name.toLowerCase(Locale.ROOT);
+        List<String> merged = sources.usingSources().get(key);
+        if (merged != null && merged.size() > 1) {
+            return merged.stream()
+                    .map(alias -> DuckTypes.quoteIdentifier(alias) + "." + DuckTypes.quoteIdentifier(name))
+                    .collect(Collectors.joining(", ", "COALESCE(", ")"));
+        }
+        String qualifier = replacementSourceQualifier(select, name, sources);
+        return qualifier == null ? null : DuckTypes.quoteIdentifier(qualifier) + "."
+                + DuckTypes.quoteIdentifier(name);
+    }
+
     private String replacementSourceQualifier(int select, String name, StructStarSources sources) {
         List<String> owners = sourceAliasesIn(sources, name);
         if (owners.size() == 1) {
             return owners.getFirst();
         }
         if (owners.size() > 1) {
-            if (sources.usingColumns().contains(name.toLowerCase(Locale.ROOT))) {
-                return owners.getFirst();
+            List<String> merged = sources.usingSources().get(name.toLowerCase(Locale.ROOT));
+            if (merged != null) {
+                return merged.getFirst();
             }
             throw invalidQuery("Column name " + name + " is ambiguous");
         }
@@ -4249,7 +4352,7 @@ final class SqlDialectTranslator {
             int as = topLevelAs(item[0], item[1]);
             int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
             int expressionEnd = alias >= 0 ? alias : item[1];
-            if (!structStarAggregates(first, expressionEnd)) {
+            if (!structStarAggregates(first, expressionEnd) && !hasWindowExpression(item[0], expressionEnd)) {
                 positions.add(position);
             }
             position++;
@@ -5206,7 +5309,8 @@ final class SqlDialectTranslator {
      * {@code FROM} row, so those names decide what the wrapper has to project and what it must reject.
      */
     private record StructStarSources(Map<String, Set<String>> columnsByAlias, Set<String> aliases,
-                                     Set<String> rangeVariables, Set<String> usingColumns, boolean allKnown) {
+                                     Set<String> rangeVariables, Map<String, List<String>> usingSources,
+                                     boolean allKnown) {
 
         /** The same view without the aliases a nested query declares itself, which shadow the outer ones. */
         StructStarSources without(Set<String> shadowed) {
@@ -5223,7 +5327,7 @@ final class SqlDialectTranslator {
             remaining.removeAll(shadowed);
             Set<String> remainingRanges = new HashSet<>(rangeVariables);
             remainingRanges.removeAll(shadowed);
-            return new StructStarSources(columns, remaining, remainingRanges, usingColumns, allKnown);
+            return new StructStarSources(columns, remaining, remainingRanges, usingSources, allKnown);
         }
     }
 
@@ -5249,9 +5353,14 @@ final class SqlDialectTranslator {
     private record ItemColumn(String path, String name) {}
 
     /** A source column projected next to the expansion, so an outer clause can still read it. */
-    private record SourceReference(String qualifier, String column, String alias) {
+    private record SourceReference(String qualifier, String column, String alias, String expression) {
+        SourceReference(String qualifier, String column, String alias) {
+            this(qualifier, column, alias, null);
+        }
+
         String path() {
-            return DuckTypes.quoteIdentifier(qualifier) + "." + DuckTypes.quoteIdentifier(column);
+            return expression != null ? expression
+                    : DuckTypes.quoteIdentifier(qualifier) + "." + DuckTypes.quoteIdentifier(column);
         }
     }
 
@@ -5281,7 +5390,7 @@ final class SqlDialectTranslator {
             }
         }
         if (from < 0) {
-            return new StructStarSources(Map.of(), Set.of(), Set.of(), Set.of(), false);
+            return new StructStarSources(Map.of(), Set.of(), Set.of(), Map.of(), false);
         }
         List<ProjectionSource> sourceList = projectionSources(from, queryDepth);
         Map<String, Set<String>> columnsByAlias = new LinkedHashMap<>();
@@ -5306,13 +5415,29 @@ final class SqlDialectTranslator {
             }
             columnsByAlias.put(alias, columns);
         }
-        Set<String> usingColumns = new HashSet<>();
+        Map<String, List<String>> usingSources = new LinkedHashMap<>();
         for (int index = 1; index < sourceList.size(); index++) {
-            for (String column : usingColumnsAfterSource(sourceList.get(index), queryDepth)) {
-                usingColumns.add(column.toLowerCase(Locale.ROOT));
+            ProjectionSource joined = sourceList.get(index);
+            for (String column : usingColumnsAfterSource(joined, queryDepth)) {
+                String key = column.toLowerCase(Locale.ROOT);
+                List<String> participants = usingSources.computeIfAbsent(key, name -> new ArrayList<>());
+                if (participants.isEmpty()) {
+                    for (int prior = 0; prior < index; prior++) {
+                        ProjectionSource source = sourceList.get(prior);
+                        if (source.alias() != null && sourceExposesColumn(source, column)) {
+                            participants.add(source.alias().toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+                if (joined.alias() != null) {
+                    String alias = joined.alias().toLowerCase(Locale.ROOT);
+                    if (!participants.contains(alias)) {
+                        participants.add(alias);
+                    }
+                }
             }
         }
-        return new StructStarSources(columnsByAlias, aliases, rangeVariables, usingColumns, allKnown);
+        return new StructStarSources(columnsByAlias, aliases, rangeVariables, usingSources, allKnown);
     }
 
     private static final Set<String> STRUCT_STAR_AGGREGATES = Set.of("COUNT", "COUNTIF", "SUM", "AVG", "MIN", "MAX",
@@ -5417,6 +5542,17 @@ final class SqlDialectTranslator {
                 if (after < 0 || !tokens.get(after).isKeyword("OVER")) {
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+
+    /** True when a select item is a window expression, which GROUP BY ALL must not group by. */
+    private boolean hasWindowExpression(int start, int end) {
+        boolean[] nested = nestedQueryPositions(start, end);
+        for (int i = start; i < end; i++) {
+            if (!nested[i] && tokens.get(i).isKeyword("OVER")) {
+                return true;
             }
         }
         return false;
@@ -5913,17 +6049,18 @@ final class SqlDialectTranslator {
     private String bareSourceReference(StructStarSources sources, String name,
                                        Map<String, SourceReference> sourceReferences) {
         String key = name.toLowerCase(Locale.ROOT);
+        List<String> merged = sources.usingSources().get(key);
+        if (merged != null && merged.size() > 1) {
+            // USING merges the column, and an outer join fills it from whichever side has a row.
+            return mergedSourceReference(merged, name, sourceReferences);
+        }
         String qualifier = null;
         for (Map.Entry<String, Set<String>> source : sources.columnsByAlias().entrySet()) {
             if (!source.getValue().contains(key)) {
                 continue;
             }
             if (qualifier != null) {
-                // A JOIN ... USING column is one column of the joined row, so any participant can name it.
-                if (!sources.usingColumns().contains(key)) {
-                    return null;
-                }
-                continue;
+                return null;
             }
             qualifier = source.getKey();
         }
@@ -5935,15 +6072,34 @@ final class SqlDialectTranslator {
         String key = qualifier.toLowerCase(Locale.ROOT) + "." + column.toLowerCase(Locale.ROOT);
         SourceReference reference = sourceReferences.get(key);
         if (reference == null) {
-            String alias;
-            int index = sourceReferences.size();
-            do {
-                alias = "_floci_source_" + index++;
-            } while (!structStarTakenNames.add(alias.toLowerCase(Locale.ROOT)));
-            reference = new SourceReference(qualifier, column, alias);
+            reference = new SourceReference(qualifier, column, nextSourceAlias(sourceReferences));
             sourceReferences.put(key, reference);
         }
         return reference.alias();
+    }
+
+    private String mergedSourceReference(List<String> participants, String column,
+                                         Map<String, SourceReference> sourceReferences) {
+        String key = "using:" + column.toLowerCase(Locale.ROOT);
+        SourceReference reference = sourceReferences.get(key);
+        if (reference == null) {
+            String expression = participants.stream()
+                    .map(alias -> DuckTypes.quoteIdentifier(alias) + "." + DuckTypes.quoteIdentifier(column))
+                    .collect(Collectors.joining(", ", "COALESCE(", ")"));
+            reference = new SourceReference(participants.getFirst(), column, nextSourceAlias(sourceReferences),
+                    expression);
+            sourceReferences.put(key, reference);
+        }
+        return reference.alias();
+    }
+
+    private String nextSourceAlias(Map<String, SourceReference> sourceReferences) {
+        String alias;
+        int index = sourceReferences.size();
+        do {
+            alias = "_floci_source_" + index++;
+        } while (!structStarTakenNames.add(alias.toLowerCase(Locale.ROOT)));
+        return alias;
     }
 
     /** The projection that carries the whole STRUCT the star expands, so a REPLACE expression can use it. */

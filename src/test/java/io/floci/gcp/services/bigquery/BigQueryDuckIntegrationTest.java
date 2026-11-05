@@ -353,6 +353,96 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void setOperationTrailingClausesStayOutsideTheLastArm() {
+        query(Map.of("query", "SELECT 1 AS x UNION ALL SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s) t ORDER BY x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x")))
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"))));
+        query(Map.of("query", "SELECT 1 AS x UNION ALL SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s) t ORDER BY x DESC LIMIT 1",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("2")));
+    }
+
+    @Test
+    @Order(2)
+    void usingColumnsReadTheMergedValueInOuterJoins() {
+        query(Map.of("query", "SELECT u.s.* REPLACE(c AS a) FROM (SELECT 1 AS c) t"
+                        + " RIGHT JOIN (SELECT 2 AS c, STRUCT(0 AS a) s) u USING(c)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f.v", equalTo(List.of("2")));
+        query(Map.of("query", "SELECT u.s.* REPLACE(c AS a)"
+                        + " FROM (SELECT 1 AS c UNION ALL SELECT 9) t"
+                        + " FULL JOIN (SELECT 2 AS c, STRUCT(0 AS a) s"
+                        + " UNION ALL SELECT 9, STRUCT(1 AS a) s) u USING(c) ORDER BY a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("2"), List.of("9"))));
+        query(Map.of("query", "SELECT t.s.* REPLACE(c AS a)"
+                        + " FROM (SELECT 1 AS c, STRUCT(5 AS a) s UNION ALL SELECT 9, STRUCT(6 AS a) s) t"
+                        + " LEFT JOIN (SELECT 1 AS c UNION ALL SELECT 7) u USING(c) ORDER BY a",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("1"), List.of("9"))));
+        query(Map.of("query", "SELECT t.s.* REPLACE(c AS a) FROM (SELECT 1 AS c, STRUCT(5 AS a) s) t"
+                        + " JOIN (SELECT 1 AS c) u USING(c) JOIN (SELECT 1 AS c, 2 AS z) v USING(c)",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1")));
+    }
+
+    @Test
+    @Order(2)
+    void structStarRenamesAndGroupingHelpersSurviveTheTail() {
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6) t"
+                        + " GROUP BY t.s ORDER BY MAX(t.id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("11", "99")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6) t"
+                        + " GROUP BY t.s ORDER BY SUM(t.id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("11", "99")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6) t"
+                        + " GROUP BY t.s QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(t.id)) = 1",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("11", "99")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(1 AS a), 6) t"
+                        + " GROUP BY t.s QUALIFY ROW_NUMBER() OVER (ORDER BY MAX(t.id)) = 1",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("11", "99")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 3 AS c), 6) t"
+                        + " GROUP BY t.s HAVING a > (SELECT a FROM (SELECT 4 AS a))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.f.v", equalTo(List.of(List.of("5"), List.of("6"))));
+        query(Map.of("query", "SELECT t.s.* REPLACE(10 AS a), u.s.* REPLACE(20 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS a) s) u", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "a_1")))
+                .body("rows[0].f.v", equalTo(List.of("10", "20")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), ROW_NUMBER() OVER () AS rn"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL QUALIFY rn = 1",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "rn")))
+                .body("rows[0].f.v", equalTo(List.of("2", "1")));
+    }
+
+    @Test
+    @Order(2)
     void multipleStructStarsExecuteWithTheirOwnStarLists() {
         String twoStars = "SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
                 + " FROM (SELECT STRUCT(1 AS a, 10 AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u";

@@ -3,8 +3,6 @@ package io.floci.gcp.services.cloudmonitoring;
 import io.floci.gcp.services.cloudmonitoring.model.StoredTimeSeriesPoint;
 
 import java.util.Map;
-import java.util.TreeMap;
-import java.util.stream.Collectors;
 
 record SeriesKey(
         String metricType,
@@ -25,22 +23,8 @@ record SeriesKey(
                 pt.getValueType());
     }
 
-    String identityString() {
-        return metricType + "|" + resourceType
-                + "|" + sortedLabels(metricLabels)
-                + "|" + sortedLabels(resourceLabels);
-    }
-
-    String canonicalString() {
-        return identityString() + "|" + metricKind + "|" + valueType;
-    }
-
-    private static String sortedLabels(Map<String, String> labels) {
-        if (labels == null || labels.isEmpty()) {
-            return "";
-        }
-        return new TreeMap<>(labels).entrySet().stream()
-                .map(e -> e.getKey() + "=" + e.getValue())
-                .collect(Collectors.joining(","));
+    /** This series without its kind and value type, which do not tell two series apart. */
+    SeriesKey identity() {
+        return new SeriesKey(metricType, metricLabels, resourceType, resourceLabels, "", "");
     }
 }

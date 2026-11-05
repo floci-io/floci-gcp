@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -145,8 +146,8 @@ class CloudMonitoringRestIntegrationTest {
 
     @Test
     void aPartialWriteAnswersWithTheSummaryDetail() {
-        String metric = "custom.googleapis.com/partial/" + java.util.UUID.randomUUID();
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        String metric = "custom.googleapis.com/partial/" + UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
         given()
                 .contentType("application/json")
                 .body("""

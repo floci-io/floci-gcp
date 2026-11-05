@@ -10,6 +10,8 @@ import com.google.monitoring.v3.Point;
 import com.google.monitoring.v3.TimeInterval;
 import com.google.monitoring.v3.TimeSeries;
 import com.google.monitoring.v3.TypedValue;
+import com.google.protobuf.util.Timestamps;
+import com.google.rpc.Status;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
@@ -286,20 +288,20 @@ public class CloudMonitoringService {
         Set<String> batchMetricTypes = timeSeriesList.stream()
                 .map(ts -> ts.getMetric().getType())
                 .collect(Collectors.toSet());
-        Map<String, Instant> latestByIdentity = new HashMap<>();
+        Map<SeriesKey, Instant> latestByIdentity = new HashMap<>();
         for (StoredTimeSeriesPoint pt : timeSeriesStore.scan(k -> {
             int idx = k.indexOf('#');
             return idx > 0 && batchMetricTypes.contains(k.substring(0, idx));
         })) {
-            latestByIdentity.merge(SeriesKey.of(pt).identityString(),
+            latestByIdentity.merge(SeriesKey.of(pt).identity(),
                     Instant.parse(pt.getEndTime()), (a, b) -> a.isAfter(b) ? a : b);
         }
 
         // A series that fails is reported; the others are still written.
         Map<String, MetricDescriptor> pendingDescriptors = new LinkedHashMap<>();
         List<StoredTimeSeriesPoint> staged = new ArrayList<>();
-        Set<String> seenIdentities = new HashSet<>();
-        Map<com.google.rpc.Status, Integer> failedPoints = new LinkedHashMap<>();
+        Set<SeriesKey> seenIdentities = new HashSet<>();
+        Map<Status, Integer> failedPoints = new LinkedHashMap<>();
         String firstFailure = null;
         int totalPoints = 0;
 
@@ -311,7 +313,7 @@ public class CloudMonitoringService {
                         latestByIdentity, seenIdentities, now);
                 staged.add(stored);
             } catch (GcpException e) {
-                failedPoints.merge(com.google.rpc.Status.newBuilder().setCode(e.getGrpcCode().value())
+                failedPoints.merge(Status.newBuilder().setCode(e.getGrpcCode().value())
                         .setMessage(e.getMessage()).build(), ts.getPointsCount(), Integer::sum);
                 if (firstFailure == null) {
                     firstFailure = e.getMessage() + ": timeSeries[" + index + "]";
@@ -342,8 +344,8 @@ public class CloudMonitoringService {
     private static StoredTimeSeriesPoint stage(String parentProject, TimeSeries ts,
                                                StorageBackend<String, String> descriptorStore,
                                                Map<String, MetricDescriptor> pendingDescriptors,
-                                               Map<String, Instant> latestByIdentity,
-                                               Set<String> seenIdentities, Instant now) {
+                                               Map<SeriesKey, Instant> latestByIdentity,
+                                               Set<SeriesKey> seenIdentities, Instant now) {
         String metricType = ts.getMetric().getType();
         if (metricType == null || metricType.isBlank()) {
             throw GcpException.invalidArgument("TimeSeries metric type is required");
@@ -353,8 +355,8 @@ public class CloudMonitoringService {
                     "Each TimeSeries must contain exactly one Point (got %d for %s)",
                     ts.getPointsCount(), metricType));
         }
-        String identity = new SeriesKey(metricType, ts.getMetric().getLabelsMap(),
-                ts.getResource().getType(), ts.getResource().getLabelsMap(), "", "").identityString();
+        SeriesKey identity = new SeriesKey(metricType, ts.getMetric().getLabelsMap(),
+                ts.getResource().getType(), ts.getResource().getLabelsMap(), "", "");
         if (!seenIdentities.add(identity)) {
             throw GcpException.invalidArgument(
                     "Duplicate TimeSeries encountered. Only one point can be written per TimeSeries per request");
@@ -637,6 +639,10 @@ public class CloudMonitoringService {
     }
 
     private static Instant toInstant(com.google.protobuf.Timestamp ts) {
+        if (!Timestamps.isValid(ts)) {
+            throw GcpException.invalidArgument(String.format(
+                    "Invalid timestamp: seconds=%d, nanos=%d", ts.getSeconds(), ts.getNanos()));
+        }
         return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
     }
 

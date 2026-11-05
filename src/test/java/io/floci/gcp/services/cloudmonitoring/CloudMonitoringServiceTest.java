@@ -320,6 +320,50 @@ class CloudMonitoringServiceTest {
     }
 
     @Test
+    void seriesWhoseLabelsJoinToTheSameTextAreDistinct() {
+        TimeSeries first = gaugePoint(METRIC, Map.of("a", "x,b=y", "b", "z"), 1.0, NOW.minusSeconds(120));
+        TimeSeries second = gaugePoint(METRIC, Map.of("a", "x", "b", "y,b=z"), 2.0, NOW.minusSeconds(180));
+
+        service.createTimeSeries(PROJECT, List.of(first, second));
+        // Each series keeps its own freshness check, so an older point for the other one is accepted.
+        service.createTimeSeries(PROJECT, List.of(
+                gaugePoint(METRIC, Map.of("a", "x", "b", "y,b=z"), 3.0, NOW.minusSeconds(150))));
+
+        assertEquals(3, timeSeriesStore.scan(k -> true).size());
+    }
+
+    @Test
+    void aTimestampOutOfRangeFailsItsSeriesAndTheOthersAreWritten() throws Exception {
+        TimeSeries good = gaugePoint(METRIC, Map.of("id", "good"), 1.0, NOW.minusSeconds(60));
+        TimeSeries good2 = gaugePoint(METRIC, Map.of("id", "good2"), 1.0, NOW.minusSeconds(60));
+        TimeSeries bad = gaugePoint(METRIC, Map.of("id", "bad"), 1.0, NOW.minusSeconds(60)).toBuilder()
+                .setPoints(0, gaugePoint(METRIC, Map.of(), 1.0, NOW).getPoints(0).toBuilder()
+                        .setInterval(TimeInterval.newBuilder()
+                                .setEndTime(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE))))
+                .build();
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.createTimeSeries(PROJECT, List.of(good, bad, good2)));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        CreateTimeSeriesSummary summary = ex.getDetails().getFirst().unpack(CreateTimeSeriesSummary.class);
+        assertEquals(3, summary.getTotalPointCount());
+        assertEquals(2, summary.getSuccessPointCount());
+        assertEquals(2, timeSeriesStore.scan(k -> true).size());
+    }
+
+    @Test
+    void aReadIntervalOutOfRangeIsInvalid() {
+        TimeInterval outOfRange = TimeInterval.newBuilder()
+                .setEndTime(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE)).build();
+
+        GcpException ex = assertThrows(GcpException.class, () -> service.listTimeSeries(PROJECT, typeFilter(),
+                outOfRange, Aggregation.getDefaultInstance(), "FULL", 10, null));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
+
+    @Test
     void identicalFailuresAreGroupedAndCountedOnce() throws Exception {
         TimeSeries noType = gaugePoint("", Map.of(), 1.0, NOW.minusSeconds(60));
 

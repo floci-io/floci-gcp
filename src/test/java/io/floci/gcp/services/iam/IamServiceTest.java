@@ -140,6 +140,16 @@ class IamServiceTest {
     }
 
     @Test
+    void aNumericAccountIdStillSigns() {
+        IamService iam = SigningKeyFixtures.iamService(new InMemoryStorage<>());
+        StoredServiceAccount numeric = iam.createServiceAccount("p6", "123456", "Numeric", "");
+
+        IamService.SignedBytes signed = iam.sign("p6", "123456", new byte[] {1});
+
+        assertEquals(iam.signingKeyId("p6", numeric.getEmail()), signed.keyId());
+    }
+
+    @Test
     void signingByUniqueIdDoesNotReachAReplacementAccount() {
         Runnable[] onScan = new Runnable[1];
         IamService iam = SigningKeyFixtures.iamService(new InMemoryStorage<>() {

@@ -694,7 +694,7 @@ public class IamService {
         StoredSigningKey key;
         synchronized (signingKeyLock) {
             account = saStore.get(saKey(ref.project(), ref.email()))
-                    .filter(found -> !isUniqueId(emailOrId) || emailOrId.equals(found.getUniqueId()))
+                    .filter(found -> namesAccount(emailOrId, found))
                     .orElseThrow(() -> GcpException.notFound("Service account not found: " + emailOrId));
             key = signingKey(ref);
         }
@@ -792,6 +792,15 @@ public class IamService {
             // An account that does not exist has no owner.
             return Optional.empty();
         }
+    }
+
+    /**
+     * Whether {@code emailOrId} still names {@code account}: a unique id must match it, unless the
+     * address resolved through the account-ID fallback for an all-digit account ID.
+     */
+    private static boolean namesAccount(String emailOrId, StoredServiceAccount account) {
+        return !isUniqueId(emailOrId) || emailOrId.equals(account.getUniqueId())
+                || account.getEmail().startsWith(emailOrId + "@");
     }
 
     // GCP account IDs must start with a letter, so an all-digit identifier is tried as a unique ID

@@ -1,6 +1,8 @@
 package io.floci.gcp.services.iam;
 
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.core.storage.StorageBackend;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredSigningKey;
 
 import java.security.KeyFactory;
@@ -18,6 +20,11 @@ public final class SigningKeyFixtures {
 
     public static IamService iamService(InMemoryStorage<String, StoredSigningKey> signingKeys) {
         return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), signingKeys);
+    }
+
+    public static IamService iamService(StorageBackend<String, StoredServiceAccount> accounts,
+                                        InMemoryStorage<String, StoredSigningKey> signingKeys) {
+        return new IamService(accounts, new InMemoryStorage<>(), new InMemoryStorage<>(), signingKeys);
     }
 
     /** The public half of a stored signing key, rebuilt from the private key's modulus and exponent. */

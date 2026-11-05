@@ -52,6 +52,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -677,8 +678,27 @@ public class IamService {
      * {@code kid}): {@code input} gets the id of the key that then signs what it returns.
      */
     public SignedBytes sign(String project, String emailOrId, Function<String, byte[]> input) {
-        StoredSigningKey key = signingKey(resolve(project, emailOrId));
-        byte[] data = input.apply(key.getKeyId());
+        return signAs(project, emailOrId, (account, keyId) -> input.apply(keyId));
+    }
+
+    /**
+     * Like {@link #sign(String, String, Function)}, for input that also names the account (a JWT's
+     * claims). The account and the key are read together under the lock deletion takes, so input
+     * never describes a different account from the one whose key signs it, and a unique id cannot
+     * reach an account that replaced the one it named.
+     */
+    public SignedBytes signAs(String project, String emailOrId,
+                              BiFunction<StoredServiceAccount, String, byte[]> input) {
+        ServiceAccountRef ref = resolve(project, emailOrId);
+        StoredServiceAccount account;
+        StoredSigningKey key;
+        synchronized (signingKeyLock) {
+            account = saStore.get(saKey(ref.project(), ref.email()))
+                    .filter(found -> !isUniqueId(emailOrId) || emailOrId.equals(found.getUniqueId()))
+                    .orElseThrow(() -> GcpException.notFound("Service account not found: " + emailOrId));
+            key = signingKey(ref);
+        }
+        byte[] data = input.apply(account, key.getKeyId());
         try {
             PrivateKey privateKey = KeyFactory.getInstance("RSA")
                     .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getPrivateKey())));

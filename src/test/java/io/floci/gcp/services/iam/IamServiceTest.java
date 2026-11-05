@@ -37,6 +37,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -136,6 +137,34 @@ class IamServiceTest {
         }
 
         assertTrue(signingKeys.keys().isEmpty());
+    }
+
+    @Test
+    void signingByUniqueIdDoesNotReachAReplacementAccount() {
+        Runnable[] onScan = new Runnable[1];
+        IamService iam = SigningKeyFixtures.iamService(new InMemoryStorage<>() {
+            @Override
+            public List<StoredServiceAccount> scan(Predicate<String> keyFilter) {
+                List<StoredServiceAccount> found = super.scan(keyFilter);
+                Runnable hook = onScan[0];
+                onScan[0] = null;
+                if (hook != null) {
+                    hook.run();
+                }
+                return found;
+            }
+        }, new InMemoryStorage<>());
+        iam.createServiceAccount("p1", "signer", "", "");
+        String email = "signer@p1.iam.gserviceaccount.com";
+        String uniqueId = iam.getServiceAccount("p1", email).getUniqueId();
+        onScan[0] = () -> {
+            iam.deleteServiceAccount("p1", email);
+            iam.createServiceAccount("p1", "signer", "", "");
+        };
+
+        GcpException replaced = assertThrows(GcpException.class, () -> iam.sign("p1", uniqueId, new byte[] {1}));
+
+        assertEquals(io.grpc.Status.Code.NOT_FOUND, replaced.getGrpcCode());
     }
 
     @Test

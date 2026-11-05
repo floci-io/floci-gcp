@@ -8,6 +8,7 @@ import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.SigningKeyFixtures;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredSigningKey;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -142,6 +144,52 @@ class IamCredentialsServiceTest {
         JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
         assertEquals(SIGNER, claims.get("email").asText());
         assertTrue(claims.get("email_verified").asBoolean());
+    }
+
+    @Test
+    void generateIdTokenClaimsNameTheAccountWhoseKeySignsWhenTheAccountIsReplaced() throws Exception {
+        Runnable[] onSecondRead = new Runnable[1];
+        int[] reads = new int[1];
+        InMemoryStorage<String, StoredSigningKey> keys = new InMemoryStorage<>();
+        IamService racing = SigningKeyFixtures.iamService(new InMemoryStorage<>() {
+            @Override
+            public Optional<StoredServiceAccount> get(String key) {
+                Optional<StoredServiceAccount> read = super.get(key);
+                // Resolving the address reads first; the read after it is the one claims come from.
+                if (onSecondRead[0] != null && ++reads[0] == 2) {
+                    onSecondRead[0].run();
+                }
+                return read;
+            }
+        }, keys);
+        IamCredentialsService credentials = new IamCredentialsService(tokenService, racing, Clock.fixed(NOW, ZoneOffset.UTC));
+        racing.createServiceAccount("p1", "signer", "", "");
+        String firstId = racing.getServiceAccount("p1", SIGNER).getUniqueId();
+        String firstKey = racing.signingKeyId("p1", SIGNER);
+        // Another request replaces the account right after a read. Inside the lock deletion takes it
+        // has to wait, so give it a moment rather than waiting for it.
+        Thread replacing = new Thread(() -> {
+            racing.deleteServiceAccount("p1", SIGNER);
+            racing.createServiceAccount("p1", "signer", "", "");
+        });
+        onSecondRead[0] = () -> {
+            replacing.start();
+            try {
+                replacing.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+
+        String[] parts = credentials.generateIdToken(SIGNER, "https://foo.bar", false).get("token").split("\\.");
+        replacing.join(5000);
+
+        ObjectMapper json = new ObjectMapper();
+        String kid = json.readTree(Base64.getUrlDecoder().decode(parts[0])).get("kid").asText();
+        String sub = json.readTree(Base64.getUrlDecoder().decode(parts[1])).get("sub").asText();
+        String secondId = racing.getServiceAccount("p1", SIGNER).getUniqueId();
+        assertNotEquals(firstId, secondId);
+        assertEquals(kid.equals(firstKey) ? firstId : secondId, sub);
     }
 
     @Test

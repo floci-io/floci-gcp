@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class IamCredentialsService {
@@ -130,7 +131,7 @@ public class IamCredentialsService {
         }
         validateExpiry(claims.get("exp"));
 
-        SignedJwt signed = signClaims(serviceAccount, payload);
+        SignedJwt signed = signClaims(serviceAccount, account -> payload);
         Map<String, String> response = new LinkedHashMap<>();
         response.put("keyId", signed.keyId());
         response.put("signedJwt", signed.jwt());
@@ -145,7 +146,13 @@ public class IamCredentialsService {
         if (audience == null || audience.isEmpty()) {
             throw GcpException.invalidArgument("audience is required");
         }
-        StoredServiceAccount account = iamService.getServiceAccount(WILDCARD_PROJECT, serviceAccount);
+        Map<String, String> response = new LinkedHashMap<>();
+        response.put("token", signClaims(serviceAccount,
+                account -> idTokenClaims(account, audience, includeEmail)).jwt());
+        return response;
+    }
+
+    private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {
         long now = clock.instant().getEpochSecond();
         ObjectNode claims = MAPPER.createObjectNode()
                 .put("aud", audience)
@@ -153,21 +160,18 @@ public class IamCredentialsService {
         if (includeEmail) {
             claims.put("email", account.getEmail()).put("email_verified", true);
         }
-        claims.put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
+        return claims.put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
                 .put("iat", now)
                 .put("iss", ID_TOKEN_ISSUER)
-                .put("sub", account.getUniqueId());
-
-        Map<String, String> response = new LinkedHashMap<>();
-        response.put("token", signClaims(account.getEmail(), claims.toString()).jwt());
-        return response;
+                .put("sub", account.getUniqueId())
+                .toString();
     }
 
-    private SignedJwt signClaims(String serviceAccount, String payload) {
-        // The header is built inside sign so its kid names the key that signs it.
+    private SignedJwt signClaims(String serviceAccount, Function<StoredServiceAccount, String> claims) {
+        // The header and claims are built inside signAs so they name the key and account that sign them.
         String[] signingInput = new String[1];
-        IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount, keyId -> {
-            signingInput[0] = jwtSigningInput(keyId, payload);
+        IamService.SignedBytes signed = iamService.signAs(WILDCARD_PROJECT, serviceAccount, (account, keyId) -> {
+            signingInput[0] = jwtSigningInput(keyId, claims.apply(account));
             return signingInput[0].getBytes(StandardCharsets.US_ASCII);
         });
         return new SignedJwt(signed.keyId(), signingInput[0] + "." + base64Url(signed.signature()));

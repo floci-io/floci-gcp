@@ -473,6 +473,31 @@ class BigQueryDuckIntegrationTest {
         }
     }
 
+    @Test
+    @Order(5)
+    void formatFunctionsCoerceAStringOrNullValueLikeBigQuery() {
+        query(Map.of("query", "SELECT FORMAT_DATE('%Y', '0099-01-02') a, FORMAT_DATE('%F', '2024-03-05') b,"
+                + " FORMAT_TIMESTAMP('%Y-%m-%d %H', '2024-03-05 07:08:09+00') c, FORMAT_DATETIME('%Y %H', '2024-03-05 07:08:09') d,"
+                + " FORMAT_TIME('%H:%M', '07:08:09') e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("99", "2024-03-05", "2024-03-05 07", "2024 07", "07:08")));
+        query(Map.of("query", "SELECT FORMAT_DATE('%F', @s) a", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "s", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "0099-01-02")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("99-01-02"));
+        query(Map.of("query", "SELECT FORMAT_DATE('%Y', NULL) y, FORMAT_DATE('%G', NULL) g, FORMAT_DATE('%F', NULL) f,"
+                + " FORMAT_DATE('%C', NULL) c, FORMAT_DATE('%e', NULL) e, FORMAT_DATE('%d', NULL) d,"
+                + " FORMAT_TIMESTAMP('%Y', NULL) t, FORMAT_DATETIME('%Y', NULL) dt, FORMAT_TIME('%H', NULL) tm",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null, null, null, null, null)));
+        query(Map.of("query", "SELECT FORMAT_DATE('%Y', null) a, FORMAT_DATE('%Y', (NULL)) b, FORMAT_DATE('%F', ((null))) c,"
+                + " FORMAT_TIMESTAMP('%Y', Null) d, FORMAT_TIME('%H', (null)) e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null)));
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

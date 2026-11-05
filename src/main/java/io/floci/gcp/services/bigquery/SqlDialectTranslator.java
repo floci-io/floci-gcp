@@ -6030,7 +6030,9 @@ final class SqlDialectTranslator {
             case "DATE_TRUNC" -> renderDateTrunc(a, name);
             case "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME" -> args(a, 2, name,
                     // DuckDB's strftime takes no TIME, so a TIME is formatted on a placeholder date it never prints.
-                    formatCall(name, name.equals("FORMAT_TIME") ? "(DATE '1970-01-01' + " + at(a, 1) + ")" : at(a, 1), at(a, 0)));
+                    formatCall(name, name.equals("FORMAT_TIME")
+                            ? "(DATE '1970-01-01' + " + formatValue(at(a, 1), name) + ")"
+                            : formatValue(at(a, 1), name), at(a, 0)));
             case "PARSE_TIMESTAMP" -> renderParseTimestamp(a, name, false);
             case "PARSE_DATETIME" -> args(a, 2, name,
                     "strptime(" + at(a, 1) + ", " + timeFormat(at(a, 0)) + ")");
@@ -6560,6 +6562,28 @@ final class SqlDialectTranslator {
             type = "TIME";
         }
         return "CAST(" + literal + " AS " + type + ")";
+    }
+
+    /**
+     * The value of a {@code FORMAT_*} call. BigQuery coerces a STRING literal or parameter to the function's type,
+     * as {@link #temporalOperand} does for the date functions, and a bare NULL (in any case, with or without
+     * redundant parentheses) is a NULL of that type.
+     */
+    private static String formatValue(String value, String function) {
+        String type = function.substring("FORMAT_".length());
+        String bare = value.strip();
+        while (wrappedInParentheses(bare)) {
+            bare = bare.substring(1, bare.length() - 1).strip();
+        }
+        if (bare.equalsIgnoreCase("NULL")) {
+            String duckType = switch (type) {
+                case "DATETIME" -> "TIMESTAMP";
+                case "TIMESTAMP" -> "TIMESTAMPTZ";
+                default -> type;
+            };
+            return "CAST(NULL AS " + duckType + ")";
+        }
+        return temporalOperand(value, type + "_");
     }
 
     /** True when {@code sql} is one parenthesized expression: its first parenthesis closes at its last character. */

@@ -1131,4 +1131,68 @@ class BigQueryRestIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", containsString("bq-dd-job.ds.t"));
     }
+
+    @Test
+    @Order(24)
+    void writeStatementsAndLoadJobsAreCheckedAgainstTheJobLocation() {
+        String mismatch = "Not found: Dataset " + PROJECT + ":eu_writes was not found in location US";
+        given().contentType("application/json")
+                .body("{\"datasetReference\": {\"datasetId\": \"eu_writes\"}, \"location\": \"EU\"}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json")
+                .body("""
+                        {"query": "CREATE TABLE eu_writes.t (name STRING)", "useLegacySql": false, "location": "US"}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"))
+                .body("error.message", equalTo(mismatch));
+        given().contentType("application/json")
+                .body("""
+                        {"query": "CREATE TABLE eu_writes.t (name STRING)", "useLegacySql": false}
+                        """)
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"));
+
+        given().contentType("application/json")
+                .body("""
+                        {"jobReference": {"location": "US"},
+                         "configuration": {"query": {"query": "DROP TABLE eu_writes.t", "useLegacySql": false}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("US"))
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult.reason", equalTo("notFound"))
+                .body("status.errorResult.message", equalTo(mismatch));
+        given().when().get(BASE + "/datasets/eu_writes/tables/t").then().statusCode(200);
+
+        given().contentType("application/json")
+                .body("""
+                        {"jobReference": {"location": "US"},
+                         "configuration": {"load": {"sourceFormat": "CSV", "sourceUris": ["gs://no-bucket/no-file.csv"],
+                           "destinationTable": {"datasetId": "eu_writes", "tableId": "t"}}}}
+                        """)
+                .when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("jobReference.location", equalTo("US"))
+                .body("status.errorResult.reason", equalTo("notFound"))
+                .body("status.errorResult.message", equalTo(mismatch));
+
+        String job = """
+                {"configuration": {"load": {"sourceFormat": "NEWLINE_DELIMITED_JSON",
+                  "destinationTable": {"datasetId": "eu_writes", "tableId": "t"}}}}
+                """;
+        String upload = given().contentType("application/json").body(job)
+                .when().post("/upload/bigquery/v2/projects/" + PROJECT + "/jobs?uploadType=resumable")
+                .then().statusCode(200).extract().header("Location");
+        byte[] data = "{\"name\": \"ana\"}\n".getBytes();
+        given().header("Content-Range", "bytes 0-" + (data.length - 1) + "/" + data.length)
+                .contentType("application/octet-stream").body(data)
+                .when().put(upload.substring(upload.indexOf("/upload/")))
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("jobReference.location", equalTo("EU"));
+    }
 }

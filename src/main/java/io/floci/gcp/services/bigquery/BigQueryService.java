@@ -794,14 +794,17 @@ public class BigQueryService {
                 // "an invalid query will return the same error it would if it wasn't a dry run", so
                 // a dry run has to resolve what the statement touches rather than only classify it.
                 inProject(projectId, targetProjectId, () -> {
+                    admitWrittenDataset(statement, jobLocation);
                     validateStatement(targetProjectId, projectId, statement, options, jobLocation);
                     return null;
                 });
+                job.setLocation(jobLocation.resolved());
                 job.setDryRun(true);
                 return job;
             }
             synchronized (writeLock) {
                 inProject(projectId, targetProjectId, () -> {
+                    admitWrittenDataset(statement, jobLocation);
                     executeStatement(targetProjectId, projectId, statement, options, job, jobLocation);
                     return null;
                 });
@@ -814,6 +817,7 @@ public class BigQueryService {
         BigQuerySqlEngine.Result result = inProject(projectId, dataProjectId, () -> engine.execute(
                 request(dataProjectId, projectId, options.sql(), options, options.dryRun()),
                 tables(dataProjectId, jobLocation)));
+        admitDestinationDataset(projectId, options, jobLocation);
         job.setLocation(jobLocation.resolved());
         job.setStatementType(result.statementType());
         job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
@@ -836,6 +840,33 @@ public class BigQueryService {
         }
         jobStore.put(job.getJobId(), job);
         return job;
+    }
+
+    /**
+     * "The location of every dataset involved in the request, including those read from and those
+     * written to, must match the location of the job as inferred or specified." A missing dataset
+     * keeps the statement's own error, and CREATE SCHEMA creates its dataset where the job runs.
+     */
+    private void admitWrittenDataset(SqlDialectTranslator.Statement statement, JobLocation jobLocation) {
+        String datasetId = null;
+        if (statement.target() != null) {
+            datasetId = statement.target().datasetId();
+        } else if (statement.kind() == SqlDialectTranslator.StatementKind.DROP_SCHEMA) {
+            datasetId = statement.datasetTarget();
+        }
+        if (datasetId != null) {
+            datasetStore.get(datasetId).ifPresent(jobLocation::admit);
+        }
+    }
+
+    /** A cross-project or incomplete destination is left for {@link #writeRows} to reject. */
+    private void admitDestinationDataset(String projectId, QueryOptions options, JobLocation jobLocation) {
+        TableReference destination = options.destinationTable();
+        if (destination == null || destination.getDatasetId() == null
+                || (destination.getProjectId() != null && !destination.getProjectId().equals(projectId))) {
+            return;
+        }
+        datasetStore.get(destination.getDatasetId()).ifPresent(jobLocation::admit);
     }
 
     /**
@@ -906,7 +937,6 @@ public class BigQueryService {
                 Dataset destinationDataset = getDataset(projectId, target.datasetId());
                 BigQuerySqlEngine.Result described = null;
                 if (statement.copySource() != null) {
-                    jobLocation.admit(destinationDataset);
                     jobLocation.admit(getDataset(projectId, statement.copySource().datasetId()));
                     Table source = getTable(projectId, statement.copySource().datasetId(),
                             statement.copySource().tableId());
@@ -1195,7 +1225,6 @@ public class BigQueryService {
         SqlDialectTranslator.TableRef target = statement.target();
         Dataset destinationDataset = getDataset(projectId, target.datasetId());
         if (statement.copySource() != null) {
-            jobLocation.admit(destinationDataset);
             jobLocation.admit(getDataset(projectId, statement.copySource().datasetId()));
         }
         job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
@@ -2615,10 +2644,11 @@ public class BigQueryService {
             config.put("skipLeadingRows", skipLeadingRows);
         }
 
+        JobLocation jobLocation = new JobLocation(projectId, location);
         StoredJob job = new StoredJob();
         job.setJobId(reserveJobId(projectId, jobId));
         job.setProjectId(projectId);
-        job.setLocation(location != null && !location.isBlank() ? location : "US");
+        job.setLocation(jobLocation.resolved());
         job.setJobType("LOAD");
         job.setLoadConfiguration(config);
         job.setState("DONE");
@@ -2627,7 +2657,7 @@ public class BigQueryService {
         List<String> fileIds = new ArrayList<>();
         try {
             synchronized (writeLock) {
-                runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job);
+                runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job, jobLocation);
             }
         } catch (GcpException e) {
             job.setErrorReason(loadErrorReason(e));
@@ -2641,6 +2671,7 @@ public class BigQueryService {
         } finally {
             loadFiles.release(fileIds);
         }
+        job.setLocation(jobLocation.resolved());
         jobStore.put(job.getJobId(), job);
         return job;
     }
@@ -2668,7 +2699,8 @@ public class BigQueryService {
 
     @SuppressWarnings("unchecked")
     private void runLoad(String projectId, Map<String, Object> config, Map<String, Object> destination,
-                         List<String> sourceUris, byte[] uploadedData, List<String> fileIds, StoredJob job) {
+                         List<String> sourceUris, byte[] uploadedData, List<String> fileIds, StoredJob job,
+                         JobLocation jobLocation) {
         String format = config.get("sourceFormat") instanceof String f ? f.toUpperCase(Locale.ROOT) : "CSV";
         if (!LOAD_FORMATS.contains(format)) {
             throw GcpException.invalidArgument("Source format " + format + " is not supported by the floci BigQuery"
@@ -2680,7 +2712,7 @@ public class BigQueryService {
             throw GcpException.invalidArgument("Cross-project load destinations are not supported by the floci"
                     + " BigQuery emulator").withReason("invalid");
         }
-        getDataset(projectId, destinationRef.getDatasetId());
+        jobLocation.admit(getDataset(projectId, destinationRef.getDatasetId()));
 
         List<byte[]> files = uploadedData != null ? List.of(uploadedData) : readSourceUris(sourceUris);
         long inputBytes = 0;
@@ -2830,9 +2862,9 @@ public class BigQueryService {
     }
 
     /**
-     * The location a query job runs in. An explicit {@code jobReference.location} /
+     * The location a job runs in. An explicit {@code jobReference.location} /
      * {@code QueryRequest.location} is kept; otherwise the job takes the location of the first
-     * dataset the query references ("the query is used for determining the processing location"),
+     * dataset it references ("the query is used for determining the processing location"),
      * falling back to {@code US}. Every referenced dataset must then live in that location, compared
      * case-insensitively, or the dataset is reported as not found there.
      */

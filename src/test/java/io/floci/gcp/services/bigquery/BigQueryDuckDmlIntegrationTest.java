@@ -899,4 +899,110 @@ class BigQueryDuckDmlIntegrationTest {
                 .body("totalRows", equalTo("2"));
         given().when().get(BASE + "/datasets/inv/tables/stock").then().statusCode(404);
     }
+
+    private static Response queryIn(String location, String sql, boolean dryRun) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("query", sql);
+        body.put("useLegacySql", false);
+        body.put("dryRun", dryRun);
+        if (location != null) {
+            body.put("location", location);
+        }
+        return given().contentType("application/json").body(body).when().post(BASE + "/queries");
+    }
+
+    private static Response insertDryRun(String sql) {
+        return given().contentType("application/json")
+                .body(Map.of("configuration", Map.of("dryRun", true,
+                        "query", Map.of("query", sql, "useLegacySql", false))))
+                .when().post(BASE + "/jobs");
+    }
+
+    @Test
+    @Order(107)
+    void dmlMustRunInTheLocationOfEveryDatasetItTouches() {
+        given().contentType("application/json")
+                .body(Map.of("datasetReference", Map.of("datasetId", "eu_dml"), "location", "EU"))
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        given().contentType("application/json")
+                .body(Map.of("datasetReference", Map.of("datasetId", "us_dml"), "location", "US"))
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        queryIn("EU", "CREATE TABLE eu_dml.orders (id INT64, qty INT64)", false).then().statusCode(200);
+        queryIn("EU", "CREATE TABLE eu_dml.changes (id INT64, qty INT64)", false).then().statusCode(200);
+        queryIn("US", "CREATE TABLE us_dml.changes (id INT64, qty INT64)", false).then().statusCode(200);
+        queryIn("EU", "INSERT INTO eu_dml.orders VALUES (1, 10)", false).then().statusCode(200);
+
+        List<String> statements = List.of(
+                "INSERT INTO eu_dml.orders VALUES (2, 20)",
+                "UPDATE eu_dml.orders SET qty = 11 WHERE id = 1",
+                "DELETE FROM eu_dml.orders WHERE id = 1",
+                "MERGE eu_dml.orders t USING eu_dml.changes s ON t.id = s.id WHEN MATCHED THEN UPDATE SET qty = s.qty");
+        for (String sql : statements) {
+            for (boolean dryRun : List.of(false, true)) {
+                queryIn("US", sql, dryRun).then().statusCode(404)
+                        .body("error.errors[0].reason", equalTo("notFound"))
+                        .body("error.message",
+                                equalTo("Not found: Dataset " + PROJECT + ":eu_dml was not found in location US"));
+            }
+            insertDryRun(sql).then().statusCode(200)
+                    .body("status.errorResult", nullValue())
+                    .body("jobReference.location", equalTo("EU"));
+        }
+        assertEquals(1, rows("SELECT id FROM eu_dml.orders").size());
+
+        queryIn(null, "MERGE eu_dml.orders t USING us_dml.changes s ON t.id = s.id"
+                + " WHEN MATCHED THEN UPDATE SET qty = s.qty", false).then().statusCode(404)
+                .body("error.message",
+                        equalTo("Not found: Dataset " + PROJECT + ":us_dml was not found in location EU"));
+        queryIn(null, "INSERT INTO us_dml.changes SELECT * FROM eu_dml.orders", false).then().statusCode(404)
+                .body("error.message",
+                        equalTo("Not found: Dataset " + PROJECT + ":eu_dml was not found in location US"));
+
+        String inferred = queryIn(null, "INSERT INTO eu_dml.orders VALUES (3, 30)", false).then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"))
+                .body("numDmlAffectedRows", equalTo("1"))
+                .extract().jsonPath().getString("jobReference.jobId");
+        given().queryParam("location", "EU").when().get(BASE + "/jobs/" + inferred).then().statusCode(200);
+
+        insertJob(Map.of("query", "UPDATE eu_dml.orders SET no_such_column = 1 WHERE TRUE", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("invalidQuery"))
+                .body("jobReference.location", equalTo("EU"));
+    }
+
+    @Test
+    @Order(108)
+    void createTableAsSelectChecksItsDestinationDatasetOnTheEngine() {
+        queryIn("US", "CREATE TABLE eu_dml.ctas AS SELECT 1 AS x", false).then().statusCode(404)
+                .body("error.message",
+                        equalTo("Not found: Dataset " + PROJECT + ":eu_dml was not found in location US"));
+        queryIn(null, "CREATE TABLE us_dml.ctas AS SELECT * FROM eu_dml.orders", false).then().statusCode(404)
+                .body("error.errors[0].reason", equalTo("notFound"));
+        given().when().get(BASE + "/datasets/us_dml/tables/ctas").then().statusCode(404);
+
+        queryIn(null, "CREATE TABLE eu_dml.ctas AS SELECT 1 AS x", false).then().statusCode(200)
+                .body("jobReference.location", equalTo("EU"));
+        assertEquals(1, rows("SELECT x FROM eu_dml.ctas").size());
+    }
+
+    @Test
+    @Order(109)
+    void aDestinationTableInAnotherLocationFailsOnTheEngine() {
+        Map<String, Object> destination = Map.of("projectId", PROJECT, "datasetId", "eu_dml", "tableId", "out");
+
+        given().contentType("application/json")
+                .body(Map.of("jobReference", Map.of("location", "US"), "configuration", Map.of("query", Map.of(
+                        "query", "SELECT 1 AS x", "useLegacySql", false, "destinationTable", destination))))
+                .when().post(BASE + "/jobs").then().statusCode(200)
+                .body("status.errorResult.reason", equalTo("notFound"))
+                .body("jobReference.location", equalTo("US"));
+        given().when().get(BASE + "/datasets/eu_dml/tables/out").then().statusCode(404);
+
+        insertJob(Map.of("query", "SELECT 1 AS x", "useLegacySql", false, "destinationTable", destination))
+                .then().statusCode(200)
+                .body("status.errorResult", nullValue())
+                .body("jobReference.location", equalTo("EU"));
+        given().when().get(BASE + "/datasets/eu_dml/tables/out/data").then().statusCode(200)
+                .body("totalRows", equalTo("1"));
+    }
 }

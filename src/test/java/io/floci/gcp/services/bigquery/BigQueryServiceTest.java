@@ -16,6 +16,8 @@ import io.floci.gcp.services.bigquery.model.TableSchema;
 import io.floci.gcp.services.bigquery.model.UpdateMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -986,6 +988,226 @@ class BigQueryServiceTest {
         service.query(PROJECT, "US", null, "SELECT * FROM ds1.t1", null);
         assertTrue(service.listDatasets(PROJECT).stream()
                 .noneMatch(d -> BigQueryService.ANON_DATASET.equals(d.getDatasetReference().getDatasetId())));
+    }
+
+    // ── Job location of statements that write ──
+
+    private void seedEuDataset() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        Dataset eu = newDataset("eu_ds");
+        eu.setLocation("EU");
+        service.createDataset(PROJECT, eu);
+        service.createTable(PROJECT, "eu_ds", newTable("eu_ds", TABLE));
+        service.appendRows(PROJECT, "eu_ds", TABLE, List.of(Map.of("name", "ana", "age", 1)));
+        service.query(PROJECT, "EU", null, "CREATE VIEW eu_ds.v AS SELECT * FROM eu_ds.t1", null);
+    }
+
+    private static void assertNotInLocation(GcpException ex, String dataset, String location) {
+        assertEquals(404, ex.getHttpStatus());
+        assertEquals("notFound", ex.getReason());
+        assertEquals("Not found: Dataset p1:" + dataset + " was not found in location " + location, ex.getMessage());
+    }
+
+    private static BigQueryService.QueryOptions dryRun(String sql) {
+        return new BigQueryService.QueryOptions(sql, null, List.of(), null, true, false);
+    }
+
+    private void assertEuDatasetUntouched() {
+        assertEquals(1, service.listTableData(PROJECT, "eu_ds", TABLE).rows().size());
+        assertEquals(2, service.listTables(PROJECT, "eu_ds").size());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, "eu_ds", "fresh")).getGcpStatus());
+        assertNull(service.getTable(PROJECT, "eu_ds", TABLE).getDescription());
+        assertNull(service.getTable(PROJECT, "eu_ds", "v").getDescription());
+        assertEquals(List.of("name", "age"), service.getTable(PROJECT, "eu_ds", TABLE).getSchema().getFields()
+                .stream().map(TableFieldSchema::getName).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "TRUNCATE TABLE eu_ds.t1",
+            "DROP TABLE eu_ds.t1",
+            "DROP TABLE IF EXISTS eu_ds.missing",
+            "DROP VIEW eu_ds.v",
+            "DROP VIEW IF EXISTS eu_ds.missing",
+            "DROP SCHEMA eu_ds CASCADE",
+            "DROP SCHEMA IF EXISTS eu_ds CASCADE",
+            "ALTER TABLE eu_ds.t1 SET OPTIONS(description='x')",
+            "ALTER TABLE IF EXISTS eu_ds.missing SET OPTIONS(description='x')",
+            "ALTER VIEW eu_ds.v SET OPTIONS(description='x')",
+            "CREATE TABLE eu_ds.fresh (id INT64)",
+            "CREATE TABLE IF NOT EXISTS eu_ds.t1 (id INT64)",
+            "CREATE OR REPLACE TABLE eu_ds.t1 (id INT64)",
+            "CREATE TABLE eu_ds.fresh AS SELECT * FROM eu_ds.t1",
+            "CREATE VIEW eu_ds.fresh AS SELECT * FROM eu_ds.t1",
+            "CREATE TABLE eu_ds.fresh COPY eu_ds.t1"})
+    void aWriteStatementMustRunInTheLocationOfItsDataset(String sql) {
+        seedEuDataset();
+
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null, sql, null)),
+                "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "US", null, dryRun(sql))), "eu_ds", "US");
+        assertEuDatasetUntouched();
+
+        StoredJob failed = service.insertQuery(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, List.of(), null, false, false));
+        assertEquals("US", failed.getLocation());
+        assertEquals("notFound", failed.getErrorReason());
+        assertEuDatasetUntouched();
+
+        assertEquals("EU", service.query(PROJECT, null, null, dryRun(sql)).getLocation());
+        assertEuDatasetUntouched();
+        assertEquals("eu", service.query(PROJECT, "eu", null, dryRun(sql)).getLocation());
+        StoredJob inferred = service.query(PROJECT, null, null, sql, null);
+        assertEquals("EU", inferred.getLocation());
+        assertEquals(inferred.getJobId(), service.getJob(PROJECT, inferred.getJobId(), "EU").getJobId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "CREATE TABLE ds1.fresh AS SELECT * FROM eu_ds.t1",
+            "CREATE VIEW ds1.fresh AS SELECT * FROM eu_ds.t1",
+            "CREATE TABLE ds1.fresh COPY eu_ds.t1"})
+    void aCreateStatementCannotSpanLocations(String sql) {
+        seedEuDataset();
+
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, null, null, sql, null)),
+                "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, "EU", null, sql, null)),
+                "ds1", "EU");
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, "fresh")).getGcpStatus());
+    }
+
+    @Test
+    void aFailedInsertedWriteStatementKeepsTheLocationItInferred() {
+        seedEuDataset();
+
+        StoredJob duplicate = service.insertQuery(PROJECT, null, null, new BigQueryService.QueryOptions(
+                "CREATE TABLE eu_ds.t1 (id INT64)", null, List.of(), null, false, false));
+        assertEquals("EU", duplicate.getLocation());
+        assertEquals("duplicate", duplicate.getErrorReason());
+
+        StoredJob truncatedView = service.insertQuery(PROJECT, null, null, new BigQueryService.QueryOptions(
+                "TRUNCATE TABLE eu_ds.v", null, List.of(), null, false, false));
+        assertEquals("EU", truncatedView.getLocation());
+
+        StoredJob dropped = service.insertQuery(PROJECT, null, null, new BigQueryService.QueryOptions(
+                "DROP TABLE eu_ds.missing", null, List.of(), null, false, false));
+        assertEquals("EU", dropped.getLocation());
+        assertEquals("notFound", dropped.getErrorReason());
+        assertEquals("Not found: Table p1:eu_ds.missing", dropped.getErrorMessage());
+    }
+
+    @Test
+    void statementsOnAMissingDatasetKeepTheirOwnErrors() {
+        assertEquals("Not found: Table p1:nope.t1", assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "EU", null, "DROP TABLE nope.t1", null)).getMessage());
+        assertEquals("SKIP", service.query(PROJECT, "EU", null, "DROP TABLE IF EXISTS nope.t1", null)
+                .getDdlOperationPerformed());
+        assertEquals("Not found: Dataset p1:nope", assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "EU", null, "DROP SCHEMA nope", null)).getMessage());
+        assertEquals("SKIP", service.query(PROJECT, "EU", null, "DROP SCHEMA IF EXISTS nope", null)
+                .getDdlOperationPerformed());
+    }
+
+    @Test
+    void createSchemaCreatesTheDatasetWhereTheJobRuns() {
+        assertEquals("EU", service.query(PROJECT, "EU", null, "CREATE SCHEMA in_eu", null).getLocation());
+        assertEquals("EU", service.getDataset(PROJECT, "in_eu").getLocation());
+
+        assertEquals("US", service.query(PROJECT, null, null, "CREATE SCHEMA in_default", null).getLocation());
+        assertEquals("US", service.getDataset(PROJECT, "in_default").getLocation());
+
+        service.query(PROJECT, null, null, "CREATE SCHEMA with_options OPTIONS(location='EU')", null);
+        assertEquals("US", service.getDataset(PROJECT, "with_options").getLocation());
+        assertEquals("SKIP", service.query(PROJECT, "US", null, "CREATE SCHEMA IF NOT EXISTS in_eu", null)
+                .getDdlOperationPerformed());
+    }
+
+    private static BigQueryService.QueryOptions intoDestination(String sql, String dataset, boolean dryRun) {
+        return new BigQueryService.QueryOptions(sql, null, List.of(), null, dryRun, false,
+                new TableReference(PROJECT, dataset, "out"), "WRITE_TRUNCATE", null);
+    }
+
+    @Test
+    void aQueryDestinationTableMustBeInTheJobLocation() {
+        seedEuDataset();
+        service.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                intoDestination("SELECT * FROM ds1.t1", "eu_ds", false))), "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                intoDestination("SELECT * FROM ds1.t1", "eu_ds", true))), "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                intoDestination("SELECT * FROM ds1.t1", "eu_ds", false))), "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, null, null,
+                intoDestination("SELECT * FROM eu_ds.t1", DATASET, false))), DATASET, "EU");
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, "eu_ds", "out")).getGcpStatus());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, DATASET, "out")).getGcpStatus());
+
+        StoredJob failed = service.insertQuery(PROJECT, "US", null,
+                intoDestination("SELECT * FROM ds1.t1", "eu_ds", false));
+        assertEquals("US", failed.getLocation());
+        assertEquals("notFound", failed.getErrorReason());
+
+        assertEquals("EU", service.query(PROJECT, null, null,
+                intoDestination("SELECT * FROM eu_ds.t1", "eu_ds", true)).getLocation());
+        assertEquals("EU", service.query(PROJECT, null, null,
+                intoDestination("SELECT * FROM eu_ds.t1", "eu_ds", false)).getLocation());
+        assertEquals(1, service.listTableData(PROJECT, "eu_ds", "out").rows().size());
+    }
+
+    private static Map<String, Object> euLoadConfig(String table) {
+        Map<String, Object> config = loadConfig(table, "schema", PEOPLE_SCHEMA);
+        config.put("destinationTable", Map.of("datasetId", "eu_ds", "tableId", table));
+        return config;
+    }
+
+    @Test
+    void aLoadJobMustRunInTheLocationOfItsDestination() {
+        seedEuDataset();
+
+        StoredJob wrong = service.load(PROJECT, "US", null, euLoadConfig("loaded"),
+                ndjson("{\"name\": \"bea\", \"age\": 2}"));
+        assertEquals("US", wrong.getLocation());
+        assertEquals("notFound", wrong.getErrorReason());
+        assertEquals("Not found: Dataset p1:eu_ds was not found in location US", wrong.getErrorMessage());
+        assertEquals("NOT_FOUND", assertThrows(GcpException.class,
+                () -> service.getTable(PROJECT, "eu_ds", "loaded")).getGcpStatus());
+
+        StoredJob explicit = service.load(PROJECT, "eu", null, euLoadConfig("loaded"),
+                ndjson("{\"name\": \"bea\", \"age\": 2}"));
+        assertFalse(explicit.failed());
+        assertEquals("eu", explicit.getLocation());
+
+        StoredJob inferred = service.load(PROJECT, null, null, euLoadConfig("inferred"),
+                ndjson("{\"name\": \"bea\", \"age\": 2}"));
+        assertFalse(inferred.failed());
+        assertEquals("EU", inferred.getLocation());
+        assertEquals(inferred.getJobId(), service.getJob(PROJECT, inferred.getJobId(), "EU").getJobId());
+        assertEquals(1, service.listTableData(PROJECT, "eu_ds", "inferred").rows().size());
+    }
+
+    @Test
+    void aFailedLoadJobKeepsTheLocationItInferred() {
+        seedEuDataset();
+        Map<String, Object> noSchema = euLoadConfig("no_schema");
+        noSchema.remove("schema");
+
+        StoredJob failed = service.load(PROJECT, null, null, noSchema, ndjson("{\"name\": \"bea\", \"age\": 2}"));
+
+        assertEquals("invalid", failed.getErrorReason());
+        assertEquals("EU", failed.getLocation());
+        assertEquals(failed.getJobId(), service.getJob(PROJECT, failed.getJobId(), "EU").getJobId());
+
+        StoredJob missingDataset = service.load(PROJECT, null, null, Map.of("destinationTable",
+                Map.of("datasetId", "nope", "tableId", "t"), "sourceFormat", "NEWLINE_DELIMITED_JSON"), ndjson("{}"));
+        assertEquals("US", missingDataset.getLocation());
+        assertEquals("notFound", missingDataset.getErrorReason());
     }
 
     // ── Helpers ──

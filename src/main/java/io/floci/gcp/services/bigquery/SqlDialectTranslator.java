@@ -2425,6 +2425,10 @@ final class SqlDialectTranslator {
      */
     private boolean selectFollowsSetOperator(int select) {
         int position = significantBefore(select);
+        if (position >= 0 && tokens.get(position).isPunct("(")) {
+            // A parenthesized arm owns its trailing ORDER BY, LIMIT and OFFSET, unlike a bare last arm.
+            return false;
+        }
         while (position >= 0 && tokens.get(position).isPunct("(")) {
             position = significantBefore(position);
         }
@@ -3796,6 +3800,17 @@ final class SqlDialectTranslator {
      */
     private List<Token> qualifyReplacementNames(int start, int close, int select, StructStarSources sources,
                                                 boolean nested, Map<String, String> renamedFields) {
+        Set<Integer> targetAliases = new HashSet<>();
+        if (!renamedFields.isEmpty()) {
+            int depth = parenthesisDepth(start);
+            for (int[] range : topLevelRanges(start, close, depth)) {
+                int as = topLevelAs(range[0], range[1]);
+                int alias = as < 0 ? -1 : nextSignificant(as + 1, range[1]);
+                if (alias >= 0) {
+                    targetAliases.add(alias);
+                }
+            }
+        }
         List<Token> out = new ArrayList<>();
         for (int i = start; i < close; i++) {
             Token token = tokens.get(i);
@@ -3810,15 +3825,15 @@ final class SqlDialectTranslator {
                     continue;
                 }
             }
-            int previous = significantBefore(i);
-            boolean namesAlias = previous >= 0 && tokens.get(previous).isKeyword("AS");
-            if (!nested && namesAlias && isName(token)) {
+            if (targetAliases.contains(i)) {
                 String renamed = renamedFields.get(token.identifierText().toLowerCase(Locale.ROOT));
                 if (renamed != null) {
                     out.add(Token.raw(DuckTypes.quoteIdentifier(renamed)));
                     continue;
                 }
             }
+            int previous = significantBefore(i);
+            boolean namesAlias = previous >= 0 && tokens.get(previous).isKeyword("AS");
             if (!nested && isName(token) && !isPrecededByDot(i) && !namesAlias) {
                 String name = token.identifierText();
                 int next = nextSignificant(i + 1, close);

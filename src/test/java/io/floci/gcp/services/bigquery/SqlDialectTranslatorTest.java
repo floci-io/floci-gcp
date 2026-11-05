@@ -1232,6 +1232,27 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void parenthesizedSetArmKeepsItsOwnOrderAndLimit() {
+        assertEquals("SELECT 0 AS c UNION ALL (SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 0, 'c': 2} AS \"s\", 3 AS id) t ORDER BY t.id)"
+                        + " AS \"_expanded\" LIMIT 1)",
+                sql("SELECT 0 AS c UNION ALL (SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s, 3 AS id) t ORDER BY t.id LIMIT 1)"));
+    }
+
+    @Test
+    void multipleStructStarReplacementKeepsANestedStructFieldName() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"z\"),"
+                        + " \"_floci_star_1\".* REPLACE ({'x': 1} AS y)"
+                        + " FROM (SELECT {'x': 1, 'z': 0} AS \"s\") t, (SELECT {'x': 2, 'y': 3} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"x\" AS \"x_1\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(z), u.s.* REPLACE(STRUCT(1 AS x) AS y)"
+                        + " FROM (SELECT STRUCT(1 AS x, 0 AS z) s) t, (SELECT STRUCT(2 AS x, 3 AS y) s) u"));
+    }
+
+    @Test
     void structStarReplaceReadsAMergedUsingColumn() {
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
                         + " FROM (SELECT unnest(u.s), COALESCE(\"t\".\"c\", \"u\".\"c\") AS \"_floci_source_0\""

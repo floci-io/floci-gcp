@@ -364,6 +364,13 @@ class BigQueryDuckIntegrationTest {
                         "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("2")));
+        query(Map.of("query", "SELECT 0 AS c UNION ALL (SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s, 3 AS id) t ORDER BY t.id LIMIT 1)",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("c")))
+                .body("rows.f.v", equalTo(List.of(List.of("0"), List.of("2"))));
+
     }
 
     @Test
@@ -433,6 +440,14 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("a", "a_1")))
                 .body("rows[0].f.v", equalTo(List.of("10", "20")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(z), u.s.* REPLACE(STRUCT(1 AS x) AS y)"
+                        + " FROM (SELECT STRUCT(1 AS x, 0 AS z) s) t, (SELECT STRUCT(2 AS x, 3 AS y) s) u",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "x_1", "y")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"))
+                .body("rows[0].f[2].v.f.v", equalTo(List.of("1")));
         query(Map.of("query", "SELECT t.s.* EXCEPT(a), ROW_NUMBER() OVER () AS rn"
                         + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL QUALIFY rn = 1",
                         "useLegacySql", false))

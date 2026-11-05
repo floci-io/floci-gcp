@@ -5,6 +5,7 @@ import com.google.api.LabelDescriptor;
 import com.google.api.MetricDescriptor;
 import com.google.api.MonitoredResourceDescriptor;
 import com.google.monitoring.v3.Aggregation;
+import com.google.monitoring.v3.CreateTimeSeriesSummary;
 import com.google.monitoring.v3.Point;
 import com.google.monitoring.v3.TimeInterval;
 import com.google.monitoring.v3.TimeSeries;
@@ -34,6 +35,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -201,12 +203,12 @@ public class CloudMonitoringService {
                 .sorted(Comparator.comparing(MetricDescriptor::getType))
                 .toList();
 
-        // Apply simple filter starts_with or equals
-        if (filter != null && !filter.isBlank()) {
-            all = all.stream()
-                    .filter(d -> matchesFilter(d, filter))
-                    .toList();
-        }
+        MonitoringFilterParser.Filter parsed =
+                MonitoringFilterParser.parse(filter, MonitoringFilterParser.Scope.METRIC_DESCRIPTORS);
+        String project = GcpResourceNames.parseProject(parentProject);
+        all = all.stream()
+                .filter(d -> parsed.matches(object -> object.equals("project") ? project : d.getType()))
+                .toList();
 
         int effective = (pageSize <= 0 || pageSize > MAX_DESCRIPTOR_PAGE_SIZE)
                 ? MAX_DESCRIPTOR_PAGE_SIZE : pageSize;
@@ -238,9 +240,24 @@ public class CloudMonitoringService {
     // ── Monitored Resource Descriptors ───────────────────────────────────────
 
     public PageToken.Page<MonitoredResourceDescriptor> listMonitoredResourceDescriptors(String parentProject,
+                                                                                        String filter,
                                                                                         int pageSize, String pageToken) {
+        MonitoringFilterParser.Filter parsed =
+                MonitoringFilterParser.parse(filter, MonitoringFilterParser.Scope.RESOURCE_DESCRIPTORS);
+        List<MonitoredResourceDescriptor> matching = DEFAULT_RESOURCE_DESCRIPTORS.stream()
+                .filter(d -> parsed.matches(object -> descriptorValue(d, object)))
+                .toList();
         int effective = pageSize <= 0 ? DEFAULT_RESOURCE_DESCRIPTORS.size() : pageSize;
-        return PageToken.paginate(DEFAULT_RESOURCE_DESCRIPTORS, effective, pageToken);
+        return PageToken.paginate(matching, effective, pageToken);
+    }
+
+    /** A descriptor has a type and label keys, so a label object is present only as a key, with no value to compare. */
+    private static String descriptorValue(MonitoredResourceDescriptor descriptor, String object) {
+        if (object.equals("resource.type")) {
+            return descriptor.getType();
+        }
+        String key = object.substring("resource.labels.".length());
+        return descriptor.getLabelsList().stream().anyMatch(label -> label.getKey().equals(key)) ? key : null;
     }
 
     public MonitoredResourceDescriptor getMonitoredResourceDescriptor(String name) {
@@ -278,114 +295,154 @@ public class CloudMonitoringService {
                     Instant.parse(pt.getEndTime()), (a, b) -> a.isAfter(b) ? a : b);
         }
 
-        // Pass 1: validate everything, stage writes; nothing is persisted on failure.
+        // A series that fails is reported; the others are still written.
         Map<String, MetricDescriptor> pendingDescriptors = new LinkedHashMap<>();
         List<StoredTimeSeriesPoint> staged = new ArrayList<>();
+        Set<String> seenIdentities = new HashSet<>();
+        Map<com.google.rpc.Status, Integer> failedPoints = new LinkedHashMap<>();
+        String firstFailure = null;
+        int totalPoints = 0;
 
-        for (TimeSeries ts : timeSeriesList) {
-            String metricType = ts.getMetric().getType();
-            if (metricType == null || metricType.isBlank()) {
-                throw GcpException.invalidArgument("TimeSeries metric type is required");
-            }
-            if (ts.getPointsCount() != 1) {
-                throw GcpException.invalidArgument(String.format(
-                        "Each TimeSeries must contain exactly one Point (got %d for %s)",
-                        ts.getPointsCount(), metricType));
-            }
-
-            MetricDescriptor desc = descriptorStore.get(metricType)
-                    .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
-                    .orElseGet(() -> pendingDescriptors.get(metricType));
-
-            Point pt = ts.getPoints(0);
-            if (desc != null) {
-                // Validate kind and value type
-                if (ts.getMetricKind() != MetricDescriptor.MetricKind.METRIC_KIND_UNSPECIFIED
-                        && ts.getMetricKind() != desc.getMetricKind()) {
-                    throw GcpException.invalidArgument(String.format(
-                            "TimeSeries metricKind %s does not match MetricDescriptor metricKind %s for %s",
-                            ts.getMetricKind(), desc.getMetricKind(), metricType));
-                }
-                if (ts.getValueType() != MetricDescriptor.ValueType.VALUE_TYPE_UNSPECIFIED
-                        && ts.getValueType() != desc.getValueType()) {
-                    throw GcpException.invalidArgument(String.format(
-                            "TimeSeries valueType %s does not match MetricDescriptor valueType %s for %s",
-                            ts.getValueType(), desc.getValueType(), metricType));
-                }
-            } else {
-                desc = autoCreateDescriptor(parentProject, ts, metricType, pt);
-                pendingDescriptors.put(metricType, desc);
-                LOG.debugf("Staged auto-created metric descriptor type=%s", metricType);
-            }
-
-            MetricDescriptor.MetricKind kind = desc.getMetricKind();
-            MetricDescriptor.ValueType valType = desc.getValueType();
-
-            // Validate interval
-            if (!pt.getInterval().hasEndTime()) {
-                throw GcpException.invalidArgument("Point interval end_time is required for " + metricType);
-            }
-            Instant end = toInstant(pt.getInterval().getEndTime());
-            if (end.isBefore(now.minus(MAX_POINT_AGE)) || end.isAfter(now.plus(MAX_POINT_FUTURE))) {
-                throw GcpException.invalidArgument(String.format(
-                        "Point end_time (%s) must be no more than 25 hours in the past and 5 minutes in the future",
-                        end));
-            }
-            Instant start;
-            if (kind == MetricDescriptor.MetricKind.GAUGE) {
-                start = pt.getInterval().hasStartTime() ? toInstant(pt.getInterval().getStartTime()) : end;
-                if (!start.equals(end)) {
-                    throw GcpException.invalidArgument(String.format(
-                            "For GAUGE metric %s, startTime (%s) must be absent or equal to endTime (%s)",
-                            metricType, start, end));
-                }
-            } else {
-                if (!pt.getInterval().hasStartTime()) {
-                    throw GcpException.invalidArgument(String.format(
-                            "For %s metric %s, a non-zero interval with startTime before endTime is required",
-                            kind, metricType));
-                }
-                start = toInstant(pt.getInterval().getStartTime());
-                if (!start.isBefore(end)) {
-                    throw GcpException.invalidArgument(String.format(
-                            "For %s metric %s, startTime (%s) must be before endTime (%s)",
-                            kind, metricType, start, end));
+        for (int index = 0; index < timeSeriesList.size(); index++) {
+            TimeSeries ts = timeSeriesList.get(index);
+            totalPoints += ts.getPointsCount();
+            try {
+                StoredTimeSeriesPoint stored = stage(parentProject, ts, descriptorStore, pendingDescriptors,
+                        latestByIdentity, seenIdentities, now);
+                staged.add(stored);
+            } catch (GcpException e) {
+                failedPoints.merge(com.google.rpc.Status.newBuilder().setCode(e.getGrpcCode().value())
+                        .setMessage(e.getMessage()).build(), ts.getPointsCount(), Integer::sum);
+                if (firstFailure == null) {
+                    firstFailure = e.getMessage() + ": timeSeries[" + index + "]";
                 }
             }
-
-            validateValueMatchesType(pt.getValue(), valType, metricType);
-
-            // Freshness: the new point must be more recent than any other point in its series
-            String identity = new SeriesKey(metricType, ts.getMetric().getLabelsMap(),
-                    ts.getResource().getType(), ts.getResource().getLabelsMap(), "", "").identityString();
-            Instant latest = latestByIdentity.get(identity);
-            if (latest != null && !end.isAfter(latest)) {
-                throw GcpException.invalidArgument(String.format(
-                        "Point end_time (%s) must be more recent than the most recent existing point (%s) for %s",
-                        end, latest, metricType));
-            }
-            latestByIdentity.put(identity, end);
-
-            StoredTimeSeriesPoint storedPoint = new StoredTimeSeriesPoint();
-            storedPoint.setMetricType(metricType);
-            storedPoint.setMetricLabels(ts.getMetric().getLabelsMap());
-            storedPoint.setResourceType(ts.getResource().getType());
-            storedPoint.setResourceLabels(ts.getResource().getLabelsMap());
-            storedPoint.setMetricKind(kind.name());
-            storedPoint.setValueType(valType.name());
-            storedPoint.setStartTime(start.toString());
-            storedPoint.setEndTime(end.toString());
-            storedPoint.setValueJson(ProtoJson.print(pt.getValue()));
-            staged.add(storedPoint);
         }
 
-        // Pass 2: persist descriptors, then points.
         pendingDescriptors.forEach((type, desc) -> descriptorStore.put(type, ProtoJson.print(desc)));
         for (StoredTimeSeriesPoint storedPoint : staged) {
             storedPoint.setSequence(sequence.incrementAndGet());
             timeSeriesStore.put(key(storedPoint), storedPoint);
         }
-        LOG.debugf("Successfully ingested %d time series", timeSeriesList.size());
+        LOG.debugf("Ingested %d of %d time series", staged.size(), timeSeriesList.size());
+
+        if (!failedPoints.isEmpty()) {
+            CreateTimeSeriesSummary.Builder summary = CreateTimeSeriesSummary.newBuilder()
+                    .setTotalPointCount(totalPoints)
+                    .setSuccessPointCount(staged.size());
+            failedPoints.forEach((status, points) -> summary.addErrors(CreateTimeSeriesSummary.Error.newBuilder()
+                    .setStatus(status).setPointCount(points)));
+            int others = timeSeriesList.size() - staged.size() - 1;
+            throw GcpException.invalidArgument("One or more TimeSeries could not be written: " + firstFailure
+                    + (others > 0 ? "; and " + others + " more errors" : "")).withDetails(summary.build());
+        }
+    }
+
+    /** Validates one series and returns its point, ready to persist; nothing is written here. */
+    private static StoredTimeSeriesPoint stage(String parentProject, TimeSeries ts,
+                                               StorageBackend<String, String> descriptorStore,
+                                               Map<String, MetricDescriptor> pendingDescriptors,
+                                               Map<String, Instant> latestByIdentity,
+                                               Set<String> seenIdentities, Instant now) {
+        String metricType = ts.getMetric().getType();
+        if (metricType == null || metricType.isBlank()) {
+            throw GcpException.invalidArgument("TimeSeries metric type is required");
+        }
+        if (ts.getPointsCount() != 1) {
+            throw GcpException.invalidArgument(String.format(
+                    "Each TimeSeries must contain exactly one Point (got %d for %s)",
+                    ts.getPointsCount(), metricType));
+        }
+        String identity = new SeriesKey(metricType, ts.getMetric().getLabelsMap(),
+                ts.getResource().getType(), ts.getResource().getLabelsMap(), "", "").identityString();
+        if (!seenIdentities.add(identity)) {
+            throw GcpException.invalidArgument(
+                    "Duplicate TimeSeries encountered. Only one point can be written per TimeSeries per request");
+        }
+
+        MetricDescriptor desc = descriptorStore.get(metricType)
+                .map(json -> ProtoJson.merge(json, MetricDescriptor.newBuilder()).build())
+                .orElseGet(() -> pendingDescriptors.get(metricType));
+
+        Point pt = ts.getPoints(0);
+        if (desc != null) {
+            // Validate kind and value type
+            if (ts.getMetricKind() != MetricDescriptor.MetricKind.METRIC_KIND_UNSPECIFIED
+                    && ts.getMetricKind() != desc.getMetricKind()) {
+                throw GcpException.invalidArgument(String.format(
+                        "TimeSeries metricKind %s does not match MetricDescriptor metricKind %s for %s",
+                        ts.getMetricKind(), desc.getMetricKind(), metricType));
+            }
+            if (ts.getValueType() != MetricDescriptor.ValueType.VALUE_TYPE_UNSPECIFIED
+                    && ts.getValueType() != desc.getValueType()) {
+                throw GcpException.invalidArgument(String.format(
+                        "TimeSeries valueType %s does not match MetricDescriptor valueType %s for %s",
+                        ts.getValueType(), desc.getValueType(), metricType));
+            }
+        } else {
+            desc = autoCreateDescriptor(parentProject, ts, metricType, pt);
+        }
+
+        MetricDescriptor.MetricKind kind = desc.getMetricKind();
+        MetricDescriptor.ValueType valType = desc.getValueType();
+
+        // Validate interval
+        if (!pt.getInterval().hasEndTime()) {
+            throw GcpException.invalidArgument("Point interval end_time is required for " + metricType);
+        }
+        Instant end = toInstant(pt.getInterval().getEndTime());
+        if (end.isBefore(now.minus(MAX_POINT_AGE)) || end.isAfter(now.plus(MAX_POINT_FUTURE))) {
+            throw GcpException.invalidArgument(String.format(
+                    "Point end_time (%s) must be no more than 25 hours in the past and 5 minutes in the future",
+                    end));
+        }
+        Instant start;
+        if (kind == MetricDescriptor.MetricKind.GAUGE) {
+            start = pt.getInterval().hasStartTime() ? toInstant(pt.getInterval().getStartTime()) : end;
+            if (!start.equals(end)) {
+                throw GcpException.invalidArgument(String.format(
+                        "For GAUGE metric %s, startTime (%s) must be absent or equal to endTime (%s)",
+                        metricType, start, end));
+            }
+        } else {
+            if (!pt.getInterval().hasStartTime()) {
+                throw GcpException.invalidArgument(String.format(
+                        "For %s metric %s, a non-zero interval with startTime before endTime is required",
+                        kind, metricType));
+            }
+            start = toInstant(pt.getInterval().getStartTime());
+            if (!start.isBefore(end)) {
+                throw GcpException.invalidArgument(String.format(
+                        "For %s metric %s, startTime (%s) must be before endTime (%s)",
+                        kind, metricType, start, end));
+            }
+        }
+
+        validateValueMatchesType(pt.getValue(), valType, metricType);
+
+        // Freshness: the new point must be more recent than any other point in its series
+        Instant latest = latestByIdentity.get(identity);
+        if (latest != null && !end.isAfter(latest)) {
+            throw GcpException.invalidArgument(String.format(
+                    "Point end_time (%s) must be more recent than the most recent existing point (%s) for %s",
+                    end, latest, metricType));
+        }
+
+        StoredTimeSeriesPoint storedPoint = new StoredTimeSeriesPoint();
+        storedPoint.setMetricType(metricType);
+        storedPoint.setMetricLabels(ts.getMetric().getLabelsMap());
+        storedPoint.setResourceType(ts.getResource().getType());
+        storedPoint.setResourceLabels(ts.getResource().getLabelsMap());
+        storedPoint.setMetricKind(kind.name());
+        storedPoint.setValueType(valType.name());
+        storedPoint.setStartTime(start.toString());
+        storedPoint.setEndTime(end.toString());
+        storedPoint.setValueJson(ProtoJson.print(pt.getValue()));
+        // Only a series that passed every check may create its metric's descriptor.
+        if (descriptorStore.get(metricType).isEmpty()) {
+            pendingDescriptors.putIfAbsent(metricType, desc);
+        }
+        return storedPoint;
     }
 
     private static MetricDescriptor autoCreateDescriptor(String parentProject, TimeSeries ts,
@@ -445,7 +502,8 @@ public class CloudMonitoringService {
         if (filter == null || filter.isBlank()) {
             throw GcpException.invalidArgument("filter is required");
         }
-        TimeSeriesFilter.ParsedFilter parsedFilter = TimeSeriesFilter.parseFilter(filter);
+        TimeSeriesFilter.ParsedFilter parsedFilter = TimeSeriesFilter.parseFilter(filter,
+                GcpResourceNames.lastSegment(parentProject));
         if (parsedFilter.metricTypeEquality() == null) {
             throw GcpException.invalidArgument(
                     "The filter must specify a single metric type using a metric.type = \"...\" clause");
@@ -592,25 +650,5 @@ public class CloudMonitoringService {
         } catch (Exception e) {
             return com.google.protobuf.Timestamp.getDefaultInstance();
         }
-    }
-
-    private static boolean matchesFilter(MetricDescriptor d, String filter) {
-        // Simple helper to filter custom.googleapis.com
-        if (filter.contains("starts_with")) {
-            int firstQuote = filter.indexOf("\"");
-            int lastQuote = filter.lastIndexOf("\"");
-            if (firstQuote >= 0 && lastQuote > firstQuote) {
-                String prefix = filter.substring(firstQuote + 1, lastQuote);
-                return d.getType().startsWith(prefix);
-            }
-        } else if (filter.contains("=")) {
-            int firstQuote = filter.indexOf("\"");
-            int lastQuote = filter.lastIndexOf("\"");
-            if (firstQuote >= 0 && lastQuote > firstQuote) {
-                String type = filter.substring(firstQuote + 1, lastQuote);
-                return d.getType().equals(type);
-            }
-        }
-        return true;
     }
 }

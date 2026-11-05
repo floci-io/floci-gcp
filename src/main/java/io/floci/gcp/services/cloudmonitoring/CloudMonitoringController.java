@@ -91,7 +91,7 @@ public class CloudMonitoringController extends MetricServiceGrpc.MetricServiceIm
         LOG.debugf("listMonitoredResourceDescriptors name=%s", request.getName());
         try {
             PageToken.Page<MonitoredResourceDescriptor> page = service.listMonitoredResourceDescriptors(
-                    request.getName(), request.getPageSize(), request.getPageToken());
+                    request.getName(), request.getFilter(), request.getPageSize(), request.getPageToken());
             ListMonitoredResourceDescriptorsResponse.Builder response = ListMonitoredResourceDescriptorsResponse.newBuilder()
                     .addAllResourceDescriptors(page.items());
             if (page.nextPageToken() != null) {

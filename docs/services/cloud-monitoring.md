@@ -27,6 +27,14 @@ the API endpoint / transport channel and disabling credentials:
 - Time series: `CreateTimeSeries` (write points) and `ListTimeSeries` (read back over a time interval,
   raw or aggregated).
 - `TypedValue` point values (`bool`, `int64`, `double`, `string`, `distribution`) are preserved round-trip.
+- `CreateTimeSeries` writes the valid series of a request even when others fail. It then answers
+  `INVALID_ARGUMENT` with a `CreateTimeSeriesSummary` in the error details, over gRPC and REST. A
+  second entry for the same series in one request fails with `Duplicate TimeSeries encountered`.
+- Filters follow the [monitoring filter syntax](https://cloud.google.com/monitoring/api/v3/filters):
+  `=`, `!=`, `:`, numeric ordering, `starts_with`, `ends_with`, `has_substring`, `one_of`,
+  `monitoring.regex.full_match`, `AND` (optional), `OR` (binds tighter) and parentheses. A filter
+  that cannot be read, or names an object the method does not take, answers `INVALID_ARGUMENT`.
+  `ListMonitoredResourceDescriptors` takes `resource.type` and `resource.labels:KEY`.
 - Pagination (`pageSize` / `pageToken` / `nextPageToken`) on all list methods. `ListMetricDescriptors`
   clamps the page size to 10,000; `ListTimeSeries` clamps to 100,000, where under the `FULL` view the
   page size limits the total number of points (a series may span pages) and under `HEADERS` it limits
@@ -72,15 +80,15 @@ Write-path rules matching the documented API behavior:
 
 ### Documented deviations from real GCP
 
-- `CreateTimeSeries` is all-or-nothing: on any invalid series the whole request fails with
-  `INVALID_ARGUMENT` and nothing is written (real GCP writes the valid subset and reports partial
-  failures via `CreateTimeSeriesSummary` error details).
 - Alignment emits points only for buckets that contain data: no interpolation of empty periods for
   `ALIGN_DELTA`/`ALIGN_RATE`.
 - `DISTRIBUTION` and `STRING` values cannot be aggregated.
 - A missing read `interval.startTime` is treated as unbounded (real GCP defaults it to the end time).
-- A single `CreateTimeSeries` request may carry multiple chronologically ordered points for the same
-  series across `TimeSeries` entries (real GCP rejects duplicate series identities per request).
+- `CreateTimeSeries`'s top-level failure message is modeled on the API's behaviour, not on a documented wording.
+- A filter's `group.id` matches nothing, as groups are not modeled, and does not require alignment.
+- `project` in a filter is compared with the project named in the request, so a project number
+  matches only when the request names the project by number.
+- `monitoring.regex.full_match` uses Java regular expressions rather than RE2.
 
 ## Quick Start
 

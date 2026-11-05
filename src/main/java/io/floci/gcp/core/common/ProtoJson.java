@@ -1,5 +1,8 @@
 package io.floci.gcp.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.serviceusage.v1beta1.ServiceIdentity;
 import com.google.cloud.kms.v1.LocationMetadata;
 import com.google.cloud.run.v2.Execution;
@@ -8,11 +11,14 @@ import com.google.cloud.run.v2.Job;
 import com.google.cloud.run.v2.WorkerPool;
 import com.google.longrunning.ListOperationsResponse;
 import com.google.longrunning.Operation;
+import com.google.monitoring.v3.CreateTimeSeriesSummary;
 import com.google.protobuf.Empty;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.MessageOrBuilder;
 import com.google.protobuf.util.JsonFormat;
+
+import java.util.Map;
 
 /**
  * Shared proto3 JSON parsing/printing for REST APIs backed by Google protobuf
@@ -44,6 +50,7 @@ public final class ProtoJson {
             .add(com.google.api.serviceusage.v1.BatchEnableServicesResponse.getDescriptor())
             .add(com.google.api.serviceusage.v1.OperationMetadata.getDescriptor())
             .add(ServiceIdentity.getDescriptor())
+            .add(CreateTimeSeriesSummary.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()
@@ -54,6 +61,8 @@ public final class ProtoJson {
             .usingTypeRegistry(TYPE_REGISTRY)
             .ignoringUnknownFields();
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private ProtoJson() {}
 
     public static String print(MessageOrBuilder message) {
@@ -61,6 +70,15 @@ public final class ProtoJson {
             return PRINTER.print(message);
         } catch (InvalidProtocolBufferException e) {
             throw GcpException.internal("Failed to serialize protobuf JSON: " + e.getMessage());
+        }
+    }
+
+    /** The proto3 JSON form as a map, for embedding a message in a response built without protobuf. */
+    public static Map<String, Object> printAsMap(MessageOrBuilder message) {
+        try {
+            return MAPPER.readValue(print(message), new TypeReference<>() {});
+        } catch (JsonProcessingException e) {
+            throw GcpException.internal("Failed to read protobuf JSON: " + e.getMessage());
         }
     }
 

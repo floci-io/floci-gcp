@@ -33,15 +33,17 @@ public abstract class GcpGrpcController {
 
     public static StatusRuntimeException grpcException(Throwable t) {
         if (t instanceof GcpException ex) {
-            if (ex.getErrorInfo() != null) {
-                GcpException.ErrorInfoDetail info = ex.getErrorInfo();
-                ErrorInfo detail = ErrorInfo.newBuilder().setReason(info.reason()).setDomain(info.domain())
-                        .putAllMetadata(info.metadata()).build();
+            if (ex.getErrorInfo() != null || !ex.getDetails().isEmpty()) {
                 // com.google.rpc.Status is the wire detail; io.grpc.Status handles ordinary errors here.
-                com.google.rpc.Status status = com.google.rpc.Status.newBuilder()
-                        .setCode(ex.getGrpcCode().value()).setMessage(ex.getMessage())
-                        .addDetails(Any.pack(detail)).build();
-                return StatusProto.toStatusRuntimeException(status);
+                com.google.rpc.Status.Builder status = com.google.rpc.Status.newBuilder()
+                        .setCode(ex.getGrpcCode().value()).setMessage(ex.getMessage());
+                if (ex.getErrorInfo() != null) {
+                    GcpException.ErrorInfoDetail info = ex.getErrorInfo();
+                    status.addDetails(Any.pack(ErrorInfo.newBuilder().setReason(info.reason())
+                            .setDomain(info.domain()).putAllMetadata(info.metadata()).build()));
+                }
+                status.addAllDetails(ex.getDetails());
+                return StatusProto.toStatusRuntimeException(status.build());
             }
             return ex.getGrpcCode().toStatus()
                     .withDescription(ex.getMessage())

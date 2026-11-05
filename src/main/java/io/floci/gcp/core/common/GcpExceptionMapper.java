@@ -2,6 +2,7 @@ package io.floci.gcp.core.common;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.protobuf.Any;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -10,6 +11,7 @@ import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -40,7 +42,7 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
                     .build();
         }
         String reason = ex.getReason() != null ? ex.getReason() : reasonFor(ex.getGcpStatus());
-        List<Map<String, Object>> details = null;
+        List<Map<String, Object>> details = new ArrayList<>();
         if (ex.getErrorInfo() != null) {
             GcpException.ErrorInfoDetail info = ex.getErrorInfo();
             Map<String, Object> detail = new LinkedHashMap<>();
@@ -48,13 +50,16 @@ public class GcpExceptionMapper implements ExceptionMapper<GcpException> {
             detail.put("reason", info.reason());
             detail.put("domain", info.domain());
             detail.put("metadata", info.metadata());
-            details = List.of(detail);
+            details.add(detail);
+        }
+        for (Any detail : ex.getDetails()) {
+            details.add(ProtoJson.printAsMap(detail));
         }
         return Response.status(ex.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)
                 .entity(new ErrorWrapper(new ErrorDetail(
                         ex.getHttpStatus(), ex.getMessage(), ex.getGcpStatus(),
-                        List.of(new ErrorItem(ex.getMessage(), "global", reason)), details)))
+                        List.of(new ErrorItem(ex.getMessage(), "global", reason)), details.isEmpty() ? null : details)))
                 .build();
     }
 

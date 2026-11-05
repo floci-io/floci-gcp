@@ -1,7 +1,11 @@
 package io.floci.gcp.core.common;
 
+import com.google.protobuf.Any;
+import com.google.protobuf.Message;
 import io.grpc.Status;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -16,13 +20,14 @@ public class GcpException extends RuntimeException {
     private final String reason;
     private final boolean plainText;
     private final ErrorInfoDetail errorInfo;
+    private final List<Any> details;
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message) {
-        this(httpStatus, gcpStatus, grpcCode, message, null, false, null);
+        this(httpStatus, gcpStatus, grpcCode, message, null, false, null, List.of());
     }
 
     private GcpException(int httpStatus, String gcpStatus, Status.Code grpcCode, String message,
-                         String reason, boolean plainText, ErrorInfoDetail errorInfo) {
+                         String reason, boolean plainText, ErrorInfoDetail errorInfo, List<Any> details) {
         super(message);
         this.httpStatus = httpStatus;
         this.gcpStatus = gcpStatus;
@@ -30,12 +35,13 @@ public class GcpException extends RuntimeException {
         this.reason = reason;
         this.plainText = plainText;
         this.errorInfo = errorInfo;
+        this.details = details;
     }
 
     /** Preserves the transport contracts when a service adds typed failure context. */
     protected GcpException(GcpException error) {
         this(error.httpStatus, error.gcpStatus, error.grpcCode, error.getMessage(), error.reason,
-                error.plainText, error.errorInfo);
+                error.plainText, error.errorInfo, error.details);
     }
 
     public int getHttpStatus() {
@@ -56,7 +62,7 @@ public class GcpException extends RuntimeException {
     }
 
     public GcpException withReason(String reason) {
-        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText, errorInfo);
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText, errorInfo, details);
     }
 
     public ErrorInfoDetail getErrorInfo() {
@@ -65,7 +71,17 @@ public class GcpException extends RuntimeException {
 
     public GcpException withErrorInfo(String reason, String domain, Map<String, String> metadata) {
         return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), this.reason, plainText,
-                new ErrorInfoDetail(reason, domain, Map.copyOf(metadata)));
+                new ErrorInfoDetail(reason, domain, Map.copyOf(metadata)), details);
+    }
+
+    /** The {@code google.rpc.Status.details} an API documents for this error, besides any ErrorInfo. */
+    public List<Any> getDetails() {
+        return details;
+    }
+
+    public GcpException withDetails(Message... messages) {
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, plainText, errorInfo,
+                Arrays.stream(messages).map(Any::pack).toList());
     }
 
     public record ErrorInfoDetail(String reason, String domain, Map<String, String> metadata) {}
@@ -81,7 +97,7 @@ public class GcpException extends RuntimeException {
      * error shape would change how a client reacts.
      */
     public GcpException asPlainText() {
-        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, true, errorInfo);
+        return new GcpException(httpStatus, gcpStatus, grpcCode, getMessage(), reason, true, errorInfo, details);
     }
 
     public static GcpException notFound(String message) {

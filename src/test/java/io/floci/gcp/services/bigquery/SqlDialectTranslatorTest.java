@@ -2534,6 +2534,10 @@ class SqlDialectTranslatorTest {
         assertTrue(qualify.contains("OVER (ORDER BY list_extract([x], 1))"), qualify);
         String subquery = sql("SELECT (SELECT AS STRUCT y AS n FROM ds.u) AS s FROM ds.t ORDER BY s.n");
         assertTrue(subquery.endsWith("ORDER BY s.n"), subquery);
+        String aggregateField = sql("SELECT x, (SELECT AS STRUCT COUNT(*) AS n) AS s FROM ds.t ORDER BY s.n");
+        assertTrue(aggregateField.endsWith("ORDER BY s.n"), aggregateField);
+        String distinctQualify = sql("SELECT DISTINCT STRUCT(x AS n) AS s FROM ds.t QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2");
+        assertTrue(distinctQualify.contains("OVER (ORDER BY list_extract([x], 1))"), distinctQualify);
         String window = sql("SELECT STRUCT(x AS n) AS s, ROW_NUMBER() OVER (ORDER BY s.n) AS r FROM ds.t");
         assertTrue(window.contains("OVER (ORDER BY s.n)"), window);
         String aggregate = sql("SELECT STRUCT(x AS n) AS s, ARRAY_AGG(x ORDER BY s.n) AS a FROM ds.t GROUP BY s");

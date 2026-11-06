@@ -5877,7 +5877,10 @@ final class SqlDialectTranslator {
             if (select < 0) {
                 continue;
             }
-            Map<String, Map<String, List<Token>>> aliases = structSelectAliases(select, qualify, depth);
+            int quantifier = nextSignificant(select + 1, qualify);
+            int listStart = quantifier >= 0 && (tokens.get(quantifier).isKeyword("DISTINCT")
+                    || tokens.get(quantifier).isKeyword("ALL")) ? quantifier : select;
+            Map<String, Map<String, List<Token>>> aliases = structSelectAliases(listStart, qualify, depth);
             if (!aliases.isEmpty()) {
                 replaceStructAliasFields(qualify + 1, clauseEnd(qualify + 1, depth), aliases, true);
             }
@@ -6151,7 +6154,10 @@ final class SqlDialectTranslator {
 
     /**
      * The STRUCT keyword of a scalar {@code (SELECT AS STRUCT expr AS name, ...)} with no FROM or other clause,
-     * whose fields read the enclosing row and can be inlined like {@code STRUCT(...)}; -1 for anything else.
+     * whose fields read the enclosing row and can be inlined like {@code STRUCT(...)}; -1 for anything else. A
+     * field that calls an aggregate or carries {@code OVER} would change the outer query if inlined (BigQuery
+     * rejects the aggregate there: {@code Aggregate function COUNT(*) not allowed in SELECT without FROM clause}),
+     * so such a subquery is not read either.
      */
     private int plainSelectAsStruct(int open) {
         int close = matchingParen(open);
@@ -6167,6 +6173,11 @@ final class SqlDialectTranslator {
             Token token = tokens.get(i);
             if (parenthesisDepth(i) == depth && token.kind == Kind.IDENT
                     && (token.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(token.upper()))) {
+                return -1;
+            }
+            int next = nextSignificant(i + 1, close);
+            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && STRUCT_STAR_AGGREGATES.contains(token.upper())
+                    && next >= 0 && tokens.get(next).isPunct("(")) {
                 return -1;
             }
         }

@@ -6155,7 +6155,8 @@ final class SqlDialectTranslator {
     /**
      * The STRUCT keyword of a scalar {@code (SELECT AS STRUCT expr AS name, ...)} with no FROM or other clause,
      * whose fields read the enclosing row and can be inlined like {@code STRUCT(...)}; -1 for anything else. A
-     * field that calls an aggregate or carries {@code OVER} would change the outer query if inlined (BigQuery
+     * field that calls an aggregate or carries {@code OVER} outside a nested query of its own would change the
+     * outer query if inlined (BigQuery
      * rejects the aggregate there: {@code Aggregate function COUNT(*) not allowed in SELECT without FROM clause}),
      * so such a subquery is not read either.
      */
@@ -6171,6 +6172,11 @@ final class SqlDialectTranslator {
         int depth = parenthesisDepth(struct);
         for (int i = struct + 1; i < close; i++) {
             Token token = tokens.get(i);
+            if (token.isPunct("(") && matchingParen(i) < close && isQuery(i + 1, matchingParen(i))) {
+                // A nested query keeps its own aggregates and windows when the field is copied.
+                i = matchingParen(i);
+                continue;
+            }
             if (parenthesisDepth(i) == depth && token.kind == Kind.IDENT
                     && (token.isKeyword("FROM") || CLAUSE_END_KEYWORDS.contains(token.upper()))) {
                 return -1;

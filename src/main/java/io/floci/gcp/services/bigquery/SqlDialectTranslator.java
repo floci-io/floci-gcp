@@ -610,10 +610,12 @@ final class SqlDialectTranslator {
 
     /**
      * A whole {@code CAST(... AS T[])}, which is how {@link #rewriteTypedArrayLiterals} renders a typed array
-     * literal such as {@code ARRAY<INT64>[1, 2, 3]} before subscripts are rewritten.
+     * literal such as {@code ARRAY<INT64>[1, 2, 3]} before subscripts are rewritten, or a {@code CAST} or
+     * {@code SAFE_CAST} to {@code ARRAY<...>} the query writes itself.
      */
     private boolean isArrayCast(int start, int last) {
-        if (!tokens.get(start).isKeyword("CAST") || !tokens.get(last).isPunct(")")) {
+        Token first = tokens.get(start);
+        if (!(first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) || !tokens.get(last).isPunct(")")) {
             return false;
         }
         int open = nextSignificant(start + 1, last + 1);
@@ -621,11 +623,24 @@ final class SqlDialectTranslator {
             return false;
         }
         int type = previousSignificantBefore(last);
-        if (type < 0 || tokens.get(type).kind != Kind.RAW) {
-            return false;
+        if (type >= 0 && tokens.get(type).kind == Kind.RAW) {
+            String text = tokens.get(type).text.trim();
+            return text.startsWith("AS ") && text.endsWith("[]");
         }
-        String text = tokens.get(type).text.trim();
-        return text.startsWith("AS ") && text.endsWith("[]");
+        // A cast the query writes itself, CAST(expr AS ARRAY<T>): the type after its top-level AS is an ARRAY.
+        int nesting = 0;
+        for (int i = open + 1; i < last; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                nesting++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                nesting--;
+            } else if (nesting == 0 && token.isKeyword("AS")) {
+                int target = nextSignificant(i + 1, last);
+                return target >= 0 && tokens.get(target).isKeyword("ARRAY");
+            }
+        }
+        return false;
     }
 
     /** True when {@code t} can end an array value, so a {@code [} right after it is a subscript. */

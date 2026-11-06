@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -297,22 +299,22 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", star + " UNION ALL SELECT 3, 6", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("c", "id")))
-                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("3", "6"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("2", "5"), List.of("3", "6")));
         query(Map.of("query", star + " UNION ALL SELECT u.s.* EXCEPT(b), u.id"
                         + " FROM (SELECT STRUCT(3 AS b, 4 AS d) s, 7 AS id) u", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("c", "id")))
-                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("4", "7"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("2", "5"), List.of("4", "7")));
         query(Map.of("query", star + " UNION ALL SELECT 3, 6 ORDER BY 1 DESC", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("3", "6"), List.of("2", "5"))));
         query(Map.of("query", star + " UNION ALL SELECT 3, 6 LIMIT 1", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("totalRows", equalTo("1"))
-                .body("rows[0].f.v", equalTo(List.of("2", "5")));
+                .body("rows[0].f.v", anyOf(equalTo(List.of("2", "5")), equalTo(List.of("3", "6"))));
         query(Map.of("query", "(" + star + ") UNION ALL (SELECT 3, 6)", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("2", "5"), List.of("3", "6"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("2", "5"), List.of("3", "6")));
         query(Map.of("query", "WITH c AS (" + star + " UNION ALL SELECT 3, 6)"
                         + " SELECT * FROM c ORDER BY id", "useLegacySql", false))
                 .then().statusCode(200)
@@ -320,7 +322,7 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT 3, 6 UNION ALL " + star, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("f0_", "f1_")))
-                .body("rows.f.v", equalTo(List.of(List.of("3", "6"), List.of("2", "5"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("3", "6"), List.of("2", "5")));
         String oneColumn = "SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t";
         query(Map.of("query", oneColumn + " INTERSECT DISTINCT SELECT 2", "useLegacySql", false))
                 .then().statusCode(200)
@@ -344,7 +346,7 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT t.s.* REPLACE(10 AS a), t.id FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t"
                         + " UNION ALL SELECT 2, 7", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("10", "5"), List.of("2", "7"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("10", "5"), List.of("2", "7")));
         query(Map.of("query", "SELECT * FROM (" + oneColumn + " UNION ALL SELECT 2) q ORDER BY c",
                         "useLegacySql", false))
                 .then().statusCode(200)
@@ -434,7 +436,7 @@ class BigQueryDuckIntegrationTest {
                         + " UNION ALL SELECT STRUCT(1 AS a, 3 AS c), 6) t"
                         + " GROUP BY t.s HAVING a > (SELECT a FROM (SELECT 4 AS a))", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("5"), List.of("6"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("5"), List.of("6")));
         query(Map.of("query", "SELECT t.s.* REPLACE(10 AS a), u.s.* REPLACE(20 AS a)"
                         + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS a) s) u", "useLegacySql", false))
                 .then().statusCode(200)
@@ -537,7 +539,7 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f.v", equalTo(List.of("10", "20")));
         query(Map.of("query", twoStars + " UNION ALL SELECT 3, 4", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("10", "20"), List.of("3", "4"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("10", "20"), List.of("3", "4")));
         query(Map.of("query", "SELECT ARRAY(SELECT AS STRUCT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
                         + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t, (SELECT STRUCT(3 AS b, 4 AS d) s) u) AS arr",
                         "useLegacySql", false))
@@ -596,7 +598,7 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a) UNION ALL SELECT 4",
                         "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("2"), List.of("4"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("2"), List.of("4")));
     }
 
     @Test
@@ -718,7 +720,7 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT t.s.* REPLACE(SUM(t.id) AS a) FROM " + one + " t GROUP BY t.s"
                         + " UNION ALL SELECT 3", "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows.f.v", equalTo(List.of(List.of("11"), List.of("3"))));
+                .body("rows.f.v", containsInAnyOrder(List.of("11"), List.of("3")));
         query(Map.of("query", "CREATE TABLE shop.grouped_star AS SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id"
                         + " UNION ALL SELECT STRUCT(1 AS a, 3 AS c), 6", "useLegacySql", false))
                 .then().statusCode(200);

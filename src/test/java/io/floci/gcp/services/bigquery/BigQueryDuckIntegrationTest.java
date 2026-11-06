@@ -733,6 +733,16 @@ class BigQueryDuckIntegrationTest {
     @Order(5)
     void bareSubscriptOnAVisibleArrayIsZeroBased() {
         query("""
+                {"query": "SELECT CAST([1, 2, 3] AS ARRAY<INT64>)[1] AS v, CAST(['a', 'b'] AS ARRAY<STRING>)[0] AS w, SAFE_CAST([1, 2, 3] AS ARRAY<INT64>)[1] AS x, CAST([10, 20] AS ARRAY<INT64>)[SAFE_OFFSET(5)] AS y", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList("2", "a", "2", null)));
+        for (String sql : List.of("SELECT CAST([1, 2, 3] AS ARRAY<INT64>)[3] AS v", "SELECT SAFE_CAST([1, 2, 3] AS ARRAY<INT64>)[3] AS v")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Array index 3 is out of bounds (overflow)"));
+        }
+        query("""
                 {"query": "SELECT ARRAY_CONCAT_AGG(a)[0] AS f, ARRAY_CONCAT_AGG(a)[2] AS t FROM UNNEST([STRUCT([1, 2] AS a), STRUCT([3])])", "useLegacySql": false}
                 """)
                 .then().statusCode(200)

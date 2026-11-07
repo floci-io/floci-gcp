@@ -9,6 +9,7 @@ path to becoming a Maintainer.
 
 ## Maintainers (this repository)
 - Hector Ventura (@hectorvent): the GCP emulator.
+- David Opaogun (@avison9): the GCP emulator.
 
 ## Emeritus
 - (none yet)

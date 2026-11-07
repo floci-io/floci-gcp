@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -141,6 +142,65 @@ class CloudMonitoringRestIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
+    @Test
+    void aPartialWriteAnswersWithTheSummaryDetail() {
+        String metric = "custom.googleapis.com/partial/" + UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "timeSeries": [{
+                            "metric": {"type": "%1$s"},
+                            "resource": {"type": "global"},
+                            "points": [{"interval": {"endTime": "%2$s"}, "value": {"doubleValue": 1.5}}]
+                          }, {
+                            "metric": {"type": "%1$s"},
+                            "resource": {"type": "global"},
+                            "points": [{"interval": {"endTime": "%2$s"}, "value": {"doubleValue": 2.5}}]
+                          }]
+                        }
+                        """.formatted(metric, now))
+                .when().post(BASE + "/timeSeries")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.details[0].'@type'",
+                        equalTo("type.googleapis.com/google.monitoring.v3.CreateTimeSeriesSummary"))
+                .body("error.details[0].totalPointCount", equalTo(2))
+                .body("error.details[0].successPointCount", equalTo(1))
+                .body("error.details[0].errors[0].pointCount", equalTo(1))
+                .body("error.details[0].errors[0].status.code", equalTo(3));
+
+        given()
+                .queryParam("filter", "metric.type = \"" + metric + "\"")
+                .queryParam("interval.endTime", now.toString())
+                .when().get(BASE + "/timeSeries")
+                .then()
+                .statusCode(200)
+                .body("timeSeries[0].points", hasSize(1))
+                .body("timeSeries[0].points[0].value.doubleValue", equalTo(1.5f));
+    }
+
+    @Test
+    void anUnreadableFilterIsRejectedAndResourceDescriptorsAreFiltered() {
+        given()
+                .queryParam("filter", "metric.type = 'x'")
+                .queryParam("interval.endTime", Instant.now().toString())
+                .when().get(BASE + "/timeSeries")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        given()
+                .queryParam("filter", "resource.type = starts_with(\"gce_\")")
+                .when().get(BASE + "/monitoredResourceDescriptors")
+                .then()
+                .statusCode(200)
+                .body("resourceDescriptors", hasSize(1))
+                .body("resourceDescriptors[0].type", equalTo("gce_instance"));
     }
 
     @Test

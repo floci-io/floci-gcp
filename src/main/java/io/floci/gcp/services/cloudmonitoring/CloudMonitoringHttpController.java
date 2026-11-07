@@ -48,11 +48,12 @@ public class CloudMonitoringHttpController {
     @GET
     @Path("/monitoredResourceDescriptors")
     public Response listMonitoredResourceDescriptors(@PathParam("project") String project,
+                                                     @QueryParam("filter") String filter,
                                                      @QueryParam("pageSize") @DefaultValue("0") int pageSize,
                                                      @QueryParam("pageToken") String pageToken) {
         LOG.debugf("HTTP GET listMonitoredResourceDescriptors project=%s", project);
         PageToken.Page<MonitoredResourceDescriptor> page = service.listMonitoredResourceDescriptors(
-                "projects/" + project, pageSize, pageToken);
+                "projects/" + project, filter, pageSize, pageToken);
         ListMonitoredResourceDescriptorsResponse.Builder response = ListMonitoredResourceDescriptorsResponse.newBuilder()
                 .addAllResourceDescriptors(page.items());
         if (page.nextPageToken() != null) {

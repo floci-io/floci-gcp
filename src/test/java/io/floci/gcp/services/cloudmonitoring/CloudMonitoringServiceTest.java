@@ -6,6 +6,7 @@ import com.google.api.MetricDescriptor;
 import com.google.api.MonitoredResource;
 import com.google.api.MonitoredResourceDescriptor;
 import com.google.monitoring.v3.Aggregation;
+import com.google.monitoring.v3.CreateTimeSeriesSummary;
 import com.google.monitoring.v3.Point;
 import com.google.monitoring.v3.TimeInterval;
 import com.google.monitoring.v3.TimeSeries;
@@ -17,6 +18,7 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.ProjectAwareStorageBackend;
 import io.floci.gcp.services.cloudmonitoring.model.StoredTimeSeriesPoint;
+import io.grpc.Status;
 import io.floci.gcp.core.storage.StorageBackend;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -277,17 +279,129 @@ class CloudMonitoringServiceTest {
     }
 
     @Test
-    void batchWritesNothingOnFailure() {
+    void aBatchWritesItsValidSeriesAndSummarizesTheFailures() throws Exception {
         TimeSeries valid = gaugePoint(METRIC, Map.of(), 1.0, NOW.minusSeconds(60));
-        TimeSeries invalid = gaugePoint("custom.googleapis.com/other", Map.of(), 1.0,
+        TimeSeries future = gaugePoint("custom.googleapis.com/other", Map.of(), 1.0,
                 NOW.plus(java.time.Duration.ofMinutes(10)));
 
-        assertThrows(GcpException.class, () -> service.createTimeSeries(PROJECT, List.of(valid, invalid)));
-
-        assertEquals(0, timeSeriesStore.scan(k -> true).size());
         GcpException ex = assertThrows(GcpException.class,
-                () -> service.getMetricDescriptor(PROJECT + "/metricDescriptors/" + METRIC));
-        assertEquals("NOT_FOUND", ex.getGcpStatus());
+                () -> service.createTimeSeries(PROJECT, List.of(valid, future)));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        assertTrue(ex.getMessage().startsWith("One or more TimeSeries could not be written: "), ex.getMessage());
+        assertTrue(ex.getMessage().contains("timeSeries[1]"), ex.getMessage());
+        CreateTimeSeriesSummary summary = ex.getDetails().getFirst().unpack(CreateTimeSeriesSummary.class);
+        assertEquals(2, summary.getTotalPointCount());
+        assertEquals(1, summary.getSuccessPointCount());
+        assertEquals(1, summary.getErrorsCount());
+        assertEquals(1, summary.getErrors(0).getPointCount());
+        assertEquals(Status.Code.INVALID_ARGUMENT.value(), summary.getErrors(0).getStatus().getCode());
+
+        assertEquals(1, timeSeriesStore.scan(k -> true).size());
+        assertEquals(METRIC, service.getMetricDescriptor(PROJECT + "/metricDescriptors/" + METRIC).getType());
+        // A failed series creates no descriptor.
+        GcpException missing = assertThrows(GcpException.class, () -> service.getMetricDescriptor(
+                PROJECT + "/metricDescriptors/custom.googleapis.com/other"));
+        assertEquals("NOT_FOUND", missing.getGcpStatus());
+    }
+
+    @Test
+    void aSecondEntryForASeriesFailsAndTheFirstIsWritten() throws Exception {
+        TimeSeries first = gaugePoint(METRIC, Map.of("id", "a"), 1.0, NOW.minusSeconds(120));
+        TimeSeries second = gaugePoint(METRIC, Map.of("id", "a"), 2.0, NOW.minusSeconds(60));
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.createTimeSeries(PROJECT, List.of(first, second)));
+
+        assertTrue(ex.getMessage().contains(
+                "Duplicate TimeSeries encountered. Only one point can be written per TimeSeries per request"));
+        assertEquals(1, ex.getDetails().getFirst().unpack(CreateTimeSeriesSummary.class).getSuccessPointCount());
+        assertEquals(1, timeSeriesStore.scan(k -> true).size());
+    }
+
+    @Test
+    void seriesWhoseLabelsJoinToTheSameTextAreDistinct() {
+        TimeSeries first = gaugePoint(METRIC, Map.of("a", "x,b=y", "b", "z"), 1.0, NOW.minusSeconds(120));
+        TimeSeries second = gaugePoint(METRIC, Map.of("a", "x", "b", "y,b=z"), 2.0, NOW.minusSeconds(180));
+
+        service.createTimeSeries(PROJECT, List.of(first, second));
+        // Each series keeps its own freshness check, so an older point for the other one is accepted.
+        service.createTimeSeries(PROJECT, List.of(
+                gaugePoint(METRIC, Map.of("a", "x", "b", "y,b=z"), 3.0, NOW.minusSeconds(150))));
+
+        assertEquals(3, timeSeriesStore.scan(k -> true).size());
+    }
+
+    @Test
+    void aTimestampOutOfRangeFailsItsSeriesAndTheOthersAreWritten() throws Exception {
+        TimeSeries good = gaugePoint(METRIC, Map.of("id", "good"), 1.0, NOW.minusSeconds(60));
+        TimeSeries good2 = gaugePoint(METRIC, Map.of("id", "good2"), 1.0, NOW.minusSeconds(60));
+        TimeSeries bad = gaugePoint(METRIC, Map.of("id", "bad"), 1.0, NOW.minusSeconds(60)).toBuilder()
+                .setPoints(0, gaugePoint(METRIC, Map.of(), 1.0, NOW).getPoints(0).toBuilder()
+                        .setInterval(TimeInterval.newBuilder()
+                                .setEndTime(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE))))
+                .build();
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.createTimeSeries(PROJECT, List.of(good, bad, good2)));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+        CreateTimeSeriesSummary summary = ex.getDetails().getFirst().unpack(CreateTimeSeriesSummary.class);
+        assertEquals(3, summary.getTotalPointCount());
+        assertEquals(2, summary.getSuccessPointCount());
+        assertEquals(2, timeSeriesStore.scan(k -> true).size());
+    }
+
+    @Test
+    void aReadIntervalOutOfRangeIsInvalid() {
+        TimeInterval outOfRange = TimeInterval.newBuilder()
+                .setEndTime(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE)).build();
+
+        GcpException ex = assertThrows(GcpException.class, () -> service.listTimeSeries(PROJECT, typeFilter(),
+                outOfRange, Aggregation.getDefaultInstance(), "FULL", 10, null));
+
+        assertEquals("INVALID_ARGUMENT", ex.getGcpStatus());
+    }
+
+    @Test
+    void identicalFailuresAreGroupedAndCountedOnce() throws Exception {
+        TimeSeries noType = gaugePoint("", Map.of(), 1.0, NOW.minusSeconds(60));
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> service.createTimeSeries(PROJECT, List.of(noType, noType)));
+
+        CreateTimeSeriesSummary summary = ex.getDetails().getFirst().unpack(CreateTimeSeriesSummary.class);
+        assertEquals(1, summary.getErrorsCount());
+        assertEquals(2, summary.getErrors(0).getPointCount());
+        assertTrue(ex.getMessage().endsWith("; and 1 more errors"), ex.getMessage());
+    }
+
+    @Test
+    void anEmptyRequestFailsWithoutASummary() {
+        GcpException ex = assertThrows(GcpException.class, () -> service.createTimeSeries(PROJECT, List.of()));
+        assertTrue(ex.getDetails().isEmpty());
+    }
+
+    @Test
+    void descriptorListsApplyTheirFilters() {
+        service.createMetricDescriptor(PROJECT, descriptor(METRIC).build());
+        service.createMetricDescriptor(PROJECT, descriptor("custom.googleapis.com/z").build());
+
+        assertEquals(1, service.listMetricDescriptors(PROJECT, "metric.type = \"" + METRIC + "\"", 0, null)
+                .items().size());
+        assertEquals(2, service.listMetricDescriptors(PROJECT,
+                "metric.type = starts_with(\"custom.\")", 0, null).items().size());
+        assertEquals(0, service.listMetricDescriptors(PROJECT,
+                "project = \"elsewhere\" AND metric.type = starts_with(\"custom.\")", 0, null).items().size());
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                () -> service.listMetricDescriptors(PROJECT, "resource.type = \"global\"", 0, null)).getGcpStatus());
+
+        assertEquals(List.of("gce_instance"), service.listMonitoredResourceDescriptors(PROJECT,
+                "resource.type = starts_with(\"gce_\") AND resource.label:zone", 0, null).items().stream()
+                .map(MonitoredResourceDescriptor::getType).toList());
+        assertEquals(2, service.listMonitoredResourceDescriptors(PROJECT, null, 0, null).items().size());
+        assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
+                () -> service.listMonitoredResourceDescriptors(PROJECT, "metric.labels:zone", 0, null)).getGcpStatus());
     }
 
     @Test
@@ -377,7 +491,7 @@ class CloudMonitoringServiceTest {
     @Test
     void filterSupportsStartsWithAndExtractsMetricType() {
         TimeSeriesFilter.ParsedFilter parsed = TimeSeriesFilter.parseFilter(
-                "metric.type = \"" + METRIC + "\" AND metric.labels.id = starts_with(\"prod-\")");
+                "metric.type = \"" + METRIC + "\" AND metric.labels.id = starts_with(\"prod-\")", "p1");
         assertEquals(METRIC, parsed.metricTypeEquality());
 
         StoredTimeSeriesPoint prod = new StoredTimeSeriesPoint();
@@ -390,7 +504,7 @@ class CloudMonitoringServiceTest {
         assertTrue(parsed.predicate().test(prod));
         assertFalse(parsed.predicate().test(dev));
 
-        assertNull(TimeSeriesFilter.parseFilter("metric.type = starts_with(\"custom.\")").metricTypeEquality());
+        assertNull(TimeSeriesFilter.parseFilter("metric.type = starts_with(\"custom.\")", "p1").metricTypeEquality());
     }
 
     // ── Aggregation ──────────────────────────────────────────────────────────
@@ -579,13 +693,13 @@ class CloudMonitoringServiceTest {
     @Test
     void listMonitoredResourceDescriptorsPaginates() {
         PageToken.Page<MonitoredResourceDescriptor> first =
-                service.listMonitoredResourceDescriptors(PROJECT, 1, null);
+                service.listMonitoredResourceDescriptors(PROJECT, null, 1, null);
         assertEquals(1, first.items().size());
         assertEquals("global", first.items().get(0).getType());
         assertNotNull(first.nextPageToken());
 
         PageToken.Page<MonitoredResourceDescriptor> second =
-                service.listMonitoredResourceDescriptors(PROJECT, 1, first.nextPageToken());
+                service.listMonitoredResourceDescriptors(PROJECT, null, 1, first.nextPageToken());
         assertEquals("gce_instance", second.items().get(0).getType());
         assertNull(second.nextPageToken());
     }

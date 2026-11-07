@@ -11,6 +11,7 @@ import com.google.cloud.monitoring.v3.MetricServiceClient.ListMetricDescriptorsP
 import com.google.monitoring.v3.Aggregation;
 import com.google.monitoring.v3.CreateMetricDescriptorRequest;
 import com.google.monitoring.v3.CreateTimeSeriesRequest;
+import com.google.monitoring.v3.CreateTimeSeriesSummary;
 import com.google.monitoring.v3.ListMetricDescriptorsRequest;
 import com.google.monitoring.v3.ListMonitoredResourceDescriptorsRequest;
 import com.google.monitoring.v3.ListTimeSeriesRequest;
@@ -172,6 +173,9 @@ class MonitoringTest {
         client.createTimeSeries(CreateTimeSeriesRequest.newBuilder()
                 .setName(PROJECT_NAME)
                 .addTimeSeries(ts1)
+                .build());
+        client.createTimeSeries(CreateTimeSeriesRequest.newBuilder()
+                .setName(PROJECT_NAME)
                 .addTimeSeries(ts2)
                 .build());
 
@@ -278,6 +282,31 @@ class MonitoringTest {
                 .addTimeSeries(gaugeSeries(AGG_METRIC_TYPE, "a", 1.0, stale))
                 .build()))
                 .isInstanceOf(InvalidArgumentException.class);
+    }
+
+    @Test
+    @Order(8)
+    void partialWriteReportsSummaryAndKeepsValidSeries() throws Exception {
+        String metricType = "custom.googleapis.com/" + TestFixtures.uniqueName("partial-metric");
+        Instant now = Instant.now();
+
+        assertThatThrownBy(() -> client.createTimeSeries(CreateTimeSeriesRequest.newBuilder()
+                .setName(PROJECT_NAME)
+                .addTimeSeries(gaugeSeries(metricType, "a", 1.0, now))
+                .addTimeSeries(gaugeSeries(metricType, "a", 2.0, now))
+                .build()))
+                .isInstanceOfSatisfying(InvalidArgumentException.class, error -> {
+                    CreateTimeSeriesSummary summary =
+                            error.getErrorDetails().getMessage(CreateTimeSeriesSummary.class);
+                    assertThat(summary.getTotalPointCount()).isEqualTo(2);
+                    assertThat(summary.getSuccessPointCount()).isEqualTo(1);
+                });
+
+        assertThat(client.listTimeSeries(ListTimeSeriesRequest.newBuilder()
+                .setName(PROJECT_NAME)
+                .setFilter("metric.type = \"" + metricType + "\"")
+                .setInterval(TimeInterval.newBuilder().setEndTime(toTimestamp(now)).build())
+                .build()).iterateAll()).hasSize(1);
     }
 
     @Test

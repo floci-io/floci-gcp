@@ -33,7 +33,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
     private static final Set<String> SERVICE_ACCOUNT_USER = Set.of(
             "iam.serviceAccounts.get", "iam.serviceAccounts.list");
     private static final Set<String> SERVICE_ACCOUNT_TOKEN_CREATOR = Set.of(
-            "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt",
+            "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken",
+            "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt",
             "iam.serviceAccounts.get", "iam.serviceAccounts.list");
 
     private final Instance<IamService> iamService;
@@ -61,7 +62,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
     @Override
     public IamOperation restOperation(String method, Map<String, String> path, JsonNode body) {
         if (path.containsKey("serviceAccount")) {
-            if (!Set.of("generateAccessToken", "signBlob", "signJwt").contains(method)) {
+            if (!Set.of("generateAccessToken", "generateIdToken", "signBlob", "signJwt").contains(method)) {
                 throw unsupported("REST method " + method);
             }
             JsonNode delegates = body == null ? null : body.get("delegates");
@@ -70,6 +71,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             }
             String operation = switch (method) {
                 case "generateAccessToken" -> "GenerateAccessToken";
+                case "generateIdToken" -> "GenerateIdToken";
                 case "signBlob" -> "SignBlob";
                 case "signJwt" -> "SignJwt";
                 default -> throw unsupported("REST method " + method);
@@ -174,6 +176,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             case "SignBlob" -> "iam.serviceAccounts.signBlob";
             case "SignJwt" -> "iam.serviceAccounts.signJwt";
             case "GenerateAccessToken" -> "iam.serviceAccounts.getAccessToken";
+            case "GenerateIdToken" -> "iam.serviceAccounts.getOpenIdToken";
             case "TestIamPermissions" -> null;
             default -> throw unsupported("operation " + operation.name());
         };

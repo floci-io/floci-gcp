@@ -1,12 +1,13 @@
 # IAM Service Account Credentials
 
-floci-gcp emulates the [IAM Service Account Credentials](https://cloud.google.com/iam/docs/reference/credentials/rest) API (`iamcredentials.googleapis.com` v1) with REST JSON, supporting `generateAccessToken`, `signBlob` and `signJwt` for service-account impersonation flows (for example `ImpersonatedCredentials` in the GCP SDKs, which call `signBlob` to make GCS signed URLs).
+floci-gcp emulates the [IAM Service Account Credentials](https://cloud.google.com/iam/docs/reference/credentials/rest) API (`iamcredentials.googleapis.com` v1) with REST JSON, supporting `generateAccessToken`, `generateIdToken`, `signBlob` and `signJwt` for service-account impersonation flows (for example `ImpersonatedCredentials` in the GCP SDKs, which call `signBlob` to make GCS signed URLs).
 
 The endpoint returns an opaque emulator token (`floci-gcp-impersonated-<uuid>`)
 that the supported IAM-enforcing services resolve to a service-account identity.
 With `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`, a recognized caller needs
 `iam.serviceAccounts.getAccessToken` on the target account, including applicable
-project policies. Signing requires `iam.serviceAccounts.signBlob` or
+project policies. `generateIdToken` requires `iam.serviceAccounts.getOpenIdToken`,
+and signing requires `iam.serviceAccounts.signBlob` or
 `iam.serviceAccounts.signJwt` respectively. See the [method and role inventory](iam.md#service-account-enforcement).
 Anonymous/external credentials bypass this evaluation, including bootstrap token
 issuance. Tokens are local emulator credentials and cannot be used with real GCP.
@@ -34,6 +35,22 @@ Request body:
 Response: `{ "accessToken": "...", "expireTime": "..." }`.
 
 ```
+POST /v1/projects/-/serviceAccounts/{serviceAccount}:generateIdToken
+```
+
+Request body:
+
+| Field | Behavior |
+|---|---|
+| `audience` | Required. Becomes the `aud` claim; a missing or empty value is rejected with `INVALID_ARGUMENT` |
+| `includeEmail` | Optional. When `true`, the token also carries `email` and `email_verified` claims |
+| `delegates` | Same behavior as `generateAccessToken` |
+
+Response: `{ "token": "..." }`, an RS256 JWT with the claims `aud`, `azp` and `sub` (the account's unique ID), `iat`, `exp` (one hour later) and `iss` (`https://accounts.google.com`). The account must exist, or the call fails with `PERMISSION_DENIED`.
+
+The token is signed with the account's Google-managed key, the same one `signJwt` uses, and its `kid` names that key. Neither Google's published certificates nor the emulator expose that key, so a verifier that checks the signature rejects the token; code under test has to skip signature verification, as with the [Compute metadata server's](compute.md) identity tokens.
+
+```
 POST /v1/projects/-/serviceAccounts/{serviceAccount}:signBlob
 POST /v1/projects/-/serviceAccounts/{serviceAccount}:signJwt
 ```
@@ -59,8 +76,9 @@ ImpersonatedCredentials credentials = ImpersonatedCredentials.newBuilder()
     .build();
 ```
 
+`ImpersonatedCredentials.idTokenWithAudience` builds its `generateIdToken` URL from the universe domain and ignores `setIamEndpointOverride`, so it does not reach the emulator. Call `IamCredentialsClient.generateIdToken` with an endpoint override instead.
+
 ## Not Yet Supported
 
-- `generateIdToken`
 - Scope-based authorization of the vended token (the supported IAM evaluator checks identity and policies, not OAuth scopes)
 - Delegation chains (only direct impersonation is IAM-enforced)

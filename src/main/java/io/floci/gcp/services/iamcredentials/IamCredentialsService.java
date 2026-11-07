@@ -2,6 +2,7 @@ package io.floci.gcp.services.iamcredentials;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ProtoJsonBytes;
@@ -11,6 +12,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -24,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class IamCredentialsService {
@@ -35,6 +38,8 @@ public class IamCredentialsService {
     static final long MAX_LIFETIME_SECONDS = 3600;
     /** signJwt rejects an {@code exp} claim further out than this. */
     static final long MAX_JWT_LIFETIME_SECONDS = 12 * 3600;
+    static final long ID_TOKEN_LIFETIME_SECONDS = 3600;
+    static final String ID_TOKEN_ISSUER = "https://accounts.google.com";
     /** iamcredentials names a service account only through the {@code -} project wildcard. */
     private static final String WILDCARD_PROJECT = "-";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -126,18 +131,53 @@ public class IamCredentialsService {
         }
         validateExpiry(claims.get("exp"));
 
-        // The header is built inside sign so its kid names the key that signs it.
-        String[] signingInput = new String[1];
-        IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount, keyId -> {
-            signingInput[0] = jwtSigningInput(keyId, payload);
-            return signingInput[0].getBytes(StandardCharsets.US_ASCII);
-        });
-
+        SignedJwt signed = signClaims(serviceAccount, account -> payload);
         Map<String, String> response = new LinkedHashMap<>();
         response.put("keyId", signed.keyId());
-        response.put("signedJwt", signingInput[0] + "." + base64Url(signed.signature()));
+        response.put("signedJwt", signed.jwt());
         return response;
     }
+
+    /**
+     * Mints an OpenID Connect ID token for {@code audience}, signed like {@link #signJwt}. The claims
+     * name the account by unique id; only {@code includeEmail} adds its email.
+     */
+    public Map<String, String> generateIdToken(String serviceAccount, String audience, boolean includeEmail) {
+        if (audience == null || audience.isEmpty()) {
+            throw GcpException.invalidArgument("audience is required");
+        }
+        Map<String, String> response = new LinkedHashMap<>();
+        response.put("token", signClaims(serviceAccount,
+                account -> idTokenClaims(account, audience, includeEmail)).jwt());
+        return response;
+    }
+
+    private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {
+        long now = clock.instant().getEpochSecond();
+        ObjectNode claims = MAPPER.createObjectNode()
+                .put("aud", audience)
+                .put("azp", account.getUniqueId());
+        if (includeEmail) {
+            claims.put("email", account.getEmail()).put("email_verified", true);
+        }
+        return claims.put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
+                .put("iat", now)
+                .put("iss", ID_TOKEN_ISSUER)
+                .put("sub", account.getUniqueId())
+                .toString();
+    }
+
+    private SignedJwt signClaims(String serviceAccount, Function<StoredServiceAccount, String> claims) {
+        // The header and claims are built inside signAs so they name the key and account that sign them.
+        String[] signingInput = new String[1];
+        IamService.SignedBytes signed = iamService.signAs(WILDCARD_PROJECT, serviceAccount, (account, keyId) -> {
+            signingInput[0] = jwtSigningInput(keyId, claims.apply(account));
+            return signingInput[0].getBytes(StandardCharsets.US_ASCII);
+        });
+        return new SignedJwt(signed.keyId(), signingInput[0] + "." + base64Url(signed.signature()));
+    }
+
+    private record SignedJwt(String keyId, String jwt) {}
 
     private static String jwtSigningInput(String keyId, String payload) {
         Map<String, String> header = new LinkedHashMap<>();

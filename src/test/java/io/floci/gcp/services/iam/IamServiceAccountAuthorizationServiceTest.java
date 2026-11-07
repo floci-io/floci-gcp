@@ -48,7 +48,8 @@ class IamServiceAccountAuthorizationServiceTest {
     @Test
     void everyRestHandlerIsInventoriedAndUnknownMethodsFailClosed() {
         assertEquals(Set.of("get", "post", "put", "patch", "delete", "getIamPolicy"), handlers(IamController.class));
-        assertEquals(Set.of("generateAccessToken", "signBlob", "signJwt"), handlers(IamCredentialsController.class));
+        assertEquals(Set.of("generateAccessToken", "generateIdToken", "signBlob", "signJwt"),
+                handlers(IamCredentialsController.class));
         assertThrows(GcpException.class, () -> adapter.restOperation("newHandler",
                 Map.of("serviceAccount", "target@p.iam.gserviceaccount.com"), mapper.createObjectNode()));
         assertThrows(GcpException.class, () -> adapter.checks(new IamOperation("NewOperation", "projects/p")));
@@ -105,6 +106,16 @@ class IamServiceAccountAuthorizationServiceTest {
     }
 
     @Test
+    void generateIdTokenUsesTheOpenIdTokenPermission() {
+        IamOperation operation = adapter.restOperation("generateIdToken",
+                Map.of("serviceAccount", "target@p.iam.gserviceaccount.com"), mapper.createObjectNode());
+        IamPermissionCheck check = adapter.checks(operation).getFirst();
+        assertEquals("iam.serviceAccounts.getOpenIdToken", check.permission());
+        assertEquals("projects/p/serviceAccounts/target@p.iam.gserviceaccount.com", check.resource().name());
+        assertTrue(adapter.roles().get("roles/iam.serviceAccountTokenCreator").contains(check.permission()));
+    }
+
+    @Test
     void accountAliasesResolveToOnePolicyWithoutMigratingPolicies() {
         String id = iam.getServiceAccount("p", "target").getUniqueId();
         String canonical = "projects/p/serviceAccounts/target@p.iam.gserviceaccount.com";
@@ -133,6 +144,7 @@ class IamServiceAccountAuthorizationServiceTest {
             assertFalse(roles.grants(role, "iam.serviceAccounts.getAccessToken"));
             assertFalse(roles.grants(role, "iam.serviceAccounts.signBlob"));
             assertFalse(roles.grants(role, "iam.serviceAccounts.signJwt"));
+            assertFalse(roles.grants(role, "iam.serviceAccounts.getOpenIdToken"));
         }
         assertTrue(roles.grants("roles/owner", "iam.serviceAccounts.setIamPolicy"));
         assertFalse(roles.grants("roles/editor", "iam.serviceAccounts.setIamPolicy"));

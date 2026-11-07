@@ -42,6 +42,18 @@ class IamCredentialsDisabledRestIntegrationTest {
         }
     }
 
+    @Test
+    void disabledIamCredentialsAlsoCoversGenerateIdToken() {
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(Map.of("audience", "https://foo.bar"))
+                .when().post("/v1/projects/-/serviceAccounts/test@test-project.iam.gserviceaccount.com:generateIdToken")
+                .then()
+                .statusCode(503)
+                .body("error.status", equalTo("UNAVAILABLE"));
+    }
+
     public static class DisabledIamCredentialsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {

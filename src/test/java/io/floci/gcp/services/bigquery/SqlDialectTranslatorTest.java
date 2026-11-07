@@ -2071,6 +2071,51 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void structStarGroupedDuplicateNamesTakeBigQuerySuffix() {
+        assertEquals("SELECT * EXCLUDE (\"a\"), 5 AS \"b_1\" FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t) AS \"_expanded\" GROUP BY 1, 2",
+                sql("SELECT t.s.* EXCEPT(a), 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY 1, 2"));
+        assertEquals("SELECT 5 AS b, * EXCLUDE (\"a\") RENAME (\"b\" AS \"b_1\")"
+                        + " FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+        String replaced = sql("SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL");
+        assertTrue(replaced.startsWith("SELECT * FROM (SELECT 5 AS b"), replaced);
+        assertTrue(replaced.contains(") AS \"_floci_duplicate_names\""), replaced);
+    }
+
+    @Test
+    void indexedAggregateStructStarKeepsItsStarList() {
+        String excluded = sql("SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT(id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+
+        assertTrue(excluded.startsWith("SELECT * EXCLUDE (\"id\") FROM (SELECT unnest(\"_floci_star\")"),
+                excluded);
+        assertFalse(excluded.contains(").*"), excluded);
+
+        String replaced = sql("SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* REPLACE (99 AS id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+        assertTrue(replaced.contains("REPLACE (99 AS id)"), replaced);
+        assertFalse(replaced.contains(").*"), replaced);
+    }
+
+    @Test
+    void structStarOrdersByANestedSourceStructField() {
+        String translated = sql("SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id, STRUCT(7 AS n) u"
+                + " UNION ALL SELECT STRUCT(2 AS a), 3, STRUCT(9 AS n)) t ORDER BY u.n DESC");
+
+        assertTrue(translated.contains("\"t\".\"u\" AS \"_floci_source_0\""), translated);
+        assertTrue(translated.contains("ORDER BY \"_floci_source_0\".n DESC"), translated);
+
+        String qualified = sql("SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id, STRUCT(7 AS n) u"
+                + " UNION ALL SELECT STRUCT(2 AS a), 3, STRUCT(9 AS n)) t ORDER BY t.u.n DESC");
+        assertTrue(qualified.contains("ORDER BY \"_floci_source_0\".n DESC"), qualified);
+    }
+
+    @Test
     void structStarReplaceResolvesAUsingJoinColumn() {
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
                         + " FROM (SELECT unnest(t.s), COALESCE(\"t\".\"c\", \"u\".\"c\") AS \"_floci_source_0\""

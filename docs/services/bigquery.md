@@ -171,6 +171,10 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   subquery. The same item keeps BigQuery's `DISTINCT`, `LIMIT`/`OFFSET` and `ORDER BY` behavior,
   a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
   query's own sources that an aggregate still needs is projected next to the expansion.
+  A duplicate output name takes BigQuery's `_1` suffix, including a sibling that collides with an
+  expanded field under a positional `GROUP BY` or `GROUP BY ALL`. An indexed aggregate star such
+  as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, and
+  a hoisted ordering can dereference a nested field of a source `STRUCT` column (`ORDER BY u.n`).
   Replacement expressions read the original query's sources, including correlated columns.
   A bare name in a replacement, such as an `UNNEST` range variable, its `WITH OFFSET` alias or a
   column of a subquery without an alias, reads the `FROM` row, not a same-named field of the struct.
@@ -540,10 +544,10 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
-- Struct-star `EXCEPT` / `REPLACE` translation does not support every combination:
+- Struct-star `EXCEPT` / `REPLACE` translation does not cover every combination allowed by the
+  GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
+  and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
-  See the GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
-  and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries).
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
   `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
   yet; they fail with `invalidQuery`.

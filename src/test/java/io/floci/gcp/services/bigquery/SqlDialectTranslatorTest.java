@@ -1052,6 +1052,338 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void structStarSetOperationArmsRewriteIndependently() {
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\")"
+                        + " AS \"_expanded\" UNION ALL SELECT 2",
+                sql("SELECT t.s.* EXCEPT (a) FROM ds.t t UNION ALL SELECT 2"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t) AS \"_expanded\""
+                        + " UNION ALL SELECT * EXCLUDE (\"b\") FROM (SELECT unnest(u.s), u.id"
+                        + " FROM (SELECT {'b': 3, 'd': 4} AS \"s\", 7 AS id) u) AS \"_expanded\"",
+                sql("SELECT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t"
+                        + " UNION ALL SELECT u.s.* EXCEPT(b), u.id"
+                        + " FROM (SELECT STRUCT(3 AS b, 4 AS d) s, 7 AS id) u"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\") t) AS \"_expanded\" EXCEPT SELECT 2",
+                sql("SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t"
+                        + " EXCEPT DISTINCT SELECT 2"));
+        assertEquals("WITH c AS (SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\") t) AS \"_expanded\" UNION ALL SELECT 2 AS \"$col1\")"
+                        + " SELECT * FROM \"c\" ORDER BY c",
+                sql("WITH c AS (SELECT t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS c) s) t"
+                        + " UNION ALL SELECT 2) SELECT * FROM c ORDER BY c"));
+    }
+
+    @Test
+    void groupedStructStarReplacementGroupsTheSourcesAndExpandsOutside() {
+        assertEquals("SELECT \"_floci_star_fields\".* REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id) t GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.s.* REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t GROUP BY t.s"));
+        assertEquals("SELECT \"id\", \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT t.id, ANY_VALUE(t.s) AS \"_floci_star\","
+                        + " SUM(t.id) AS \"_floci_replacement_0\" FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.id) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.id, t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.id"));
+    }
+
+    @Test
+    void groupedStructStarReplacementSuffixesACollidingField() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_replacement_0\")"
+                        + " RENAME (\"_floci_projection_0\" AS \"a\", \"a\" AS \"a_1\") FROM ("
+                        + "SELECT \"_floci_projection_0\", \"_floci_star_fields\".*"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\"), \"_floci_group\".\"_floci_replacement_0\""
+                        + " FROM (SELECT 99 AS \"_floci_projection_0\", ANY_VALUE(t.s) AS \"_floci_star\","
+                        + " SUM(t.id) AS \"_floci_replacement_0\" FROM (SELECT {'a': 1} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\")"
+                        + " AS \"_floci_renamed_groups\"",
+                sql("SELECT 99 AS a, t.s.* REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t GROUP BY t.s"));
+    }
+
+    @Test
+    void groupedStructStarReplacementPointsQualifyAggregatesAtTheHelpers() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\""
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY \"_floci_replacement_0\" DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(t.id) DESC) = 1"));
+    }
+
+    @Test
+    void groupedStructStarReplacementPointsAHavingAliasAtTheHelper() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\""
+                        + " FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t GROUP BY t.s"
+                        + " HAVING \"_floci_replacement_0\" > 6) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\"",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s HAVING a > 6"));
+    }
+
+    @Test
+    void groupedStructStarReplacementProjectsATailAggregate() {
+        assertEquals("SELECT \"_floci_star_fields\".* EXCLUDE (\"c\")"
+                        + " REPLACE (\"_floci_replacement_0\" AS \"a\")"
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", SUM(t.id) AS \"_floci_replacement_0\","
+                        + " MAX(t.id) AS \"_floci_aggregate_0\" FROM (SELECT {'a': 1, 'c': 2} AS \"s\", 5 AS id) t"
+                        + " GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\""
+                        + " ORDER BY \"_floci_aggregate_0\"",
+                sql("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t GROUP BY t.s ORDER BY MAX(t.id)"));
+    }
+
+    @Test
+    void groupedStructStarReplacementValidatesItsStarLists() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t";
+        assertEquals("Column z in SELECT * EXCEPT list does not exist",
+                invalid("SELECT t.s.* EXCEPT(z) REPLACE(SUM(t.id) AS a)" + base + " GROUP BY t.s").getMessage());
+        assertEquals("Column z in SELECT * REPLACE list does not exist",
+                invalid("SELECT t.s.* EXCEPT(c) REPLACE(SUM(t.id) AS z)" + base + " GROUP BY t.s").getMessage());
+        assertEquals("Column a cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT t.s.* EXCEPT(a) REPLACE(SUM(t.id) AS a)" + base + " GROUP BY t.s").getMessage());
+    }
+
+    @Test
+    void multipleStructStarsExpandThroughTheirOwnDerivedTables() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'a': 1, 'c': 10} AS \"s\") t, (SELECT {'b': 2, 'd': 20} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\", (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 10 AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"));
+        assertEquals("SELECT \"_floci_star_0\".* REPLACE (10 AS a), \"_floci_star_1\".* REPLACE (20 AS b)"
+                        + " FROM (SELECT {'a': 1, 'c': 5} AS \"s\") t, (SELECT {'b': 2, 'd': 6} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\", (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* REPLACE(10 AS a), u.s.* REPLACE(20 AS b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 5 AS c) s) t, (SELECT STRUCT(2 AS b, 6 AS d) s) u"));
+        assertEquals("SELECT t.*, \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'b': 2, 'd': 8} AS \"s\", 7 AS id) u, (SELECT 1 AS x) t,"
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.*, u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(2 AS b, 8 AS d) s, 7 AS id) u, (SELECT 1 AS x) t"));
+    }
+
+    @Test
+    void bareAndDottedStructStarsBothExpandThroughDerivedTables() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"x\"), \"_floci_star_1\".* EXCLUDE (\"y\")"
+                        + " FROM (SELECT {'x': 1, 'c': 5} AS \"s\") t,"
+                        + " (SELECT {'y': 2, 'c': 6} AS \"t\") u, (SELECT unnest(s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"c\" AS \"c_1\") FROM (SELECT unnest(u.t))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT s.* EXCEPT(x), u.t.* EXCEPT(y)"
+                        + " FROM (SELECT STRUCT(1 AS x, 5 AS c) s) t, (SELECT STRUCT(2 AS y, 6 AS c) t) u"));
+    }
+
+    @Test
+    void scalarSubqueryStructStarsMaterializeTheirOperand() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT (SELECT {'a': 1, 'c': 2} AS \"$col1\") AS \"_floci_operand_0\")"
+                        + " AS \"_floci_operand_source_0\","
+                        + " (SELECT unnest(\"_floci_operand_source_0\".\"_floci_operand_0\")) AS \"_floci_star_0\","
+                        + " (SELECT (SELECT {'b': 3, 'd': 4} AS \"$col1\") AS \"_floci_operand_1\")"
+                        + " AS \"_floci_operand_source_1\","
+                        + " (SELECT unnest(\"_floci_operand_source_1\".\"_floci_operand_1\")) AS \"_floci_star_1\"",
+                sql("SELECT (SELECT STRUCT(1 AS a, 2 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(3 AS b, 4 AS d)).* EXCEPT(b)"));
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT (SELECT {'a': 1, 'c': 5} AS \"$col1\") AS \"_floci_operand_0\")"
+                        + " AS \"_floci_operand_source_0\","
+                        + " (SELECT unnest(\"_floci_operand_source_0\".\"_floci_operand_0\")) AS \"_floci_star_0\","
+                        + " (SELECT (SELECT {'b': 2, 'c': 6} AS \"$col1\") AS \"_floci_operand_1\")"
+                        + " AS \"_floci_operand_source_1\","
+                        + " (SELECT * RENAME (\"c\" AS \"c_1\") FROM (SELECT unnest("
+                        + "\"_floci_operand_source_1\".\"_floci_operand_1\")) AS \"_floci_derived_0\")"
+                        + " AS \"_floci_star_1\"",
+                sql("SELECT (SELECT STRUCT(1 AS a, 5 AS c)).* EXCEPT(a),"
+                        + " (SELECT STRUCT(2 AS b, 6 AS c)).* EXCEPT(b)"));
+    }
+
+    @Test
+    void multipleStructStarsSuffixCollisionsInSelectOrder() {
+        assertEquals("SELECT 99 AS c, \"_floci_star_1\".* EXCLUDE (\"a\"),"
+                        + " \"_floci_star_2\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'a': 1, 'c': 5} AS \"s\") t, (SELECT {'b': 2, 'c': 6} AS \"s\") u,"
+                        + " (SELECT * RENAME (\"c\" AS \"c_1\") FROM (SELECT unnest(t.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\","
+                        + " (SELECT * RENAME (\"c\" AS \"c_2\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_1\") AS \"_floci_star_2\"",
+                sql("SELECT 99 AS c, t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 5 AS c) s) t, (SELECT STRUCT(2 AS b, 6 AS c) s) u"));
+    }
+
+    @Test
+    void structStarRewritesLeaveTheWholeSetsTrailingClausesOutside() {
+        assertEquals("SELECT 1 AS x UNION ALL SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 0, 'c': 2} AS \"s\") t) AS \"_expanded\" ORDER BY x",
+                sql("SELECT 1 AS x UNION ALL SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s) t ORDER BY x"));
+    }
+
+    @Test
+    void parenthesizedSetArmKeepsItsOwnOrderAndLimit() {
+        assertEquals("SELECT 0 AS c UNION ALL (SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 0, 'c': 2} AS \"s\", 3 AS id) t ORDER BY t.id)"
+                        + " AS \"_expanded\" LIMIT 1)",
+                sql("SELECT 0 AS c UNION ALL (SELECT t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(0 AS a, 2 AS c) s, 3 AS id) t ORDER BY t.id LIMIT 1)"));
+    }
+
+    @Test
+    void multipleStructStarReplacementKeepsANestedStructFieldName() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"z\"),"
+                        + " \"_floci_star_1\".* REPLACE ({'x': 1} AS y)"
+                        + " FROM (SELECT {'x': 1, 'z': 0} AS \"s\") t, (SELECT {'x': 2, 'y': 3} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"x\" AS \"x_1\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(z), u.s.* REPLACE(STRUCT(1 AS x) AS y)"
+                        + " FROM (SELECT STRUCT(1 AS x, 0 AS z) s) t, (SELECT STRUCT(2 AS x, 3 AS y) s) u"));
+    }
+
+    @Test
+    void multipleStructStarReplacementHandlesAnArrayLiteralTarget() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"z\"),"
+                        + " \"_floci_star_1\".* REPLACE ([10,20] AS \"x_1\")"
+                        + " FROM (SELECT {'x': 1, 'z': 0} AS \"s\") t, (SELECT {'x': 2} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"x\" AS \"x_1\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT t.s.* EXCEPT(z), u.s.* REPLACE([10,20] AS x)"
+                        + " FROM (SELECT STRUCT(1 AS x, 0 AS z) s) t, (SELECT STRUCT(2 AS x) s) u"));
+    }
+
+    @Test
+    void structStarReplaceReadsAMergedUsingColumn() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
+                        + " FROM (SELECT unnest(u.s), COALESCE(\"t\".\"c\", \"u\".\"c\") AS \"_floci_source_0\""
+                        + " FROM (SELECT 1 AS c) t RIGHT JOIN (SELECT 2 AS c, {'a': 0} AS \"s\") u USING(c))"
+                        + " AS \"_expanded\"",
+                sql("SELECT u.s.* REPLACE(c AS a) FROM (SELECT 1 AS c) t"
+                        + " RIGHT JOIN (SELECT 2 AS c, STRUCT(0 AS a) s) u USING(c)"));
+    }
+
+    @Test
+    void multipleStructStarsRenameAReplacedFieldInsideItsExpansion() {
+        assertEquals("SELECT \"_floci_star_0\".* REPLACE (10 AS a),"
+                        + " \"_floci_star_1\".* REPLACE (20 AS \"a_1\")"
+                        + " FROM (SELECT {'a': 1} AS \"s\") t, (SELECT {'a': 2} AS \"s\") u,"
+                        + " (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT * RENAME (\"a\" AS \"a_1\") FROM (SELECT unnest(u.s))"
+                        + " AS \"_floci_derived_0\") AS \"_floci_star_1\"",
+                sql("SELECT t.s.* REPLACE(10 AS a), u.s.* REPLACE(20 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS a) s) u"));
+    }
+
+    @Test
+    void groupedStructStarRenameWrapperCarriesTheTailHelpers() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_replacement_0\", \"_floci_aggregate_0\")"
+                        + " RENAME (\"_floci_projection_1\" AS \"a_1\")"
+                        + " FROM (SELECT \"_floci_star_fields\".* REPLACE (\"_floci_replacement_0\" AS \"a\"),"
+                        + " \"_floci_projection_1\", \"_floci_group\".\"_floci_replacement_0\","
+                        + " \"_floci_group\".\"_floci_aggregate_0\""
+                        + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", 99 AS \"_floci_projection_1\","
+                        + " SUM(t.id) AS \"_floci_replacement_0\", MAX(t.id) AS \"_floci_aggregate_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id) t GROUP BY t.s) AS \"_floci_group\","
+                        + " (SELECT unnest(\"_floci_group\".\"_floci_star\")) AS \"_floci_star_fields\")"
+                        + " AS \"_floci_renamed_groups\" ORDER BY \"_floci_aggregate_0\"",
+                sql("SELECT t.s.* REPLACE(SUM(t.id) AS a), 99 AS a"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id) t GROUP BY t.s ORDER BY MAX(t.id)"));
+    }
+
+    @Test
+    void groupByAllPositionsSkipWindowExpressions() {
+        assertEquals("SELECT * EXCLUDE (\"a\"), ROW_NUMBER() OVER () AS rn FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t) AS \"_expanded\" GROUP BY 1"
+                        + " QUALIFY rn = 1",
+                sql("SELECT t.s.* EXCEPT(a), ROW_NUMBER() OVER () AS rn"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL QUALIFY rn = 1"));
+    }
+
+    @Test
+    void multipleStructStarReplaceQualifiesTheSourceOfABareName() {
+        assertEquals("SELECT \"_floci_star_0\".* REPLACE (\"v\".\"x\" AS a),"
+                        + " \"_floci_star_1\".* EXCLUDE (\"b\")"
+                        + " FROM (SELECT {'a': 1, 'x': 2} AS \"s\") t, (SELECT {'b': 2, 'd': 8} AS \"s\") u,"
+                        + " (SELECT 5 AS x) v, (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\"",
+                sql("SELECT t.s.* REPLACE(x AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u,"
+                        + " (SELECT 5 AS x) v"));
+    }
+
+    @Test
+    void multipleStructStarsKeepGroupByAllReadableWithQualify() {
+        assertEquals("SELECT \"_floci_star_0\".* EXCLUDE (\"a\"), \"_floci_star_1\".* EXCLUDE (\"b\"),"
+                        + " COUNT(*) AS n FROM (SELECT {'a': 1, 'c': 'x'} AS \"s\") t,"
+                        + " (SELECT {'b': 2, 'd': 20} AS \"s\") u , (SELECT unnest(t.s)) AS \"_floci_star_0\","
+                        + " (SELECT unnest(u.s)) AS \"_floci_star_1\" GROUP BY 1, 2"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b), COUNT(*) AS n"
+                        + " FROM (SELECT STRUCT(1 AS a, 'x' AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"
+                        + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1"));
+    }
+
+    @Test
+    void multipleStructStarsStayInOneSetOperationArm() {
+        String translated = sql("SELECT t.s.* EXCEPT(a), u.s.* EXCEPT(b)"
+                + " FROM (SELECT STRUCT(1 AS a, 10 AS c) s) t, (SELECT STRUCT(2 AS b, 20 AS d) s) u"
+                + " UNION ALL SELECT 3, 4");
+        assertTrue(translated.endsWith("(SELECT unnest(u.s)) AS \"_floci_star_1\"  UNION ALL SELECT 3, 4"),
+                translated);
+    }
+
+    @Test
+    void multipleStructStarsRejectAStarTheStructDoesNotHave() {
+        assertEquals("Column z in SELECT * EXCEPT list does not exist",
+                invalid("SELECT t.s.* EXCEPT(z), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Column z in SELECT * REPLACE list does not exist",
+                invalid("SELECT t.s.* REPLACE(10 AS z), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Column a cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT t.s.* EXCEPT(a) REPLACE(10 AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u").getMessage());
+        assertEquals("Unrecognized name: x",
+                invalid("SELECT t.s.* REPLACE(x AS a), u.s.* EXCEPT(b)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS x) s) t, (SELECT STRUCT(2 AS b, 8 AS d) s) u")
+                        .getMessage());
+    }
+
+    @Test
+    void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
+        String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
+        assertEquals("MAX is not defined for arguments of type STRUCT",
+                invalid("SELECT MAX(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("MAX is not defined for arguments of type STRUCT",
+                invalid("SELECT MAX(t.s).*" + base).getMessage());
+        assertEquals("MIN is not defined for arguments of type STRUCT",
+                invalid("SELECT MIN(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for type INT64",
+                invalid("SELECT COUNT(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for type ARRAY",
+                invalid("SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base).getMessage());
+        assertEquals("Dot-star is not supported for the aggregate expression",
+                invalid("SELECT MAX(t.s.a).*" + base).getMessage());
+        // ANY_VALUE keeps its input type, so it can still expand a STRUCT.
+        assertTrue(sql("SELECT ANY_VALUE(t.s).* EXCEPT(a)" + base + " GROUP BY ALL")
+                .contains("ANY_VALUE(t.s) AS \"_floci_star\""));
+        assertTrue(sql("SELECT g, ANY_VALUE(s).*, MAX(x) AS m FROM ds.t GROUP BY g")
+                .contains("unnest(ANY_VALUE(s))"));
+    }
+
+    @Test
     void structStarReplaceResolvesColumnsOfTheQuerySources() {
         SqlDialectTranslator.TableRef table = new SqlDialectTranslator.TableRef("ds", "t");
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\", \"_floci_source_1\")"
@@ -1708,6 +2040,62 @@ class SqlDialectTranslatorTest {
                         + " AS \"_expanded\" ORDER BY b LIMIT 1",
                 sql("SELECT t.s.* REPLACE (-t.s.b AS b)"
                         + " FROM (SELECT STRUCT(1 AS b) s UNION ALL SELECT STRUCT(2 AS b)) t ORDER BY b LIMIT 1"));
+    }
+
+    @Test
+    void structStarOrderByReadsAnExpandedFieldOutsideTheWrapper() {
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 5 AS id) t) AS \"_expanded\" ORDER BY b",
+                sql("SELECT t.s.* EXCEPT (a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 5 AS id) t"
+                        + " ORDER BY b"));
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s), t.id"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 5 AS id) t) AS \"_expanded\""
+                        + " ORDER BY UPPER(b)",
+                sql("SELECT t.s.* EXCEPT (a), t.id FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 5 AS id) t"
+                        + " ORDER BY UPPER(b)"));
+        // The expanded field wins over a source column of the same name, as BigQuery's output alias does.
+        assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\", 9 AS b) t) AS \"_expanded\" ORDER BY b DESC",
+                sql("SELECT t.s.* EXCEPT (a) FROM (SELECT STRUCT(1 AS a, 'x' AS b) s, 9 AS b) t ORDER BY b DESC"));
+    }
+
+    @Test
+    void structStarOrderByReplacedFieldPathSortsByTheReplacement() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE ({'n': \"_floci_source_0\"} AS a)"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id UNION ALL SELECT {'a': 2} AS \"$col1\", 3 AS \"$col2\") t)"
+                        + " AS \"_expanded\" ORDER BY ({'n': \"_floci_source_0\"}).n DESC",
+                sql("SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(2 AS a), 3) t"
+                        + " ORDER BY a.n DESC"));
+    }
+
+    @Test
+    void structStarReplaceResolvesAUsingJoinColumn() {
+        assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE (\"_floci_source_0\" AS a)"
+                        + " FROM (SELECT unnest(t.s), COALESCE(\"t\".\"c\", \"u\".\"c\") AS \"_floci_source_0\""
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS c) t JOIN (SELECT 5 AS c) u USING (c))"
+                        + " AS \"_expanded\"",
+                sql("SELECT t.s.* REPLACE (c AS a) FROM (SELECT STRUCT(1 AS a) s, 5 AS c) t"
+                        + " JOIN (SELECT 5 AS c) u USING (c)"));
+    }
+
+    @Test
+    void structStarGroupByAllKeepsQualifyWithExplicitGroupingPositions() {
+        assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'x'} AS \"$col1\""
+                        + " UNION ALL SELECT {'a': 3, 'b': 'y'} AS \"$col1\") t) AS \"_expanded\" GROUP BY 1"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1",
+                sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t"
+                        + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1"));
+        assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'y'} AS \"$col1\") t)"
+                        + " AS \"_expanded\" GROUP BY 1 HAVING COUNT(*) > 0"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1",
+                sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
+                        + " UNION ALL SELECT STRUCT(2 AS a, 'y' AS b)) t GROUP BY ALL HAVING COUNT(*) > 0"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1"));
     }
 
     @Test

@@ -2658,6 +2658,11 @@ final class SqlDialectTranslator {
         if (starFields != null) {
             reservedNames.addAll(starFields);
         }
+        Set<String> outputStarFields = starFields;
+        if (starFields != null) {
+            outputStarFields = new HashSet<>(starFields);
+            outputStarFields.removeAll(excludedNames);
+        }
         List<String> outputNames = new ArrayList<>();
         for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
             if (itemIndex == targetItem) {
@@ -2757,7 +2762,7 @@ final class SqlDialectTranslator {
         RewrittenTail tail = rewriteStructStarClauses(items.getLast()[1], end, queryDepth,
                 distinct || replaceOpen >= 0 || starOutputOrder, targetStart, targetDot, replaceOpen, replaceClose,
                 renameTargets, sources, itemColumns, sourceReferences, structProjections, replacedNames,
-                starFields, innerNames);
+                outputStarFields, innerNames);
         end -= tail.removed();
         List<Token> replacement = List.of();
         if (replaceOpen >= 0) {
@@ -4454,21 +4459,37 @@ final class SqlDialectTranslator {
                 }
             }
         }
+        Set<String> reservedOutputNames = new HashSet<>();
+        for (int index = 0; index < items.size(); index++) {
+            String name = outputNames.get(index);
+            if (name != null) {
+                reservedOutputNames.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
         Map<Integer, String> renamedItems = new HashMap<>();
         Map<String, String> renamedStarFields = new LinkedHashMap<>();
         Set<String> claimedOutputNames = new HashSet<>();
+        // A generated suffix must not take an explicit sibling alias or a field the star still expands.
+        Set<String> unavailableOutputNames = new HashSet<>(reservedOutputNames);
+        for (String field : expandedStarFields) {
+            unavailableOutputNames.add(field.toLowerCase(Locale.ROOT));
+        }
         for (int index = 0; index < items.size(); index++) {
             if (index == targetItem) {
                 for (String field : expandedStarFields) {
                     if (!claimedOutputNames.add(field.toLowerCase(Locale.ROOT))) {
-                        renamedStarFields.put(field, suffixedName(field, claimedOutputNames));
+                        String renamed = suffixedName(field, unavailableOutputNames);
+                        claimedOutputNames.add(renamed.toLowerCase(Locale.ROOT));
+                        renamedStarFields.put(field, renamed);
                     }
                 }
                 continue;
             }
             String name = outputNames.get(index);
             if (name != null && !claimedOutputNames.add(name.toLowerCase(Locale.ROOT))) {
-                renamedItems.put(index, suffixedName(name, claimedOutputNames));
+                String renamed = suffixedName(name, unavailableOutputNames);
+                claimedOutputNames.add(renamed.toLowerCase(Locale.ROOT));
+                renamedItems.put(index, renamed);
             }
         }
         int[] substitutions = new int[1];
@@ -4845,8 +4866,8 @@ final class SqlDialectTranslator {
                         dropped = rewriteQualifiedOrderItem(range[0], range[1], sourceAliases, sources, itemColumns,
                                 sourceReferences);
                         if (dropped < 0) {
-                            dropped = rewriteBareSourcePathOrderItem(range[0], range[1], sources,
-                                    sourceReferences);
+                            dropped = rewriteBareSourcePathOrderItem(range[0], range[1], sources, starFields,
+                                    innerNames, sourceReferences);
                         }
                     }
                     if (dropped > 0) {
@@ -5009,6 +5030,7 @@ final class SqlDialectTranslator {
      * Returns 0 when the item was rewritten in place, or -1 for a shape it cannot map.
      */
     private int rewriteBareSourcePathOrderItem(int start, int end, StructStarSources sources,
+                                               Set<String> starFields, List<String> innerNames,
                                                Map<String, SourceReference> sourceReferences) {
         int first = nextSignificant(start, end);
         if (first < 0 || !isName(tokens.get(first)) || isPrecededByDot(first)) {
@@ -5025,7 +5047,13 @@ final class SqlDialectTranslator {
                 return -1;
             }
         }
-        String reference = bareSourceReference(sources, tokens.get(first).identifierText(), sourceReferences);
+        String name = tokens.get(first).identifierText();
+        boolean output = innerNames.stream().anyMatch(inner -> inner != null && inner.equalsIgnoreCase(name));
+        if (output || starFields != null && starFields.contains(name.toLowerCase(Locale.ROOT))) {
+            // The path names an expanded field or a sibling output, which the wrapper still exposes.
+            return -1;
+        }
+        String reference = bareSourceReference(sources, name, sourceReferences);
         if (reference == null) {
             return -1;
         }

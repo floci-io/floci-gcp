@@ -2083,6 +2083,18 @@ class SqlDialectTranslatorTest {
                 + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL");
         assertTrue(replaced.startsWith("SELECT * FROM (SELECT 5 AS b"), replaced);
         assertTrue(replaced.contains(") AS \"_floci_duplicate_names\""), replaced);
+
+        String reserved = sql("SELECT t.s.* EXCEPT(a), t.id AS b, -t.id AS b_1"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 1 AS id"
+                + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b), 2) t GROUP BY ALL ORDER BY b_1");
+        assertTrue(reserved.contains("AS \"b_2\""), reserved);
+        assertFalse(reserved.contains("b_1_1"), reserved);
+
+        String expanded = sql("SELECT t.s.* EXCEPT(a), t.id AS b"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s, 1 AS id"
+                + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1), 2) t GROUP BY ALL");
+        assertTrue(expanded.contains("AS \"b_2\""), expanded);
+        assertFalse(expanded.contains("b_1_1"), expanded);
     }
 
     @Test
@@ -2113,6 +2125,13 @@ class SqlDialectTranslatorTest {
                 + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id, STRUCT(7 AS n) u"
                 + " UNION ALL SELECT STRUCT(2 AS a), 3, STRUCT(9 AS n)) t ORDER BY t.u.n DESC");
         assertTrue(qualified.contains("ORDER BY \"_floci_source_0\".n DESC"), qualified);
+
+        String expanded = sql("SELECT t.s.* REPLACE(9 AS a)"
+                + " FROM (SELECT STRUCT(1 AS a, STRUCT(1 AS n) AS u) s, STRUCT(9 AS n) u"
+                + " UNION ALL SELECT STRUCT(2 AS a, STRUCT(2 AS n) AS u), STRUCT(0 AS n)) t"
+                + " ORDER BY u.n");
+        assertTrue(expanded.contains("ORDER BY u.n"), expanded);
+        assertFalse(expanded.contains("\"t\".\"u\" AS"), expanded);
     }
 
     @Test

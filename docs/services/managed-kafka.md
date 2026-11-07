@@ -105,8 +105,18 @@ curl -X DELETE \
 - `RestartConnector`
 - `StopConnector`
 
-This is the full `ManagedKafka` v1 RPC surface plus `ManagedKafkaConnect`. The Schema Registry
-service is not served.
+**Schema Registry (`ManagedSchemaRegistry`):**
+
+- `CreateSchemaRegistry`, `GetSchemaRegistry`, `ListSchemaRegistries`, `DeleteSchemaRegistry`
+- `CreateVersion`, `LookupVersion`, `GetVersion`, `ListVersions`, `DeleteVersion`
+- `ListSubjects`, `DeleteSubject`, `GetSchema`, `CheckCompatibility`
+- `GetSchemaConfig`, `UpdateSchemaConfig`, `DeleteSchemaConfig`
+- `GetSchemaMode`, `UpdateSchemaMode`, `DeleteSchemaMode`
+
+This is the full `ManagedKafka` v1 RPC surface plus `ManagedKafkaConnect`, and the Schema Registry
+methods above. Contexts (`GetContext`, `ListContexts` and the `contexts/*` bindings), `GetRawSchema`,
+`GetRawSchemaVersion`, `ListSchemaVersions`, `ListSchemaTypes`, `ListSubjectsBySchemaId` and
+`ListReferencedSchemas` are not served yet.
 
 ## ACLs
 
@@ -211,3 +221,58 @@ Connect cluster deletes its connectors. `taskRestartPolicy` has no Kafka Connect
 is stored and read back but does not change how the worker restarts tasks. Workers do not outlive
 the emulator process: they stop on shutdown, like the Redpanda containers, and are not restarted
 on the next start.
+
+## Schema Registry
+
+A schema registry lives under a project and location, not under a Kafka cluster, and a project
+can have several. The routes under a registry mirror the Confluent Schema Registry API, so a
+Confluent serializer or deserializer configured with
+`schema.registry.url=http://localhost:4588/v1/projects/<project>/locations/<location>/schemaRegistries/<registry>`
+works unchanged (request bodies are accepted with `application/vnd.schemaregistry.v1+json`).
+
+Outside mock mode, each registry runs in its own Redpanda container (the same
+`FLOCI_GCP_SERVICES_KAFKA_DEFAULT_IMAGE`), whose built-in schema registry stores the schemas and
+checks Avro, Protobuf and JSON Schema compatibility. `CreateSchemaRegistry` returns once the
+registry answers, usually within a few seconds. The container stops with the emulator and starts
+again on the registry's first use after a restart; its data is kept on the registry's volume.
+Deleting the registry removes the container. Its data is removed too when storage mode is
+`memory`; in the persistent modes the volume (or host directory) is kept unless
+`prune-volumes-on-delete` is enabled, which it is not by default.
+
+In mock mode the registry is kept in the emulator's storage with the Confluent rules for schema
+ids, versions, soft and hard deletes, config and mode, but schemas are not checked for
+compatibility (`CheckCompatibility` always answers `is_compatible: true`) and only Avro and JSON
+Schema payloads are checked for being valid JSON.
+
+```bash
+R=http://localhost:4588/v1/projects/floci-local/locations/us-central1/schemaRegistries
+
+curl -X POST "$R" -H 'Content-Type: application/json' -d '{"schemaRegistryId":"my_registry"}'
+
+# Register a schema (CreateVersion returns {"id": ...}) and read it back by id
+curl -X POST "$R/my_registry/subjects/orders-value/versions" \
+  -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+  -d '{"schema":"{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"}]}"}'
+curl "$R/my_registry/schemas/ids/1"
+curl "$R/my_registry/subjects/orders-value/versions/latest"
+
+# Compatibility level and mode
+curl -X PUT "$R/my_registry/config/orders-value" -H 'Content-Type: application/json' -d '{"compatibility":"FULL"}'
+curl -X PUT "$R/my_registry/mode" -H 'Content-Type: application/json' -d '{"mode":"READONLY"}'
+```
+
+Deviations and unverified behaviour:
+
+- `ListSubjects`, `DeleteSubject`, `ListVersions` and `DeleteVersion` return `google.api.HttpBody`
+  in the proto; floci returns the Confluent JSON (`["orders-value"]`, `[1, 2]`, `2`) as the body.
+- Registry errors use the Google error envelope with the Confluent message: an unknown subject,
+  version or schema is `404 NOT_FOUND`, an incompatible schema is `400 FAILED_PRECONDITION`, and an
+  invalid schema, compatibility level or mode, or a write in `READONLY` mode, is
+  `400 INVALID_ARGUMENT`. Production's status codes and messages for these were not verified.
+- `UpdateSchemaConfig` with `normalize: true` is `400 INVALID_ARGUMENT`: Redpanda does not store
+  `normalize` in a config. Pass `normalize` on `CreateVersion` or `LookupVersion` instead.
+- `CheckCompatibility` against `compatibility/subjects/<subject>/versions` (no version) checks
+  every version for the `*_TRANSITIVE` levels and the latest version otherwise, and answers
+  `is_compatible: true` for a subject with no versions.
+- The registry id must start with a letter and contain only letters, digits and underscores, up
+  to 63 characters, as the proto describes; other ids are `400 INVALID_ARGUMENT`.

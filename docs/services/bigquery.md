@@ -574,11 +574,15 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `+0000` and `+00:00`. `PARSE_DATE`, `PARSE_DATETIME` and `PARSE_TIMESTAMP` need a constant
   format (a literal or a query parameter): DuckDB's `strptime` takes no format read from a column.
   `FORMAT_*` accepts a format read from a column.
-- A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP`
-  when compared with one, but only with an uppercase `T` and `Z`, `UTC` or a numeric offset. A lowercase
-  `t` or `z` (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) or a time zone name
-  (`2014-09-27 12:30:00.45 America/Los_Angeles`) is not coerced, and the comparison fails with
-  `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`; BigQuery accepts all three.
+- A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
+  compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
+  time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. Three forms differ: a lowercase `t`
+  or `z` (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) is not coerced, and the comparison fails
+  with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where BigQuery accepts
+  both; a lowercase zone name (`america/los_angeles`) is accepted, where BigQuery fails with `Invalid time
+  zone`; and a value with a zone name compared with a `DATE` succeeds, where BigQuery fails with `Invalid
+  date`. An unknown zone name fails with DuckDB's `Unknown TimeZone` rather than BigQuery's `Invalid time
+  zone`.
 - `NUMERIC` and `BIGNUMERIC` are computed as `DECIMAL(38, 9)`.
 - `TIMESTAMP` values are staged as ISO-8601 strings for DuckDB, including values nested inside
   `RECORD` or `REPEATED` columns; the BigQuery wire format continues to use epoch seconds.

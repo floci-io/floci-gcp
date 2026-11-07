@@ -11577,9 +11577,15 @@ final class SqlDialectTranslator {
             this.positional = "POSITIONAL".equalsIgnoreCase(parameterMode);
         }
 
-        /** A STRING parameter value shaped like a DATE, DATETIME or TIMESTAMP literal. */
+        /**
+         * A STRING parameter value shaped like a DATE, DATETIME or TIMESTAMP literal: an uppercase {@code T}
+         * and {@code Z}, {@code UTC}, a numeric offset or a time zone name such as {@code America/Los_Angeles} or
+         * {@code EST5EDT} (which DuckDB reads through ICU, loaded by the session's {@code SET TimeZone}). A
+         * lowercase {@code t} or {@code z} is left out: DuckDB cannot parse it.
+         */
         private static final Pattern TEMPORAL_STRING = Pattern.compile(
-                "\\d{4}-\\d{1,2}-\\d{1,2}([ T]\\d{1,2}:\\d{2}(:\\d{2}(\\.\\d{1,9})?)?)?\\s*(Z|UTC|[+-]\\d{1,2}(:?\\d{2})?)?");
+                "\\d{4}-\\d{1,2}-\\d{1,2}([ T]\\d{1,2}:\\d{2}(:\\d{2}(\\.\\d{1,9})?)?)?"
+                        + "\\s*(Z|UTC|[+-]\\d{1,2}(:?\\d{2})?|(?!z$)[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*)?");
 
         static QueryParameters none() {
             return new QueryParameters(List.of(), null);

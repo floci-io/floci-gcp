@@ -1,7 +1,6 @@
 package io.floci.gcp.services.gcs;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamIdentityKind;
@@ -63,13 +62,11 @@ public class GcsIamAuthorizationAdapter implements IamAuthorizationAdapter {
     }
 
     public IamResource bucketResource(String bucket) {
-        GcsBucket stored = services.get().getBucket(bucket);
-        return IamResource.gcsBucket(bucket, stored.getProjectId());
+        return IamResource.gcsBucket(bucket, services.get().bucketProject(bucket));
     }
 
     public IamResource objectResource(String bucket, String object) {
-        GcsBucket stored = services.get().getBucket(bucket);
-        return IamResource.gcsObject(bucket, object, stored.getProjectId());
+        return IamResource.gcsObject(bucket, object, services.get().bucketProject(bucket));
     }
 
     @Override

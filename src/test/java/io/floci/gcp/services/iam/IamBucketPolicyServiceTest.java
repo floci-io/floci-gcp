@@ -59,6 +59,7 @@ class IamBucketPolicyServiceTest {
         GcsBucket storedBucket = new GcsBucket();
         storedBucket.setProjectId("test-project");
         when(gcsService.getBucket(bucket)).thenReturn(storedBucket);
+        when(gcsService.bucketProject(bucket)).thenReturn("test-project");
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);

@@ -103,7 +103,7 @@ final class GcsServiceUsageAdapter implements ServiceUsageAdapter {
 
     private Optional<String> projectOfBucket(String bucket) {
         try {
-            return Optional.ofNullable(service.getBucket(bucket).getProjectId());
+            return Optional.of(service.bucketProject(bucket));
         } catch (GcpException expected) {
             // A bucket that does not exist has no owner: the generic resolution applies and the
             // handler answers 404.

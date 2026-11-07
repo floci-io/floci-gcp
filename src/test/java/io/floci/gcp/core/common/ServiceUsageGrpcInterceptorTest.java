@@ -111,11 +111,11 @@ class ServiceUsageGrpcInterceptorTest {
 
     @Test
     void projectFromRoutingHeader() {
-        assertEquals("p1", ServiceUsageGrpcInterceptor.projectFromHeader("topic=projects%2Fp1%2Ftopics%2Ft"));
-        assertEquals("p2", ServiceUsageGrpcInterceptor.projectFromHeader("project_id=p2&database_id="));
-        assertEquals("p3", ServiceUsageGrpcInterceptor.projectFromHeader("parent=projects/p3/locations/us"));
-        assertNull(ServiceUsageGrpcInterceptor.projectFromHeader("bucket=projects%2F_%2Fbuckets%2Fb"));
-        assertNull(ServiceUsageGrpcInterceptor.projectFromHeader(null));
+        assertEquals("p1", RequestTarget.routedProject("topic=projects%2Fp1%2Ftopics%2Ft"));
+        assertEquals("p2", RequestTarget.routedProject("project_id=p2&database_id="));
+        assertEquals("p3", RequestTarget.routedProject("parent=projects/p3/locations/us"));
+        assertNull(RequestTarget.routedProject("bucket=projects%2F_%2Fbuckets%2Fb"));
+        assertNull(RequestTarget.routedProject(null));
     }
 
     @Test
@@ -147,7 +147,7 @@ class ServiceUsageGrpcInterceptorTest {
         CreateReadSessionRequest session = CreateReadSessionRequest.newBuilder()
                 .setParent("projects/a")
                 .setReadSession(ReadSession.newBuilder().setTable("projects/b/datasets/d/tables/t")).build();
-        assertEquals(List.of("a", "b"), ServiceUsageGrpcInterceptor.projectsFromMessage(session,
+        assertEquals(List.of("a", "b"), RequestTarget.projects(session,
                 Set.of("bigquerystorage.googleapis.com", "bigquery.googleapis.com")));
         assertEquals(List.of("a"), projects("bigquerystorage.googleapis.com", session));
         assertEquals(List.of("a", "b"), projects("pubsub.googleapis.com", PublishRequest.newBuilder()
@@ -173,7 +173,7 @@ class ServiceUsageGrpcInterceptorTest {
     private static List<String> projects(String api, Message... messages) {
         Set<String> projects = new LinkedHashSet<>();
         for (Message message : messages) {
-            projects.addAll(ServiceUsageGrpcInterceptor.projectsFromMessage(message, Set.of(api)));
+            projects.addAll(RequestTarget.projects(message, Set.of(api)));
         }
         return List.copyOf(projects);
     }

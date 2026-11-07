@@ -2,6 +2,7 @@ package io.floci.gcp.services.firestore;
 
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Message;
+import io.floci.gcp.core.common.RequestTarget;
 import io.floci.gcp.core.common.ServiceUsageAdapter;
 
 import java.util.LinkedHashSet;
@@ -41,7 +42,7 @@ final class FirestoreServiceUsageAdapter implements ServiceUsageAdapter {
                             ? List.of(message.getField(field)) : List.of();
             for (Object value : values) {
                 if (value instanceof String name && RESOURCE_FIELDS.contains(field.getName())) {
-                    String project = ServiceUsageAdapter.projectOf(name);
+                    String project = RequestTarget.projectOf(name);
                     if (project != null) {
                         projects.add(project);
                     }

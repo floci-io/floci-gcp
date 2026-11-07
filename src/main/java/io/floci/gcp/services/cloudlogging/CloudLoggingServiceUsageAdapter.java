@@ -5,6 +5,7 @@ import com.google.logging.v2.ListLogEntriesRequest;
 import com.google.logging.v2.LogEntry;
 import com.google.logging.v2.WriteLogEntriesRequest;
 import com.google.protobuf.Message;
+import io.floci.gcp.core.common.RequestTarget;
 import io.floci.gcp.core.common.ServiceUsageAdapter;
 
 import java.util.Collection;
@@ -60,7 +61,7 @@ final class CloudLoggingServiceUsageAdapter implements ServiceUsageAdapter {
     private static List<String> projects(Collection<String> resourceNames) {
         Set<String> projects = new LinkedHashSet<>();
         for (String name : resourceNames) {
-            String project = ServiceUsageAdapter.projectOf(name);
+            String project = RequestTarget.projectOf(name);
             if (project != null) {
                 projects.add(project);
             }

@@ -3,6 +3,7 @@ package io.floci.gcp.services.iam.authorization;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.RequestBody;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -13,7 +14,6 @@ import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.ext.Provider;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -48,15 +48,12 @@ public class IamRestAuthorizationFilter implements ContainerRequestFilter {
             return;
         }
         JsonNode body = mapper.createObjectNode();
-        if (context.hasEntity()) {
-            byte[] bytes = context.getEntityStream().readAllBytes();
-            context.setEntityStream(new ByteArrayInputStream(bytes));
-            if (bytes.length > 0) {
-                try {
-                    body = mapper.readTree(bytes);
-                } catch (IOException e) {
-                    throw GcpException.invalidArgument("Invalid JSON request body");
-                }
+        byte[] bytes = RequestBody.of(context);
+        if (bytes.length > 0) {
+            try {
+                body = mapper.readTree(bytes);
+            } catch (IOException e) {
+                throw GcpException.invalidArgument("Invalid JSON request body");
             }
         }
         Map<String, String> path = new LinkedHashMap<>();

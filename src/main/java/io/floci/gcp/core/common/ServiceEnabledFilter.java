@@ -15,7 +15,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
@@ -139,12 +138,8 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         }
 
         private JsonNode readBody() {
-            if (!ctx.hasEntity()) {
-                return mapper.createObjectNode();
-            }
             try {
-                byte[] bytes = ctx.getEntityStream().readAllBytes();
-                ctx.setEntityStream(new ByteArrayInputStream(bytes));
+                byte[] bytes = RequestBody.of(ctx);
                 JsonNode parsed = bytes.length > 0 ? mapper.readTree(bytes) : null;
                 return parsed != null && parsed.isObject() ? parsed : mapper.createObjectNode();
             } catch (IOException e) {

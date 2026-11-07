@@ -632,7 +632,7 @@ public class IamService {
     public StoredServiceAccountKey getKey(String project, String emailOrId, String keyId) {
         ServiceAccountRef ref = resolve(project, emailOrId);
         return keyStore.get(keyStorageKey(ref.project(), ref.email(), keyId))
-                .orElseThrow(() -> GcpException.notFound("Key not found: " + keyId));
+                .orElseThrow(() -> missingKey(project, emailOrId, keyId));
     }
 
     public List<StoredServiceAccountKey> listKeys(String project, String emailOrId) {
@@ -651,9 +651,18 @@ public class IamService {
     public void deleteKey(String project, String emailOrId, String keyId) {
         ServiceAccountRef ref = resolve(project, emailOrId);
         String storageKey = keyStorageKey(ref.project(), ref.email(), keyId);
-        keyStore.get(storageKey).orElseThrow(() -> GcpException.notFound("Key not found: " + keyId));
+        keyStore.get(storageKey).orElseThrow(() -> missingKey(project, emailOrId, keyId));
         keyStore.delete(storageKey);
         LOG.debugf("deleteKey project=%s email=%s keyId=%s", ref.project(), ref.email(), keyId);
+    }
+
+    /** As documented for {@code projects/-/serviceAccounts/{account}/keys/{KEY_ID}} in iam-v1. */
+    private static GcpException missingKey(String project, String emailOrId, String keyId) {
+        if (WILDCARD_PROJECT.equals(project)) {
+            return GcpException.permissionDenied("Permission denied on resource (or it may not exist): "
+                    + "projects/-/serviceAccounts/" + emailOrId + "/keys/" + keyId);
+        }
+        return GcpException.notFound("Key not found: " + keyId);
     }
 
     /** IAM v1 {@code serviceAccounts.signBlob}: the response names the signature {@code signature}. */

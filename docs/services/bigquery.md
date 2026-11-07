@@ -470,19 +470,33 @@ come from DuckDB, so their wording differs from BigQuery's.
 
 ## Job locations
 
-A query job runs in one location, and every dataset it reads must live there:
+A job runs in one location, and every dataset it reads or writes must live there:
 
 - `jobReference.location` (`jobs.insert`) or `location` (`jobs.query`) sets the job's location.
-  When it is absent the job takes the location of the datasets the query references, and `US`
-  when it references none. Locations compare case-insensitively (`US` and `us` are the same), but
-  a multi-region and a region inside it are different locations (`US` is not `us-central1`).
-- A referenced dataset in another location returns 404 with reason `notFound` and the message
+  When it is absent the job takes the location of the datasets it references, then of its
+  destination table, and `US` when it has neither. Locations compare case-insensitively (`US` and
+  `us` are the same), but a multi-region and a region inside it are different locations (`US` is
+  not `us-central1`).
+- A dataset in another location returns 404 with reason `notFound` and the message
   `Not found: Dataset {project}:{dataset} was not found in location {LOCATION}`: an HTTP error
-  from `jobs.query`, a `DONE` job carrying `status.errorResult` from `jobs.insert`. A query that
-  reads datasets from two locations fails the same way. Only `SELECT` queries are checked so far;
-  DML and DDL statements run in the requested location (or `US`) without comparing it to the
-  datasets they touch.
-- A query that fails in `jobs.insert` is recorded in the location it had resolved to, so the
+  from `jobs.query`, a `DONE` job carrying `status.errorResult` from `jobs.insert`. A job that
+  touches datasets from two locations fails the same way. Dry runs report the same error.
+- What is compared:
+    - `SELECT`: every dataset it reads, and the dataset of `configuration.query.destinationTable`.
+    - `INSERT`, `UPDATE`, `DELETE`, `MERGE`: the target's dataset and every dataset they read.
+    - `TRUNCATE TABLE`, `ALTER TABLE`, `ALTER VIEW`, `DROP TABLE`, `DROP VIEW`: the target's
+      dataset, also when `IF EXISTS` finds no such table.
+    - `CREATE TABLE` and `CREATE VIEW`, in every form: the new table's dataset, also when
+      `IF NOT EXISTS` skips an existing table, and every dataset the query or `COPY` source reads.
+    - `DROP SCHEMA`: the dataset being dropped.
+    - Load jobs: the destination table's dataset.
+    - Copy jobs: the source datasets. A destination in another location is a cross-region copy.
+- A dataset that does not exist has nothing to compare, so the statement's own error applies, or
+  its `IF EXISTS` skip.
+- `CREATE SCHEMA` is not compared with anything: it creates the dataset in the job's location. It
+  ignores `OPTIONS`, including `location`. `IF NOT EXISTS` skips an existing dataset in any
+  location.
+- A job that fails in `jobs.insert` is recorded in the location it had resolved to, so the
   failed job is found there.
 - A dataset-qualified INFORMATION_SCHEMA view (`eu_ds.INFORMATION_SCHEMA.TABLES`) is checked like a
   table of that dataset. A region-qualified view (`region-eu.INFORMATION_SCHEMA.TABLES`) sets the

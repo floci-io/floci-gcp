@@ -871,6 +871,11 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT UPPER(w) AS w, STRUCT(w AS raw) AS s FROM UNNEST(['b', 'C', 'a']) w ORDER BY s.raw", "rows.collect { it.f[0].v }", "C,A,B"},
                 {"SELECT -x AS x, STRUCT(x AS n) AS s FROM UNNEST([1, 2, 3]) x ORDER BY s.n", "rows.collect { it.f[0].v }", "-1,-2,-3"},
                 {"SELECT x, STRUCT(1 AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.n, x DESC", "rows.collect { it.f[0].v }", "3,2,1"},
+                {"SELECT (SELECT AS STRUCT x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2,3"},
+                {"SELECT x, (SELECT AS STRUCT (SELECT MAX(y) * -1 FROM UNNEST([3, 1, 2]) y WHERE y <= x) AS n) AS s FROM UNNEST([1, 2, 3]) x ORDER BY s.n", "rows.collect { it.f[0].v }", "3,2,1"},
+                {"SELECT STRUCT(s.n * -1 AS n) AS s FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([1, 2, 3]) x) ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "-3,-2,-1"},
+                {"SELECT x, STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2 ORDER BY x", "rows.collect { it.f[0].v }", "1,2"},
+                {"SELECT DISTINCT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2 ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
                 {"SELECT t.s.n AS m, STRUCT(0 AS n) AS s FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t ORDER BY t.s.n", "rows.collect { it.f[0].v }", "1,2,3"},
                 {"SELECT STRUCT(MAX(t.s.n) AS n) AS s, t.s.n AS k FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t GROUP BY k HAVING t.s.n > 1 ORDER BY k", "rows.collect { it.f[1].v }", "2,3"},
         };

@@ -560,6 +560,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
+- A struct star with no `EXCEPT`/`REPLACE` list cannot be grouped by position or with `GROUP BY ALL`
+  (`SELECT t.s.* ... GROUP BY ALL`); BigQuery returns the expanded fields. A parenthesized indexed
+  aggregate star such as `(ARRAY_AGG(t))[OFFSET(0)].*` is not rewritten; the unparenthesized form is.
 - A star over a join that mixes `USING` with `ON` or comma joins, or an `UNPIVOT` combined with a
   `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
   name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived

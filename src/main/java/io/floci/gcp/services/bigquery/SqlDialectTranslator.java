@@ -579,7 +579,7 @@ final class SqlDialectTranslator {
                             + " ELSE _s.a[" + position + "] END";
             List<Token> replacement = new ArrayList<>();
             replacement.add(new Token(Kind.PUNCT, "(", "("));
-            replacement.add(Token.raw("list_transform([struct_pack(a := "));
+            replacement.add(Token.raw(INDEXED_AGGREGATE_PREFIX));
             replacement.addAll(array);
             replacement.add(Token.raw(", i := "));
             replacement.addAll(index);
@@ -4982,6 +4982,12 @@ final class SqlDialectTranslator {
     private static final Set<String> STRUCT_STAR_CLAUSES = Set.of("WHERE", "GROUP", "HAVING", "QUALIFY",
             "WINDOW", "ORDER", "LIMIT", "OFFSET");
 
+    /**
+     * The prefix {@code rewriteArraySubscripts} writes for an indexed aggregate and the later pinned
+     * aggregate-star validation and indexed-wildcard rewrites recognize. Keep the three uses in step.
+     */
+    private static final String INDEXED_AGGREGATE_PREFIX = "list_transform([struct_pack(a := ";
+
     /** True when the keyword at {@code index} opens a clause, not the {@code OFFSET} of {@code UNNEST ... WITH OFFSET}. */
     private boolean startsStructStarClause(int index) {
         Token token = tokens.get(index);
@@ -5652,7 +5658,7 @@ final class SqlDialectTranslator {
         int afterOpen = firstToken >= 0 && tokens.get(firstToken).isPunct("(")
                 ? nextNonSpace(firstToken + 1, end) : -1;
         if (afterOpen >= 0 && tokens.get(afterOpen).kind == Kind.RAW
-                && tokens.get(afterOpen).text.contains("list_transform([struct_pack(a := ")) {
+                && tokens.get(afterOpen).text.contains(INDEXED_AGGREGATE_PREFIX)) {
             // An indexed aggregate has already been rewritten to an array subscript, which yields one
             // element, so the dot-star applies to that element rather than to the aggregate's ARRAY.
             return;
@@ -9120,7 +9126,7 @@ final class SqlDialectTranslator {
         if (tokens.get(expressionEnd).isPunct(")")) {
             int openParen = matchingOpen(expressionEnd, "(", ")");
             return render(openParen, expressionEnd + 1).trim()
-                    .startsWith("(list_transform([struct_pack(a := ");
+                    .startsWith("(" + INDEXED_AGGREGATE_PREFIX);
         }
         return tokens.get(expressionEnd).kind == Kind.RAW;
     }
@@ -9150,7 +9156,7 @@ final class SqlDialectTranslator {
             } else if (tokens.get(expressionEnd).isPunct(")")) {
                 int openParen = matchingOpen(expressionEnd, "(", ")");
                 if (!render(openParen, expressionEnd + 1).trim()
-                        .startsWith("(list_transform([struct_pack(a := ")) {
+                        .startsWith("(" + INDEXED_AGGREGATE_PREFIX)) {
                     continue;
                 }
                 expressionStart = openParen;

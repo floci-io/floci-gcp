@@ -559,9 +559,10 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
-- A star over a `USING` join whose inputs repeat a column name, or an `UNPIVOT` that decorates only
-  one source of a join, keeps DuckDB's generated names and column order. A `* EXCEPT` over `PIVOT`
-  output that names a column the pivot does not produce is not rejected.
+- A star over a join that mixes `USING` with `ON` or comma joins, or an `UNPIVOT` combined with a
+  `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
+  name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived
+  from literal `IN` values and aggregate aliases is not validated.
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
   `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
   yet; they fail with `invalidQuery`.

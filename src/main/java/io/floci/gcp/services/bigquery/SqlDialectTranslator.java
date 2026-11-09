@@ -6216,11 +6216,13 @@ final class SqlDialectTranslator {
         return written;
     }
 
+    private record PivotShape(List<String> remaining, List<String> generated) {}
+
     /**
-     * The source columns a PIVOT keeps unchanged: its base columns minus the FOR column and the columns
-     * its aggregates consume. Those are the written names a star's EXCEPT list resolves against.
+     * The names a PIVOT writes: the source columns it keeps unchanged (base columns minus the FOR column
+     * and the columns its aggregates consume), then one column per aggregate and IN value.
      */
-    private List<String> pivotRemainingFields(int select) {
+    private PivotShape pivotShape(int select) {
         int depth = parenthesisDepth(select);
         int from = namesFromClause(select, depth);
         if (from < 0) {
@@ -6288,7 +6290,66 @@ final class SqlDialectTranslator {
                 remaining.add(field);
             }
         }
-        return remaining;
+        int inKeyword = keywordAtDepth(forKeyword + 1, close, contentsDepth, "IN");
+        List<String> generated = inKeyword < 0 ? null
+                : pivotGeneratedNames(open + 1, forKeyword, inKeyword, close);
+        return new PivotShape(remaining, generated);
+    }
+
+    /**
+     * The output name of each PIVOT aggregate column in DuckDB's output order: aggregate-major, then IN
+     * value. A single unnamed aggregate is named by its value; every other aggregate needs an alias,
+     * which GoogleSQL emits as {@code <alias>_<value>}. Null when a name cannot be derived.
+     */
+    private List<String> pivotGeneratedNames(int aggregatesStart, int forIndex, int inIndex, int close) {
+        List<String> prefixes = new ArrayList<>();
+        for (int[] range : argumentRanges(aggregatesStart, forIndex)) {
+            int as = topLevelAs(range[0], range[1]);
+            int alias = as >= 0 ? nextSignificant(as + 1, range[1]) : implicitSelectAlias(range[0], range[1]);
+            prefixes.add(alias < 0 ? null : tokens.get(alias).identifierText());
+        }
+        int valuesOpen = nextSignificant(inIndex + 1, close);
+        if (valuesOpen < 0 || !tokens.get(valuesOpen).isPunct("(")) {
+            return null;
+        }
+        List<String> values = new ArrayList<>();
+        for (int[] range : argumentRanges(valuesOpen, matchingParen(valuesOpen))) {
+            int as = topLevelAs(range[0], range[1]);
+            int alias = as >= 0 ? nextSignificant(as + 1, range[1]) : implicitSelectAlias(range[0], range[1]);
+            if (alias >= 0) {
+                values.add(tokens.get(alias).identifierText());
+                continue;
+            }
+            List<Token> value = significant(range[0], range[1]);
+            if (value.size() != 1 || value.getFirst().kind != Kind.STRING && value.getFirst().kind != Kind.NUMBER) {
+                return null;
+            }
+            values.add(value.getFirst().kind == Kind.STRING ? value.getFirst().value : value.getFirst().text);
+        }
+        if (prefixes.size() == 1 && prefixes.getFirst() == null) {
+            return values;
+        }
+        if (prefixes.stream().anyMatch(prefix -> prefix == null)) {
+            return null;
+        }
+        List<String> generated = new ArrayList<>();
+        for (String prefix : prefixes) {
+            for (String value : values) {
+                generated.add(prefix + "_" + value);
+            }
+        }
+        return generated;
+    }
+
+    /** The full written-name list of a PIVOT, or null when a generated name cannot be derived. */
+    private List<String> pivotOutputNames(int select) {
+        PivotShape shape = pivotShape(select);
+        if (shape == null || shape.generated() == null) {
+            return null;
+        }
+        List<String> names = new ArrayList<>(shape.remaining());
+        names.addAll(shape.generated());
+        return names;
     }
 
     /**
@@ -6302,10 +6363,11 @@ final class SqlDialectTranslator {
             if (!tokens.get(select).isKeyword("SELECT")) {
                 continue;
             }
-            List<String> remaining = pivotRemainingFields(select);
-            if (remaining == null) {
+            PivotShape pivot = pivotShape(select);
+            if (pivot == null) {
                 continue;
             }
+            List<String> remaining = pivot.remaining();
             List<String> suffixed = bigQueryOutputNames(remaining);
             boolean duplicates = nameCounts(remaining).values().stream().anyMatch(count -> count > 1);
             List<int[]> items = selectItems(select);
@@ -6360,18 +6422,16 @@ final class SqlDialectTranslator {
         }
     }
 
-    /** The output names UNPIVOT writes and the FROM-relation position each one comes from. */
-    private record UnpivotShape(List<String> fields, List<Integer> positions) {}
-
     /**
-     * The columns UNPIVOT outputs, in BigQuery's order: the source columns it does not consume, then the
-     * value columns, then the name column. DuckDB puts the name column before the values, so a star over
-     * an UNPIVOT source is rewritten by position.
+     * The columns a bare star over an UNPIVOT source outputs, in BigQuery's order and with the reference
+     * that reads each from the FROM relation. The UNPIVOT source contributes the columns it does not
+     * consume, then the value columns, then the name column; any other source contributes its columns in
+     * source order. Null when the clause cannot be read, the FROM has a USING join, or a PIVOT is present.
      */
-    private UnpivotShape unpivotShape(int select) {
+    private List<StarColumn> unpivotStarColumns(int select) {
         int depth = parenthesisDepth(select);
         int from = namesFromClause(select, depth);
-        if (from < 0) {
+        if (from < 0 || hasUsingClause(select)) {
             return null;
         }
         int fromEnd = structStarFromEnd(from, structStarQueryEnd(select), depth);
@@ -6391,10 +6451,16 @@ final class SqlDialectTranslator {
             return null;
         }
         List<ProjectionSource> sources = projectionSources(from, depth);
-        if (sources.size() != 1) {
+        int baseIndex = -1;
+        for (int i = 0; i < sources.size(); i++) {
+            if (sources.get(i).startToken() < unpivot) {
+                baseIndex = i;
+            }
+        }
+        if (baseIndex < 0) {
             return null;
         }
-        List<String> baseFields = sourceWrittenColumns(sources.getFirst(), select);
+        List<String> baseFields = sourceWrittenColumns(sources.get(baseIndex), select);
         if (baseFields == null) {
             return null;
         }
@@ -6437,23 +6503,54 @@ final class SqlDialectTranslator {
                 consumed.add(tokens.get(i).identifierText().toLowerCase(Locale.ROOT));
             }
         }
-        List<String> fields = new ArrayList<>();
-        List<Integer> positions = new ArrayList<>();
-        for (int i = 0; i < baseFields.size(); i++) {
-            if (!consumed.contains(baseFields.get(i).toLowerCase(Locale.ROOT))) {
-                fields.add(baseFields.get(i));
-                // DuckDB puts the surviving source columns first, then the name column, then the values.
-                positions.add(fields.size());
+        List<String> remaining = new ArrayList<>();
+        for (String field : baseFields) {
+            if (!consumed.contains(field.toLowerCase(Locale.ROOT))) {
+                remaining.add(field);
             }
         }
-        int namePosition = fields.size() + 1;
-        for (int i = 0; i < values.size(); i++) {
-            fields.add(values.get(i));
-            positions.add(namePosition + 1 + i);
+        List<String> unpivotFields = new ArrayList<>(remaining);
+        List<Integer> unpivotPositions = new ArrayList<>();
+        for (int i = 0; i < remaining.size(); i++) {
+            unpivotPositions.add(i + 1);
         }
-        fields.add(name);
-        positions.add(namePosition);
-        return new UnpivotShape(fields, positions);
+        int namePosition = remaining.size() + 1;
+        for (int i = 0; i < values.size(); i++) {
+            unpivotFields.add(values.get(i));
+            unpivotPositions.add(namePosition + 1 + i);
+        }
+        unpivotFields.add(name);
+        unpivotPositions.add(namePosition);
+
+        List<StarColumn> columns = new ArrayList<>();
+        int offset = 0;
+        for (int i = 0; i < sources.size(); i++) {
+            if (i == baseIndex) {
+                for (int j = 0; j < unpivotFields.size(); j++) {
+                    columns.add(new StarColumn(unpivotFields.get(j),
+                            positionReference(offset + unpivotPositions.get(j))));
+                }
+                offset += unpivotFields.size();
+                continue;
+            }
+            List<String> sourceColumns = sourceWrittenColumns(sources.get(i), select);
+            if (sourceColumns == null) {
+                return null;
+            }
+            for (int j = 0; j < sourceColumns.size(); j++) {
+                columns.add(new StarColumn(sourceColumns.get(j), positionReference(offset + j + 1)));
+            }
+            offset += sourceColumns.size();
+        }
+        return columns;
+    }
+
+    private static List<String> starColumnNames(List<StarColumn> columns) {
+        List<String> names = new ArrayList<>(columns.size());
+        for (StarColumn column : columns) {
+            names.add(column.name());
+        }
+        return names;
     }
 
     /**
@@ -6465,8 +6562,8 @@ final class SqlDialectTranslator {
             if (!tokens.get(select).isKeyword("SELECT")) {
                 continue;
             }
-            UnpivotShape shape = unpivotShape(select);
-            if (shape == null) {
+            List<StarColumn> unpivotColumns = unpivotStarColumns(select);
+            if (unpivotColumns == null) {
                 continue;
             }
             List<int[]> items = selectItems(select);
@@ -6497,7 +6594,7 @@ final class SqlDialectTranslator {
                             continue;
                         }
                         String name = token.identifierText();
-                        if (shape.fields().stream().noneMatch(field -> field.equalsIgnoreCase(name))) {
+                        if (unpivotColumns.stream().noneMatch(column -> column.name().equalsIgnoreCase(name))) {
                             throw invalidQuery("Column " + name + " in SELECT * EXCEPT list does not exist");
                         }
                         excluded.add(name.toLowerCase(Locale.ROOT));
@@ -6526,10 +6623,11 @@ final class SqlDialectTranslator {
                 }
                 List<Integer> kept = new ArrayList<>();
                 List<String> keptNames = new ArrayList<>();
-                for (int position = 0; position < shape.fields().size(); position++) {
-                    if (!excluded.contains(shape.fields().get(position).toLowerCase(Locale.ROOT))) {
+                for (int position = 0; position < unpivotColumns.size(); position++) {
+                    String column = unpivotColumns.get(position).name();
+                    if (!excluded.contains(column.toLowerCase(Locale.ROOT))) {
                         kept.add(position);
-                        keptNames.add(shape.fields().get(position));
+                        keptNames.add(column);
                     }
                 }
                 if (kept.isEmpty()) {
@@ -6545,7 +6643,7 @@ final class SqlDialectTranslator {
                     String name = names.get(position);
                     List<Token> expression = replaced.get(keptNames.get(position).toLowerCase(Locale.ROOT));
                     if (expression == null) {
-                        replacement.addAll(positionalColumn(shape.positions().get(kept.get(position)), name));
+                        replacement.addAll(aliasedColumn(unpivotColumns.get(kept.get(position)).reference(), name));
                         continue;
                     }
                     replacement.addAll(expression);
@@ -6744,8 +6842,8 @@ final class SqlDialectTranslator {
                 if (star < 0) {
                     continue;
                 }
-                PositionalStarContext context = positionalStarContext(select, star);
-                if (context == null) {
+                StarShape shape = starShape(select, star);
+                if (shape == null) {
                     continue;
                 }
                 int clause = nextSignificant(star + 1, item[1]);
@@ -6756,7 +6854,11 @@ final class SqlDialectTranslator {
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
                     continue;
                 }
-                List<String> fields = context.fields();
+                List<StarColumn> columns = shape.columns();
+                List<String> fields = new ArrayList<>(columns.size());
+                for (StarColumn column : columns) {
+                    fields.add(column.name());
+                }
                 int close = matchingParen(open);
                 Set<String> excluded = new HashSet<>();
                 for (Token token : significant(open + 1, close)) {
@@ -6773,7 +6875,8 @@ final class SqlDialectTranslator {
                     }
                 }
                 if (kept.isEmpty()) {
-                    throw invalidQuery(context.qualified() ? "SELECT .* expands to zero columns after applying EXCEPT"
+                    throw invalidQuery(shape.qualified()
+                            ? "SELECT .* expands to zero columns after applying EXCEPT"
                             : "SELECT * expands to zero columns after applying EXCEPT");
                 }
                 if (kept.size() == fields.size()
@@ -6787,7 +6890,7 @@ final class SqlDialectTranslator {
                     if (position > 0) {
                         replacement.addAll(commaSeparator());
                     }
-                    replacement.addAll(positionalColumn(context.offset() + kept.get(position) + 1,
+                    replacement.addAll(aliasedColumn(columns.get(kept.get(position)).reference(),
                             names.get(position)));
                 }
                 replacement.add(space());
@@ -6797,16 +6900,36 @@ final class SqlDialectTranslator {
         }
     }
 
-    private record PositionalStarContext(List<String> fields, int offset, boolean qualified) {}
+    private record StarColumn(String name, List<Token> reference) {}
+
+    private record StarShape(List<StarColumn> columns, boolean qualified) {}
+
+    private static List<Token> positionReference(int position) {
+        return List.of(Token.raw("#" + position));
+    }
+
+    private static List<Token> nameReference(String name) {
+        return List.of(new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
+    }
+
+    private static List<Token> aliasedColumn(List<Token> reference, String name) {
+        List<Token> out = new ArrayList<>(reference);
+        out.add(space());
+        out.add(new Token(Kind.IDENT, "AS", "AS"));
+        out.add(space());
+        out.add(new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
+        return out;
+    }
 
     /**
-     * The written fields a source star expands to and the offset of its first field in the FROM relation,
-     * which is what {@code #n} references index. Null for a struct or expression star, for a USING join
-     * whose merge reorders the relation, or when a source's columns are unknown.
+     * The written fields a source star expands to and, for each, the reference that reads its value in
+     * the FROM relation. A plain source column is {@code #n}; a USING column merged across sources is read
+     * by name, because DuckDB puts the merged column first in a {@code *} but keeps every source column in
+     * relation order. Null for a struct or expression star, a mixed USING join, or an unknown source.
      */
-    private PositionalStarContext positionalStarContext(int select, int star) {
+    private StarShape starShape(int select, int star) {
         int depth = parenthesisDepth(select);
-        if (pivotInFrom(select, depth) || hasUsingClause(select)) {
+        if (pivotInFrom(select, depth)) {
             return null;
         }
         int from = namesFromClause(select, depth);
@@ -6832,21 +6955,120 @@ final class SqlDialectTranslator {
                     return null;
                 }
                 if (source.alias() != null && source.alias().equalsIgnoreCase(alias)) {
-                    return new PositionalStarContext(columns, offset, true);
+                    List<StarColumn> shaped = new ArrayList<>(columns.size());
+                    for (int index = 0; index < columns.size(); index++) {
+                        shaped.add(new StarColumn(columns.get(index), positionReference(offset + index + 1)));
+                    }
+                    return new StarShape(shaped, true);
                 }
                 offset += columns.size();
             }
             return null;
         }
-        List<String> columns = new ArrayList<>();
+        if (hasUsingClause(select)) {
+            if (!usingOnlyJoins(select, depth)) {
+                return null;
+            }
+            List<StarColumn> shaped = usingStarColumns(select, star, sources);
+            return shaped == null ? null : new StarShape(shaped, false);
+        }
+        List<StarColumn> columns = new ArrayList<>();
+        int position = 1;
         for (ProjectionSource source : sources) {
             List<String> sourceColumns = sourceWrittenColumns(source, select);
             if (sourceColumns == null) {
                 return null;
             }
-            columns.addAll(sourceColumns);
+            for (String column : sourceColumns) {
+                columns.add(new StarColumn(column, positionReference(position++)));
+            }
         }
-        return columns.isEmpty() ? null : new PositionalStarContext(columns, 0, false);
+        return columns.isEmpty() ? null : new StarShape(columns, false);
+    }
+
+    /**
+     * True when every source after the first is joined with USING and no comma join is present, so the
+     * merged columns and their participants are unambiguous.
+     */
+    private boolean usingOnlyJoins(int select, int depth) {
+        int from = namesFromClause(select, depth);
+        if (from < 0) {
+            return false;
+        }
+        List<ProjectionSource> sources = projectionSources(from, depth);
+        if (sources.size() < 2) {
+            return false;
+        }
+        for (int index = 1; index < sources.size(); index++) {
+            if (usingColumnsAfterSource(sources.get(index), depth).isEmpty()) {
+                return false;
+            }
+        }
+        int fromEnd = structStarFromEnd(from, structStarQueryEnd(select), depth);
+        for (int i = from; i < fromEnd; i++) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isPunct(",")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The written names a bare star expands to, with USING columns merged and the rest in source order. */
+    private List<String> usingStarColumns(int select, int star) {
+        List<ProjectionSource> sources = projectionSourcesForStar(star);
+        return usingStarColumnNames(select, star, sources);
+    }
+
+    private List<String> usingStarColumnNames(int select, int star, List<ProjectionSource> sources) {
+        List<StarColumn> columns = usingStarColumns(select, star, sources);
+        if (columns == null) {
+            return null;
+        }
+        List<String> names = new ArrayList<>(columns.size());
+        for (StarColumn column : columns) {
+            names.add(column.name());
+        }
+        return names;
+    }
+
+    private List<StarColumn> usingStarColumns(int select, int star, List<ProjectionSource> sources) {
+        List<UsingProjection> merged = usingProjectionsForStar(star, sources);
+        Set<String> mergedNames = new HashSet<>();
+        Map<Integer, Set<String>> skipped = new HashMap<>();
+        for (UsingProjection projection : merged) {
+            String key = projection.name().toLowerCase(Locale.ROOT);
+            mergedNames.add(key);
+            for (ProjectionSource participant : projection.sources()) {
+                skipped.computeIfAbsent(participant.startToken(), ignored -> new HashSet<>()).add(key);
+            }
+        }
+        List<StarColumn> columns = new ArrayList<>();
+        for (UsingProjection projection : merged) {
+            columns.add(new StarColumn(projection.name(), nameReference(projection.name())));
+        }
+        int offset = 0;
+        for (ProjectionSource source : sources) {
+            List<String> sourceColumns = sourceWrittenColumns(source, select);
+            if (sourceColumns == null) {
+                return null;
+            }
+            Set<String> skip = skipped.getOrDefault(source.startToken(), Set.of());
+            for (int index = 0; index < sourceColumns.size(); index++) {
+                String column = sourceColumns.get(index);
+                if (skip.contains(column.toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                boolean unrelatedMergedName = mergedNames.contains(column.toLowerCase(Locale.ROOT));
+                if (unrelatedMergedName) {
+                    // A source outside the USING join exposes the same name, so the merged name reference
+                    // would be ambiguous. Leave this shape to DuckDB.
+                    return null;
+                }
+                columns.add(new StarColumn(column, positionReference(offset + index + 1)));
+            }
+            offset += sourceColumns.size();
+        }
+        return columns;
     }
 
     /**
@@ -7122,8 +7344,12 @@ final class SqlDialectTranslator {
     private Set<String> sourceGeneratedNames(int select) {
         int depth = parenthesisDepth(select);
         if (pivotInFrom(select, depth)) {
-            UnpivotShape unpivot = unpivotShape(select);
-            return unpivot == null ? Set.of() : generatedNames(unpivot.fields());
+            List<StarColumn> unpivot = unpivotStarColumns(select);
+            if (unpivot != null) {
+                return generatedNames(starColumnNames(unpivot));
+            }
+            List<String> pivot = pivotOutputNames(select);
+            return pivot == null ? Set.of() : generatedNames(pivot);
         }
         int from = namesFromClause(select, depth);
         if (from < 0) {
@@ -7264,8 +7490,12 @@ final class SqlDialectTranslator {
     private Map<String, Integer> sourceColumnCounts(int select) {
         int depth = parenthesisDepth(select);
         if (pivotInFrom(select, depth)) {
-            UnpivotShape unpivot = unpivotShape(select);
-            return unpivot == null ? null : nameCounts(unpivot.fields());
+            List<StarColumn> unpivot = unpivotStarColumns(select);
+            if (unpivot != null) {
+                return nameCounts(starColumnNames(unpivot));
+            }
+            List<String> pivot = pivotOutputNames(select);
+            return pivot == null ? null : nameCounts(pivot);
         }
         int from = namesFromClause(select, depth);
         if (from < 0) {
@@ -7585,17 +7815,17 @@ final class SqlDialectTranslator {
      */
     private List<String> unqualifiedStarWrittenColumns(int select, int star) {
         int depth = parenthesisDepth(select);
-        UnpivotShape unpivot = unpivotShape(select);
+        List<StarColumn> unpivot = unpivotStarColumns(select);
         if (unpivot != null) {
-            return unpivot.fields();
+            return starColumnNames(unpivot);
         }
         if (pivotInFrom(select, depth)) {
-            return null;
+            return pivotOutputNames(select);
+        }
+        if (hasUsingClause(select)) {
+            return usingOnlyJoins(select, depth) ? usingStarColumns(select, star) : null;
         }
         List<ProjectionSource> sources = projectionSourcesForStar(star);
-        if (hasUsingClause(select)) {
-            return sources.size() == 1 ? sourceWrittenColumns(sources.getFirst(), select) : null;
-        }
         List<String> columns = new ArrayList<>();
         for (ProjectionSource source : sources) {
             List<String> sourceColumns = sourceWrittenColumns(source, select);

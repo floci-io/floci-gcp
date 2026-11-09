@@ -1730,6 +1730,19 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
                         + " PIVOT(SUM(v) FOR k IN ('x'))",
                 List.of("b", "b_1", "x"), List.of("5", "7", "1"));
+        assertResultColumns("SELECT * FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))",
+                List.of("total_x", "m_x"), List.of("1", "1"));
+        assertResultColumns("SELECT * EXCEPT(m_x) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))",
+                List.of("total_x"), List.of("1"));
+        for (String sql : List.of(
+                "SELECT * EXCEPT(nope) FROM (SELECT 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))",
+                "SELECT * EXCEPT(k) FROM (SELECT 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("in SELECT * EXCEPT list does not exist"));
+        }
         assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
                         + " PIVOT(SUM(v) FOR k IN ('x'))",
                 List.of("x"), List.of("1"));
@@ -1760,6 +1773,34 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT y2.* EXCEPT(c)"
                         + " FROM (SELECT 5 AS b) x, (SELECT 1 AS c, 2 AS c, 3 AS d) y2",
                 List.of("d"), List.of("3"));
+    }
+
+    @Test
+    @Order(5)
+    void usingJoinsAndUnpivotInAJoinMatchBigQuery() {
+        assertResultColumns("SELECT * EXCEPT(id) FROM (SELECT 1 AS id, 2 AS x) a"
+                + " JOIN (SELECT 1 AS id, 3 AS y) b USING(id)", List.of("x", "y"), List.of("2", "3"));
+        assertResultColumns("SELECT * EXCEPT(c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)",
+                List.of("id", "d"), List.of("1", "4"));
+        assertResultColumns("SELECT * EXCEPT(id, c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)", List.of("d"), List.of("4"));
+        assertResultColumns("SELECT a.* EXCEPT(c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)", List.of("id"), List.of("1"));
+        query(Map.of("query", "SELECT * EXCEPT(id) FROM (SELECT 1 AS id, 2 AS x) a"
+                + " RIGHT JOIN (SELECT 2 AS id, 3 AS y) b USING(id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "y")))
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, "3")));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS m) a,"
+                        + " (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c))",
+                List.of("m", "b", "b_1", "v", "n"), List.of("1", "5", "7", "8", "c"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS m) a"
+                        + " JOIN (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c)) ON a.m > 0",
+                List.of("m", "b", "b_1", "v", "n"), List.of("1", "5", "7", "8", "c"));
+        assertResultColumns("SELECT * EXCEPT(v) FROM (SELECT 1 AS m) a,"
+                        + " (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c))",
+                List.of("m", "b", "b_1", "n"), List.of("1", "5", "7", "c"));
     }
 
     @Test

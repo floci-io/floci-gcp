@@ -2244,6 +2244,20 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void pivotStarListsResolveAgainstGeneratedColumnNames() {
+        assertEquals("Column nope in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(nope) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
+        assertEquals("Column k in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(k) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
+        String multi = sql("SELECT * EXCEPT(m_x) FROM (SELECT 'x' AS k, 1 AS v)"
+                + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))");
+        assertTrue(multi.contains("\"x_total\" AS \"total_x\"") && multi.contains("\"x_m\" AS \"m_x\""),
+                multi);
+    }
+
+    @Test
     void orderByRejectsASuffixGeneratedForADuplicate() {
         assertEquals("Unrecognized name: b_2",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"

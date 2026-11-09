@@ -193,9 +193,12 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
   `HAVING`, `QUALIFY` and inside a window), and a suffix generated for a duplicate is unrecognized
   unless a source column carries that name. A star's `EXCEPT` list drops every output written with the
-  name, and `REPLACE` rejects a name it would replace more than once. A `CREATE TABLE` or `CREATE VIEW`
-  whose query repeats a name is rejected, and querying a view whose definition repeats a name fails,
-  as both fail in BigQuery.
+  name across the query's sources (positionally, when the sources are not joined with `USING`), and
+  `REPLACE` rejects a name it would replace more than once. A bare star over an `UNPIVOT` source returns
+  the surviving source columns, then the value columns, then the name column, as BigQuery does. `PIVOT`
+  and `UNPIVOT` reject a duplicated name they reference. A `CREATE TABLE` or `CREATE VIEW` whose query
+  repeats a name is rejected, and querying a view whose definition repeats a name fails, as both fail
+  in BigQuery.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes
@@ -556,6 +559,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
+- A star over `PIVOT` output, over a `USING` join whose inputs repeat a column name, or an `UNPIVOT`
+  under a join or `* REPLACE` keeps DuckDB's generated names and column order; an `EXCEPT` list there
+  may not drop every written name.
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
   `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
   yet; they fail with `invalidQuery`.

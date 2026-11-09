@@ -2192,6 +2192,44 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void pivotAndUnpivotRejectADuplicatedSourceName() {
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (b))").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(b) FOR k IN ('x'))").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR b IN (5, 7))").getMessage());
+        sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))");
+        sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (c))");
+    }
+
+    @Test
+    void unpivotStarTakesBigQueryColumnOrder() {
+        String translated = sql("SELECT * FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(translated.startsWith("SELECT #2 AS \"v\", #1 AS \"n\" FROM ("), translated);
+        String multi = sql("SELECT * FROM (SELECT 1 AS a1, 2 AS a2, 3 AS b1, 4 AS b2, 5 AS r)"
+                + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))");
+        assertTrue(multi.startsWith("SELECT #1 AS \"r\", #3 AS \"v1\", #4 AS \"v2\", #2 AS \"n\" FROM ("),
+                multi);
+    }
+
+    @Test
+    void multiSourceStarExclusionsDropEveryWrittenName() {
+        String bare = sql("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y");
+        assertTrue(bare.startsWith("SELECT #3 AS \"c\" FROM ("), bare);
+        String qualified = sql("SELECT y2.* EXCEPT(c)"
+                + " FROM (SELECT 5 AS b) x, (SELECT 1 AS c, 2 AS c, 3 AS d) y2");
+        assertTrue(qualified.startsWith("SELECT #4 AS \"d\" FROM ("), qualified);
+        assertEquals("SELECT * expands to zero columns after applying EXCEPT",
+                invalid("SELECT * EXCEPT(b) FROM (SELECT 5 AS b)").getMessage());
+        assertEquals("SELECT .* expands to zero columns after applying EXCEPT",
+                invalid("SELECT x.* EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS y) y2")
+                        .getMessage());
+    }
+
+    @Test
     void orderByRejectsASuffixGeneratedForADuplicate() {
         assertEquals("Unrecognized name: b_2",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"

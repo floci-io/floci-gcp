@@ -1703,6 +1703,45 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void pivotUnpivotAndMultiSourceStarsMatchBigQuery() {
+        assertResultColumns("SELECT * FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v", "n"), List.of("8", "c"));
+        query(Map.of("query", "SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 9 AS d)"
+                        + " UNPIVOT(v FOR n IN (c, d))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1", "v", "n")))
+                .body("rows[0].f.v", equalTo(List.of("5", "7", "8", "c")))
+                .body("rows[1].f.v", equalTo(List.of("5", "7", "9", "d")));
+        assertResultColumns("SELECT * EXCEPT(v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("n"), List.of("c"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a1, 2 AS a2, 3 AS b1, 4 AS b2, 5 AS r)"
+                        + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))",
+                List.of("r", "v1", "v2", "n"), List.of("5", "1", "2", "a1_a2"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("b", "b_1", "x"), List.of("5", "7", "1"));
+        for (String sql : List.of(
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (b))",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(b) FOR k IN ('x'))",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR b IN (5, 7))")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y",
+                List.of("c"), List.of("1"));
+        assertResultColumns("SELECT * EXCEPT(c) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y",
+                List.of("b", "b_1"), List.of("5", "7"));
+        assertResultColumns("SELECT x.* EXCEPT(b)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c) x, (SELECT 1 AS y) y2",
+                List.of("c"), List.of("8"));
+        assertResultColumns("SELECT y2.* EXCEPT(c)"
+                        + " FROM (SELECT 5 AS b) x, (SELECT 1 AS c, 2 AS c, 3 AS d) y2",
+                List.of("d"), List.of("3"));
+    }
+
+    @Test
+    @Order(5)
     void sourceReferencesRejectADuplicatedColumnName() {
         for (String sql : List.of(
                 "SELECT b FROM (SELECT 5 AS b, 7 AS b)",

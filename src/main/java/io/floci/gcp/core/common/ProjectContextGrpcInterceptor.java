@@ -20,9 +20,6 @@ import io.smallrye.common.vertx.VertxContext;
  */
 public final class ProjectContextGrpcInterceptor implements ServerInterceptor {
 
-    private static final Metadata.Key<String> REQUEST_PARAMS =
-            Metadata.Key.of("x-goog-request-params", Metadata.ASCII_STRING_MARSHALLER);
-
     private final String defaultProjectId;
 
     public ProjectContextGrpcInterceptor(String defaultProjectId) {
@@ -32,7 +29,7 @@ public final class ProjectContextGrpcInterceptor implements ServerInterceptor {
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
             Metadata headers, ServerCallHandler<ReqT, RespT> next) {
-        String routed = ServiceUsageGrpcInterceptor.projectFromHeader(headers.get(REQUEST_PARAMS));
+        String routed = RequestTarget.routedProject(headers.get(RequestTarget.ROUTING_HEADER));
         String initial = routed != null ? routed : defaultProjectId;
         // On the server every call has its own Vert.x context, which carries the request context
         // to the threads the handler moves work to. There the context lives as long as the call,
@@ -62,7 +59,7 @@ public final class ProjectContextGrpcInterceptor implements ServerInterceptor {
             @Override
             public void onMessage(ReqT message) {
                 if (!named && message instanceof Message proto) {
-                    String target = targetProject(proto);
+                    String target = RequestTarget.primaryProject(proto);
                     if (target != null) {
                         project = target;
                         named = true;
@@ -110,23 +107,5 @@ public final class ProjectContextGrpcInterceptor implements ServerInterceptor {
                 }
             }
         };
-    }
-
-    /** The project of the request's own target, otherwise of the first resource it names. */
-    static String targetProject(Message request) {
-        String first = null;
-        for (ProtoResourceFields.Ref ref : ProtoResourceFields.refs(request)) {
-            String project = ServiceUsageGrpcInterceptor.projectOf(ref.field(), ref.value());
-            if (project == null) {
-                continue;
-            }
-            if (ref.top()) {
-                return project;
-            }
-            if (first == null) {
-                first = project;
-            }
-        }
-        return first;
     }
 }

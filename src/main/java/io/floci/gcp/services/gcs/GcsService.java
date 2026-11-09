@@ -334,6 +334,11 @@ public class GcsService {
         }
     }
 
+    /** The project that owns a bucket, for every policy that asks; NOT_FOUND when there is no such bucket. */
+    public String bucketProject(String name) {
+        return getBucket(name).getProjectId();
+    }
+
     public GcsBucket getBucket(String name) {
         LOG.debugf("getBucket name=%s", name);
         return bucketStore.get(name)

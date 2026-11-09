@@ -10,16 +10,11 @@ import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Applies {@link ServiceUsageGate} to one gRPC service. The consumer project comes from the
@@ -30,14 +25,6 @@ import java.util.regex.Pattern;
  * service whose handler picks the project differently answers through its {@link ServiceUsageAdapter}.
  */
 public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
-
-    private static final Metadata.Key<String> REQUEST_PARAMS =
-            Metadata.Key.of("x-goog-request-params", Metadata.ASCII_STRING_MARSHALLER);
-    private static final Pattern RESOURCE_PROJECT = Pattern.compile("(?:^|[=&/])projects/([^/&]+)");
-    private static final Set<String> COMMON_DOMAINS =
-            Set.of("cloudresourcemanager.googleapis.com", "locations.googleapis.com");
-    private static final Set<String> TARGET_FIELDS = Set.of("name", "parent", "resource");
-    private static final Pattern PARAM_PROJECT = Pattern.compile("(?:^|&)project(?:_id)?=([^&]+)");
 
     private final ServiceUsageGate gate;
     private final ServiceDescriptor descriptor;
@@ -58,7 +45,7 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
             Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         GatedCall<ReqT, RespT> gated = new GatedCall<>(call);
         GatedListener<ReqT, RespT> listener = new GatedListener<>(gated, headers, next);
-        String project = projectFromHeader(headers.get(REQUEST_PARAMS));
+        String project = RequestTarget.routedProject(headers.get(RequestTarget.ROUTING_HEADER));
         if (project == null) {
             call.request(1);
         } else if (gate.isDenied(descriptor, project)) {
@@ -72,24 +59,6 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
         return listener;
     }
 
-    static String projectFromHeader(String params) {
-        if (params == null || params.isBlank()) {
-            return null;
-        }
-        String decoded = URLDecoder.decode(params, StandardCharsets.UTF_8);
-        Matcher resource = RESOURCE_PROJECT.matcher(decoded);
-        while (resource.find()) {
-            if (isConcrete(resource.group(1))) {
-                return resource.group(1);
-            }
-        }
-        Matcher param = PARAM_PROJECT.matcher(decoded);
-        if (param.find() && isConcrete(param.group(1))) {
-            return param.group(1);
-        }
-        return null;
-    }
-
     private List<String> projects(Object message) {
         if (message instanceof Message proto) {
             Optional<List<String>> owned = descriptor.usageAdapter().grpcProjects(proto);
@@ -97,52 +66,7 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
                 return owned.get();
             }
         }
-        return projectsFromMessage(message, domains);
-    }
-
-    /**
-     * Every project named by the fields the API declares as resource names (see
-     * {@link ProtoResourceFields}). A reference to another API's resource, such as the KMS key of
-     * a Cloud Storage object, is not this API's consumer and is skipped, unless it is the
-     * request's own target or the service lists its domain.
-     */
-    static List<String> projectsFromMessage(Object message, Set<String> domains) {
-        if (!(message instanceof Message proto)) {
-            return List.of();
-        }
-        Set<String> projects = new LinkedHashSet<>();
-        for (ProtoResourceFields.Ref ref : ProtoResourceFields.refs(proto)) {
-            if (!gatesOn(ref, domains)) {
-                continue;
-            }
-            String project = projectOf(ref.field(), ref.value());
-            if (project != null) {
-                projects.add(project);
-            }
-        }
-        return List.copyOf(projects);
-    }
-
-    private static boolean gatesOn(ProtoResourceFields.Ref ref, Set<String> domains) {
-        if (ref.type() == null || ref.type().equals("*") || (ref.top() && TARGET_FIELDS.contains(ref.field()))) {
-            return true;
-        }
-        String domain = ref.type().substring(0, Math.max(0, ref.type().indexOf('/')));
-        return COMMON_DOMAINS.contains(domain) || domains.contains(domain);
-    }
-
-    static String projectOf(String field, String value) {
-        if (field.equals("project_id") || field.equals("project")) {
-            String project = value.startsWith("projects/") ? value.substring("projects/".length()) : value;
-            if (isConcrete(project)) {
-                return project;
-            }
-        }
-        return ServiceUsageAdapter.projectOf(value);
-    }
-
-    private static boolean isConcrete(String project) {
-        return !project.isEmpty() && !project.equals("_") && !project.equals("-");
+        return RequestTarget.projects(message, domains);
     }
 
     /** Lets the gate close a call the handler already holds: the handler's later writes are dropped. */

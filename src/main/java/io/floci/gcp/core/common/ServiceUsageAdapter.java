@@ -12,8 +12,8 @@ import java.util.Set;
 /**
  * Service-owned answers for {@link ServiceUsageGate}: which projects a request acts on, and how a
  * denial is rendered on a transport that is not REST JSON. A service registers one when its
- * handlers pick the project differently from the generic resolution (path, query, routing header,
- * resource names in the message). An empty result leaves the generic behaviour in place; an empty
+ * handlers pick the project differently from the generic resolution ({@link RequestTarget}, path,
+ * query). An empty result leaves the generic behaviour in place; an empty
  * list means the default project.
  */
 public interface ServiceUsageAdapter {
@@ -43,17 +43,6 @@ public interface ServiceUsageAdapter {
 
     default Optional<Response> restDenial(RestRequest request, Status status) {
         return Optional.empty();
-    }
-
-    /** The project a {@code projects/{project}/...} resource name belongs to, or null. */
-    static String projectOf(String resourceName) {
-        if (resourceName == null || !resourceName.startsWith("projects/")) {
-            return null;
-        }
-        int end = resourceName.indexOf('/', "projects/".length());
-        String project = end < 0 ? resourceName.substring("projects/".length())
-                : resourceName.substring("projects/".length(), end);
-        return project.isEmpty() || project.equals("_") || project.equals("-") ? null : project;
     }
 
     interface RestRequest {

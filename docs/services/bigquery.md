@@ -163,7 +163,7 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - `JOIN` (all kinds, including correlated `LEFT JOIN UNNEST(array) alias`), `GROUP BY`, `HAVING`,
   `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
   `UNION`/`INTERSECT`/`EXCEPT` (`ALL` and `DISTINCT`), subqueries, `WITH` (CTEs), window
-  functions, `QUALIFY`, `PIVOT`, `UNNEST` (including `WITH OFFSET`,
+  functions, `QUALIFY`, `PIVOT`, `UNPIVOT`, `UNNEST` (including `WITH OFFSET`,
   `FROM t, t.array_column AS x`, and `x IN UNNEST(...)`), `SELECT * EXCEPT (...)`, and
   `SELECT * REPLACE (...)`.
 - `SELECT * EXCEPT (...)` and `SELECT * REPLACE (...)` also apply to a `STRUCT` expression
@@ -193,12 +193,13 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
   `HAVING`, `QUALIFY` and inside a window), and a suffix generated for a duplicate is unrecognized
   unless a source column carries that name. A star's `EXCEPT` list drops every output written with the
-  name across the query's sources (positionally, when the sources are not joined with `USING`), and
-  `REPLACE` rejects a name it would replace more than once. A bare star over an `UNPIVOT` source returns
-  the surviving source columns, then the value columns, then the name column, as BigQuery does. `PIVOT`
-  and `UNPIVOT` reject a duplicated name they reference. A `CREATE TABLE` or `CREATE VIEW` whose query
-  repeats a name is rejected, and querying a view whose definition repeats a name fails, as both fail
-  in BigQuery.
+  name across the query's sources, including columns merged by a `USING` join, and `REPLACE` rejects a
+  name it would replace more than once. A bare star over an `UNPIVOT` source, including an `UNPIVOT`
+  that decorates one source of a join, returns the surviving source columns, then the value columns,
+  then the name column, as BigQuery does. A star's `EXCEPT` and `REPLACE` over `PIVOT` output resolve
+  against the pivot's generated column names, and `PIVOT` and `UNPIVOT` reject a duplicated name they
+  reference. A `CREATE TABLE` or `CREATE VIEW` whose query repeats a name is rejected, and querying a
+  view whose definition repeats a name fails, as both fail in BigQuery.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes

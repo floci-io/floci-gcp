@@ -294,6 +294,84 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void structStarGroupedDuplicateNamesAndSourceStructOrderingMatchBigQuery() {
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY 1, 2", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("2", "5")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "9", "2")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), t.id AS b, -t.id AS b_1"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 1 AS id"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b), 2) t"
+                        + " GROUP BY ALL ORDER BY b_1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("2", "2", "-2")))
+                .body("rows[1].f.v", equalTo(List.of("2", "1", "-1")));
+        query(Map.of("query", "SELECT t.s.* EXCEPT(a), t.id AS b"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s, 1 AS id"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1), 2) t"
+                        + " GROUP BY ALL", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1", "b_2")))
+                .body("rows[0].f.v", equalTo(List.of("2", "3", "1")))
+                .body("rows[1].f.v", equalTo(List.of("2", "3", "2")));
+        query(Map.of("query", "SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id, STRUCT(7 AS n) u"
+                        + " UNION ALL SELECT STRUCT(2 AS a), 3, STRUCT(9 AS n)) t"
+                        + " ORDER BY u.n DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("3"))
+                .body("rows[1].f[0].v.f[0].v", equalTo("5"));
+        query(Map.of("query", "SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id, STRUCT(7 AS n) u"
+                        + " UNION ALL SELECT STRUCT(2 AS a), 3, STRUCT(9 AS n)) t"
+                        + " ORDER BY t.u.n DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("3"))
+                .body("rows[1].f[0].v.f[0].v", equalTo("5"));
+        query(Map.of("query", "SELECT t.s.* REPLACE(9 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, STRUCT(1 AS n) AS u) s, STRUCT(9 AS n) u"
+                        + " UNION ALL SELECT STRUCT(2 AS a, STRUCT(2 AS n) AS u), STRUCT(0 AS n)) t"
+                        + " ORDER BY u.n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "u")))
+                .body("rows[0].f[0].v", equalTo("9"))
+                .body("rows[0].f[1].v.f[0].v", equalTo("1"))
+                .body("rows[1].f[1].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
+    void indexedAggregateStructStarAppliesItsStarList() {
+        query(Map.of("query", "SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT(id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("name")))
+                .body("rows[0].f[0].v", equalTo("y"));
+        query(Map.of("query", "SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* REPLACE (99 AS id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "name")))
+                .body("rows[0].f.v", equalTo(List.of("99", "y")));
+    }
+
+    @Test
+    @Order(2)
     void structStarSetOperationArmsExecuteIndependently() {
         String star = "SELECT t.s.* EXCEPT(a), t.id FROM (SELECT STRUCT(1 AS a, 2 AS c) s, 5 AS id) t";
         query(Map.of("query", star + " UNION ALL SELECT 3, 6", "useLegacySql", false))

@@ -2404,6 +2404,7 @@ final class SqlDialectTranslator {
         validatePivotReferences();
         rewriteSourceStarExclusions();
         rewriteUnpivotStars();
+        augmentPivotStarExclusions();
         nameNestedDuplicateOutputs();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
@@ -6205,6 +6206,150 @@ final class SqlDialectTranslator {
             }
         }
         return written;
+    }
+
+    /**
+     * The source columns a PIVOT keeps unchanged: its base columns minus the FOR column and the columns
+     * its aggregates consume. Those are the written names a star's EXCEPT list resolves against.
+     */
+    private List<String> pivotRemainingFields(int select) {
+        int depth = parenthesisDepth(select);
+        int from = namesFromClause(select, depth);
+        if (from < 0) {
+            return null;
+        }
+        int fromEnd = structStarFromEnd(from, structStarQueryEnd(select), depth);
+        int pivot = -1;
+        for (int i = from; i < fromEnd; i++) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            if (tokens.get(i).isKeyword("UNPIVOT")) {
+                return null;
+            }
+            if (tokens.get(i).isKeyword("PIVOT")) {
+                pivot = i;
+                break;
+            }
+        }
+        if (pivot < 0) {
+            return null;
+        }
+        List<ProjectionSource> sources = projectionSources(from, depth);
+        if (sources.size() != 1) {
+            return null;
+        }
+        List<String> base = sourceWrittenColumns(sources.getFirst(), select);
+        if (base == null) {
+            return null;
+        }
+        int open = -1;
+        for (int i = pivot + 1; i < fromEnd; i++) {
+            if (parenthesisDepth(i) == depth && tokens.get(i).isPunct("(")) {
+                open = i;
+                break;
+            }
+        }
+        if (open < 0) {
+            return null;
+        }
+        int close = matchingParen(open);
+        int contentsDepth = depth + 1;
+        int forKeyword = keywordAtDepth(open + 1, close, contentsDepth, "FOR");
+        if (forKeyword < 0) {
+            return null;
+        }
+        Set<String> consumed = new HashSet<>();
+        for (int i = open + 1; i < forKeyword; i++) {
+            if (!isReferenceName(i, forKeyword, Set.of())) {
+                continue;
+            }
+            int next = nextSignificant(i + 1, forKeyword);
+            if (next >= 0 && tokens.get(next).isPunct(".")) {
+                continue; // a qualifier; the field after the dot is the reference
+            }
+            consumed.add(tokens.get(i).identifierText().toLowerCase(Locale.ROOT));
+        }
+        int column = nextSignificant(forKeyword + 1, close);
+        if (column >= 0 && isName(tokens.get(column))) {
+            consumed.add(tokens.get(column).identifierText().toLowerCase(Locale.ROOT));
+        }
+        List<String> remaining = new ArrayList<>();
+        for (String field : base) {
+            if (!consumed.contains(field.toLowerCase(Locale.ROOT))) {
+                remaining.add(field);
+            }
+        }
+        return remaining;
+    }
+
+    /**
+     * A star's EXCEPT list over PIVOT output names written columns. When a surviving source column repeats,
+     * BigQuery suffixes the later outputs, so excluding the written name must exclude its suffixes too.
+     * DuckDB's PIVOT keeps the source names, so the suffixes are added to the EXCEPT list before the pivot
+     * is rewritten.
+     */
+    private void augmentPivotStarExclusions() {
+        for (int select = tokens.size() - 1; select >= 0; select--) {
+            if (!tokens.get(select).isKeyword("SELECT")) {
+                continue;
+            }
+            List<String> remaining = pivotRemainingFields(select);
+            if (remaining == null) {
+                continue;
+            }
+            List<String> suffixed = bigQueryOutputNames(remaining);
+            boolean duplicates = nameCounts(remaining).values().stream().anyMatch(count -> count > 1);
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            for (int index = items.size() - 1; index >= 0; index--) {
+                int[] item = items.get(index);
+                int star = projectionStarIndex(item);
+                if (star < 0) {
+                    continue;
+                }
+                int clause = nextSignificant(star + 1, item[1]);
+                if (clause < 0 || !tokens.get(clause).isKeyword("EXCEPT")) {
+                    continue;
+                }
+                int open = nextSignificant(clause + 1, item[1]);
+                if (open < 0 || !tokens.get(open).isPunct("(")) {
+                    continue;
+                }
+                int close = matchingParen(open);
+                List<String> extras = new ArrayList<>();
+                for (Token token : significant(open + 1, close)) {
+                    if (token.kind != Kind.IDENT && token.kind != Kind.QIDENT) {
+                        continue;
+                    }
+                    String name = token.identifierText();
+                    boolean written = remaining.stream().anyMatch(field -> field.equalsIgnoreCase(name));
+                    boolean generated = !written && suffixed.stream().anyMatch(n -> n.equalsIgnoreCase(name));
+                    if (generated) {
+                        throw invalidQuery("Column " + name + " in SELECT * EXCEPT list does not exist");
+                    }
+                    if (!duplicates || !written) {
+                        continue;
+                    }
+                    for (int position = 0; position < remaining.size(); position++) {
+                        if (remaining.get(position).equalsIgnoreCase(name)
+                                && !suffixed.get(position).equalsIgnoreCase(name)) {
+                            extras.add(suffixed.get(position));
+                        }
+                    }
+                }
+                if (!extras.isEmpty()) {
+                    List<Token> addition = new ArrayList<>();
+                    for (String extra : extras.stream().distinct().toList()) {
+                        addition.add(Token.raw(", "));
+                        addition.add(new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(extra), extra));
+                    }
+                    tokens.addAll(close, addition);
+                }
+            }
+        }
     }
 
     /** The output names UNPIVOT writes and the FROM-relation position each one comes from. */

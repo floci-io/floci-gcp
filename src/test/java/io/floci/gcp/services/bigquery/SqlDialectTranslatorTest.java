@@ -2203,6 +2203,12 @@ class SqlDialectTranslatorTest {
                         + " PIVOT(SUM(v) FOR b IN (5, 7))").getMessage());
         sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))");
         sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (c))");
+        String pivot = sql("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                + " PIVOT(SUM(v) FOR k IN ('x'))");
+        assertTrue(pivot.contains("(?i)^(b|b_1)$"), pivot);
+        assertEquals("Column b_1 in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(b_1) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
     }
 
     @Test

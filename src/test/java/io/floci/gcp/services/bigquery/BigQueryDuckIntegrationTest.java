@@ -1720,6 +1720,18 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
                         + " PIVOT(SUM(v) FOR k IN ('x'))",
                 List.of("b", "b_1", "x"), List.of("5", "7", "1"));
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("x"), List.of("1"));
+        assertResultColumns("SELECT * EXCEPT(x) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("b", "b_1"), List.of("5", "7"));
+        query("{\"query\": \"SELECT * EXCEPT(b_1)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b_1 in SELECT * EXCEPT list does not exist"));
         for (String sql : List.of(
                 "SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (b))",
                 "SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(b) FOR k IN ('x'))",

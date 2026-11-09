@@ -1654,6 +1654,13 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT 5 AS b, 6 AS b, 1 + 1", List.of("b", "b_1", "f0_"), List.of("5", "6", "2"));
         assertResultColumns("SELECT 5 AS b, 6 AS b FROM (SELECT 1) ORDER BY 1", List.of("b", "b_1"),
                 List.of("5", "6"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)", List.of("b", "b_2", "b_1"),
+                List.of("5", "7", "6"));
+        assertResultColumns("SELECT 9 AS b, * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b", "b_2", "b_3", "b_1"), List.of("9", "5", "7", "6"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 6 AS b)", List.of("b", "b_1"), List.of("5", "6"));
+        assertResultColumns("WITH x AS (SELECT 5 AS b, 7 AS b, 6 AS b_1) SELECT * FROM x",
+                List.of("b", "b_2", "b_1"), List.of("5", "7", "6"));
         query("""
                 {"query": "SELECT 5 AS b, 6 AS b", "dryRun": true, "useLegacySql": false}
                 """)
@@ -1672,6 +1679,10 @@ class BigQueryDuckIntegrationTest {
                  "view": {"query": "SELECT 5 AS b, 6 AS b", "useLegacySql": false}}
                 """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200)
                 .body("schema.fields.name", equalTo(List.of("b", "b_1")));
+        query(Map.of("query", "SELECT * FROM shop.dup_api_view", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Duplicate column name 'b' in definition of view 'shop.dup_api_view'"));
     }
 
     @Test
@@ -1681,16 +1692,26 @@ class BigQueryDuckIntegrationTest {
                 "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY b",
                 "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY IF(b > 0, 1, 0)",
                 "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
-                        + " GROUP BY ALL ORDER BY b")) {
+                        + " GROUP BY ALL ORDER BY b",
+                "SELECT t.* FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t ORDER BY b",
+                "SELECT ROW_NUMBER() OVER (ORDER BY b) FROM (SELECT 5 AS b, 6 AS b)",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) HAVING b > 0",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) QUALIFY ROW_NUMBER() OVER (ORDER BY b) > 0")) {
             query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                     .then().statusCode(400)
                     .body("error.message", containsString("Column name b is ambiguous"));
         }
+        query("{\"query\": \"SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) GROUP BY b\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b in GROUP BY clause is ambiguous;"
+                        + " it may refer to multiple columns in the SELECT-list"));
         for (String sql : List.of(
                 "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"
                         + " ORDER BY b_2",
                 "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
-                        + " GROUP BY ALL ORDER BY b_1")) {
+                        + " GROUP BY ALL ORDER BY b_1",
+                "SELECT * FROM (SELECT 5 AS b, 6 AS b) ORDER BY b_1")) {
             query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                     .then().statusCode(400)
                     .body("error.message", containsString("Unrecognized name"));

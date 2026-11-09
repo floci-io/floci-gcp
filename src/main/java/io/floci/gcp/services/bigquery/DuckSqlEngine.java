@@ -71,7 +71,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         if (request.dryRun()) {
             List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
             return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
-                    duplicateOutputNames(described));
+                    duplicateNames(translation, described));
         }
 
         DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
@@ -82,13 +82,24 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             List<Column> columns = columns(described);
             return new Result(schemaOf(columns),
                     rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
-                    staging.bytesProcessed(), duplicateOutputNames(described));
+                    staging.bytesProcessed(), duplicateNames(translation, described));
         }
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
                 .toList());
         return new Result(schemaOf(columns), rejectNullArrayElements(columns, decodeRows(result.rows(), columns)),
-                "SELECT", staging.bytesProcessed());
+                "SELECT", staging.bytesProcessed(), translation.duplicateOutputNames());
+    }
+
+    /**
+     * The select-list names a statement wrote more than once. The translator resolves them through nested
+     * queries, which a schema read cannot once a star has been expanded; the described names are a fallback
+     * for a shape the translator could not resolve.
+     */
+    private static List<String> duplicateNames(SqlDialectTranslator.Translation translation,
+                                               List<Map<String, Object>> described) {
+        return translation.duplicateOutputNames().isEmpty()
+                ? duplicateOutputNames(described) : translation.duplicateOutputNames();
     }
 
     /**
@@ -549,6 +560,11 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             SqlDialectTranslator.Translation view = SqlDialectTranslator.translate(viewQuery, projectId, projectId,
                     ref.datasetId(), SqlDialectTranslator.QueryParameters.none(),
                     dependency -> columnNames(tables, dependency), dependency -> columnFields(tables, dependency));
+            if (!view.duplicateOutputNames().isEmpty()) {
+                throw SqlDialectTranslator.invalidQuery("Duplicate column name '"
+                        + view.duplicateOutputNames().getFirst() + "' in definition of view '"
+                        + ref.datasetId() + "." + ref.tableId() + "'");
+            }
             unicodeCaseFold[0] |= view.needsUnicodeCaseFold();
             for (SqlDialectTranslator.TableRef dependency : view.tables()) {
                 stageOne(projectId, dependency, tables, flociEndpoint, setup, emptySetup, views, schemas, staged,

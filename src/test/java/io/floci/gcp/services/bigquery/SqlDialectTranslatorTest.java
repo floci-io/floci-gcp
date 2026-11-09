@@ -2140,9 +2140,31 @@ class SqlDialectTranslatorTest {
         assertEquals("Column name b is ambiguous",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
                         + " GROUP BY ALL ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT t.* FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT ROW_NUMBER() OVER (ORDER BY b) FROM (SELECT 5 AS b, 6 AS b)").getMessage());
+        assertEquals("Name b in GROUP BY clause is ambiguous; it may refer to multiple columns in the SELECT-list",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) GROUP BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) HAVING b > 0").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c)"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b) > 0").getMessage());
         sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY 1");
         sql("SELECT 5 AS b, 6 AS c FROM (SELECT 1) UNION ALL SELECT 7, 8 FROM (SELECT 1) ORDER BY b");
         sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS b_1) ORDER BY b_1");
+        sql("SELECT 5 AS b, 6 AS c FROM (SELECT 1 AS c) GROUP BY b");
+    }
+
+    @Test
+    void nestedDuplicateOutputNamesTakeBigQuerySuffixes() {
+        String nested = sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)");
+        assertTrue(nested.startsWith("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_1\" FROM ("), nested);
+
+        String sibling = sql("SELECT 9 AS b, * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)");
+        assertTrue(sibling.startsWith("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_3\", #4 AS \"b_1\" FROM ("),
+                sibling);
     }
 
     @Test
@@ -2153,6 +2175,8 @@ class SqlDialectTranslatorTest {
         assertEquals("Unrecognized name: b_1",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
                         + " GROUP BY ALL ORDER BY b_1").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT * FROM (SELECT 5 AS b, 6 AS b) ORDER BY b_1").getMessage());
         sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s, 9 AS b_2) t"
                 + " ORDER BY b_2");
     }

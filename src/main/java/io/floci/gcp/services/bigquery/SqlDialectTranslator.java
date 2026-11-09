@@ -2578,6 +2578,7 @@ final class SqlDialectTranslator {
         int exceptClose = -1;
         int replaceOpen = -1;
         int replaceClose = -1;
+        boolean groupedStar = structStarGroupsByPosition(items.getLast()[1], end, queryDepth);
         for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
             int[] item = items.get(itemIndex);
             for (int star = item[0]; star < item[1]; star++) {
@@ -2589,17 +2590,23 @@ final class SqlDialectTranslator {
                 int clause = nextSignificant(star + 1, item[1]);
                 boolean except = clause >= 0 && tokens.get(clause).isKeyword("EXCEPT");
                 boolean replace = clause >= 0 && tokens.get(clause).isKeyword("REPLACE");
-                if (dot < item[0] || !tokens.get(dot).isPunct(".") || (!except && !replace)) {
+                boolean plainGrouped = !except && !replace && clause < 0 && groupedStar;
+                if (dot < item[0] || !tokens.get(dot).isPunct(".") || (!except && !replace && !plainGrouped)) {
                     continue;
                 }
-                int open = nextSignificant(clause + 1, item[1]);
-                if (open < 0 || !tokens.get(open).isPunct("(")) {
-                    continue;
-                }
-                int close = matchingParen(open);
-                int itemEnd = close;
+                int open = -1;
+                int close = -1;
+                int itemEnd = star;
                 int openAfterExcept = -1;
                 int closeAfterExcept = -1;
+                if (except || replace) {
+                    open = nextSignificant(clause + 1, item[1]);
+                    if (open < 0 || !tokens.get(open).isPunct("(")) {
+                        continue;
+                    }
+                    close = matchingParen(open);
+                    itemEnd = close;
+                }
                 if (except) {
                     int after = nextSignificant(close + 1, item[1]);
                     if (after >= 0 && tokens.get(after).isKeyword("REPLACE")) {
@@ -4043,6 +4050,16 @@ final class SqlDialectTranslator {
                                                int targetStar, int targetStart, int targetDot, int exceptOpen,
                                                int exceptClose, int replaceOpen, int tailStart, int queryDepth) {
         int[] operand = unwrappedOperand(targetStart, targetDot);
+        while (operand[0] < operand[1] && tokens.get(operand[0]).isPunct("(")) {
+            int close = matchingParen(operand[0]);
+            int inner = close < 0 ? -1 : nextSignificant(operand[0] + 1, close);
+            int innerEnd = close < 0 ? -1 : previousSignificant(close - 1);
+            if (close < 0 || close >= operand[1] || inner < 0 || innerEnd < inner) {
+                break;
+            }
+            // An indexed aggregate can be wrapped in parentheses, as in (ARRAY_AGG(t))[OFFSET(0)].*.
+            operand = new int[] {inner, previousSignificant(innerEnd) + 1};
+        }
         int callOpen = nextSignificant(operand[0] + 1, operand[1]);
         int callClose = callOpen < 0 ? -1 : matchingParen(callOpen);
         int group = groupByAllKeyword(tailStart, end, queryDepth);

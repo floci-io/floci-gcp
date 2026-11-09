@@ -294,6 +294,32 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void plainStructStarGroupsLikeBigQuery() {
+        assertResultColumns("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("a", "b"), List.of("1", "2"));
+        assertResultColumns("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("a", "b", "b_1"), List.of("1", "2", "5"));
+        assertResultColumns("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY 1, 2, 3",
+                List.of("a", "b", "b_1"), List.of("1", "2", "5"));
+        assertResultColumns("SELECT 5 AS b, t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("b", "a", "b_1"), List.of("5", "1", "2"));
+        assertResultColumns("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"
+                + " ORDER BY b DESC", List.of("a", "b"), List.of("1", "2"));
+    }
+
+    @Test
+    @Order(2)
+    void indexedAggregateStructStarAcceptsParentheses() {
+        assertResultColumns("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* EXCEPT (id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                List.of("name"), List.of("x"));
+        assertResultColumns("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* REPLACE (99 AS id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                List.of("id", "name"), List.of("99", "x"));
+    }
+
+    @Test
+    @Order(2)
     void structStarGroupedDuplicateNamesAndSourceStructOrderingMatchBigQuery() {
         query(Map.of("query", "SELECT t.s.* EXCEPT(a), 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
                         + " GROUP BY 1, 2", "useLegacySql", false))

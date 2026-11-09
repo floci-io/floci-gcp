@@ -172,8 +172,10 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
   query's own sources that an aggregate still needs is projected next to the expansion.
   An indexed aggregate star such
-  as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, and
-  a hoisted ordering can dereference a nested field of a source `STRUCT` column (`ORDER BY u.n`).
+  as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, with or
+  without parentheses around the aggregate, and a hoisted ordering can dereference a nested field of a
+  source `STRUCT` column (`ORDER BY u.n`). A plain `t.s.*` with no star list groups by position or
+  `GROUP BY ALL` as BigQuery does.
   Replacement expressions read the original query's sources, including correlated columns.
   A bare name in a replacement, such as an `UNNEST` range variable, its `WITH OFFSET` alias or a
   column of a subquery without an alias, reads the `FROM` row, not a same-named field of the struct.
@@ -560,9 +562,6 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
-- A struct star with no `EXCEPT`/`REPLACE` list cannot be grouped by position or with `GROUP BY ALL`
-  (`SELECT t.s.* ... GROUP BY ALL`); BigQuery returns the expanded fields. A parenthesized indexed
-  aggregate star such as `(ARRAY_AGG(t))[OFFSET(0)].*` is not rewritten; the unparenthesized form is.
 - A star over a join that mixes `USING` with `ON` or comma joins, or an `UNPIVOT` combined with a
   `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
   name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived

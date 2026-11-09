@@ -2101,6 +2101,35 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void plainStructStarWithNoListGroupsByPositionAndAll() {
+        assertEquals("SELECT * FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+        assertEquals("SELECT *, 5 AS \"b_1\" FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+        assertEquals("SELECT *, 5 AS \"b_1\" FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY 1, 2, 3",
+                sql("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY 1, 2, 3"));
+        assertEquals("SELECT 5 AS b, * RENAME (\"b\" AS \"b_1\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t) AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT 5 AS b, t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+    }
+
+    @Test
+    void indexedAggregateStructStarAcceptsParentheses() {
+        String excluded = sql("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* EXCEPT (id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+        assertTrue(excluded.contains("EXCLUDE (\"id\")"), excluded);
+        assertFalse(excluded.contains(").*"), excluded);
+
+        String replaced = sql("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* REPLACE (99 AS id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+        assertTrue(replaced.contains("REPLACE (99 AS id)"), replaced);
+        assertFalse(replaced.contains(").*"), replaced);
+    }
+
+    @Test
     void structStarDuplicateNamesSkipASuffixALaterFieldUses() {
         assertEquals("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_1\""
                         + " FROM (SELECT * EXCLUDE (\"a\") FROM (SELECT 5 AS b, unnest(t.s)"

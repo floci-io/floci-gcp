@@ -69,16 +69,20 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         String sql = translation.sql();
         if (request.dryRun()) {
-            List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
-            return new Result(schemaOf(columns), List.of(), "SELECT", staging.bytesProcessed());
+            List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+            return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
+                    duplicateOutputNames(described));
         }
 
         DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
-        if (result.columns() == null) {
-            List<Column> columns = describe(sql, staging.emptySetup(), flociEndpoint);
+        if (result.columns() == null || hasDuplicateNames(result.columns())) {
+            // A duplicate output name arrives as repeated keys in the JSON rows, so the values are read
+            // again with positional aliases once the schema has BigQuery's names.
+            List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+            List<Column> columns = columns(described);
             return new Result(schemaOf(columns),
                     rejectNullArrayElements(columns, fetch(sql, staging.setup(), flociEndpoint, columns)), "SELECT",
-                    staging.bytesProcessed());
+                    staging.bytesProcessed(), duplicateOutputNames(described));
         }
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
@@ -780,48 +784,84 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return new TableSchema(columns.stream().map(Column::field).toList());
     }
 
-    private List<Column> describe(String sql, String setup, String flociEndpoint) {
-        return columns(run("DESCRIBE " + sql, setup, flociEndpoint, null).rows());
+    private List<Map<String, Object>> describeRows(String sql, String setup, String flociEndpoint) {
+        return run("DESCRIBE " + sql, setup, flociEndpoint, null).rows();
     }
 
-    /**
-     * Result columns from {@code column_name}/{@code column_type} pairs; rejects duplicate names.
-     * Anonymous columns a {@code *} brought up from a nested select list are named {@code f0_},
-     * {@code f1_}, ... in output order, as BigQuery names them, skipping names other columns of the
-     * result already have.
-     */
-    private static List<Column> columns(List<Map<String, Object>> described) {
-        List<Column> columns = new ArrayList<>(described.size());
-        Set<String> seen = new LinkedHashSet<>();
-        Set<String> duplicates = new LinkedHashSet<>();
-        Set<String> named = new HashSet<>();
+    /** The select-list names written more than once, before BigQuery's suffixes are applied. */
+    private static List<String> duplicateOutputNames(List<Map<String, Object>> described) {
+        List<String> duplicates = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         for (Map<String, Object> row : described) {
             String name = String.valueOf(row.get("column_name"));
-            if (!ANONYMOUS_COLUMN.matcher(name).matches()) {
-                named.add(name.toLowerCase(Locale.ROOT));
+            if (ANONYMOUS_COLUMN.matcher(name).matches()) {
+                continue;
             }
-        }
-        int anonymous = 0;
-        for (Map<String, Object> row : described) {
-            String name = String.valueOf(row.get("column_name"));
             if (!seen.add(name.toLowerCase(Locale.ROOT))) {
                 duplicates.add(name);
             }
-            DuckTypes.DuckType type = DuckTypes.parse(String.valueOf(row.get("column_type")));
-            String output = name;
-            if (ANONYMOUS_COLUMN.matcher(name).matches()) {
-                while (named.contains("f" + anonymous + "_")) {
-                    anonymous++;
-                }
-                output = "f" + anonymous++ + "_";
-            }
-            columns.add(new Column(name, type, DuckTypes.toField(output, type), DuckTypes.projection(type)));
         }
-        if (!duplicates.isEmpty()) {
+        return duplicates;
+    }
+
+    /**
+     * Result columns from {@code column_name}/{@code column_type} pairs. BigQuery suffixes a duplicate
+     * output name ({@code b, b_1}), so the columns take the same names. Anonymous columns a {@code *}
+     * brought up from a nested select list are named {@code f0_}, {@code f1_}, ... in output order, as
+     * BigQuery names them, skipping names other columns of the result already have; a duplicate among
+     * those names is an error, as BigQuery reports it.
+     */
+    private static List<Column> columns(List<Map<String, Object>> described) {
+        List<String> sourceNames = new ArrayList<>(described.size());
+        List<DuckTypes.DuckType> types = new ArrayList<>(described.size());
+        Set<String> named = new HashSet<>();
+        Set<String> anonymousSeen = new HashSet<>();
+        Set<String> duplicateAnonymous = new LinkedHashSet<>();
+        for (Map<String, Object> row : described) {
+            String name = String.valueOf(row.get("column_name"));
+            sourceNames.add(name);
+            types.add(DuckTypes.parse(String.valueOf(row.get("column_type"))));
+            if (ANONYMOUS_COLUMN.matcher(name).matches()) {
+                if (!anonymousSeen.add(name.toLowerCase(Locale.ROOT))) {
+                    duplicateAnonymous.add(name);
+                }
+            } else {
+                named.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        if (!duplicateAnonymous.isEmpty()) {
             throw SqlDialectTranslator.invalidQuery("Duplicate column names in the result are not supported."
-                    + " Found duplicate(s): " + String.join(", ", duplicates));
+                    + " Found duplicate(s): " + String.join(", ", duplicateAnonymous));
+        }
+        List<String> outputs = new ArrayList<>(sourceNames);
+        int anonymous = 0;
+        for (int i = 0; i < outputs.size(); i++) {
+            if (!ANONYMOUS_COLUMN.matcher(outputs.get(i)).matches()) {
+                continue;
+            }
+            while (named.contains("f" + anonymous + "_")) {
+                anonymous++;
+            }
+            outputs.set(i, "f" + anonymous++ + "_");
+        }
+        List<String> names = SqlDialectTranslator.bigQueryOutputNames(outputs);
+        List<Column> columns = new ArrayList<>(described.size());
+        for (int i = 0; i < sourceNames.size(); i++) {
+            DuckTypes.DuckType type = types.get(i);
+            columns.add(new Column(sourceNames.get(i), type, DuckTypes.toField(names.get(i), type),
+                    DuckTypes.projection(type)));
         }
         return columns;
+    }
+
+    private static boolean hasDuplicateNames(List<DuckClient.DuckColumn> columns) {
+        Set<String> seen = new HashSet<>();
+        for (DuckClient.DuckColumn column : columns) {
+            if (!seen.add(column.name().toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<Map<String, Object>> fetch(String sql, String setup, String flociEndpoint, List<Column> columns) {

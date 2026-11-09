@@ -2129,6 +2129,35 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void orderByRejectsANameTwoSelectOutputsWereWrittenWith() {
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY IF(b > 0, 1, 0)").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1) UNION ALL SELECT 7, 8 FROM (SELECT 1)"
+                        + " ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b").getMessage());
+        sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY 1");
+        sql("SELECT 5 AS b, 6 AS c FROM (SELECT 1) UNION ALL SELECT 7, 8 FROM (SELECT 1) ORDER BY b");
+        sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS b_1) ORDER BY b_1");
+    }
+
+    @Test
+    void orderByRejectsASuffixGeneratedForADuplicate() {
+        assertEquals("Unrecognized name: b_2",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"
+                        + " ORDER BY b_2").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b_1").getMessage());
+        sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s, 9 AS b_2) t"
+                + " ORDER BY b_2");
+    }
+
+    @Test
     void indexedAggregateStructStarKeepsItsStarList() {
         String excluded = sql("SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT(id)"
                 + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");

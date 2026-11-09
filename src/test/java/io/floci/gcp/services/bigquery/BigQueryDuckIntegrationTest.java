@@ -1644,6 +1644,61 @@ class BigQueryDuckIntegrationTest {
         }
     }
 
+    @Test
+    @Order(5)
+    void duplicateOutputNamesTakeBigQuerySuffixes() {
+        assertResultColumns("SELECT 5 AS b, 6 AS b", List.of("b", "b_1"), List.of("5", "6"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b_1, 7 AS b", List.of("b", "b_1", "b_2"),
+                List.of("5", "6", "7"));
+        assertResultColumns("SELECT 5 AS f0_, 6 AS f0_", List.of("f0_", "f0__1"), List.of("5", "6"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b, 1 + 1", List.of("b", "b_1", "f0_"), List.of("5", "6", "2"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b FROM (SELECT 1) ORDER BY 1", List.of("b", "b_1"),
+                List.of("5", "6"));
+        query("""
+                {"query": "SELECT 5 AS b, 6 AS b", "dryRun": true, "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")))
+                .body("rows", nullValue());
+        query(Map.of("query", "CREATE TABLE shop.dup_as_select AS SELECT 5 AS b, 6 AS b",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CREATE TABLE has columns with duplicate name b"));
+        query(Map.of("query", "CREATE VIEW shop.dup_view AS SELECT 5 AS b, 6 AS b", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CREATE VIEW has columns with duplicate name b"));
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "dup_api_view"},
+                 "view": {"query": "SELECT 5 AS b, 6 AS b", "useLegacySql": false}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")));
+    }
+
+    @Test
+    @Order(5)
+    void orderByRejectsARepeatedSelectNameAndAGeneratedSuffix() {
+        for (String sql : List.of(
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY b",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY IF(b > 0, 1, 0)",
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        for (String sql : List.of(
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"
+                        + " ORDER BY b_2",
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b_1")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Unrecognized name"));
+        }
+        assertResultColumns("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS b_1) ORDER BY b_1",
+                List.of("b", "b_1"), List.of("5", "6"));
+    }
+
     private static void assertResultColumns(String sql, List<String> names, List<String> firstRow) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(200)
@@ -2178,8 +2233,10 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT * FROM (SELECT 1 AS id) d"
                         + " JOIN shop.reviewed_partition a USING(id)"
                         + " JOIN shop.reviewed_partition b ON b.id = a.id", "useLegacySql", false))
-                .then().statusCode(400)
-                .body("error.message", containsString("duplicate(s): id"));
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "name", "secret",
+                        "id_1", "name_1", "secret_1")))
+                .body("rows[0].f.v", equalTo(List.of("1", "ana", "hidden", "1", "ana", "hidden")));
 
         query(Map.of("query", "SELECT e.* REPLACE(id + 1 AS id),"
                         + " DATE '2026-10-01' AS _PARTITIONDATE FROM shop.reviewed_partition e",

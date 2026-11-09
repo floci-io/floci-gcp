@@ -171,8 +171,7 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   subquery. The same item keeps BigQuery's `DISTINCT`, `LIMIT`/`OFFSET` and `ORDER BY` behavior,
   a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
   query's own sources that an aggregate still needs is projected next to the expansion.
-  A duplicate output name takes BigQuery's `_1` suffix, including a sibling that collides with an
-  expanded field under a positional `GROUP BY` or `GROUP BY ALL`. An indexed aggregate star such
+  An indexed aggregate star such
   as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, and
   a hoisted ordering can dereference a nested field of a source `STRUCT` column (`ORDER BY u.n`).
   Replacement expressions read the original query's sources, including correlated columns.
@@ -188,6 +187,11 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   when joined sources expose same-named struct columns.
   A correlated `SELECT AS STRUCT input.* EXCEPT (id)` hides `_PARTITIONDATE` and `_PARTITIONTIME`
   in any query whose `FROM` provides `input`.
+- A duplicate output name takes BigQuery's `_1` suffix in the result schema, including a sibling that
+  collides with an expanded field under a positional `GROUP BY` or `GROUP BY ALL`. `ORDER BY` resolves
+  names as BigQuery does: a name two outputs were written with is ambiguous, and a suffix generated
+  for a duplicate is unrecognized unless a source column carries that name. A `CREATE TABLE` or
+  `CREATE VIEW` whose query repeats a name is rejected, as BigQuery rejects it.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes

@@ -956,6 +956,7 @@ public class BigQueryService {
                     described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
                             options, true),
                             tables(projectId, jobLocation));
+                    rejectDuplicateQueryColumns(statement, described);
                 }
                 if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
                         && statement.copySource() == null) {
@@ -988,6 +989,20 @@ public class BigQueryService {
             }
             default -> { }
         }
+    }
+
+    /** A CREATE TABLE or CREATE VIEW derives its schema, so BigQuery rejects a repeated select name. */
+    private static void rejectDuplicateQueryColumns(SqlDialectTranslator.Statement statement,
+                                                    BigQuerySqlEngine.Result result) {
+        if (result == null || result.duplicateOutputNames().isEmpty()) {
+            return;
+        }
+        String kind = switch (statement.kind()) {
+            case CREATE_VIEW -> statement.materialized() ? "CREATE MATERIALIZED VIEW" : "CREATE VIEW";
+            default -> "CREATE TABLE";
+        };
+        throw QueryEngine.invalidQuery(kind + " has columns with duplicate name "
+                + result.duplicateOutputNames().getFirst());
     }
 
     /**
@@ -1245,6 +1260,7 @@ public class BigQueryService {
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
             BigQuerySqlEngine.Result described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
                     options, true), tables(projectId, jobLocation));
+            rejectDuplicateQueryColumns(statement, described);
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
             if (statement.materialized()) {
@@ -1274,6 +1290,7 @@ public class BigQueryService {
         } else if (statement.querySql() != null) {
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, statement.querySql(),
                     options, false), tables(projectId, jobLocation));
+            rejectDuplicateQueryColumns(statement, result);
             table.setSchema(result.schema());
             rows = result.rows();
             job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));

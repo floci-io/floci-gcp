@@ -2378,6 +2378,7 @@ final class SqlDialectTranslator {
         }
         queryResult = true;
         collectCteNames();
+        validateOrderByNames();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
@@ -2769,6 +2770,13 @@ final class SqlDialectTranslator {
             innerNames.add(projectionAliases.getOrDefault(itemIndex, outputNames.get(itemIndex)));
         }
         StructStarSources sources = structStarSources(items.getLast()[1], end, queryDepth);
+        List<String> writtenOutputNames = writtenOutputNames(outputNames, outputStarFields, targetItem);
+        List<String> duplicateSafeNames = writtenOutputNames == null ? null
+                : bigQueryOutputNames(writtenOutputNames);
+        if (duplicateSafeNames != null && !duplicateSafeNames.equals(writtenOutputNames)) {
+            validateGeneratedOrderByNames(select, items.getLast()[1], end, queryDepth, writtenOutputNames,
+                    duplicateSafeNames, sources);
+        }
         List<ItemColumn> itemColumns = itemColumns(items, innerNames, targetItem, -1);
         Map<String, SourceReference> sourceReferences = new LinkedHashMap<>();
         Map<String, StructProjection> structProjections = new LinkedHashMap<>();
@@ -2902,7 +2910,7 @@ final class SqlDialectTranslator {
         rewritten.addAll(new Lexer(queryOperand ? ") AS `_floci_operand_source`) AS `_expanded`"
                 : ") AS `_expanded`").tokenize());
         if (!renamesReplacedField) {
-            rewritten = withBigQueryOutputNames(rewritten, outputNames, outputStarFields, targetItem);
+            rewritten = withBigQueryOutputNames(rewritten, writtenOutputNames, duplicateSafeNames);
         }
         if (!tail.outside().isEmpty()) {
             rewritten.add(Token.raw(" "));
@@ -4510,6 +4518,28 @@ final class SqlDialectTranslator {
                 renamedItems.put(index, renamed);
             }
         }
+        List<String> writtenNames = new ArrayList<>();
+        List<String> assignedNames = new ArrayList<>();
+        boolean namedSiblings = true;
+        for (int index = 0; index < items.size(); index++) {
+            if (index == targetItem) {
+                for (String field : expandedStarFields) {
+                    writtenNames.add(field);
+                    assignedNames.add(renamedStarFields.getOrDefault(field, field));
+                }
+                continue;
+            }
+            String name = outputNames.get(index);
+            if (name == null) {
+                namedSiblings = false;
+                break;
+            }
+            writtenNames.add(name);
+            assignedNames.add(renamedItems.getOrDefault(index, name));
+        }
+        if (namedSiblings && !assignedNames.equals(writtenNames)) {
+            validateGeneratedOrderByNames(select, tailStart, end, queryDepth, writtenNames, assignedNames, sources);
+        }
         int[] substitutions = new int[1];
         List<List<Token>> rewrittenItems = new ArrayList<>();
         for (int index = 0; index < items.size(); index++) {
@@ -6107,23 +6137,10 @@ final class SqlDialectTranslator {
      * BigQuery reserves every name the select list writes, so a duplicate skips a suffix a later output
      * already uses ({@code b, a, b, b_1} becomes {@code b, a, b_2, b_1}); DuckDB numbers duplicates in
      * place ({@code b, a, b_1, b_1_1}), so the projection is emitted by position to keep both row order
-     * and names. {@code starFields} is null when the expanded fields are not known.
+     * and names. {@code written} is null when the expanded fields are not known.
      */
-    private List<Token> withBigQueryOutputNames(List<Token> select, List<String> siblingNames, Set<String> starFields,
-                                                int starItem) {
-        if (starFields == null) {
-            return select;
-        }
-        List<String> written = new ArrayList<>();
-        for (int index = 0; index < siblingNames.size(); index++) {
-            if (index == starItem) {
-                written.addAll(starFields);
-            } else {
-                written.add(siblingNames.get(index));
-            }
-        }
-        List<String> names = bigQueryOutputNames(written);
-        if (names.equals(duckOutputNames(written))) {
+    private List<Token> withBigQueryOutputNames(List<Token> select, List<String> written, List<String> names) {
+        if (written == null || names == null || names.equals(duckOutputNames(written))) {
             return select;
         }
         List<Token> wrapped = new ArrayList<>();
@@ -6140,11 +6157,222 @@ final class SqlDialectTranslator {
         return wrapped;
     }
 
+    /** The names a select list writes in output order, or null when the star's fields are not known. */
+    private static List<String> writtenOutputNames(List<String> siblingNames, Set<String> starFields, int starItem) {
+        if (starFields == null) {
+            return null;
+        }
+        List<String> written = new ArrayList<>();
+        for (int index = 0; index < siblingNames.size(); index++) {
+            if (index == starItem) {
+                written.addAll(starFields);
+            } else {
+                written.add(siblingNames.get(index));
+            }
+        }
+        return written;
+    }
+
+    /**
+     * BigQuery never resolves a bare ORDER BY name to a suffix it generated for a duplicate output, so a
+     * reference to one is unrecognized unless a source column carries that name. Called before the tail
+     * is rewritten, while the ORDER BY still holds the caller's names.
+     */
+    private void validateGeneratedOrderByNames(int select, int start, int end, int queryDepth,
+                                               List<String> written, List<String> names,
+                                               StructStarSources sources) {
+        Set<String> writtenNames = new HashSet<>();
+        for (String name : written) {
+            writtenNames.add(name.toLowerCase(Locale.ROOT));
+        }
+        Set<String> generated = new HashSet<>();
+        for (String name : names) {
+            if (!writtenNames.contains(name.toLowerCase(Locale.ROOT))) {
+                generated.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        if (generated.isEmpty()) {
+            return;
+        }
+        int order = structStarClauseStart(start, end, queryDepth, "ORDER");
+        if (order < 0) {
+            return;
+        }
+        int by = nextSignificant(order + 1, end);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            return;
+        }
+        int orderEnd = Math.min(clauseEnd(by + 1, queryDepth), end);
+        for (int[] range : topLevelRanges(by + 1, orderEnd, queryDepth)) {
+            for (int i = range[0]; i < range[1]; i++) {
+                if (insideNestedQuery(i, select) || !isBareOrderName(i, range[1])) {
+                    continue;
+                }
+                Token token = tokens.get(i);
+                String name = token.identifierText().toLowerCase(Locale.ROOT);
+                if (writtenNames.contains(name) || !generated.contains(name)) {
+                    continue;
+                }
+                if (sources != null && sources.allKnown() && !sourceHasColumn(sources, name)) {
+                    throw invalidQuery("Unrecognized name: " + token.identifierText());
+                }
+            }
+        }
+    }
+
+    /**
+     * True for a token in an ORDER BY item that can name a select output: a bare name, not a field of a
+     * path, not an order modifier, not a function call and not the type of a {@code CAST}.
+     */
+    private boolean isBareOrderName(int index, int end) {
+        Token token = tokens.get(index);
+        if (!isName(token) || isPrecededByDot(index) || isOrderModifier(token)) {
+            return false;
+        }
+        int next = nextSignificant(index + 1, end);
+        if (next >= 0 && tokens.get(next).isPunct("(")) {
+            return false;
+        }
+        int before = significantBefore(index);
+        return before < 0 || !tokens.get(before).isKeyword("AS");
+    }
+
+    private static boolean sourceHasColumn(StructStarSources sources, String name) {
+        String key = name.toLowerCase(Locale.ROOT);
+        if (sources.rangeVariables().contains(key) || sources.usingSources().containsKey(key)) {
+            return true;
+        }
+        for (Set<String> columns : sources.columnsByAlias().values()) {
+            if (columns.contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * BigQuery resolves a bare name in ORDER BY to the select list first, so a name that two outputs were
+     * written with is ambiguous there. DuckDB would sort by one of them silently.
+     */
+    private void validateOrderByNames() {
+        for (int order = tokens.size() - 1; order >= 0; order--) {
+            if (!tokens.get(order).isKeyword("ORDER") || isPrecededByDot(order)) {
+                continue;
+            }
+            int by = nextSignificant(order + 1, tokens.size());
+            if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+                continue;
+            }
+            int depth = parenthesisDepth(order);
+            int select = firstSelectAtDepth(order, depth);
+            if (select < 0 || leavesDepth(select, order, depth)) {
+                continue;
+            }
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            Map<String, Integer> written = writtenOutputNameCounts(select, items);
+            if (written.values().stream().noneMatch(count -> count > 1)) {
+                continue;
+            }
+            int orderEnd = clauseEnd(by + 1, depth);
+            for (int[] range : topLevelRanges(by + 1, orderEnd, depth)) {
+                for (int i = range[0]; i < range[1]; i++) {
+                    if (insideNestedQuery(i, select) || !isBareOrderName(i, range[1])) {
+                        continue;
+                    }
+                    String name = tokens.get(i).identifierText();
+                    if (written.getOrDefault(name.toLowerCase(Locale.ROOT), 0) > 1) {
+                        throw invalidQuery("Column name " + name + " is ambiguous");
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The first SELECT of the query holding {@code before}, which is the arm whose names a trailing
+     * ORDER BY sees when the query is a set operation. SELECTs of nested queries sit deeper and are skipped.
+     */
+    private int firstSelectAtDepth(int before, int depth) {
+        int first = -1;
+        for (int i = before - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) < depth) {
+                break;
+            }
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("SELECT")) {
+                first = i;
+            }
+        }
+        return first;
+    }
+
+    /** How many outputs this select list writes under each name, before suffixes are assigned. */
+    private Map<String, Integer> writtenOutputNameCounts(int select, List<int[]> items) {
+        Map<String, Integer> counts = new HashMap<>();
+        for (int[] item : items) {
+            if (expandsStar(item)) {
+                Set<String> fields = starItemFields(select, item);
+                if (fields == null) {
+                    continue;
+                }
+                for (String field : fields) {
+                    counts.merge(field.toLowerCase(Locale.ROOT), 1, Integer::sum);
+                }
+                continue;
+            }
+            String name = outputNameText(item[0], item[1]);
+            if (name != null) {
+                counts.merge(name.toLowerCase(Locale.ROOT), 1, Integer::sum);
+            }
+        }
+        return counts;
+    }
+
+    /** The names a {@code *} or struct star item writes, or null when they cannot be determined. */
+    private Set<String> starItemFields(int select, int[] item) {
+        int star = projectionStarIndex(item);
+        if (star < 0) {
+            return null;
+        }
+        Set<String> fields;
+        int dot = significantBefore(star);
+        if (dot >= 0 && tokens.get(dot).isPunct(".")) {
+            int last = significantBefore(dot);
+            if (last < 0) {
+                return null;
+            }
+            fields = operandFields(select, starOperandStart(last), dot);
+        } else {
+            fields = starColumns(select);
+        }
+        if (fields == null) {
+            return null;
+        }
+        int clause = nextSignificant(star + 1, item[1]);
+        if (clause < 0 || !tokens.get(clause).isKeyword("EXCEPT")) {
+            return fields;
+        }
+        int open = nextSignificant(clause + 1, item[1]);
+        int close = open < 0 ? -1 : matchingParen(open);
+        if (close < 0) {
+            return null;
+        }
+        Set<String> remaining = new LinkedHashSet<>(fields);
+        for (Token token : significant(open + 1, close)) {
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                remaining.remove(token.identifierText().toLowerCase(Locale.ROOT));
+            }
+        }
+        return remaining;
+    }
+
     /**
      * BigQuery names duplicate outputs in select order after reserving every name the select list writes,
      * so a duplicate takes the first free {@code _N} suffix and a later written name keeps its spelling.
      */
-    private static List<String> bigQueryOutputNames(List<String> written) {
+    static List<String> bigQueryOutputNames(List<String> written) {
         Set<String> taken = new HashSet<>();
         for (String name : written) {
             taken.add(name.toLowerCase(Locale.ROOT));

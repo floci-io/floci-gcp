@@ -285,7 +285,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
         DuckClient.DuckResult result;
         try {
-            result = client.query(sql, "SET TimeZone = 'UTC';", flociEndpoint);
+            result = client.query(sql, SESSION_SETUP, flociEndpoint);
         } catch (DuckClient.DuckSqlException e) {
             throw loadError("Error while reading data, error message: " + queryErrorMessage(e.getMessage()));
         }
@@ -459,6 +459,13 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     static final String LOCK_EXTERNAL_ACCESS = "SET enable_external_access = false;\nSET lock_configuration = true;\n";
 
     /**
+     * Opens every session: UTC for TIMESTAMP values, and BigQuery's default NULL order, first for an ascending
+     * sort and last for a descending one, which also applies inside {@code OVER (...)} and ordered aggregates.
+     */
+    static final String SESSION_SETUP = "SET TimeZone = 'UTC';\n"
+            + "SET default_null_order = 'nulls_first_on_asc_last_on_desc';\n";
+
+    /**
      * Setup SQL creating every referenced table in DuckDB. Views are expanded: their own
      * references are staged first, then the view is created from its translated query. Views come
      * from callers' SQL, so they are created after {@link #LOCK_EXTERNAL_ACCESS}, with the tables.
@@ -471,8 +478,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private Staging stage(String projectId, Set<SqlDialectTranslator.TableRef> refs,
                           Set<InformationSchema.Ref> informationSchema, boolean needsUnicodeCaseFold,
                           Tables tables, String flociEndpoint) {
-        StringBuilder setup = new StringBuilder("SET TimeZone = 'UTC';\n");
-        StringBuilder emptySetup = new StringBuilder("SET TimeZone = 'UTC';\n");
+        StringBuilder setup = new StringBuilder(SESSION_SETUP);
+        StringBuilder emptySetup = new StringBuilder(SESSION_SETUP);
         StringBuilder views = new StringBuilder();
         long[] bytes = {0};
         boolean[] unicodeCaseFold = {needsUnicodeCaseFold};

@@ -1202,7 +1202,7 @@ class BigQueryDuckIntegrationTest {
                 {"query": "SELECT ARRAY_AGG(STRUCT(x AS v) ORDER BY x) AS a FROM UNNEST([1, NULL]) x", "useLegacySql": false}
                 """)
                 .then().statusCode(200)
-                .body("rows[0].f[0].v.v.f.v", equalTo(List.of(List.of("1"), Arrays.asList((String) null))));
+                .body("rows[0].f[0].v.v.f.v", equalTo(List.of(Arrays.asList((String) null), List.of("1"))));
     }
 
     @Test
@@ -1423,6 +1423,25 @@ class BigQueryDuckIntegrationTest {
                 + " FORMAT_TIMESTAMP('%Y', Null) d, FORMAT_TIME('%H', (null)) e", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null)));
+    }
+
+    @Test
+    @Order(5)
+    void nullsSortFirstAscendingAndLastDescendingLikeBigQuery() {
+        String[][] cases = {
+                {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n", "rows.collect { it.f[0].v }", "NULL,1,3"},
+                {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n DESC", "rows.collect { it.f[0].v }", "3,1,NULL"},
+                {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n ASC NULLS LAST", "rows.collect { it.f[0].v }", "1,3,NULL"},
+                {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n DESC NULLS FIRST", "rows.collect { it.f[0].v }", "NULL,3,1"},
+                {"SELECT n, ROW_NUMBER() OVER (ORDER BY n) AS r FROM UNNEST([1, 3, NULL]) n ORDER BY r", "rows.collect { it.f[0].v }", "NULL,1,3"},
+                {"SELECT a, b FROM UNNEST([STRUCT(1 AS a, CAST(NULL AS INT64) AS b), STRUCT(1, 2), STRUCT(NULL, 3)]) ORDER BY a, b DESC", "rows.collect { it.f[1].v }", "3,2,NULL"},
+        };
+        for (String[] c : cases) {
+            List<String> expected = Arrays.stream(c[2].split(",")).map(v -> v.equals("NULL") ? null : v).toList();
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body(c[1], equalTo(expected));
+        }
     }
 
     private static void assertNullElementError(String sql, String field) {

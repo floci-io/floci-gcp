@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -1733,6 +1734,69 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v.v", equalTo(List.of("1", "22")))
                 .body("rows[0].f[1].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void nanSortsJustAfterNullLikeBigQuery() {
+        String values = "UNNEST([1.0, CAST('NaN' AS FLOAT64), NULL, -1.0]) x";
+        String[][] cases = {
+                {"SELECT x FROM " + values + " ORDER BY x", "NULL,NaN,-1.0,1.0"},
+                {"SELECT x FROM " + values + " ORDER BY x DESC", "1.0,-1.0,NaN,NULL"},
+                {"SELECT x FROM " + values + " ORDER BY x ASC NULLS LAST", "NaN,-1.0,1.0,NULL"},
+                {"SELECT x FROM " + values + " ORDER BY x DESC NULLS FIRST", "NULL,1.0,-1.0,NaN"},
+                {"SELECT DISTINCT x FROM " + values + " ORDER BY x", "NULL,NaN,-1.0,1.0"},
+                {"SELECT x * 2 AS y FROM " + values + " ORDER BY y", "NULL,NaN,-2.0,2.0"},
+                {"SELECT x FROM (SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS r FROM " + values + ") ORDER BY r",
+                        "NULL,NaN,-1.0,1.0"},
+        };
+        for (String[] c : cases) {
+            List<String> expected = Arrays.stream(c[1].split(",")).map(v -> v.equals("NULL") ? null : v).toList();
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v }", equalTo(expected));
+        }
+        query(Map.of("query", "SELECT ARRAY_AGG(x IGNORE NULLS ORDER BY x) AS a FROM " + values, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("NaN", "-1.0", "1.0")));
+        query(Map.of("query", "CREATE TABLE shop.nan_values AS SELECT x FROM " + values, "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT x FROM shop.nan_values ORDER BY x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(Arrays.asList(null, "NaN", "-1.0", "1.0")));
+        query(Map.of("query", "SELECT COALESCE(x, 0) AS x FROM UNNEST([NULL, -1, CAST('NaN' AS FLOAT64)]) x ORDER BY x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(List.of("NaN", "-1.0", "0.0")));
+        query(Map.of("query", "SELECT x * 2 `y` FROM UNNEST([1.0, CAST('NaN' AS FLOAT64), NULL]) x ORDER BY y",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(Arrays.asList(null, "NaN", "2.0")));
+        query(Map.of("query", "SELECT SUM(x) OVER (w RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS s,"
+                + " CAST('NaN' AS FLOAT64) AS n FROM UNNEST([1, 2]) x WINDOW w AS (ORDER BY x)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(List.of("1", "3")));
+        for (String sql : List.of("SELECT x FROM " + values + " GROUP BY ALL ORDER BY x",
+                "SELECT x, COUNT(*) AS c FROM " + values + " GROUP BY ALL ORDER BY x DESC",
+                "SELECT x * 2 AS y FROM " + values + " GROUP BY ALL ORDER BY y")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows", hasSize(4));
+        }
+        List<String> random = query(Map.of("query", "SELECT IF(RAND() < 0.5, NULL, 1.0) AS y, CAST('NaN' AS FLOAT64) AS n"
+                + " FROM UNNEST(GENERATE_ARRAY(1, 100)) i ORDER BY y", "useLegacySql", false))
+                .then().statusCode(200)
+                .extract().path("rows.collect { it.f[0].v }");
+        int nulls = Collections.frequency(random, null);
+        assertEquals(Collections.nCopies(nulls, (String) null), random.subList(0, nulls));
+        query(Map.of("query", "SELECT r FROM (SELECT STRUCT(x AS `limit`) AS r FROM UNNEST([1.0, CAST('NaN' AS FLOAT64)]) x)"
+                + " ORDER BY r.limit", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("NaN", "1.0")));
+        query(Map.of("query", "SELECT t.rows AS r FROM UNNEST([STRUCT(1.0 AS `rows`), STRUCT(CAST('NaN' AS FLOAT64) AS `rows`)]) t"
+                + " ORDER BY t.rows DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(List.of("1.0", "NaN")));
     }
 
     private static void assertNullElementError(String sql, String field) {

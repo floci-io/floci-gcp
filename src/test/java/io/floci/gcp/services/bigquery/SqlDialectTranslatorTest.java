@@ -4009,4 +4009,34 @@ class SqlDialectTranslatorTest {
         assertTrue(slice.contains("list_transform([RANDOM()], _floci_slice_offset ->")
                 || slice.contains("list_transform([random()], _floci_slice_offset ->"), slice);
     }
+
+    @Test
+    void orderByKeysGetANanKeyOnlyWhenTheQueryCanSeeANan() {
+        String nan = " WHERE x IS DISTINCT FROM CAST('NaN' AS FLOAT64)";
+        String plain = sql("SELECT x FROM ds.t" + nan + " ORDER BY x DESC NULLS FIRST");
+        assertTrue(plain.contains("ORDER BY (CASE WHEN (x) IS NULL THEN NULL WHEN typeof(x) IN ('DOUBLE', 'FLOAT')"
+                + " AND isnan(TRY_CAST(CAST((x) AS VARCHAR) AS DOUBLE)) THEN 0 ELSE 1 END) DESC NULLS FIRST, x DESC NULLS FIRST"),
+                plain);
+        assertTrue(sql("SELECT ROW_NUMBER() OVER (ORDER BY x) AS r FROM ds.t" + nan).contains("OVER (ORDER BY (CASE WHEN (x)"));
+        assertTrue(sql("SELECT IEEE_DIVIDE(x, y) AS q FROM ds.t ORDER BY q").contains("isnan"));
+        assertFalse(sql("SELECT x FROM ds.t ORDER BY x").contains("isnan"));
+        assertFalse(sql("SELECT x FROM ds.t" + nan + " ORDER BY 1").contains("isnan"));
+        assertFalse(sql("(SELECT x FROM ds.t" + nan + ") UNION ALL (SELECT y FROM ds.u) ORDER BY x").contains("isnan"));
+        assertFalse(sql("SELECT ARRAY_AGG(DISTINCT x ORDER BY x) AS a FROM ds.t" + nan).contains("isnan"));
+        String shadow = sql("SELECT COALESCE(x, 0) AS x FROM ds.t" + nan + " ORDER BY x");
+        assertTrue(shadow.contains("ORDER BY (CASE WHEN (COALESCE(x, 0)) IS NULL"), shadow);
+        String implicit = sql("SELECT x * 2 `y` FROM ds.t" + nan + " ORDER BY y");
+        assertTrue(implicit.contains("ORDER BY (CASE WHEN (x * 2) IS NULL"), implicit);
+        String namedRange = sql("SELECT SUM(x) OVER (w RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM ds.t" + nan
+                + " WINDOW w AS (ORDER BY x)");
+        assertFalse(namedRange.contains("isnan"), namedRange);
+        String range = sql("SELECT SUM(x) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM ds.t" + nan);
+        assertFalse(range.contains("isnan"), range);
+        String groupByAll = sql("SELECT x FROM ds.t" + nan + " GROUP BY ALL ORDER BY x");
+        assertFalse(groupByAll.contains("isnan"), groupByAll);
+        String random = sql("SELECT IF(RAND() < 0.5, NULL, x) AS y FROM ds.t" + nan + " ORDER BY y");
+        assertFalse(random.contains("isnan"), random);
+        String dotted = sql("SELECT t.limit FROM ds.t" + nan + " ORDER BY t.limit");
+        assertTrue(dotted.contains("ORDER BY (CASE WHEN (t.\"limit\") IS NULL") || dotted.contains("ORDER BY (CASE WHEN (t.limit) IS NULL"), dotted);
+    }
 }

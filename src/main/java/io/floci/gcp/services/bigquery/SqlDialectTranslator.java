@@ -2675,7 +2675,7 @@ final class SqlDialectTranslator {
         }
         Set<String> outputStarFields = starFields;
         if (starFields != null) {
-            outputStarFields = new HashSet<>(starFields);
+            outputStarFields = new LinkedHashSet<>(starFields);
             outputStarFields.removeAll(excludedNames);
         }
         List<String> outputNames = new ArrayList<>();
@@ -2901,6 +2901,9 @@ final class SqlDialectTranslator {
         rewritten.addAll(withoutTrailingSpace(tail.inside()));
         rewritten.addAll(new Lexer(queryOperand ? ") AS `_floci_operand_source`) AS `_expanded`"
                 : ") AS `_expanded`").tokenize());
+        if (!renamesReplacedField) {
+            rewritten = withBigQueryOutputNames(rewritten, outputNames, outputStarFields, targetItem);
+        }
         if (!tail.outside().isEmpty()) {
             rewritten.add(Token.raw(" "));
             rewritten.addAll(tail.outside());
@@ -4585,7 +4588,10 @@ final class SqlDialectTranslator {
                 rewritten.add(Token.raw(" REPLACE ("));
                 rewritten.addAll(replacement);
                 rewritten.add(Token.raw(")"));
-            } else if (!renamedStarFields.isEmpty()) {
+            }
+            if (!renamedStarFields.isEmpty()) {
+                // DuckDB accepts RENAME after REPLACE, so the suffix lands on the right output without a
+                // wrapper that would leave DuckDB's own duplicate numbering in charge of the names.
                 rewritten.add(Token.raw(" RENAME ("));
                 rewritten.add(Token.raw(renamedStarFields.entrySet().stream()
                         .map(entry -> DuckTypes.quoteIdentifier(entry.getKey()) + " AS "
@@ -4627,15 +4633,6 @@ final class SqlDialectTranslator {
         rewritten.addAll(new Lexer(queryOperand ? ") AS `_floci_operand_source`) AS `_expanded` "
                 : ") AS `_expanded` ").tokenize());
         rewritten.addAll(clauses);
-        if (replaceOpen >= 0 && !renamedStarFields.isEmpty()) {
-            // DuckDB cannot combine RENAME with REPLACE in one star list. Wrapping the finished query
-            // lets DuckDB suffix the duplicate output names in select order instead.
-            List<Token> wrapped = new ArrayList<>();
-            wrapped.addAll(new Lexer("SELECT * FROM (").tokenize());
-            wrapped.addAll(rewritten);
-            wrapped.addAll(new Lexer(") AS `" + structStarName("_floci_duplicate_names") + "`").tokenize());
-            rewritten = wrapped;
-        }
         tokens.subList(select, end).clear();
         tokens.addAll(select, rewritten);
         return true;
@@ -6103,6 +6100,80 @@ final class SqlDialectTranslator {
             candidate = name + "_" + suffix++;
         } while (!taken.add(candidate.toLowerCase(Locale.ROOT)));
         return candidate;
+    }
+
+    /**
+     * Gives a star expansion BigQuery's output names when DuckDB would number a duplicate differently.
+     * BigQuery reserves every name the select list writes, so a duplicate skips a suffix a later output
+     * already uses ({@code b, a, b, b_1} becomes {@code b, a, b_2, b_1}); DuckDB numbers duplicates in
+     * place ({@code b, a, b_1, b_1_1}), so the projection is emitted by position to keep both row order
+     * and names. {@code starFields} is null when the expanded fields are not known.
+     */
+    private List<Token> withBigQueryOutputNames(List<Token> select, List<String> siblingNames, Set<String> starFields,
+                                                int starItem) {
+        if (starFields == null) {
+            return select;
+        }
+        List<String> written = new ArrayList<>();
+        for (int index = 0; index < siblingNames.size(); index++) {
+            if (index == starItem) {
+                written.addAll(starFields);
+            } else {
+                written.add(siblingNames.get(index));
+            }
+        }
+        List<String> names = bigQueryOutputNames(written);
+        if (names.equals(duckOutputNames(written))) {
+            return select;
+        }
+        List<Token> wrapped = new ArrayList<>();
+        wrapped.addAll(new Lexer("SELECT ").tokenize());
+        for (int index = 0; index < names.size(); index++) {
+            if (index > 0) {
+                wrapped.add(Token.raw(", "));
+            }
+            wrapped.add(Token.raw("#" + (index + 1) + " AS " + DuckTypes.quoteIdentifier(names.get(index))));
+        }
+        wrapped.addAll(new Lexer(" FROM (").tokenize());
+        wrapped.addAll(select);
+        wrapped.addAll(new Lexer(") AS `" + structStarName("_floci_names") + "`").tokenize());
+        return wrapped;
+    }
+
+    /**
+     * BigQuery names duplicate outputs in select order after reserving every name the select list writes,
+     * so a duplicate takes the first free {@code _N} suffix and a later written name keeps its spelling.
+     */
+    private static List<String> bigQueryOutputNames(List<String> written) {
+        Set<String> taken = new HashSet<>();
+        for (String name : written) {
+            taken.add(name.toLowerCase(Locale.ROOT));
+        }
+        Set<String> claimed = new HashSet<>();
+        List<String> names = new ArrayList<>(written.size());
+        for (String name : written) {
+            if (claimed.add(name.toLowerCase(Locale.ROOT))) {
+                names.add(name);
+                continue;
+            }
+            String suffixed = suffixedName(name, taken);
+            claimed.add(suffixed.toLowerCase(Locale.ROOT));
+            names.add(suffixed);
+        }
+        return names;
+    }
+
+    /**
+     * The names DuckDB gives a derived table's duplicate outputs: the first keeps its name and a later one
+     * takes the next free {@code _N} suffix without reserving names that come later in the list.
+     */
+    private static List<String> duckOutputNames(List<String> written) {
+        Set<String> used = new HashSet<>();
+        List<String> names = new ArrayList<>(written.size());
+        for (String name : written) {
+            names.add(used.add(name.toLowerCase(Locale.ROOT)) ? name : suffixedName(name, used));
+        }
+        return names;
     }
 
     private String structStarName(String name) {

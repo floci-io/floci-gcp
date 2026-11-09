@@ -2082,8 +2082,10 @@ class SqlDialectTranslatorTest {
                 sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
         String replaced = sql("SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
                 + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL");
-        assertTrue(replaced.startsWith("SELECT * FROM (SELECT 5 AS b"), replaced);
-        assertTrue(replaced.contains(") AS \"_floci_duplicate_names\""), replaced);
+        assertEquals("SELECT 5 AS b, * REPLACE (9 AS a) RENAME (\"b\" AS \"b_1\")"
+                        + " FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                replaced);
 
         String reserved = sql("SELECT t.s.* EXCEPT(a), t.id AS b, -t.id AS b_1"
                 + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 1 AS id"
@@ -2096,6 +2098,34 @@ class SqlDialectTranslatorTest {
                 + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1), 2) t GROUP BY ALL");
         assertTrue(expanded.contains("AS \"b_2\""), expanded);
         assertFalse(expanded.contains("b_1_1"), expanded);
+    }
+
+    @Test
+    void structStarDuplicateNamesSkipASuffixALaterFieldUses() {
+        assertEquals("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_1\""
+                        + " FROM (SELECT * EXCLUDE (\"a\") FROM (SELECT 5 AS b, unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2, 'b_1': 3} AS \"s\") t) AS \"_expanded\")"
+                        + " AS \"_floci_names\"",
+                sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"));
+        assertFalse(sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t")
+                .contains("_floci_names"), "DuckDB numbering already matches BigQuery");
+
+        String twoSiblings = sql("SELECT 5 AS b, 6 AS b, t.s.* EXCEPT(a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t");
+        assertTrue(twoSiblings.contains("#1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_3\", #4 AS \"b_1\""),
+                twoSiblings);
+
+        String ordered = sql("SELECT 5 AS b, t.s.* EXCEPT(a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t ORDER BY b_1");
+        assertTrue(ordered.endsWith("AS \"_floci_names\" ORDER BY b_1"), ordered);
+
+        String grouped = sql("SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t GROUP BY ALL");
+        assertEquals("SELECT 5 AS b, * REPLACE (9 AS a) RENAME (\"b\" AS \"b_2\")"
+                        + " FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2, 'b_1': 3} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                grouped);
+        assertFalse(grouped.contains("_floci_duplicate_names"), grouped);
     }
 
     @Test

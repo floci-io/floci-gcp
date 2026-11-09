@@ -355,6 +355,42 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void structStarDuplicateNamesSkipASuffixALaterFieldUses() {
+        query(Map.of("query", "SELECT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT DISTINCT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, 6 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_3", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "6", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 4 AS b_1)) t ORDER BY b_1 DESC",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "4")))
+                .body("rows[1].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 7 AS b, 4 AS b_1)) t"
+                        + " GROUP BY ALL ORDER BY b_1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "9", "2", "3")))
+                .body("rows[1].f.v", equalTo(List.of("5", "9", "7", "4")));
+    }
+
+    @Test
+    @Order(2)
     void indexedAggregateStructStarAppliesItsStarList() {
         query(Map.of("query", "SELECT ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT(id)"
                         + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",

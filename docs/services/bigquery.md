@@ -213,11 +213,12 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   array literals including `ARRAY<STRUCT<...>>[...]`.
 - `CAST`/`SAFE_CAST` with GoogleSQL type names, including `ARRAY<...>` and `STRUCT<...>`.
 - Functions rewritten to their DuckDB equivalents: `SAFE_DIVIDE`, `IEEE_DIVIDE`, `DIV`, `IF`,
-  `COUNTIF`, `CONCAT`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `ARRAY_CONCAT_AGG`,
+  `COUNTIF`, `CONCAT`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `ARRAY_SLICE`,
+  `ARRAY_CONCAT_AGG`,
   `GENERATE_ARRAY`, `GENERATE_DATE_ARRAY`, `GENERATE_TIMESTAMP_ARRAY`, `GENERATE_UUID`,
   `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`, `SPLIT`, `FORMAT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
   `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
-  `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_REPLACE`,
+  `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
   `TIMESTAMP_SECONDS`/`TIMESTAMP_MILLIS`/`TIMESTAMP_MICROS`, `TIMESTAMP_ADD`/`TIMESTAMP_SUB`,
   `DATE_ADD`/`DATE_SUB`, `*_DIFF`, `*_TRUNC`, `FORMAT_TIMESTAMP`/`FORMAT_DATETIME`/`FORMAT_DATE`/`FORMAT_TIME`,
@@ -599,6 +600,10 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `+0000` and `+00:00`. `PARSE_DATE`, `PARSE_DATETIME` and `PARSE_TIMESTAMP` need a constant
   format (a literal or a query parameter): DuckDB's `strptime` takes no format read from a column.
   `FORMAT_*` accepts a format read from a column.
+- A bare subscript `[i]` on an `ARRAY` reached through a field path, such as
+  `CAST(STRUCT([1, 2] AS a) AS STRUCT<a ARRAY<INT64>>).a[1]`, is read as DuckDB's one-based subscript (`1`
+  here, where BigQuery returns `2`): the translator does not know the field is an array. Write `[OFFSET(i)]`
+  or `[ORDINAL(i)]` there.
 - A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
   compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
   time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. Three forms differ: a lowercase `t`

@@ -8,6 +8,7 @@ import java.time.DateTimeException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -47,13 +48,20 @@ final class SqlDialectTranslator {
      * BigQuery's suffixes; a CREATE TABLE or CREATE VIEW statement rejects those.
      */
     record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
-                       boolean needsUnicodeCaseFold, List<String> duplicateOutputNames) {
+                       boolean needsUnicodeCaseFold, List<String> duplicateOutputNames,
+                       List<MissingStructField> missingStructFields) {
 
         Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
                     boolean needsUnicodeCaseFold) {
-            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of());
+            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of(), List.of());
         }
     }
+
+    /**
+     * An {@code alias.field} in ORDER BY naming a field the STRUCT select alias does not have, as written, and
+     * whether it belongs to the outermost query, whose aliases are the result's columns.
+     */
+    record MissingStructField(String alias, String field, boolean outermost) {}
 
     private record UnnestOffset(String name, int nextToken) {}
 
@@ -139,6 +147,13 @@ final class SqlDialectTranslator {
     private int generatedInitcapName;
     private int generatedAnyValueName;
     private boolean needsUnicodeCaseFold;
+    private final List<MissingStructField> missingStructFields = new ArrayList<>();
+    /**
+     * Field maps from {@link #googleSqlStructFields} that include an anonymous field. Such a struct is never
+     * reported as missing a field, since floci cannot write its type the way BigQuery's message does.
+     */
+    private final Set<Map<String, List<Token>>> structFieldsWithAnonymous = Collections.newSetFromMap(
+            new IdentityHashMap<>());
     private boolean queryResult;
 
     private List<Token> tokens;
@@ -1423,7 +1438,8 @@ final class SqlDialectTranslator {
         if (first.equals("MERGE")) {
             out.append(" RETURNING merge_action");
         }
-        return new Translation(out.toString().trim(), tables, informationSchema, needsUnicodeCaseFold);
+        return new Translation(out.toString().trim(), tables, informationSchema, needsUnicodeCaseFold,
+                List.of(), List.copyOf(missingStructFields));
     }
 
     /**
@@ -2433,7 +2449,7 @@ final class SqlDialectTranslator {
                     + ") AS \"_floci_star_replace\"";
         }
         return new Translation(rendered, tables, informationSchema, needsUnicodeCaseFold,
-                duplicateOutputNames);
+                duplicateOutputNames, List.copyOf(missingStructFields));
     }
 
     /**
@@ -9621,7 +9637,10 @@ final class SqlDialectTranslator {
      * Replaces each {@code alias.field} between {@code start} and {@code end} with the field's expression; the tail
      * of a qualified path such as {@code t.s.n} is a column of {@code t}, not the alias, and is left alone. In
      * ORDER BY, DuckDB reads a bare name as a select alias and an integer literal as a column position, so the
-     * expression is wrapped in {@code list_extract([...], 1)}, which keeps its value and type.
+     * expression is wrapped in {@code list_extract([...], 1)}, which keeps its value and type. There, as in
+     * BigQuery, a field the alias does not have is an error rather than a column of a table of the same name. It
+     * is recorded so the engine can name the struct's type before the query runs; the {@code error(...)} left in
+     * its place is the fallback for a path that does not check.
      */
     private void replaceStructAliasFields(int start, int end, Map<String, Map<String, List<Token>>> aliases,
                                           boolean orderBy) {
@@ -9647,6 +9666,12 @@ final class SqlDialectTranslator {
             List<Token> expression = fields == null
                     ? null
                     : fields.get(tokens.get(field).identifierText().toLowerCase(Locale.ROOT));
+            if (fields != null && expression == null && orderBy && !structFieldsWithAnonymous.contains(fields)) {
+                missingStructFields.add(new MissingStructField(alias.identifierText(),
+                        tokens.get(field).identifierText(), parenthesisDepth(start) == 0));
+                String message = "Field name " + tokens.get(field).identifierText() + " does not exist in STRUCT";
+                expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
+            }
             if (expression == null) {
                 continue;
             }
@@ -9919,6 +9944,8 @@ final class SqlDialectTranslator {
 
     private Map<String, List<Token>> googleSqlStructFields(int open, int close) {
         Map<String, List<Token>> fields = new HashMap<>();
+        int position = 1;
+        boolean anonymous = false;
         int start = nextSignificant(open + 1, close);
         while (start >= 0 && start < close) {
             int end = structArgumentEnd(start, close);
@@ -9934,7 +9961,20 @@ final class SqlDialectTranslator {
                     as = i;
                 }
             }
-            int field = as < 0 ? start : nextSignificant(as + 1, end);
+            int field = as < 0 ? implicitStructFieldName(start, end) : nextSignificant(as + 1, end);
+            if (as < 0 && field < 0) {
+                // An anonymous field, named by position as renderStruct names it; its struct is never
+                // reported as missing a field.
+                List<Token> anonymousExpression = new ArrayList<>(tokens.subList(start, end));
+                while (!anonymousExpression.isEmpty() && anonymousExpression.getLast().kind == Kind.SPACE) {
+                    anonymousExpression.removeLast();
+                }
+                fields.put("_field_" + position, anonymousExpression);
+                anonymous = true;
+                position++;
+                start = nextSignificant(end + 1, close);
+                continue;
+            }
             if (field < 0 || (tokens.get(field).kind != Kind.IDENT && tokens.get(field).kind != Kind.QIDENT)) {
                 return Map.of();
             }
@@ -9943,10 +9983,38 @@ final class SqlDialectTranslator {
             while (!expression.isEmpty() && expression.getLast().kind == Kind.SPACE) {
                 expression.removeLast();
             }
-            fields.put(tokens.get(field).identifierText().toLowerCase(Locale.ROOT), expression);
+            String name = as < 0 ? pathSegments(tokens.get(field)).getLast() : tokens.get(field).identifierText();
+            fields.put(name.toLowerCase(Locale.ROOT), expression);
+            position++;
             start = nextSignificant(end + 1, close);
         }
+        if (anonymous) {
+            structFieldsWithAnonymous.add(fields);
+        }
         return fields;
+    }
+
+
+    /**
+     * The token naming a STRUCT field written without {@code AS}: as in BigQuery, a path such as {@code t.n} is
+     * named by its last part. Any other expression makes an anonymous field, so -1 is returned.
+     */
+    private int implicitStructFieldName(int start, int end) {
+        int last = -1;
+        boolean expectName = true;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.SPACE) {
+                continue;
+            }
+            if (expectName && (token.kind == Kind.IDENT || token.kind == Kind.QIDENT)) {
+                last = i;
+            } else if (expectName || !token.isPunct(".")) {
+                return -1;
+            }
+            expectName = !expectName;
+        }
+        return expectName ? -1 : last;
     }
 
     private int structArgumentEnd(int start, int close) {

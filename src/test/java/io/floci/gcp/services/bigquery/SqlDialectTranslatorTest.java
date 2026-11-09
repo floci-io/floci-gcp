@@ -2287,6 +2287,53 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void sourceStarReplaceSurvivesPositionalExclusion() {
+        assertEquals("SELECT 9 AS \"c\" FROM (SELECT 5 AS b, 7 AS b, 8 AS c) AS \"_floci_derived_0\"",
+                sql("SELECT * EXCEPT(b) REPLACE(9 AS c) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)"));
+        assertEquals("SELECT 9 AS \"c\", #4 AS \"c_1\""
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1) AS \"_floci_derived_0\"",
+                sql("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1)"));
+        assertEquals("Column b cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT * EXCEPT(b) REPLACE(9 AS b) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)")
+                        .getMessage());
+    }
+
+    @Test
+    void windowsResolveInputRowsBeforeSiblingAliases() {
+        sql("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn FROM (SELECT 1 AS x)");
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 5 AS x, 6 AS x FROM (SELECT 1 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)").getMessage());
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                        + " FROM (SELECT 2 AS x, 3 AS x)").getMessage());
+    }
+
+    @Test
+    void groupByPrefersAUniqueOutputAliasOverDuplicateSources() {
+        sql("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b");
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b + 0")
+                        .getMessage());
+    }
+
+    @Test
+    void eachJoinedUnpivotSourceIsShaped() {
+        assertEquals("SELECT #2 AS \"v\", #1 AS \"n\", #4 AS \"w\", #3 AS \"m\""
+                        + " FROM (SELECT 1 AS a) AS \"_floci_derived_0\" UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) AS \"_floci_derived_1\" UNPIVOT(w FOR m IN(b))",
+                sql("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) UNPIVOT(w FOR m IN(b))"));
+        assertEquals("SELECT #2 AS \"v\", #1 AS \"n\", #3 AS \"b\""
+                        + " FROM (SELECT 1 AS a) AS \"_floci_derived_0\" UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) AS \"_floci_derived_1\"",
+                sql("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)), (SELECT 2 AS b)"));
+    }
+
+    @Test
     void orderByRejectsASuffixGeneratedForADuplicate() {
         assertEquals("Unrecognized name: b_2",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"

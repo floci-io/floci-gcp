@@ -194,11 +194,13 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   subquery that repeats a name. A name two select outputs or two source columns expose is ambiguous
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
   `HAVING`, `QUALIFY` and inside a window), and a suffix generated for a duplicate is unrecognized
-  unless a source column carries that name. A star's `EXCEPT` list drops every output written with the
-  name across the query's sources, including columns merged by a `USING` join, and `REPLACE` rejects a
-  name it would replace more than once. A bare star over an `UNPIVOT` source, including an `UNPIVOT`
-  that decorates one source of a join, returns the surviving source columns, then the value columns,
-  then the name column, as BigQuery does. A star's `EXCEPT` and `REPLACE` over `PIVOT` output resolve
+  unless a source column carries that name. A bare `GROUP BY` name resolves a unique output alias
+  first, and a window in the select list reads input columns rather than sibling aliases. A star's
+  `EXCEPT` list drops every output written with the name across the query's sources, including columns
+  merged by a `USING` join, and a `REPLACE` on the same star is still applied to the surviving outputs.
+  `REPLACE` rejects a name it would replace more than once. A bare star over an `UNPIVOT` source,
+  including each `UNPIVOT` that decorates a source of a join, returns the surviving source columns,
+  then the value columns, then the name column, as BigQuery does. A star's `EXCEPT` and `REPLACE` over `PIVOT` output resolve
   against the pivot's generated column names, and `PIVOT` and `UNPIVOT` reject a duplicated name they
   reference. A `CREATE TABLE` or `CREATE VIEW` whose query repeats a name is rejected, and querying a
   view whose definition repeats a name fails, as both fail in BigQuery.

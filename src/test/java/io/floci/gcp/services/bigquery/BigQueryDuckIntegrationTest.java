@@ -1831,6 +1831,51 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void greptileFollowUpsMatchBigQuery() {
+        assertResultColumns("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c)",
+                List.of("c"), List.of("9"));
+        assertResultColumns("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1)",
+                List.of("c", "c_1"), List.of("9", "3"));
+        query("{\"query\": \"SELECT * EXCEPT(b) REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b cannot occur in both SELECT * EXCEPT and REPLACE"));
+
+        assertResultColumns("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                        + " FROM (SELECT 1 AS x)",
+                List.of("x", "x_1", "rn"), List.of("5", "6", "1"));
+        query("{\"query\": \"SELECT 5 AS x, 6 AS x FROM (SELECT 1 AS x)"
+                + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column name x is ambiguous"));
+        query("{\"query\": \"SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                + " FROM (SELECT 2 AS x, 3 AS x)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column name x is ambiguous"));
+
+        assertResultColumns("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b",
+                List.of("b", "n"), List.of("1", "1"));
+        for (String sql : List.of(
+                "SELECT COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b",
+                "SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b + 0")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) UNPIVOT(w FOR m IN(b))",
+                List.of("v", "n", "w", "m"), List.of("1", "a", "2", "b"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b)",
+                List.of("v", "n", "b"), List.of("1", "a", "2"));
+    }
+
+    @Test
+    @Order(5)
     void sourceReferencesRejectADuplicatedColumnName() {
         for (String sql : List.of(
                 "SELECT b FROM (SELECT 5 AS b, 7 AS b)",

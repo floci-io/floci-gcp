@@ -189,11 +189,13 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   in any query whose `FROM` provides `input`.
 - A duplicate output name takes BigQuery's `_1` suffix in the result schema, including a sibling that
   collides with an expanded field under a positional `GROUP BY` or `GROUP BY ALL`, and a star over a
-  subquery that repeats a name. `ORDER BY`, `HAVING`, `QUALIFY` and a bare `GROUP BY` name resolve as
-  BigQuery resolves them: a name two outputs were written with is ambiguous, and a suffix generated
-  for a duplicate is unrecognized unless a source column carries that name. A `CREATE TABLE` or
-  `CREATE VIEW` whose query repeats a name is rejected, and querying a view whose definition repeats
-  a name fails, as both fail in BigQuery.
+  subquery that repeats a name. A name two select outputs or two source columns expose is ambiguous
+  wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
+  `HAVING`, `QUALIFY` and inside a window), and a suffix generated for a duplicate is unrecognized
+  unless a source column carries that name. A star's `EXCEPT` list drops every output written with the
+  name, and `REPLACE` rejects a name it would replace more than once. A `CREATE TABLE` or `CREATE VIEW`
+  whose query repeats a name is rejected, and querying a view whose definition repeats a name fails,
+  as both fail in BigQuery.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes

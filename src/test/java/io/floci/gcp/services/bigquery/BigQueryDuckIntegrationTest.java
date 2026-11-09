@@ -1659,6 +1659,22 @@ class BigQueryDuckIntegrationTest {
         assertResultColumns("SELECT 9 AS b, * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
                 List.of("b", "b_2", "b_3", "b_1"), List.of("9", "5", "7", "6"));
         assertResultColumns("SELECT * FROM (SELECT 5 AS b, 6 AS b)", List.of("b", "b_1"), List.of("5", "6"));
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT t.* EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT * EXCEPT(b_1) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b", "b_1"), List.of("5", "7"));
+        query("{\"query\": \"SELECT * REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b in SELECT * REPLACE list is ambiguous"));
+        query("{\"query\": \"SELECT * EXCEPT(b_2)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b_2 in SELECT * EXCEPT list does not exist"));
         assertResultColumns("WITH x AS (SELECT 5 AS b, 7 AS b, 6 AS b_1) SELECT * FROM x",
                 List.of("b", "b_2", "b_1"), List.of("5", "7", "6"));
         query("""
@@ -1683,6 +1699,37 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", containsString(
                         "Duplicate column name 'b' in definition of view 'shop.dup_api_view'"));
+    }
+
+    @Test
+    @Order(5)
+    void sourceReferencesRejectADuplicatedColumnName() {
+        for (String sql : List.of(
+                "SELECT b FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT SUM(b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT ROW_NUMBER() OVER (PARTITION BY b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) WHERE b > 0",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) x JOIN (SELECT 1 AS c) y ON b > 0",
+                "SELECT COUNT(*) FROM (SELECT 5 AS b, 7 AS b) GROUP BY b + 0")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        query("{\"query\": \"SELECT t.b FROM (SELECT 5 AS b, 7 AS b) t\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b is ambiguous inside t"));
+        query("{\"query\": \"SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) WHERE b > 0\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b"));
+        query("{\"query\": \"SELECT b_2 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b_2"));
+        assertResultColumns("SELECT b_1 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) WHERE b_1 > 0",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT id FROM (SELECT 1 AS id, 2 AS x) a"
+                + " JOIN (SELECT 1 AS id, 3 AS y) b USING(id)", List.of("id"), List.of("1"));
     }
 
     @Test

@@ -2399,6 +2399,10 @@ final class SqlDialectTranslator {
         topLevelOutputNames = topLevelOutputNames();
         duplicateOutputNames = duplicateNames(topLevelOutputNames);
         validateSelectNameAmbiguity();
+        validateSourceReferences();
+        validateSourceStarLists();
+        rewriteSourceStarExclusions();
+        nameNestedDuplicateOutputs();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
@@ -6172,12 +6176,17 @@ final class SqlDialectTranslator {
             if (index > 0) {
                 wrapped.add(Token.raw(", "));
             }
-            wrapped.add(Token.raw("#" + (index + 1) + " AS " + DuckTypes.quoteIdentifier(names.get(index))));
+            wrapped.addAll(positionalColumn(index + 1, names.get(index)));
         }
         wrapped.addAll(new Lexer(" FROM (").tokenize());
         wrapped.addAll(select);
         wrapped.addAll(new Lexer(") AS `" + structStarName("_floci_names") + "`").tokenize());
         return wrapped;
+    }
+
+    private static List<Token> positionalColumn(int position, String name) {
+        return List.of(Token.raw("#" + position), Token.raw(" "), new Token(Kind.IDENT, "AS", "AS"),
+                Token.raw(" "), new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
     }
 
     /** The names a select list writes in output order, or null when the star's fields are not known. */
@@ -6194,6 +6203,166 @@ final class SqlDialectTranslator {
             }
         }
         return written;
+    }
+
+    /**
+     * A bare star's EXCEPT list drops every output written with that name, and REPLACE rejects an
+     * ambiguous name. Both resolve against the source select list's written names.
+     */
+    private void validateSourceStarLists() {
+        for (int select = 0; select < tokens.size(); select++) {
+            if (!tokens.get(select).isKeyword("SELECT")) {
+                continue;
+            }
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            for (int[] item : items) {
+                validateSourceStarList(select, item);
+            }
+        }
+    }
+
+    private void validateSourceStarList(int select, int[] item) {
+        int star = projectionStarIndex(item);
+        if (star < 0 || !sourceStar(select, star)) {
+            return;
+        }
+        List<String> fields = starSourceWrittenColumns(select, item);
+        if (fields == null) {
+            return;
+        }
+        Map<String, Integer> counts = nameCounts(fields);
+        int clause = nextSignificant(star + 1, item[1]);
+        if (clause < 0) {
+            return;
+        }
+        int replace = clause;
+        if (tokens.get(clause).isKeyword("EXCEPT")) {
+            int open = nextSignificant(clause + 1, item[1]);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                return;
+            }
+            int close = matchingParen(open);
+            for (Token token : significant(open + 1, close)) {
+                if ((token.kind == Kind.IDENT || token.kind == Kind.QIDENT)
+                        && !counts.containsKey(token.identifierText().toLowerCase(Locale.ROOT))) {
+                    throw invalidQuery("Column " + token.identifierText()
+                            + " in SELECT * EXCEPT list does not exist");
+                }
+            }
+            replace = nextSignificant(close + 1, item[1]);
+        }
+        if (replace < 0 || !tokens.get(replace).isKeyword("REPLACE")) {
+            return;
+        }
+        int open = nextSignificant(replace + 1, item[1]);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return;
+        }
+        int close = matchingParen(open);
+        for (String target : replaceTargetNames(open, close)) {
+            String key = target.toLowerCase(Locale.ROOT);
+            if (!counts.containsKey(key)) {
+                throw invalidQuery("Column " + target + " in SELECT * REPLACE list does not exist");
+            }
+            if (counts.get(key) > 1) {
+                throw invalidQuery("Column " + target + " in SELECT * REPLACE list is ambiguous");
+            }
+        }
+    }
+
+    /**
+     * Rewrites a bare star's EXCEPT list to positional output names when one source is in scope. BigQuery
+     * removes every output written with an excluded name and re-suffixes the rest, while DuckDB removes
+     * one column and keeps its own numbering. Positional references keep both the values and the names.
+     */
+    private void rewriteSourceStarExclusions() {
+        for (int select = tokens.size() - 1; select >= 0; select--) {
+            if (!tokens.get(select).isKeyword("SELECT")) {
+                continue;
+            }
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            for (int index = items.size() - 1; index >= 0; index--) {
+                int[] item = items.get(index);
+                int star = projectionStarIndex(item);
+                if (star < 0 || !singleSourceStar(select, star)) {
+                    continue;
+                }
+                int clause = nextSignificant(star + 1, item[1]);
+                if (clause < 0 || !tokens.get(clause).isKeyword("EXCEPT")) {
+                    continue;
+                }
+                int open = nextSignificant(clause + 1, item[1]);
+                if (open < 0 || !tokens.get(open).isPunct("(")) {
+                    continue;
+                }
+                List<String> fields = starSourceWrittenColumns(select, item);
+                if (fields == null || nameCounts(fields).values().stream().noneMatch(count -> count > 1)) {
+                    continue;
+                }
+                int close = matchingParen(open);
+                Set<String> excluded = new HashSet<>();
+                for (Token token : significant(open + 1, close)) {
+                    if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                        excluded.add(token.identifierText().toLowerCase(Locale.ROOT));
+                    }
+                }
+                List<Integer> kept = new ArrayList<>();
+                List<String> keptNames = new ArrayList<>();
+                for (int position = 0; position < fields.size(); position++) {
+                    if (!excluded.contains(fields.get(position).toLowerCase(Locale.ROOT))) {
+                        kept.add(position);
+                        keptNames.add(fields.get(position));
+                    }
+                }
+                if (kept.size() == fields.size()) {
+                    continue;
+                }
+                List<String> names = bigQueryOutputNames(keptNames);
+                List<Token> replacement = new ArrayList<>();
+                replacement.add(Token.raw(" "));
+                for (int position = 0; position < kept.size(); position++) {
+                    if (position > 0) {
+                        replacement.add(Token.raw(", "));
+                    }
+                    replacement.addAll(positionalColumn(kept.get(position) + 1, names.get(position)));
+                }
+                tokens.subList(item[0], item[1]).clear();
+                tokens.addAll(item[0], replacement);
+            }
+        }
+    }
+
+    /** True when a star item reads one source, so positional references index its written fields. */
+    private boolean singleSourceStar(int select, int star) {
+        if (!sourceStar(select, star) || pivotInFrom(select, parenthesisDepth(select))) {
+            return false;
+        }
+        int from = namesFromClause(select, parenthesisDepth(select));
+        return from >= 0 && projectionSources(from, parenthesisDepth(select)).size() == 1;
+    }
+
+    /**
+     * True for a bare {@code *} or {@code alias.*} that reads a FROM source, not a struct field star such
+     * as {@code t.s.*} or an expression star such as {@code f(x).*}.
+     */
+    private boolean sourceStar(int select, int star) {
+        int dot = significantBefore(star);
+        if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+            return true;
+        }
+        int last = significantBefore(dot);
+        int beforeLast = last < 0 ? -1 : significantBefore(last);
+        if (last < 0 || !isName(tokens.get(last))
+                || beforeLast >= 0 && tokens.get(beforeLast).isPunct(".")) {
+            return false;
+        }
+        return qualifiedStarWrittenColumns(select, star) != null;
     }
 
     /**
@@ -6271,6 +6440,222 @@ final class SqlDialectTranslator {
             }
         }
         return false;
+    }
+
+    /**
+     * BigQuery rejects a reference to a name two source columns expose, and the select list, WHERE and ON
+     * cannot see select aliases either. DuckDB would resolve one of them silently.
+     */
+    private void validateSourceReferences() {
+        for (int select = 0; select < tokens.size(); select++) {
+            if (tokens.get(select).isKeyword("SELECT")) {
+                validateSourceReferences(select);
+            }
+        }
+    }
+
+    private void validateSourceReferences(int select) {
+        List<int[]> items = selectItems(select);
+        if (items == null) {
+            return;
+        }
+        int depth = parenthesisDepth(select);
+        int tailStart = items.getLast()[1];
+        int end = structStarArmEnd(tailStart, structStarQueryEnd(select), depth);
+        end = structStarSetOperationTail(select, tailStart, end, depth);
+        Map<String, Integer> sources = sourceColumnCounts(select);
+        List<String> writtenNames = orderedWrittenOutputNames(select, items);
+        Map<String, Integer> written = writtenNames == null
+                ? writtenOutputNameCounts(select, items) : nameCounts(writtenNames);
+        Set<String> generated = writtenNames == null ? Set.of() : generatedNames(writtenNames);
+        Set<String> sourceGenerated = sourceGeneratedNames(select);
+        Map<String, Map<String, Integer>> aliasColumns = sourceAliasColumnCounts(select, depth);
+        Set<Integer> implicitAliases = implicitAliasTokens(items);
+        for (ReferenceRange range : referenceRanges(select, items, depth, end)) {
+            for (int i = range.start(); i < range.end(); i++) {
+                if (isPrecededByDot(i) || insideNestedQuery(i, select)
+                        || !isReferenceName(i, range.end(), implicitAliases)) {
+                    continue;
+                }
+                Token token = tokens.get(i);
+                String name = token.identifierText();
+                String key = name.toLowerCase(Locale.ROOT);
+                int dot = nextSignificant(i + 1, range.end());
+                if (dot >= 0 && tokens.get(dot).isPunct(".")) {
+                    if (ambiguousField(aliasColumns, key, dot, range.end())) {
+                        continue;
+                    }
+                    if (aliasColumns.containsKey(key)) {
+                        continue;
+                    }
+                    // A struct column of the query's sources, not a table alias.
+                }
+                if (sources == null) {
+                    continue;
+                }
+                int occurrences = sources.getOrDefault(key, 0);
+                if (occurrences > 1) {
+                    throw invalidQuery("Column name " + name + " is ambiguous");
+                }
+                if (occurrences == 0 && sourceGenerated.contains(key)) {
+                    throw invalidQuery("Unrecognized name: " + name);
+                }
+                if (range.aliasesHidden() && occurrences == 0
+                        && (written.containsKey(key) || generated.contains(key))) {
+                    throw invalidQuery("Unrecognized name: " + name);
+                }
+            }
+        }
+    }
+
+    /**
+     * True when the field after a source alias is one the alias exposes more than once, which BigQuery
+     * reports as ambiguous inside the alias.
+     */
+    private boolean ambiguousField(Map<String, Map<String, Integer>> aliasColumns, String alias, int dot,
+                                   int end) {
+        int field = nextSignificant(dot + 1, end);
+        Map<String, Integer> columns = aliasColumns.get(alias);
+        if (field < 0 || columns == null || !isName(tokens.get(field))) {
+            return false;
+        }
+        String name = tokens.get(field).identifierText();
+        if (columns.getOrDefault(name.toLowerCase(Locale.ROOT), 0) > 1) {
+            throw invalidQuery("Name " + name + " is ambiguous inside " + tokens.get(
+                    significantBefore(dot)).identifierText());
+        }
+        return true;
+    }
+
+    private record ReferenceRange(int start, int end, boolean aliasesHidden) {}
+
+    /**
+     * The ranges whose bare names must resolve against the query's sources: select list, WHERE and ON.
+     * {@code aliasesHidden} marks the clauses where BigQuery cannot see a select alias; the select list
+     * is left false because a typed literal or a PIVOT/UNPIVOT source can split its names before the
+     * rewrite that understands them.
+     */
+    private List<ReferenceRange> referenceRanges(int select, List<int[]> items, int depth, int end) {
+        List<ReferenceRange> ranges = new ArrayList<>();
+        for (int[] item : items) {
+            if (!expandsStar(item)) {
+                ranges.add(new ReferenceRange(item[0], item[1], false));
+            }
+        }
+        int where = structStarClauseStart(items.getLast()[1], end, depth, "WHERE");
+        if (where >= 0) {
+            ranges.add(new ReferenceRange(where + 1, Math.min(clauseEnd(where + 1, depth), end), true));
+        }
+        for (String keyword : List.of("GROUP", "WINDOW")) {
+            int clause = structStarClauseStart(items.getLast()[1], end, depth, keyword);
+            if (clause < 0) {
+                continue;
+            }
+            int start = clause + 1;
+            if (tokens.get(clause).isKeyword("GROUP")) {
+                int by = nextSignificant(start, tokens.size());
+                if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+                    continue;
+                }
+                start = by + 1;
+            }
+            ranges.add(new ReferenceRange(start, Math.min(clauseEnd(start, depth), end), false));
+        }
+        int from = namesFromClause(select, depth);
+        if (from >= 0) {
+            int fromEnd = structStarFromEnd(from, end, depth);
+            for (int i = from; i < fromEnd; i++) {
+                if (parenthesisDepth(i) != depth || !tokens.get(i).isKeyword("ON")) {
+                    continue;
+                }
+                int onEnd = i + 1;
+                for (; onEnd < fromEnd; onEnd++) {
+                    if (parenthesisDepth(onEnd) == depth && tokens.get(onEnd).kind == Kind.IDENT
+                            && (tokens.get(onEnd).isKeyword("JOIN") || tokens.get(onEnd).isKeyword("INNER")
+                                    || tokens.get(onEnd).isKeyword("LEFT") || tokens.get(onEnd).isKeyword("RIGHT")
+                                    || tokens.get(onEnd).isKeyword("FULL") || tokens.get(onEnd).isKeyword("CROSS")
+                                    || tokens.get(onEnd).isKeyword("ON")
+                                    || CLAUSE_END_KEYWORDS.contains(tokens.get(onEnd).upper()))) {
+                        break;
+                    }
+                }
+                ranges.add(new ReferenceRange(i + 1, onEnd, true));
+            }
+        }
+        return ranges;
+    }
+
+    /** The token positions that are implicit select aliases, not source references. */
+    private Set<Integer> implicitAliasTokens(List<int[]> items) {
+        Set<Integer> aliases = new HashSet<>();
+        for (int[] item : items) {
+            if (expandsStar(item) || topLevelAs(item[0], item[1]) >= 0) {
+                continue;
+            }
+            int alias = implicitSelectAlias(item[0], item[1]);
+            if (alias >= 0) {
+                aliases.add(alias);
+            }
+        }
+        return aliases;
+    }
+
+    private boolean isReferenceName(int index, int end, Set<Integer> implicitAliases) {
+        Token token = tokens.get(index);
+        if (!isName(token) || isOrderModifier(token)) {
+            return false;
+        }
+        int next = nextSignificant(index + 1, end);
+        if (next >= 0 && tokens.get(next).isPunct("(")) {
+            return false;
+        }
+        int before = significantBefore(index);
+        if (before >= 0 && tokens.get(before).isKeyword("AS")) {
+            return false;
+        }
+        return isPrecededByDot(index) || !implicitAliases.contains(index);
+    }
+
+    /** The suffixes BigQuery generated for names inside the query's subquery or CTE sources. */
+    private Set<String> sourceGeneratedNames(int select) {
+        int depth = parenthesisDepth(select);
+        if (pivotInFrom(select, depth)) {
+            return Set.of();
+        }
+        int from = namesFromClause(select, depth);
+        if (from < 0) {
+            return Set.of();
+        }
+        Set<String> generated = new HashSet<>();
+        for (ProjectionSource source : projectionSources(from, depth)) {
+            if (source.directTable()) {
+                continue;
+            }
+            List<String> columns = sourceWrittenColumns(source, select);
+            if (columns != null) {
+                generated.addAll(generatedNames(columns));
+            }
+        }
+        return generated;
+    }
+
+    /** How many of each column each named source exposes, for a qualified reference's field check. */
+    private Map<String, Map<String, Integer>> sourceAliasColumnCounts(int select, int depth) {
+        int from = namesFromClause(select, depth);
+        if (from < 0 || pivotInFrom(select, depth)) {
+            return Map.of();
+        }
+        Map<String, Map<String, Integer>> aliases = new HashMap<>();
+        for (ProjectionSource source : projectionSources(from, depth)) {
+            if (source.alias() == null) {
+                continue;
+            }
+            List<String> columns = sourceWrittenColumns(source, select);
+            if (columns != null) {
+                aliases.put(source.alias().toLowerCase(Locale.ROOT), nameCounts(columns));
+            }
+        }
+        return aliases;
     }
 
     /**
@@ -6375,6 +6760,9 @@ final class SqlDialectTranslator {
      */
     private Map<String, Integer> sourceColumnCounts(int select) {
         int depth = parenthesisDepth(select);
+        if (pivotInFrom(select, depth)) {
+            return null;
+        }
         int from = namesFromClause(select, depth);
         if (from < 0) {
             return Map.of();
@@ -6396,6 +6784,22 @@ final class SqlDialectTranslator {
             }
         }
         return counts;
+    }
+
+    /** True when the query's FROM is reshaped by PIVOT or UNPIVOT, whose output names are generated. */
+    private boolean pivotInFrom(int select, int depth) {
+        int from = namesFromClause(select, depth);
+        if (from < 0) {
+            return false;
+        }
+        int fromEnd = structStarFromEnd(from, structStarQueryEnd(select), depth);
+        for (int i = from; i < fromEnd; i++) {
+            if (parenthesisDepth(i) == depth
+                    && (tokens.get(i).isKeyword("PIVOT") || tokens.get(i).isKeyword("UNPIVOT"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The FROM of the query at {@code select}, skipping an EXCEPT that belongs to a star's list. */
@@ -6509,7 +6913,7 @@ final class SqlDialectTranslator {
             first++;
         }
         return first < tokens.size() && tokens.get(first).kind == Kind.RAW
-                && tokens.get(first).text.startsWith("#1 AS ");
+                && tokens.get(first).text.startsWith("#1");
     }
 
     /** The names written more than once, in select order. */
@@ -6525,6 +6929,52 @@ final class SqlDialectTranslator {
             }
         }
         return duplicates;
+    }
+
+    /**
+     * Names a nested query's output the way BigQuery does when DuckDB would number a duplicate differently.
+     * An outer reference such as {@code b_1} then reads the column BigQuery reads, which DuckDB would
+     * otherwise bind to an earlier duplicate it renamed. The outermost query is left for the final wrap.
+     */
+    private void nameNestedDuplicateOutputs() {
+        List<Integer> selects = new ArrayList<>();
+        for (int i = 0; i < tokens.size(); i++) {
+            if (tokens.get(i).isKeyword("SELECT") && parenthesisDepth(i) > 0) {
+                selects.add(i);
+            }
+        }
+        for (int index = selects.size() - 1; index >= 0; index--) {
+            int select = selects.get(index);
+            if (selectFollowsSetOperator(select)) {
+                continue;
+            }
+            List<int[]> items = selectItems(select);
+            if (items == null) {
+                continue;
+            }
+            List<String> written = orderedWrittenOutputNames(select, items);
+            if (written == null) {
+                continue;
+            }
+            List<String> names = bigQueryOutputNames(written);
+            if (names.equals(duckOutputNames(written))) {
+                continue;
+            }
+            int end = structStarQueryEnd(select);
+            List<Token> wrapped = new ArrayList<>();
+            wrapped.addAll(new Lexer("SELECT ").tokenize());
+            for (int column = 0; column < names.size(); column++) {
+                if (column > 0) {
+                    wrapped.add(Token.raw(", "));
+                }
+                wrapped.addAll(positionalColumn(column + 1, names.get(column)));
+            }
+            wrapped.addAll(new Lexer(" FROM (").tokenize());
+            wrapped.addAll(tokens.subList(select, end));
+            wrapped.addAll(new Lexer(") AS `" + structStarName("_floci_names") + "`").tokenize());
+            tokens.subList(select, end).clear();
+            tokens.addAll(select, wrapped);
+        }
     }
 
     /**
@@ -6547,7 +6997,7 @@ final class SqlDialectTranslator {
             if (index > 0) {
                 wrapped.add(Token.raw(", "));
             }
-            wrapped.add(Token.raw("#" + (index + 1) + " AS " + DuckTypes.quoteIdentifier(names.get(index))));
+            wrapped.addAll(positionalColumn(index + 1, names.get(index)));
         }
         wrapped.addAll(new Lexer(" FROM (").tokenize());
         wrapped.addAll(tokens);
@@ -6558,35 +7008,11 @@ final class SqlDialectTranslator {
 
     /** The written names a star select item expands to, in order, or null when they cannot be derived. */
     private List<String> starItemFieldList(int select, int[] item) {
-        int star = projectionStarIndex(item);
-        if (star < 0) {
-            return null;
-        }
-        List<String> fields;
-        int dot = significantBefore(star);
-        int last = dot >= 0 && tokens.get(dot).isPunct(".") ? significantBefore(dot) : -1;
-        int beforeLast = last < 0 ? -1 : significantBefore(last);
-        if (last >= 0 && beforeLast >= 0 && tokens.get(beforeLast).isPunct(".")) {
-            Set<String> structFields = operandFields(select, starOperandStart(last), dot);
-            if (structFields == null) {
-                return null;
-            }
-            fields = new ArrayList<>(structFields);
-        } else if (last >= 0 && dot >= 0 && tokens.get(dot).isPunct(".")) {
-            fields = qualifiedStarWrittenColumns(select, star);
-            if (fields == null) {
-                Set<String> structFields = operandFields(select, starOperandStart(last), dot);
-                if (structFields == null) {
-                    return null;
-                }
-                fields = new ArrayList<>(structFields);
-            }
-        } else {
-            fields = unqualifiedStarWrittenColumns(select, star);
-        }
+        List<String> fields = starSourceWrittenColumns(select, item);
         if (fields == null) {
             return null;
         }
+        int star = projectionStarIndex(item);
         int clause = nextSignificant(star + 1, item[1]);
         if (clause < 0 || !tokens.get(clause).isKeyword("EXCEPT")) {
             return fields;
@@ -6615,14 +7041,44 @@ final class SqlDialectTranslator {
         return remaining;
     }
 
+    /** The written names a star's source exposes, before its own EXCEPT list removes any. */
+    private List<String> starSourceWrittenColumns(int select, int[] item) {
+        int star = projectionStarIndex(item);
+        if (star < 0) {
+            return null;
+        }
+        int dot = significantBefore(star);
+        int last = dot >= 0 && tokens.get(dot).isPunct(".") ? significantBefore(dot) : -1;
+        int beforeLast = last < 0 ? -1 : significantBefore(last);
+        if (last >= 0 && beforeLast >= 0 && tokens.get(beforeLast).isPunct(".")) {
+            Set<String> structFields = operandFields(select, starOperandStart(last), dot);
+            return structFields == null ? null : new ArrayList<>(structFields);
+        }
+        if (last >= 0 && dot >= 0 && tokens.get(dot).isPunct(".")) {
+            List<String> qualified = qualifiedStarWrittenColumns(select, star);
+            if (qualified != null) {
+                return qualified;
+            }
+            Set<String> structFields = operandFields(select, starOperandStart(last), dot);
+            return structFields == null ? null : new ArrayList<>(structFields);
+        }
+        return unqualifiedStarWrittenColumns(select, star);
+    }
+
     /** The written names of the single source a {@code t.*} item names, or null when it has none. */
     private List<String> qualifiedStarWrittenColumns(int select, int star) {
+        if (pivotInFrom(select, parenthesisDepth(select))) {
+            return null;
+        }
         List<ProjectionSource> sources = projectionSourcesForStar(star);
         return sources.size() == 1 ? sourceWrittenColumns(sources.getFirst(), select) : null;
     }
 
     /** The written names a bare {@code *} expands to, taken from the query's single source. */
     private List<String> unqualifiedStarWrittenColumns(int select, int star) {
+        if (pivotInFrom(select, parenthesisDepth(select))) {
+            return null;
+        }
         List<ProjectionSource> sources = projectionSourcesForStar(star);
         return sources.size() == 1 ? sourceWrittenColumns(sources.getFirst(), select) : null;
     }

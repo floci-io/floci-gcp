@@ -2168,6 +2168,30 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void sourceReferencesRejectADuplicatedColumnNameOutsideTheResolvingClauses() {
+        for (String sql : List.of(
+                "SELECT b FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT SUM(b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT ROW_NUMBER() OVER (PARTITION BY b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) WHERE b > 0",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) x JOIN (SELECT 1 AS c) y ON b > 0",
+                "SELECT COUNT(*) FROM (SELECT 5 AS b, 7 AS b) GROUP BY b + 0")) {
+            assertEquals("Column name b is ambiguous", invalid(sql).getMessage());
+        }
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT t.b FROM (SELECT 5 AS b, 7 AS b) t").getMessage());
+        assertEquals("Unrecognized name: b",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) WHERE b > 0").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT * FROM (SELECT 5 AS b, 6 AS b) WHERE b_1 > 0").getMessage());
+        assertEquals("Unrecognized name: b_2",
+                invalid("SELECT b_2 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)").getMessage());
+        sql("SELECT b_1 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) WHERE b_1 > 0");
+        sql("SELECT t.b FROM (SELECT 1 AS b) t WHERE t.b > 0");
+        sql("SELECT id FROM (SELECT 1 AS id, 2 AS x) a JOIN (SELECT 1 AS id, 3 AS y) b USING(id)");
+    }
+
+    @Test
     void orderByRejectsASuffixGeneratedForADuplicate() {
         assertEquals("Unrecognized name: b_2",
                 invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"

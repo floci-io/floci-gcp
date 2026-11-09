@@ -1714,6 +1714,16 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[1].f.v", equalTo(List.of("5", "7", "9", "d")));
         assertResultColumns("SELECT * EXCEPT(v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
                 List.of("n"), List.of("c"));
+        assertResultColumns("SELECT * REPLACE(9 AS v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v", "n"), List.of("9", "c"));
+        assertResultColumns("SELECT * EXCEPT(n) REPLACE(9 AS v)"
+                        + " FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v"), List.of("9"));
+        query("{\"query\": \"SELECT * REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (c))\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column b in SELECT * REPLACE list is ambiguous"));
         assertResultColumns("SELECT * FROM (SELECT 1 AS a1, 2 AS a2, 3 AS b1, 4 AS b2, 5 AS r)"
                         + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))",
                 List.of("r", "v1", "v2", "n"), List.of("5", "1", "2", "a1_a2"));

@@ -2219,6 +2219,14 @@ class SqlDialectTranslatorTest {
                 + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))");
         assertTrue(multi.startsWith("SELECT #1 AS \"r\", #3 AS \"v1\", #4 AS \"v2\", #2 AS \"n\" FROM ("),
                 multi);
+        String replaced = sql("SELECT * REPLACE(9 AS v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(replaced.startsWith("SELECT 9 AS \"v\", #1 AS \"n\" FROM ("), replaced);
+        String exceptAndReplace = sql("SELECT * EXCEPT(n) REPLACE(9 AS v)"
+                + " FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(exceptAndReplace.startsWith("SELECT 9 AS \"v\" FROM ("), exceptAndReplace);
+        assertEquals("Column b in SELECT * REPLACE list is ambiguous",
+                invalid("SELECT * REPLACE(9 AS b) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)"
+                        + " UNPIVOT(v FOR n IN (c))").getMessage());
     }
 
     @Test

@@ -6177,7 +6177,7 @@ final class SqlDialectTranslator {
         wrapped.addAll(new Lexer("SELECT ").tokenize());
         for (int index = 0; index < names.size(); index++) {
             if (index > 0) {
-                wrapped.add(Token.raw(", "));
+                wrapped.addAll(commaSeparator());
             }
             wrapped.addAll(positionalColumn(index + 1, names.get(index)));
         }
@@ -6188,8 +6188,16 @@ final class SqlDialectTranslator {
     }
 
     private static List<Token> positionalColumn(int position, String name) {
-        return List.of(Token.raw("#" + position), Token.raw(" "), new Token(Kind.IDENT, "AS", "AS"),
-                Token.raw(" "), new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
+        return List.of(Token.raw("#" + position), space(), new Token(Kind.IDENT, "AS", "AS"),
+                space(), new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
+    }
+
+    private static Token space() {
+        return new Token(Kind.SPACE, " ", " ");
+    }
+
+    private static List<Token> commaSeparator() {
+        return List.of(new Token(Kind.PUNCT, ",", ","), space());
     }
 
     /** The names a select list writes in output order, or null when the star's fields are not known. */
@@ -6343,7 +6351,7 @@ final class SqlDialectTranslator {
                 if (!extras.isEmpty()) {
                     List<Token> addition = new ArrayList<>();
                     for (String extra : extras.stream().distinct().toList()) {
-                        addition.add(Token.raw(", "));
+                        addition.addAll(commaSeparator());
                         addition.add(new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(extra), extra));
                     }
                     tokens.addAll(close, addition);
@@ -6476,6 +6484,7 @@ final class SqlDialectTranslator {
                     continue; // a qualified or struct star
                 }
                 Set<String> excluded = new HashSet<>();
+                Map<String, List<Token>> replaced = new LinkedHashMap<>();
                 int clause = nextSignificant(star + 1, item[1]);
                 if (clause >= 0 && tokens.get(clause).isKeyword("EXCEPT")) {
                     int open = nextSignificant(clause + 1, item[1]);
@@ -6493,9 +6502,26 @@ final class SqlDialectTranslator {
                         }
                         excluded.add(name.toLowerCase(Locale.ROOT));
                     }
-                    int after = nextSignificant(close + 1, item[1]);
-                    if (after >= 0 && tokens.get(after).isKeyword("REPLACE")) {
-                        continue; // leave a REPLACE list to the existing rewrite
+                    clause = nextSignificant(close + 1, item[1]);
+                }
+                if (clause >= 0 && tokens.get(clause).isKeyword("REPLACE")) {
+                    int open = nextSignificant(clause + 1, item[1]);
+                    if (open >= 0 && tokens.get(open).isPunct("(")) {
+                        int close = matchingParen(open);
+                        for (int[] range : replaceEntryRanges(open + 1, close)) {
+                            int as = topLevelAs(range[0], range[1]);
+                            int target = as < 0 ? -1 : nextSignificant(as + 1, range[1]);
+                            int first = nextSignificant(range[0], as < 0 ? range[1] : as);
+                            if (target < 0 || first < 0 || !isName(tokens.get(target))) {
+                                continue;
+                            }
+                            int end = as;
+                            while (end > first && tokens.get(end - 1).kind == Kind.SPACE) {
+                                end--;
+                            }
+                            replaced.put(tokens.get(target).identifierText().toLowerCase(Locale.ROOT),
+                                    new ArrayList<>(tokens.subList(first, end)));
+                        }
                     }
                 }
                 List<Integer> kept = new ArrayList<>();
@@ -6511,15 +6537,24 @@ final class SqlDialectTranslator {
                 }
                 List<String> names = bigQueryOutputNames(keptNames);
                 List<Token> replacement = new ArrayList<>();
-                replacement.add(Token.raw(" "));
+                replacement.add(space());
                 for (int position = 0; position < kept.size(); position++) {
                     if (position > 0) {
-                        replacement.add(Token.raw(", "));
+                        replacement.addAll(commaSeparator());
                     }
-                    replacement.addAll(positionalColumn(shape.positions().get(kept.get(position)),
-                            names.get(position)));
+                    String name = names.get(position);
+                    List<Token> expression = replaced.get(keptNames.get(position).toLowerCase(Locale.ROOT));
+                    if (expression == null) {
+                        replacement.addAll(positionalColumn(shape.positions().get(kept.get(position)), name));
+                        continue;
+                    }
+                    replacement.addAll(expression);
+                    replacement.add(space());
+                    replacement.add(new Token(Kind.IDENT, "AS", "AS"));
+                    replacement.add(space());
+                    replacement.add(new Token(Kind.QIDENT, DuckTypes.quoteIdentifier(name), name));
                 }
-                replacement.add(Token.raw(" "));
+                replacement.add(space());
                 tokens.subList(item[0], item[1]).clear();
                 tokens.addAll(item[0], replacement);
             }
@@ -6747,15 +6782,15 @@ final class SqlDialectTranslator {
                 }
                 List<String> names = bigQueryOutputNames(keptNames);
                 List<Token> replacement = new ArrayList<>();
-                replacement.add(Token.raw(" "));
+                replacement.add(space());
                 for (int position = 0; position < kept.size(); position++) {
                     if (position > 0) {
-                        replacement.add(Token.raw(", "));
+                        replacement.addAll(commaSeparator());
                     }
                     replacement.addAll(positionalColumn(context.offset() + kept.get(position) + 1,
                             names.get(position)));
                 }
-                replacement.add(Token.raw(" "));
+                replacement.add(space());
                 tokens.subList(item[0], item[1]).clear();
                 tokens.addAll(item[0], replacement);
             }
@@ -7434,7 +7469,7 @@ final class SqlDialectTranslator {
             wrapped.addAll(new Lexer("SELECT ").tokenize());
             for (int column = 0; column < names.size(); column++) {
                 if (column > 0) {
-                    wrapped.add(Token.raw(", "));
+                    wrapped.addAll(commaSeparator());
                 }
                 wrapped.addAll(positionalColumn(column + 1, names.get(column)));
             }
@@ -7464,7 +7499,7 @@ final class SqlDialectTranslator {
         wrapped.addAll(new Lexer("SELECT ").tokenize());
         for (int index = 0; index < names.size(); index++) {
             if (index > 0) {
-                wrapped.add(Token.raw(", "));
+                wrapped.addAll(commaSeparator());
             }
             wrapped.addAll(positionalColumn(index + 1, names.get(index)));
         }

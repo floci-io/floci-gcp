@@ -1112,6 +1112,19 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void aTimestampVariableRejectsAValueBigQueryCannotCoerce() {
+        // Live BigQuery: "Cannot coerce expression 1 to type TIMESTAMP". A result's epoch seconds are
+        // converted where the result enters the script, not for an ordinary assignment.
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE ts TIMESTAMP DEFAULT 1; SELECT ts;", null));
+
+        assertTrue(error.getMessage().contains("Value cannot be coerced to TIMESTAMP"), error.getMessage());
+        GcpException text = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE ts TIMESTAMP DEFAULT '1735689600'; SELECT ts;", null));
+        assertTrue(text.getMessage().contains("Value cannot be coerced to TIMESTAMP"), text.getMessage());
+    }
+
+    @Test
     void assignmentsToOuterVariablesSurviveABeginBlock() {
         seedTwoRows();
         StoredJob job = service.query(PROJECT, "US", null, """

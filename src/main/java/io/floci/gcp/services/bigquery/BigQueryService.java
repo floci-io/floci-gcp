@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -1726,13 +1727,59 @@ public class BigQueryService {
     }
 
     private static Object scriptResultValue(Map<String, Object> row, TableFieldSchema field, int index) {
+        Object value = null;
         if (row.containsKey(field.getName())) {
-            return row.get(field.getName());
+            value = row.get(field.getName());
+        } else if (index < row.size()) {
+            value = new ArrayList<>(row.values()).get(index);
         }
-        if (index < row.size()) {
-            return new ArrayList<>(row.values()).get(index);
+        return scriptResultValue(value, field);
+    }
+
+    /** A result's value as a script holds it: a TIMESTAMP result is decimal epoch seconds. */
+    private static Object scriptResultValue(Object value, TableFieldSchema field) {
+        if (value == null || field == null) {
+            return value;
         }
-        return null;
+        if ("TIMESTAMP".equals(field.getType()) && !"REPEATED".equals(field.getMode())) {
+            return resultTimestamp(value);
+        }
+        if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
+            TableFieldSchema element = new TableFieldSchema();
+            element.setName(field.getName());
+            element.setType(field.getType());
+            element.setMode("NULLABLE");
+            element.setFields(field.getFields());
+            List<Object> converted = new ArrayList<>(values.size());
+            for (Object item : values) {
+                converted.add(scriptResultValue(item, element));
+            }
+            return converted;
+        }
+        if ("RECORD".equals(field.getType()) && value instanceof Map<?, ?> record) {
+            Map<String, Object> converted = new LinkedHashMap<>();
+            for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
+                converted.put(child.getName(), scriptResultValue(record.get(child.getName()), child));
+            }
+            return converted;
+        }
+        return value;
+    }
+
+    /** A result row as a script holds it, converting every field a script represents differently. */
+    private static Map<String, Object> scriptResultRow(Map<String, Object> row, TableSchema schema) {
+        List<TableFieldSchema> fields = schema != null && schema.getFields() != null
+                ? schema.getFields() : List.of();
+        Map<String, Object> converted = new LinkedHashMap<>();
+        for (TableFieldSchema field : fields) {
+            if (row.containsKey(field.getName())) {
+                converted.put(field.getName(), scriptResultValue(row.get(field.getName()), field));
+            }
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            converted.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+        return converted;
     }
 
     private void validateScriptConfiguration(QueryOptions options) {
@@ -1972,6 +2019,7 @@ public class BigQueryService {
         } else {
             throw QueryEngine.invalidQuery("Script expression did not produce exactly one value.");
         }
+        value = scriptResultValue(value, fields.isEmpty() ? null : fields.getFirst());
         return new ScriptExpressionValue(value, fields.isEmpty() ? inferredScriptVariableType(value)
                 : scriptVariableType(fields.getFirst()));
     }
@@ -2428,9 +2476,6 @@ public class BigQueryService {
         if (value instanceof LocalDateTime dateTime) {
             return dateTime.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
         }
-        if (value instanceof Number number) {
-            return epochSeconds(number.toString());
-        }
         if (value instanceof String string) {
             String normalized = string.trim().replaceFirst("(?i)\\s+UTC$", "Z").replace(' ', 'T');
             normalized = normalized.replaceFirst("([+-][0-9]{2})$", "$1:00");
@@ -2444,9 +2489,8 @@ public class BigQueryService {
                     try {
                         return LocalDateTime.parse(normalized).toInstant(ZoneOffset.UTC)
                                 .truncatedTo(ChronoUnit.MICROS);
-                    } catch (DateTimeParseException ignoredLocal) {
-                        // A query result reports a TIMESTAMP as decimal epoch seconds.
-                        return epochSeconds(string);
+                    } catch (DateTimeParseException e) {
+                        throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
                     }
                 }
             }
@@ -2454,14 +2498,23 @@ public class BigQueryService {
         throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
     }
 
+    /** A TIMESTAMP result as a script holds it: decimal epoch seconds, or the engine's text form. */
+    private static Instant resultTimestamp(Object value) {
+        if (value instanceof Instant instant) {
+            return instant.truncatedTo(ChronoUnit.MICROS);
+        }
+        String text = value.toString().trim();
+        return text.matches("[-+]?[0-9]+(\\.[0-9]+)?") ? epochSeconds(text) : coerceScriptTimestamp(text);
+    }
+
     /** A TIMESTAMP in BigQuery's decimal epoch seconds, e.g. {@code 1735689600.123456}. */
     private static Instant epochSeconds(String text) {
         long micros;
         try {
             micros = new BigDecimal(text.trim()).movePointRight(6)
-                    .setScale(0, java.math.RoundingMode.HALF_UP).longValueExact();
+                    .setScale(0, RoundingMode.HALF_UP).longValueExact();
         } catch (NumberFormatException | ArithmeticException e) {
-            throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+            throw QueryEngine.invalidQuery("A TIMESTAMP result must be epoch seconds.");
         }
         return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L)
                 .truncatedTo(ChronoUnit.MICROS);
@@ -3242,7 +3295,7 @@ public class BigQueryService {
         context.variableTypes().put(variable, scriptRowType(rows.schema()));
         try {
             for (int index = 0; index < Math.min(rows.rows().size(), 1000); index++) {
-                context.variables().put(variable, rows.rows().get(index));
+                context.variables().put(variable, scriptResultRow(rows.rows().get(index), rows.schema()));
                 try {
                     for (SqlDialectTranslator.ScriptItem nested : loop.items()) {
                         executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);

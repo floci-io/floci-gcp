@@ -1160,6 +1160,40 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void multiStatementScriptsRejectParametersWithoutNamesToo() {
+        // The SDKs send positional parameters with no parameterMode, so the mode BigQuery infers for
+        // them is positional too; every statement would otherwise rebind the first value.
+        Map<String, Object> first = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1"));
+        Map<String, Object> second = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "2"));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions("SELECT ? AS a; SELECT ? AS b", null,
+                List.of(first, second), null, false, false);
+
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null, options));
+
+        assertTrue(error.getMessage().contains(
+                "Positional query parameters are not supported in multi-statement scripts"), error.getMessage());
+    }
+
+    @Test
+    void namedParametersWithoutAParameterModeStillRunAScript() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "INTEGER", null))),
+                List.of(Map.of("value", 7L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions("SELECT @value; SELECT @value;", null,
+                List.of(Map.of("name", "value", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "7"))), null, false, false);
+
+        StoredJob job = scriptService.query(PROJECT, "US", null, options);
+
+        assertEquals("SCRIPT", job.getStatementType());
+    }
+
+    @Test
     void temporaryTableColumnsAreNotReplacedBySameNamedVariables() {
         BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
         when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(

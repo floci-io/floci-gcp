@@ -125,9 +125,10 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `FOR … IN` evaluates its table expression once and exposes each row as a struct in the loop body.
   All loop forms stop after 1,000 iterations. JavaScript UDFs and positional parameters in
   multi-statement scripts are not supported, where BigQuery binds positional parameters across the
-  statements of a script. Multi-statement queries reject destination, disposition,
-  schema update, partitioning,
-  clustering, destination encryption, and user-defined function resource configuration fields.
+  statements of a script; a parameter list sent without names rejects a script the same way, since
+  that is the positional mode BigQuery infers for it. Multi-statement queries reject destination,
+  disposition, schema update, partitioning, clustering, destination encryption, and user-defined
+  function resource configuration fields.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is

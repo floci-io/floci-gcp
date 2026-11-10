@@ -738,6 +738,17 @@ public class BigQueryService {
             return defaultDatasetId != null && defaultProjectId != null && !defaultProjectId.isBlank()
                     ? defaultProjectId : jobProjectId;
         }
+
+        /**
+         * True when the parameters bind by position: an explicit {@code POSITIONAL} mode or, as the
+         * SDKs send them, a list without names and without a mode, the same rule
+         * {@link SqlDialectTranslator.QueryParameters} follows.
+         */
+        boolean positionalParameters() {
+            return "POSITIONAL".equalsIgnoreCase(parameterMode)
+                    || queryParameters != null && !queryParameters.isEmpty()
+                    && queryParameters.getFirst().get("name") == null;
+        }
     }
 
     /** True when {@code e} is the 409 for an already-used explicit job ID, not a statement error. */
@@ -794,7 +805,7 @@ public class BigQueryService {
         if (script) {
             validateScriptConfiguration(options);
         }
-        if (script && "POSITIONAL".equalsIgnoreCase(options.parameterMode())) {
+        if (script && options.positionalParameters()) {
             throw QueryEngine.invalidQuery(
                     "Positional query parameters are not supported in multi-statement scripts.");
         }
@@ -3652,9 +3663,7 @@ public class BigQueryService {
         if (parameters == null || parameters.isEmpty()) {
             return options;
         }
-        boolean positional = "POSITIONAL".equalsIgnoreCase(options.parameterMode())
-                || parameters.getFirst().get("name") == null;
-        if (!positional) {
+        if (!options.positionalParameters()) {
             return options;
         }
         int from = Math.min(expression.firstParameter(), parameters.size());

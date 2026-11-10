@@ -898,6 +898,23 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(data + "/datasets/inv/tables/stock/data").then().statusCode(200)
                 .body("totalRows", equalTo("2"));
         given().when().get(BASE + "/datasets/inv/tables/stock").then().statusCode(404);
+
+        // A script reads and writes the default dataset's project too, while the job and its saved
+        // results stay in the job's project, as live BigQuery does.
+        given().contentType("application/json")
+                .body(Map.of("query", """
+                        DECLARE added INT64 DEFAULT 4;
+                        CREATE TEMP TABLE stock_copy AS SELECT sku, qty FROM stock;
+                        INSERT INTO stock VALUES ('c', added);
+                        SELECT SUM(qty) AS total FROM stock_copy;
+                        """, "useLegacySql", false, "defaultDataset", defaultDataset))
+                .when().post(BASE + "/queries")
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"))
+                .body("jobReference.projectId", equalTo(PROJECT));
+        given().when().get(data + "/datasets/inv/tables/stock/data").then().statusCode(200)
+                .body("totalRows", equalTo("3"));
+        given().when().get(BASE + "/datasets/inv/tables/stock").then().statusCode(404);
     }
 
     private static Response queryIn(String location, String sql, boolean dryRun) {

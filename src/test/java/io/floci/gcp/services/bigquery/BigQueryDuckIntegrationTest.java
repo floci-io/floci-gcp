@@ -1291,6 +1291,54 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void temporaryTableColumnsWinOverSameNamedVariables() {
+        // Live BigQuery returns 1: a temporary table's column shadows the script variable.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE shadowed AS SELECT 1 AS id;
+                SELECT id FROM shadowed;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // Live BigQuery returns 99: an alias does not hide the variable it names.
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 99; SELECT id AS id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("99"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptParametersBindByNameWhateverTheParameterMode() {
+        // BigQuery infers NAMED from the names, so a script without a parameterMode binds them.
+        query(Map.of("query", "SELECT @value AS a; SELECT @value AS b", "useLegacySql", false,
+                "queryParameters", List.of(Map.of("name", "value", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "7")))))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("b"))
+                .body("rows[0].f[0].v", equalTo("7"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptsRejectPositionalParametersEvenWithoutAParameterMode() {
+        // BigQuery binds `?` across the statements of a script and returns 2 here; the emulator
+        // rejects positional parameters in scripts because each statement would rebind the first one.
+        Map<String, Object> first = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1"));
+        Map<String, Object> second = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "2"));
+        query(Map.of("query", "SELECT ? AS a; SELECT ? AS b", "useLegacySql", false,
+                "queryParameters", List.of(first, second)))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "Positional query parameters are not supported in multi-statement scripts"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

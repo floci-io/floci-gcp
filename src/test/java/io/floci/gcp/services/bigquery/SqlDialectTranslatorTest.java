@@ -3254,6 +3254,23 @@ class SqlDialectTranslatorTest {
         assertTrue(qualify.contains("OVER (ORDER BY list_extract([x], 1))"), qualify);
         String subquery = sql("SELECT (SELECT AS STRUCT y AS n FROM ds.u) AS s FROM ds.t ORDER BY s.n");
         assertTrue(subquery.endsWith("ORDER BY s.n"), subquery);
+        String implicitPath = sql("SELECT STRUCT(t.n) AS s FROM ds.t AS t ORDER BY s.n");
+        assertTrue(implicitPath.endsWith("ORDER BY list_extract([t.n], 1)"), implicitPath);
+        String quoted = sql("SELECT STRUCT(x AS `a.b`) AS s FROM ds.t ORDER BY s.`a.b`");
+        assertTrue(quoted.endsWith("ORDER BY list_extract([x], 1)"), quoted);
+        String mixed = sql("SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t ORDER BY s.n");
+        assertTrue(mixed.endsWith("ORDER BY list_extract([x], 1)"), mixed);
+        String mixedMissing = sql("SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t ORDER BY s.zz");
+        assertTrue(mixedMissing.endsWith("ORDER BY s.zz"), mixedMissing);
+        String twoStars = sql("SELECT t.s.* EXCEPT(n), u.s.* EXCEPT(m) FROM (SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t) t,"
+                + " (SELECT STRUCT(y + 1, y AS m) AS s FROM ds.u) u");
+        assertFalse(twoStars.contains("\"\""), twoStars);
+        String anonymous = sql("SELECT STRUCT(x + 1) AS s FROM ds.t ORDER BY s.x");
+        assertTrue(anonymous.endsWith("ORDER BY s.x"), anonymous);
+        String missing = sql("SELECT STRUCT(x AS n) AS s FROM ds.t ORDER BY s.zz");
+        assertTrue(missing.endsWith("ORDER BY list_extract([error('Field name zz does not exist in STRUCT')], 1)"), missing);
+        String havingMissing = sql("SELECT STRUCT(x AS n) AS s FROM ds.t GROUP BY x HAVING s.zz > 0");
+        assertTrue(havingMissing.contains("HAVING s.zz > 0"), havingMissing);
         String aggregateField = sql("SELECT x, (SELECT AS STRUCT COUNT(*) AS n) AS s FROM ds.t ORDER BY s.n");
         assertTrue(aggregateField.endsWith("ORDER BY s.n"), aggregateField);
         String nestedAggregate = sql("SELECT x, (SELECT AS STRUCT (SELECT MAX(y) FROM ds.u) AS n) AS s FROM ds.t ORDER BY s.n");

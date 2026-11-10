@@ -68,6 +68,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
         String sql = translation.sql();
+        rejectMissingStructFields(translation, sql, staging.emptySetup(), flociEndpoint);
         if (request.dryRun()) {
             List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
             return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
@@ -100,6 +101,33 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
                                                List<Map<String, Object>> described) {
         return translation.duplicateOutputNames().isEmpty()
                 ? duplicateOutputNames(described) : translation.duplicateOutputNames();
+    }
+
+    /**
+     * BigQuery fails {@code ORDER BY s.zz}, where the STRUCT select alias {@code s} has no field {@code zz}, while
+     * it analyzes the query: {@code Field name zz does not exist in STRUCT<n INT64>}. The struct's type comes from
+     * describing the query, so this fails before a row is read, and an empty input fails too. When the reference
+     * belongs to a nested query, or the alias is not a STRUCT column of the result, the type is left out: a result
+     * column of the same name may be another struct.
+     */
+    private void rejectMissingStructFields(SqlDialectTranslator.Translation translation, String sql, String setup,
+                                           String flociEndpoint) {
+        if (translation.missingStructFields().isEmpty()) {
+            return;
+        }
+        // The translator rewrites from the end of the query, so the first reference is recorded last.
+        SqlDialectTranslator.MissingStructField missing = translation.missingStructFields().getLast();
+        String type = "STRUCT";
+        List<Column> columns = missing.outermost() ? columns(describeRows(sql, setup, flociEndpoint)) : List.of();
+        for (Column column : columns) {
+            TableFieldSchema field = column.field();
+            if (column.name().equalsIgnoreCase(missing.alias()) && "RECORD".equals(field.getType())
+                    && !"REPEATED".equals(field.getMode())) {
+                type = InformationSchema.dataType(field);
+                break;
+            }
+        }
+        throw SqlDialectTranslator.invalidQuery("Field name " + missing.field() + " does not exist in " + type);
     }
 
     /**
@@ -167,6 +195,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
+        rejectMissingStructFields(translation, translation.sql(), staging.emptySetup(), flociEndpoint);
         DuckClient.ArrowIpc arrow;
         try {
             arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();

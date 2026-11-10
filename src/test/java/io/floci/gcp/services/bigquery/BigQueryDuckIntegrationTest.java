@@ -1522,6 +1522,25 @@ class BigQueryDuckIntegrationTest {
         }
     }
 
+    @Test
+    @Order(5)
+    void stringParameterWithATimeZoneNameIsCoercedToTimestampLikeBigQuery() {
+        for (String[] c : new String[][] {
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS gt, TIMESTAMP '2014-09-27 19:30:00.45+00' = @a AS eq",
+                        "2014-09-27 12:30:00.45 America/Los_Angeles", "true,true"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS gt", "2014-09-27 12:30:00 Etc/GMT+7", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS gt", "2014-09-27 12:30:00 EST5EDT", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS gt", "2014-09-27 12:30:00 GB", "true"},
+                {"SELECT @a AS v", "2014-09-27 12:30:00.45 America/Los_Angeles", "2014-09-27 12:30:00.45 America/Los_Angeles"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", c[1])))))
+                    .then().statusCode(200)
+                    .body("rows[0].f.v", equalTo(List.of(c[2].split(","))));
+        }
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

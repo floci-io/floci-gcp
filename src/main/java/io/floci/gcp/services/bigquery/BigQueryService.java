@@ -1523,6 +1523,10 @@ public class BigQueryService {
                 || dynamicScript.items().getFirst() instanceof SqlDialectTranslator.BeginBlock)) {
             throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE requires a single query, DDL, DML, or BEGIN block.");
         }
+        // BigQuery validates the SQL a dynamic statement supplies before running it, so an invalid block
+        // reports its error instead of writing the part of it that came first.
+        validateProceduralStatements(projectId, jobProjectId, dynamicScript, options.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(parameters, parameterMode));
         ProceduralContext dynamicContext = context.dynamicSqlChild();
         try {
             executeProceduralItem(projectId, jobProjectId, dynamicScript.items().getFirst(), dynamicOptions, job,
@@ -3216,7 +3220,9 @@ public class BigQueryService {
                 tables(projectId, jobLocation));
         context.recordBytes(rows.totalBytesProcessed());
         context.clearQueryResult();
-        context.variableTypes().put(variable, "STRUCT");
+        // The row a FOR loop exposes is a struct of the query's fields, so a field keeps its type when
+        // the loop substitutes it or binds it as a dynamic parameter.
+        context.variableTypes().put(variable, scriptRowType(rows.schema()));
         try {
             for (int index = 0; index < Math.min(rows.rows().size(), 1000); index++) {
                 context.variables().put(variable, rows.rows().get(index));
@@ -3516,6 +3522,9 @@ public class BigQueryService {
             result = new BigQuerySqlEngine.Result(new TableSchema(declaredFields), result.rows(),
                     result.statementType(), result.totalBytesProcessed());
         }
+        // "A REQUIRED field cannot store a NULL value": creating the table rejects the values an insert
+        // into it would reject.
+        RequiredFields.check(result.schema() != null ? result.schema().getFields() : List.of(), result.rows());
         context.materializeTemporaryTable(name, result);
     }
 
@@ -3583,6 +3592,23 @@ public class BigQueryService {
             sql.append(')');
         }
         return sql.append("])").toString();
+    }
+
+    /** The type of a FOR loop's row: its query's fields, nested structs and arrays included. */
+    private static String scriptRowType(TableSchema schema) {
+        List<TableFieldSchema> fields = schema != null && schema.getFields() != null
+                ? schema.getFields() : List.of();
+        List<String> members = new ArrayList<>(fields.size());
+        try {
+            for (TableFieldSchema field : fields) {
+                members.add(quoteScriptTypeField(field.getName()) + " " + scriptVariableType(field));
+            }
+        } catch (GcpException e) {
+            // A field type a script variable cannot hold, such as GEOGRAPHY: the row stays a struct of
+            // values, which is what a loop over such a query resolved to before it kept types.
+            return "STRUCT";
+        }
+        return members.isEmpty() ? "STRUCT" : "STRUCT<" + String.join(", ", members) + ">";
     }
 
     private static String googleType(TableFieldSchema field) {

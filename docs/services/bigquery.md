@@ -113,7 +113,8 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
   outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or
-  request query parameters; nested `EXECUTE IMMEDIATE` is rejected.
+  request query parameters; nested `EXECUTE IMMEDIATE` is rejected, and the SQL it supplies is
+  validated before any of it runs, so an invalid block writes nothing.
   `WHILE` supports simple scalar comparisons with a
   1,000-iteration safety limit. `BEGIN` blocks scope variables. Full GoogleSQL expression and type
   semantics are not supported. Labels are supported
@@ -124,7 +125,9 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   selected branch. Supported persistent DML
   and DDL statements execute in source order. A sequence
   of temporary function declarations followed by one query remains a single query, as in BigQuery.
-  `FOR … IN` evaluates its table expression once and exposes each row as a struct in the loop body.
+  `FOR … IN` evaluates its table expression once and exposes each row as a struct of the query's
+  fields in the loop body, so a field keeps its type. A `CREATE TEMP TABLE` whose declared schema
+  makes a field `NOT NULL` rejects a row that would store a NULL there.
   All loop forms stop after 1,000 iterations. JavaScript UDFs and positional parameters in
   multi-statement scripts are not supported, where BigQuery binds positional parameters across the
   statements of a script; a parameter list sent without names rejects a script the same way, since

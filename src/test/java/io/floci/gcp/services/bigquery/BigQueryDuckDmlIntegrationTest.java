@@ -915,6 +915,20 @@ class BigQueryDuckDmlIntegrationTest {
         given().when().get(data + "/datasets/inv/tables/stock/data").then().statusCode(200)
                 .body("totalRows", equalTo("3"));
         given().when().get(BASE + "/datasets/inv/tables/stock").then().statusCode(404);
+
+        // A dataset-qualified name resolves in the job's project even when the default dataset lives in
+        // another one, so this temporary DML cannot read the other project's `inv` dataset: it reports
+        // the same cross-project rejection as every other query path, naming the job's project.
+        given().contentType("application/json")
+                .body(Map.of("query", """
+                        CREATE TEMP TABLE copied AS SELECT sku, qty FROM stock;
+                        INSERT INTO copied SELECT * FROM inv.stock;
+                        SELECT COUNT(*) FROM copied;
+                        """, "useLegacySql", false, "defaultDataset", defaultDataset))
+                .when().post(BASE + "/queries")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(PROJECT + ".inv.stock"));
     }
 
     private static Response queryIn(String location, String sql, boolean dryRun) {
@@ -1581,5 +1595,21 @@ class BigQueryDuckDmlIntegrationTest {
                 DELETE FROM variables.people WHERE name = 'updated';
                 SELECT COUNT(*) FROM variables.people;
                 """));
+    }
+
+    @Test
+    @Order(231)
+    void anInvalidDynamicBlockWritesNothing() {
+        query("CREATE SCHEMA dynamic_block").then().statusCode(200);
+        query("CREATE TABLE dynamic_block.target (id INT64)").then().statusCode(200);
+        query("INSERT INTO dynamic_block.target VALUES (1), (2)").then().statusCode(200);
+
+        // BigQuery validates the block a dynamic statement supplies before running it, so the DELETE
+        // never happens.
+        query("EXECUTE IMMEDIATE 'BEGIN DELETE FROM dynamic_block.target WHERE TRUE; BREAK; END'")
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("BREAK statement must be inside a loop"));
+        assertEquals(List.of(List.of("2")), rows("SELECT COUNT(*) FROM dynamic_block.target"));
     }
 }

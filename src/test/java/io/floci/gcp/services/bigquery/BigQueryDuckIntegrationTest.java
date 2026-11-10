@@ -1339,6 +1339,43 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void forLoopRowsKeepTheTypesOfTheirQuery() {
+        // Live BigQuery reports DATE here and returns 2025-01-01.
+        query(Map.of("query", """
+                FOR r IN (SELECT DATE '2025-01-01' AS d) DO
+                  SELECT r.d AS d;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("DATE"))
+                .body("rows[0].f[0].v", equalTo("2025-01-01"));
+        // The row also binds as a struct parameter, keeping each field's type.
+        query(Map.of("query", """
+                FOR r IN (SELECT DATE '2025-01-01' AS d) DO
+                  EXECUTE IMMEDIATE "SELECT @row.d AS d" USING r AS row;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("DATE"))
+                .body("rows[0].f[0].v", equalTo("2025-01-01"));
+    }
+
+    @Test
+    @Order(2)
+    void createdTemporaryTablesRejectNullsInRequiredFields() {
+        // Live BigQuery: "Required field item.id cannot be null; error in writing field item".
+        query(Map.of("query", """
+                CREATE TEMP TABLE required_fields (item STRUCT<id INT64 NOT NULL>)
+                  AS SELECT STRUCT(NULL AS id) AS item;
+                SELECT * FROM required_fields;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("required field item.id"));
+    }
+
+    @Test
+    @Order(2)
     void scriptParametersBindByNameWhateverTheParameterMode() {
         // BigQuery infers NAMED from the names, so a script without a parameterMode binds them.
         query(Map.of("query", "SELECT @value AS a; SELECT @value AS b", "useLegacySql", false,

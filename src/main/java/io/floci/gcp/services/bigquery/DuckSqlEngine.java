@@ -357,7 +357,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     public TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable,
                                                    List<TableFieldSchema> targetFields) {
         SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
-                request.projectId(), request.defaultDatasetId(),
+                request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()));
         SqlDialectTranslator.Statement statement = script.finalStatement();
         if (!statement.isDml()) {
@@ -426,37 +426,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         // BigQuery fails a DML statement that would store a NULL array element, and writes nothing.
         rejectNullArrayElements(columns, tableRows);
-        validateRequiredFields(targetFields, tableRows);
+        RequiredFields.check(targetFields, tableRows);
         DmlResult dmlResult = new DmlResult(affected, inserted, updated, deleted, tableRows, totalBytesProcessed);
         return new TemporaryDmlResult(schemaOf(columns), dmlResult);
-    }
-
-    private static void validateRequiredFields(List<TableFieldSchema> fields, List<Map<String, Object>> rows) {
-        for (Map<String, Object> row : rows) {
-            validateRequiredFields(fields, row, "");
-        }
-    }
-
-    private static void validateRequiredFields(List<TableFieldSchema> fields, Map<?, ?> row, String prefix) {
-        for (TableFieldSchema field : fields) {
-            String path = prefix + field.getName();
-            Object value = row.get(field.getName());
-            if (value == null && "REQUIRED".equals(field.getMode())) {
-                throw SqlDialectTranslator.invalidQuery("NULL value for required field " + path);
-            }
-            if (value == null || field.getFields() == null) {
-                continue;
-            }
-            if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
-                for (Object element : values) {
-                    if (element instanceof Map<?, ?> nested) {
-                        validateRequiredFields(field.getFields(), nested, path + ".");
-                    }
-                }
-            } else if (value instanceof Map<?, ?> nested) {
-                validateRequiredFields(field.getFields(), nested, path + ".");
-            }
-        }
     }
 
     // ── Load jobs ─────────────────────────────────────────────────────────────

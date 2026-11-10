@@ -1349,6 +1349,16 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].type", equalTo("DATE"))
                 .body("rows[0].f[0].v", equalTo("2025-01-01"));
+        // A TIMESTAMP field keeps its type too, in the select list and as a parameter.
+        query(Map.of("query", """
+                FOR r IN (SELECT TIMESTAMP '2025-01-01 00:00:00+00' AS t, DATE '2025-01-02' AS d) DO
+                  SELECT r.t AS t, r.d AS d;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("TIMESTAMP", "DATE")))
+                .body("rows[0].f[0].v", equalTo("1735689600"))
+                .body("rows[0].f[1].v", equalTo("2025-01-02"));
         // The row also binds as a struct parameter, keeping each field's type.
         query(Map.of("query", """
                 FOR r IN (SELECT DATE '2025-01-01' AS d) DO
@@ -1358,6 +1368,14 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].type", equalTo("DATE"))
                 .body("rows[0].f[0].v", equalTo("2025-01-01"));
+        query(Map.of("query", """
+                FOR r IN (SELECT TIMESTAMP '2025-01-01 00:00:00+00' AS t) DO
+                  EXECUTE IMMEDIATE "SELECT @row.t AS t" USING r AS row;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("TIMESTAMP"))
+                .body("rows[0].f[0].v", equalTo("1735689600"));
     }
 
     @Test

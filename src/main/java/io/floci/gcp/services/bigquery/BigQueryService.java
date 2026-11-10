@@ -2428,6 +2428,9 @@ public class BigQueryService {
         if (value instanceof LocalDateTime dateTime) {
             return dateTime.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
         }
+        if (value instanceof Number number) {
+            return epochSeconds(number.toString());
+        }
         if (value instanceof String string) {
             String normalized = string.trim().replaceFirst("(?i)\\s+UTC$", "Z").replace(' ', 'T');
             normalized = normalized.replaceFirst("([+-][0-9]{2})$", "$1:00");
@@ -2441,13 +2444,27 @@ public class BigQueryService {
                     try {
                         return LocalDateTime.parse(normalized).toInstant(ZoneOffset.UTC)
                                 .truncatedTo(ChronoUnit.MICROS);
-                    } catch (DateTimeParseException e) {
-                        throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+                    } catch (DateTimeParseException ignoredLocal) {
+                        // A query result reports a TIMESTAMP as decimal epoch seconds.
+                        return epochSeconds(string);
                     }
                 }
             }
         }
         throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+    }
+
+    /** A TIMESTAMP in BigQuery's decimal epoch seconds, e.g. {@code 1735689600.123456}. */
+    private static Instant epochSeconds(String text) {
+        long micros;
+        try {
+            micros = new BigDecimal(text.trim()).movePointRight(6)
+                    .setScale(0, java.math.RoundingMode.HALF_UP).longValueExact();
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+        }
+        return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L)
+                .truncatedTo(ChronoUnit.MICROS);
     }
 
     private static LocalDateTime coerceScriptDateTime(Object value) {

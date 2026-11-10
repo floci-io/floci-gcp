@@ -1293,11 +1293,8 @@ class BigQueryDuckIntegrationTest {
     @Order(2)
     void temporaryTableColumnsWinOverSameNamedVariables() {
         // Live BigQuery returns 1: a temporary table's column shadows the script variable.
-        query(Map.of("query", """
-                DECLARE id INT64 DEFAULT 99;
-                CREATE TEMP TABLE shadowed AS SELECT 1 AS id;
-                SELECT id FROM shadowed;
-                """, "useLegacySql", false))
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 99; CREATE TEMP TABLE t AS SELECT 1 AS id; "
+                + "SELECT id FROM t;", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("schema.fields[0].name", equalTo("id"))
                 .body("rows[0].f[0].v", equalTo("1"));

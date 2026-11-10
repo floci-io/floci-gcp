@@ -1399,6 +1399,7 @@ final class SqlDialectTranslator {
         bindPositionalParameters();
         collectCteNames();
         rewriteTypedArrayLiterals();
+        rewriteTypedStructConstructors();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
         List<Integer> sig = significantIndexes();
@@ -2432,6 +2433,7 @@ final class SqlDialectTranslator {
         augmentPivotStarExclusions();
         nameNestedDuplicateOutputs();
         rewriteTypedArrayLiterals();
+        rewriteTypedStructConstructors();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
@@ -7375,6 +7377,15 @@ final class SqlDialectTranslator {
     private void validateReferenceNames(int start, int end, boolean aliasesHidden, ReferenceScope scope,
                                         Set<Integer> implicitAliases) {
         for (int i = start; i < end; i++) {
+            if (tokens.get(i).isKeyword("STRUCT") || tokens.get(i).isKeyword("ARRAY")) {
+                // The field names of a type, STRUCT<n INT64>(x), are not references.
+                int angle = nextSignificant(i + 1, end);
+                int close = angle >= 0 && tokens.get(angle).isPunct("<") ? matchingTypeAngle(angle) : -1;
+                if (close > i) {
+                    i = close;
+                    continue;
+                }
+            }
             if (isPrecededByDot(i) || insideNestedQuery(i, scope.select())
                     || !isReferenceName(i, end, implicitAliases)) {
                 continue;
@@ -9015,6 +9026,110 @@ final class SqlDialectTranslator {
             tokens.add(castEnd, Token.raw(" AS " + translatedType));
             tokens.add(castEnd + 1, new Token(Kind.PUNCT, ")", null));
         }
+    }
+
+    /**
+     * Rewrites a typed struct constructor, {@code STRUCT<n INT64, m STRING>(x, 'a')}, to a DuckDB struct literal
+     * with each value cast to its declared type, {@code {'n': CAST(x AS BIGINT), 'm': CAST('a' AS VARCHAR)}}. A
+     * type written without a name gets BigQuery's {@code _field_1}, {@code _field_2}, ... The literal form is one
+     * {@link #structSelectAliases} reads, so {@code ORDER BY s.n} works on it. A value count that differs from the
+     * type list, or a missing value, fails with BigQuery's message.
+     */
+    private void rewriteTypedStructConstructors() {
+        for (int i = tokens.size() - 1; i >= 0; i--) {
+            if (!tokens.get(i).isKeyword("STRUCT")) {
+                continue;
+            }
+            int openAngle = nextSignificant(i + 1, tokens.size());
+            if (openAngle < 0 || !tokens.get(openAngle).isPunct("<")) {
+                continue;
+            }
+            int closeAngle = matchingTypeAngle(openAngle);
+            int open = closeAngle < 0 ? -1 : nextSignificant(closeAngle + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParen(open);
+            List<List<Token>> types = topLevelItems(openAngle + 1, closeAngle, true);
+            for (int extra = 1; extra < tokens.get(closeAngle).text.length() && !types.isEmpty(); extra++) {
+                // A closing ">>" also ends the last field's own type.
+                types.getLast().add(new Token(Kind.PUNCT, ">", null));
+            }
+            List<List<Token>> values = topLevelItems(open + 1, close, false);
+            if (values.size() > 1 && values.contains(List.of())) {
+                // BigQuery's parser rejects a missing value: STRUCT<n INT64>(,1) or STRUCT<n INT64>(1,).
+                boolean trailing = values.indexOf(List.of()) == values.size() - 1;
+                throw invalidQuery("Syntax error: Unexpected \"" + (trailing ? ")" : ",") + "\"");
+            }
+            values.removeIf(List::isEmpty);
+            if (types.isEmpty()) {
+                continue;
+            }
+            if (types.size() != values.size()) {
+                throw invalidQuery("STRUCT type has " + types.size() + " fields but constructor call has "
+                        + values.size() + " fields");
+            }
+            Set<String> names = new HashSet<>();
+            List<Token> literal = new ArrayList<>(new Lexer("{").tokenize());
+            for (int k = 0; k < types.size(); k++) {
+                List<Token> type = types.get(k);
+                boolean named = type.size() >= 2 && (type.get(0).kind == Kind.IDENT || type.get(0).kind == Kind.QIDENT)
+                        && !type.get(1).isPunct("<") && !type.get(1).isPunct("(");
+                // A repeated declared name, STRUCT<n INT64, n STRING>, gives the later field BigQuery's _field_N.
+                String name = named && names.add(type.get(0).identifierText().toLowerCase(Locale.ROOT))
+                        ? type.get(0).identifierText() : "_field_" + (k + 1);
+                if (k > 0) {
+                    literal.addAll(new Lexer(", ").tokenize());
+                }
+                literal.addAll(new Lexer(DuckTypes.quoteLiteral(name) + ": CAST(").tokenize());
+                literal.addAll(values.get(k));
+                literal.add(Token.raw(" AS " + translateType(named ? type.subList(1, type.size()) : type)));
+                literal.addAll(new Lexer(")").tokenize());
+            }
+            literal.addAll(new Lexer("}").tokenize());
+            tokens.subList(i, close + 1).clear();
+            tokens.addAll(i, literal);
+        }
+    }
+
+    /**
+     * The comma-separated items from {@code start} to {@code end}, splitting only outside brackets (and outside
+     * type angles when {@code types}); a type item drops its spaces, a value item keeps its inner ones.
+     */
+    private List<List<Token>> topLevelItems(int start, int end, boolean types) {
+        List<List<Token>> items = new ArrayList<>();
+        List<Token> item = new ArrayList<>();
+        int nesting = 0;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{") || types && token.isPunct("<")) {
+                nesting++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                nesting--;
+            } else if (types && token.kind == Kind.PUNCT && token.text.matches(">+")) {
+                nesting -= token.text.length();
+            } else if (nesting == 0 && token.isPunct(",")) {
+                items.add(item);
+                item = new ArrayList<>();
+                continue;
+            }
+            if (!types || token.kind != Kind.SPACE) {
+                item.add(token);
+            }
+        }
+        items.add(item);
+        for (List<Token> each : items) {
+            while (!each.isEmpty() && each.getFirst().kind == Kind.SPACE) {
+                each.removeFirst();
+            }
+            while (!each.isEmpty() && each.getLast().kind == Kind.SPACE) {
+                each.removeLast();
+            }
+        }
+        if (types) {
+            items.removeIf(List::isEmpty);
+        }
+        return items;
     }
 
     /** Rewrites BigQuery's {@code SELECT AS STRUCT ...} into a DuckDB struct value. */
@@ -13904,9 +14019,9 @@ final class SqlDialectTranslator {
             if (t.kind != Kind.SPACE) {
                 any = true;
             }
-            if (t.isPunct("(") || t.isPunct("[")) {
+            if (t.isPunct("(") || t.isPunct("[") || t.isPunct("{")) {
                 depth++;
-            } else if (t.isPunct(")") || t.isPunct("]")) {
+            } else if (t.isPunct(")") || t.isPunct("]") || t.isPunct("}")) {
                 depth--;
             } else if (depth == 0 && t.isPunct(",")) {
                 ranges.add(new int[] {start, k});

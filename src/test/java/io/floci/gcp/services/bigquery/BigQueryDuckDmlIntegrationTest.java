@@ -1543,4 +1543,43 @@ class BigQueryDuckDmlIntegrationTest {
                 """).then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalidQuery"));
     }
+
+    @Test
+    @Order(230)
+    void scriptVariablesLeaveDmlColumnListsAlone() {
+        query("CREATE SCHEMA variables").then().statusCode(200);
+        query("CREATE TABLE variables.people (id INT64, name STRING)").then().statusCode(200);
+
+        // The column list names columns, while the value an INSERT supplies binds the variable.
+        assertEquals(List.of(List.of("9", "zzz")), rows("""
+                DECLARE name STRING DEFAULT 'zzz';
+                INSERT INTO variables.people (id, name) VALUES (9, name);
+                SELECT id, name FROM variables.people;
+                """));
+        assertEquals(List.of(List.of("99", "var")), rows("""
+                DECLARE id INT64 DEFAULT 99;
+                INSERT INTO variables.people (id, name) VALUES (id, 'var');
+                SELECT id, name FROM variables.people WHERE name = 'var';
+                """));
+
+        // The table an INSERT reads supplies the columns its query names.
+        assertEquals(List.of(List.of("9", "zzz"), List.of("19", "zzz"), List.of("99", "var"),
+                List.of("109", "var")), rows("""
+                DECLARE name STRING DEFAULT 'other';
+                INSERT INTO variables.people SELECT id + 10, name FROM variables.people;
+                SELECT id, name FROM variables.people ORDER BY id;
+                """));
+
+        // UPDATE and DELETE read their target's columns wherever they name one.
+        assertEquals(List.of(List.of("2")), rows("""
+                DECLARE name STRING DEFAULT 'other';
+                UPDATE variables.people SET name = 'updated' WHERE name = 'zzz';
+                SELECT COUNT(*) FROM variables.people WHERE name = 'updated';
+                """));
+        assertEquals(List.of(List.of("2")), rows("""
+                DECLARE name STRING DEFAULT 'other';
+                DELETE FROM variables.people WHERE name = 'updated';
+                SELECT COUNT(*) FROM variables.people;
+                """));
+    }
 }

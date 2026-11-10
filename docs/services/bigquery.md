@@ -107,8 +107,10 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
   literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
   evaluated by the configured SQL engine. Variable references are token-substituted as typed literals;
-  known source columns, aliases, function names, and qualified fields are left intact. `EXECUTE IMMEDIATE`
-  supports a single query, supported DDL or DML statement, or `BEGIN` block. `USING` binds named or positional query
+  known source columns, the columns a DML statement names, aliases, function names, and qualified fields
+  are left intact, so a column keeps its name while the values an `INSERT` supplies still bind the
+  variables. `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
+  block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
   outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or
   request query parameters; nested `EXECUTE IMMEDIATE` is rejected.

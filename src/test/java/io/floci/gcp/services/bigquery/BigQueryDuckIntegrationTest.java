@@ -1307,6 +1307,38 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scriptVariablesLeaveDeclaredTemporaryColumnsAlone() {
+        // The declared schema and the INSERT column list name columns; the value a variable supplies
+        // in the same statement still substitutes, as in BigQuery.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE declared (id INT64);
+                INSERT INTO declared (id) VALUES (5);
+                SELECT id FROM declared;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE declared (id INT64);
+                INSERT INTO declared (id) VALUES (id);
+                SELECT id FROM declared;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("99"));
+        // An UPDATE reads the target's columns, so the variable leaves them alone.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE updated AS SELECT 1 AS id;
+                UPDATE updated SET id = id + 1 WHERE id = 1;
+                SELECT id FROM updated;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
     void scriptParametersBindByNameWhateverTheParameterMode() {
         // BigQuery infers NAMED from the names, so a script without a parameterMode binds them.
         query(Map.of("query", "SELECT @value AS a; SELECT @value AS b", "useLegacySql", false,

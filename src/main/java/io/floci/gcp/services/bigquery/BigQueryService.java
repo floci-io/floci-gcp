@@ -48,6 +48,7 @@ import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2595,36 +2596,226 @@ public class BigQueryService {
 
     private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
                                          ProceduralContext context, JobLocation jobLocation) {
-        Set<String> columnNames = temporaryColumnNames(sql, context);
-        SqlDialectTranslator.Translation translation;
+        Set<String> columnNames;
+        Set<Integer> columnPositions = Set.of();
         try {
-            translation = SqlDialectTranslator.translateStatement(sql, projectId, jobProjectId,
-                    options.defaultDatasetId(),
+            SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(sql, projectId,
+                    jobProjectId, options.defaultDatasetId(),
                     new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
                     context.temporaryTables());
+            columnNames = temporaryColumnNames(sql, context);
+            addTableColumnNames(translation.tables(), projectId, jobLocation, context, columnNames);
         } catch (GcpException e) {
-            // Variable substitution runs before statement-specific handling. Non-query script statements
-            // cannot be translated here, but their statements are validated and executed afterward.
-            return expandScriptVariables(sql, context, columnNames);
+            // Variable substitution runs before statement-specific handling. A DML statement writes and
+            // reads tables, and a DDL statement declares or targets columns, that a query translation
+            // cannot describe; their own handling reports errors.
+            columnNames = new LinkedHashSet<>();
+            columnPositions = statementColumnPositions(sql, projectId, jobProjectId, options, context, jobLocation,
+                    columnNames);
         }
-        BigQuerySqlEngine.Tables availableTables = tables(projectId, jobLocation);
-        for (SqlDialectTranslator.TableRef tableRef : translation.tables()) {
-            Table table;
-            try {
-                table = availableTables.table(tableRef.datasetId(), tableRef.tableId());
-            } catch (GcpException e) {
-                if (e.getHttpStatus() == 404) {
-                    continue;
-                }
-                throw e;
+        return expandScriptVariables(sql, context, columnNames, columnPositions);
+    }
+
+    /**
+     * Adds the lower-cased column names of {@code refs}: a temporary table has no entry in the store,
+     * so its schema comes from the script context.
+     */
+    private void addTableColumnNames(Collection<SqlDialectTranslator.TableRef> refs, String projectId,
+                                     JobLocation jobLocation, ProceduralContext context, Set<String> columnNames) {
+        for (SqlDialectTranslator.TableRef ref : refs) {
+            columnNames.addAll(tableColumnNames(ref, projectId, jobLocation, context));
+        }
+    }
+
+    private Set<String> tableColumnNames(SqlDialectTranslator.TableRef ref, String projectId,
+                                         JobLocation jobLocation, ProceduralContext context) {
+        if (context.temporaryTables().contains(ref.tableId())) {
+            return fieldNames(context.temporaryTableColumns(ref.tableId()));
+        }
+        Table table;
+        try {
+            table = tables(projectId, jobLocation).table(ref.datasetId(), ref.tableId());
+        } catch (GcpException e) {
+            if (e.getHttpStatus() == 404) {
+                return Set.of();
             }
-            if (table.getSchema() != null && table.getSchema().getFields() != null) {
-                for (TableFieldSchema field : table.getSchema().getFields()) {
-                    columnNames.add(field.getName().toLowerCase(Locale.ROOT));
+            throw e;
+        }
+        return table.getSchema() != null ? fieldNames(table.getSchema().getFields()) : Set.of();
+    }
+
+    private static Set<String> fieldNames(List<TableFieldSchema> fields) {
+        Set<String> names = new LinkedHashSet<>();
+        if (fields != null) {
+            for (TableFieldSchema field : fields) {
+                if (field.getName() != null) {
+                    names.add(field.getName().toLowerCase(Locale.ROOT));
                 }
             }
         }
-        return expandScriptVariables(sql, context, columnNames);
+        return names;
+    }
+
+    /**
+     * The token positions where a statement that is not a query resolves a name to a column:
+     * the columns a {@code CREATE TABLE} declares, and the {@code INSERT} column list of a statement
+     * whose values or query is a scope of its own, where a variable still substitutes as in BigQuery.
+     * The other DML statements read their target's columns wherever they name one, so those names join
+     * {@code columnNames} instead. Returns the positions of a declaration's column list.
+     */
+    private Set<Integer> statementColumnPositions(String sql, String projectId, String jobProjectId,
+                                                  QueryOptions options, ProceduralContext context,
+                                                  JobLocation jobLocation, Set<String> columnNames) {
+        Set<Integer> positions = new LinkedHashSet<>();
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+
+        // A declared schema is a list of column names, whether the table lives in the session or not.
+        SqlDialectTranslator.TemporaryTableDefinition declaration = SqlDialectTranslator.temporaryTableDefinition(sql);
+        if (declaration != null) {
+            positions.addAll(columnListPositions(tokens, declaration.name(), fieldNames(declaration.fields())));
+            return positions;
+        }
+
+        SqlDialectTranslator.Statement statement;
+        try {
+            statement = SqlDialectTranslator.parseStatement(sql, projectId, jobProjectId,
+                    options.defaultDatasetId(), context.temporaryTables());
+        } catch (GcpException e) {
+            return positions;
+        }
+        if (statement.target() == null && !statement.isDml()) {
+            return positions;
+        }
+        Set<String> declared = fieldNames(statement.columns());
+        if (!declared.isEmpty() && statement.target() != null) {
+            positions.addAll(columnListPositions(tokens, statement.target().tableId(), declared));
+        }
+        if (!statement.isDml()) {
+            return positions;
+        }
+        // A DML statement against a temporary table has no resolved target: the table is request-local,
+        // so its name comes from the statement itself.
+        String targetTable = statement.target() != null ? statement.target().tableId()
+                : SqlDialectTranslator.temporaryDmlTarget(sql, context.temporaryTables());
+        if (targetTable == null) {
+            return positions;
+        }
+        Set<String> target = Set.of();
+        if (context.temporaryTables().contains(targetTable)) {
+            target = fieldNames(context.temporaryTableColumns(targetTable));
+        } else if (statement.target() != null) {
+            target = tableColumnNames(statement.target(), projectId, jobLocation, context);
+        }
+        if (statement.kind() == SqlDialectTranslator.StatementKind.INSERT) {
+            positions.addAll(columnListPositions(tokens, targetTable, target));
+            // Only the column list names the target's columns; the values or query an INSERT supplies
+            // is a scope of its own, where a variable of the same name still substitutes.
+            columnNames.addAll(temporarySourceColumnNames(sql, context));
+            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context,
+                    targetTable, columnNames);
+            if (readsTable(tokens, targetTable)) {
+                // A self-referencing INSERT reads the columns of its own target.
+                columnNames.addAll(target);
+            }
+            return positions;
+        }
+        // UPDATE, DELETE and MERGE read their target's columns wherever they name one.
+        columnNames.addAll(target);
+        if (statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
+            columnNames.addAll(temporarySourceColumnNames(sql, context));
+            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context, null, columnNames);
+        }
+        return positions;
+    }
+
+    /**
+     * Adds the columns of the tables a DML statement reads, leaving out the target {@code skip}. The
+     * translation that names them rejects a shape it cannot translate; the statement's own handling
+     * then reports that error.
+     */
+    private void addDmlTableColumnNames(String sql, String projectId, String jobProjectId, QueryOptions options,
+                                        JobLocation jobLocation, ProceduralContext context,
+                                        String skip, Set<String> columnNames) {
+        SqlDialectTranslator.Translation translation;
+        try {
+            translation = SqlDialectTranslator.translateDml(sql, projectId, jobProjectId, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    ref -> null);
+        } catch (GcpException e) {
+            return;
+        }
+        for (SqlDialectTranslator.TableRef ref : translation.tables()) {
+            if (skip == null || !skip.equalsIgnoreCase(ref.tableId())) {
+                columnNames.addAll(tableColumnNames(ref, projectId, jobLocation, context));
+            }
+        }
+    }
+
+    /**
+     * True when {@code tableName} stands in a table position the statement reads: a self-referencing
+     * {@code INSERT} reads the columns of the table it writes.
+     */
+    private static boolean readsTable(List<SqlDialectTranslator.Token> tokens, String tableName) {
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tableName.equalsIgnoreCase(token.identifierText())) {
+                continue;
+            }
+            if (tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Positions of the column names in the parenthesized list that follows {@code tableName}: the
+     * columns a {@code CREATE TABLE} declares, or the column list of an {@code INSERT}. BigQuery reads
+     * those names as columns, so a variable of the same name cannot replace them.
+     */
+    private static Set<Integer> columnListPositions(List<SqlDialectTranslator.Token> tokens, String tableName,
+                                                    Set<String> columnNames) {
+        Set<Integer> positions = new LinkedHashSet<>();
+        if (tableName == null || columnNames.isEmpty()) {
+            return positions;
+        }
+        int open = -1;
+        for (int index = 0; index < tokens.size() && open < 0; index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tableName.equalsIgnoreCase(token.identifierText())) {
+                continue;
+            }
+            int next = nextSignificantToken(tokens, index + 1);
+            if (next >= 0 && tokens.get(next).isPunct("(")) {
+                open = next;
+            }
+        }
+        if (open < 0) {
+            return positions;
+        }
+        int depth = 0;
+        for (int index = open; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+                continue;
+            }
+            if (token.isPunct(")")) {
+                depth--;
+                if (depth == 0) {
+                    break;
+                }
+                continue;
+            }
+            if (depth == 1 && (token.kind == SqlDialectTranslator.Kind.IDENT
+                    || token.kind == SqlDialectTranslator.Kind.QIDENT)
+                    && columnNames.contains(token.identifierText().toLowerCase(Locale.ROOT))) {
+                positions.add(index);
+            }
+        }
+        return positions;
     }
 
     /**
@@ -2655,19 +2846,60 @@ public class BigQueryService {
     }
 
     private static boolean temporaryTablePosition(List<SqlDialectTranslator.Token> tokens, int index) {
+        return tablePosition(tokens, index, Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "USING"));
+    }
+
+    /**
+     * True when the dotted name ending at {@code index} stands in one of the {@code keywords} table
+     * positions, so that {@code _SESSION.t} and {@code dataset.table} both count.
+     */
+    private static boolean tablePosition(List<SqlDialectTranslator.Token> tokens, int index,
+                                         Set<String> keywords) {
         int previous = previousSignificantToken(tokens, index - 1);
-        if (previous < 0) {
-            return false;
-        }
-        SqlDialectTranslator.Token token = tokens.get(previous);
-        if (token.isPunct(".")) {
+        while (previous >= 0 && tokens.get(previous).isPunct(".")) {
             int qualifier = previousSignificantToken(tokens, previous - 1);
-            return qualifier >= 0 && "_SESSION".equalsIgnoreCase(tokens.get(qualifier).identifierText());
+            if (qualifier < 0) {
+                return false;
+            }
+            previous = previousSignificantToken(tokens, qualifier - 1);
         }
-        return Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "USING").contains(token.upper());
+        return previous >= 0 && keywords.contains(tokens.get(previous).upper());
+    }
+
+    /** As {@link #temporaryColumnNames(String, ProceduralContext)}, for the tables a query reads. */
+    private static Set<String> temporarySourceColumnNames(String sql, ProceduralContext context) {
+        Set<String> columnNames = new LinkedHashSet<>();
+        if (context.temporaryTables().isEmpty()) {
+            return columnNames;
+        }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
+                continue;
+            }
+            String name = token.identifierText();
+            if (!context.temporaryTables().contains(name)
+                    || !tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
+                continue;
+            }
+            for (TableFieldSchema field : context.temporaryTableColumns(name)) {
+                columnNames.add(field.getName().toLowerCase(Locale.ROOT));
+            }
+        }
+        return columnNames;
     }
 
     private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames) {
+        return expandScriptVariables(sql, context, columnNames, Set.of());
+    }
+
+    /**
+     * Replaces every script variable a statement may name with its typed literal. {@code columnPositions}
+     * are the token indexes a statement resolves as column names even when a variable has that name.
+     */
+    private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames,
+                                                Set<Integer> columnPositions) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
         Set<String> aliases = new LinkedHashSet<>();
         for (int index = 0; index < tokens.size(); index++) {
@@ -2689,8 +2921,9 @@ public class BigQueryService {
                     .contains(tokens.get(previous).upper());
             boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
+            boolean columnName = columnNames.contains(name) || columnPositions.contains(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
-                    || declarationPosition || functionName || qualifiedField || columnNames.contains(name)
+                    || declarationPosition || functionName || qualifiedField || columnName
                     || aliases.contains(name) && aliasReferences[index]) {
                 expanded.append(token.text);
                 continue;

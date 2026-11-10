@@ -330,6 +330,20 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aPositionalParameterInOneDynamicStatementBindsThroughPrependedTemporarySetup() {
+        List<Map<String, Object>> parameters = List.of(Map.of(
+                "parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1")));
+
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE working (id INT64);
+                SELECT ? AS value;
+                """, "test-project", null, new SqlDialectTranslator.QueryParameters(parameters, "POSITIONAL"));
+
+        assertTrue(script.sql().contains("CAST(1 AS BIGINT)"), script.sql());
+    }
+
+    @Test
     void scriptsRejectEmptyStatementsButAllowOneTrailingDelimiter() {
         assertTrue(SqlDialectTranslator.multiStatementScript("SELECT 1; SELECT 2;"));
         assertThrows(GcpException.class,

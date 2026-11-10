@@ -286,6 +286,13 @@ final class SqlDialectTranslator {
         return translator.run(sql);
     }
 
+    /** Translates one statement, treating {@code temporaryTables} as request-local names. */
+    static Translation translateStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId,
+                                          QueryParameters parameters, Collection<String> temporaryTables) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                Set.copyOf(temporaryTables));
+    }
+
     private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
                                                             String defaultDatasetId, QueryParameters parameters,
                                                             Set<String> temporaryTables) {
@@ -380,9 +387,11 @@ final class SqlDialectTranslator {
         if (statements.isEmpty()) {
             throw invalidQuery("Syntax error: Unexpected end of script");
         }
-        if (parameters.positional && multiStatementScript(sql)) {
-            throw invalidQuery("Positional query parameters are not supported in multi-statement scripts.");
-        }
+        // A request-level multi-statement script never reaches here with positional parameters:
+        // BigQueryService.query rejects it, because control flow may run statements in another order
+        // than the parameters were supplied. The SQL here can still be multi-statement when the
+        // service prepends request-local temporary objects to one dynamic statement, and that
+        // statement's own positional parameters are bound in source order.
         Set<TableRef> tables = new LinkedHashSet<>();
         Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
         Set<String> temporaryTables = new LinkedHashSet<>();
@@ -1044,31 +1053,31 @@ final class SqlDialectTranslator {
         return droppedTemporaryTable(sql, Set.copyOf(temporaryTables));
     }
 
-    /** Validates a procedural leaf without resolving or staging the resources it references. */
-    static void validateProceduralStatement(String sql, String projectId, String defaultDatasetId,
-                                            Collection<String> temporaryTables) {
-        validateProceduralStatement(sql, projectId, projectId, defaultDatasetId, temporaryTables);
-    }
-
+    /**
+     * A named query parameter may appear in any statement of a script (BigQuery binds it wherever
+     * it is written), so the caller's parameters are substituted during validation too instead of
+     * reporting every placeholder as missing.
+     */
     static void validateProceduralStatement(String sql, String projectId, String jobProjectId,
-                                            String defaultDatasetId, Collection<String> temporaryTables) {
+                                            String defaultDatasetId, Collection<String> temporaryTables,
+                                            QueryParameters parameters) {
         Set<String> names = new LinkedHashSet<>(temporaryTables);
         names.addAll(sessionTableNames(sql));
         String validationDataset = defaultDatasetId != null && !defaultDatasetId.isBlank()
                 ? defaultDatasetId : "_floci_validation";
         if (temporaryFunction(sql)) {
-            translateTemporaryFunction(sql, projectId, jobProjectId, validationDataset, QueryParameters.none(),
+            translateTemporaryFunction(sql, projectId, jobProjectId, validationDataset, parameters,
                     names, Set.of());
             return;
         }
         if (temporaryTable(sql)) {
-            translateTemporaryTable(sql, projectId, jobProjectId, validationDataset, QueryParameters.none(), names,
+            translateTemporaryTable(sql, projectId, jobProjectId, validationDataset, parameters, names,
                     ref -> null, ref -> null);
             return;
         }
         Statement statement = parseStatement(sql, projectId, jobProjectId, validationDataset, names);
         if (statement.kind() == StatementKind.QUERY) {
-            translateWithTemporaryTables(sql, projectId, jobProjectId, validationDataset, QueryParameters.none(),
+            translateWithTemporaryTables(sql, projectId, jobProjectId, validationDataset, parameters,
                     names);
         }
     }

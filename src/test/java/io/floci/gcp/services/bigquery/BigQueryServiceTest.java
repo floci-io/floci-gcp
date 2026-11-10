@@ -1112,6 +1112,230 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void assignmentsToOuterVariablesSurviveABeginBlock() {
+        seedTwoRows();
+        StoredJob job = service.query(PROJECT, "US", null, """
+                DECLARE target_age INT64 DEFAULT 24;
+                BEGIN
+                  SET target_age = 25;
+                END;
+                SELECT * FROM ds1.t1 WHERE age = target_age;
+                """, null);
+
+        BigQueryService.TableData result = service.queryResults(PROJECT, job);
+        assertEquals(1, result.rows().size());
+        assertEquals("bob", result.rows().getFirst().getF().getFirst().getV());
+    }
+
+    @Test
+    void namedParametersBindInEveryStatementOfAScript() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "INTEGER", null))),
+                List.of(Map.of("value", 7L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions("SELECT @value; SELECT @value;", null,
+                List.of(Map.of("name", "value", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "7"))), "NAMED", false, false);
+
+        StoredJob job = scriptService.query(PROJECT, "US", null, options);
+
+        assertEquals("SCRIPT", job.getStatementType());
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+    }
+
+    @Test
+    void multiStatementScriptsStillRejectPositionalParameters() {
+        Map<String, Object> parameter = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1"));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions("SELECT ?; SELECT ?", null, List.of(parameter, parameter),
+                "POSITIONAL", false, false);
+
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null, options));
+
+        assertTrue(error.getMessage().contains(
+                "Positional query parameters are not supported in multi-statement scripts"), error.getMessage());
+    }
+
+    @Test
+    void temporaryTableColumnsAreNotReplacedBySameNamedVariables() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))),
+                List.of(Map.of("id", 1L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE t AS SELECT 1 AS id;
+                SELECT id FROM t;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        String sql = request.getAllValues().getLast().sql();
+        assertTrue(sql.endsWith("SELECT id FROM t"), sql);
+    }
+
+    @Test
+    void aVariableInTheSelectListIsNotHiddenByItsOwnAlias() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))),
+                List.of(Map.of("id", 99L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE id INT64 DEFAULT 99;
+                SELECT id AS id;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        assertEquals("SELECT 99 AS id", request.getValue().sql());
+    }
+
+    @Test
+    void aliasReferencesOutsideTheSelectListStillWinOverVariables() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("total", "INTEGER", null))),
+                List.of(Map.of("total", 30L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE total INT64 DEFAULT 999;
+                SELECT age AS total FROM ds1.t1 ORDER BY total;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        String sql = request.getValue().sql();
+        assertTrue(sql.contains("age AS total"), sql);
+        assertTrue(sql.endsWith("ORDER BY total"), sql);
+    }
+
+    @Test
+    void stringVariableLiteralsEscapeBackslashes() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("path", "STRING", null))),
+                List.of(Map.of("path", "C:\\new")), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE path STRING DEFAULT r'C:\\new';
+                SELECT path;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        assertEquals("SELECT 'C:\\\\new'", request.getValue().sql());
+    }
+
+    @Test
+    void nullVariablesKeepTheirDeclaredTypes() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("a", "INTEGER", null))),
+                List.of(Map.of("a", 1L)), "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE s STRING;
+                DECLARE record STRUCT<a INT64>;
+                SELECT s, record.a;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        String sql = request.getValue().sql();
+        assertTrue(sql.contains("CAST(NULL AS STRING)"), sql);
+        assertTrue(sql.contains("CAST(NULL AS STRUCT<`a` INT64>).a"), sql);
+    }
+
+    @Test
+    void aNullConditionTakesTheElseBranchEvenWhenNegated() {
+        seedTwoRows();
+        StoredJob job = service.query(PROJECT, "US", null, """
+                DECLARE b BOOL;
+                IF NOT b THEN
+                  SELECT * FROM ds1.t1 WHERE age = 30;
+                ELSE
+                  SELECT * FROM ds1.t1 WHERE age = 25;
+                END IF;
+                """, null);
+
+        BigQueryService.TableData result = service.queryResults(PROJECT, job);
+        assertEquals(1, result.rows().size());
+        assertEquals("bob", result.rows().getFirst().getF().getFirst().getV());
+    }
+
+    @Test
+    void arithmeticOnANullVariableKeepsItNull() {
+        seedTwoRows();
+        StoredJob job = service.query(PROJECT, "US", null, """
+                DECLARE target_age INT64;
+                SET target_age = target_age + 1;
+                IF target_age IS NULL THEN
+                  SELECT * FROM ds1.t1 WHERE age = 25;
+                END IF;
+                """, null);
+
+        assertEquals(1, service.queryResults(PROJECT, job).rows().size());
+    }
+
+    @Test
+    void int64ConditionsCompareWithoutLosingPrecision() {
+        seedTwoRows();
+        StoredJob job = service.query(PROJECT, "US", null, """
+                DECLARE counter INT64 DEFAULT 9007199254740993;
+                IF counter = 9007199254740992 THEN
+                  SELECT * FROM ds1.t1 WHERE age = 30;
+                ELSE
+                  SELECT * FROM ds1.t1 WHERE age = 25;
+                END IF;
+                """, null);
+
+        BigQueryService.TableData result = service.queryResults(PROJECT, job);
+        assertEquals(1, result.rows().size());
+        assertEquals("bob", result.rows().getFirst().getF().getFirst().getV());
+    }
+
+    @Test
+    void stringExpressionDefaultsAreEvaluatedInsteadOfReadAsOneLiteral() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenAnswer(invocation -> {
+            BigQuerySqlEngine.Request request = invocation.getArgument(0);
+            if (request.sql().contains("_floci_script_value")) {
+                return new BigQuerySqlEngine.Result(
+                        new TableSchema(List.of(field("_floci_script_value", "STRING", null))),
+                        List.of(Map.of("_floci_script_value", "ab")), "SELECT", 0);
+            }
+            return new BigQuerySqlEngine.Result(new TableSchema(List.of(field("s", "STRING", null))),
+                    List.of(Map.of("s", "ab")), "SELECT", 0);
+        });
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        scriptService.query(PROJECT, "US", null, """
+                DECLARE s STRING DEFAULT 'a' || 'b';
+                SELECT s;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        assertEquals("SELECT 'ab'", request.getAllValues().getLast().sql());
+    }
+
+    @Test
     void selectStarMaterializesAnonymousDestinationTable() {
         seedTwoRows();
         StoredJob job = service.query(PROJECT, "US", null, "SELECT * FROM ds1.t1", null);

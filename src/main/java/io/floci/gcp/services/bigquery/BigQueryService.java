@@ -799,7 +799,8 @@ public class BigQueryService {
                     "Positional query parameters are not supported in multi-statement scripts.");
         }
         if (procedural != null) {
-            validateProceduralStatements(dataProjectId, projectId, procedural, options.defaultDatasetId());
+            validateProceduralStatements(dataProjectId, projectId, procedural, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()));
         }
         SqlDialectTranslator.Statement statement = procedural == null
                 ? SqlDialectTranslator.scriptFinalStatement(options.sql(), dataProjectId, projectId,
@@ -818,8 +819,10 @@ public class BigQueryService {
 
         if (procedural != null) {
             if (options.dryRun()) {
-                ProceduralContext context = validateProceduralScript(
-                        dataProjectId, projectId, procedural, options, jobLocation);
+                // The default dataset may name another project, so resolve temporary objects and tables
+                // while the stores see the project the statement reads from.
+                ProceduralContext context = inProject(projectId, dataProjectId, () -> validateProceduralScript(
+                        dataProjectId, projectId, procedural, options, jobLocation));
                 BigQuerySqlEngine.Result result = context.lastQueryResult();
                 if (result != null) {
                     job.setSchema(result.schema());
@@ -1087,9 +1090,10 @@ public class BigQueryService {
 
     private static void validateProceduralStatements(String projectId, String jobProjectId,
                                                      SqlDialectTranslator.ProceduralScript script,
-                                                     String defaultDatasetId) {
+                                                     String defaultDatasetId,
+                                                     SqlDialectTranslator.QueryParameters parameters) {
         validateProceduralItems(projectId, jobProjectId, script.items(), defaultDatasetId,
-                new LinkedHashSet<>(), true);
+                new LinkedHashSet<>(), parameters, true);
         validateLoopControlTargets(script.items(), new LinkedHashMap<>(), 0);
     }
 
@@ -1159,6 +1163,7 @@ public class BigQueryService {
     private static Set<String> validateProceduralItems(String projectId, String jobProjectId,
                                                        List<SqlDialectTranslator.ScriptItem> items,
                                                        String defaultDatasetId, Set<String> temporaryTables,
+                                                       SqlDialectTranslator.QueryParameters parameters,
                                                        boolean declarationsAllowed) {
         Set<String> current = new LinkedHashSet<>(temporaryTables);
         boolean proceduralStatementSeen = false;
@@ -1184,7 +1189,7 @@ public class BigQueryService {
                     continue;
                 }
                 SqlDialectTranslator.validateProceduralStatement(
-                        sql.sql(), projectId, jobProjectId, defaultDatasetId, current);
+                        sql.sql(), projectId, jobProjectId, defaultDatasetId, current, parameters);
                 SqlDialectTranslator.TemporaryTableDefinition declaration =
                         SqlDialectTranslator.temporaryTableDefinition(sql.sql());
                 if (declaration != null) {
@@ -1200,7 +1205,8 @@ public class BigQueryService {
             }
             proceduralStatementSeen = true;
             if (item instanceof SqlDialectTranslator.BeginBlock block) {
-                Set<String> nested = validateProceduralItems(projectId, jobProjectId, block.items(), defaultDatasetId, current, true);
+                Set<String> nested = validateProceduralItems(projectId, jobProjectId, block.items(), defaultDatasetId,
+                        current, parameters, true);
                 current.clear();
                 current.addAll(nested);
                 continue;
@@ -1209,33 +1215,40 @@ public class BigQueryService {
                 continue;
             }
             if (item instanceof SqlDialectTranslator.LoopBlock loop) {
-                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, false);
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
                 continue;
             }
             if (item instanceof SqlDialectTranslator.ForBlock loop) {
-                SqlDialectTranslator.validateProceduralStatement(loop.query(), projectId, defaultDatasetId, current);
-                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, false);
+                SqlDialectTranslator.validateProceduralStatement(loop.query(), projectId, jobProjectId,
+                        defaultDatasetId, current, parameters);
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
                 continue;
             }
             if (item instanceof SqlDialectTranslator.RepeatBlock loop) {
                 if (!loop.condition().matches("(?i)\\s*[A-Za-z_][A-Za-z0-9_]*\\s*(<=|>=|!=|<>|=|<|>)\\s*"
                         + "([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)\\s*")) {
                     SqlDialectTranslator.validateProceduralStatement(
-                            "SELECT " + loop.condition(), projectId, defaultDatasetId, current);
+                            "SELECT " + loop.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
                 }
-                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, false);
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
                 continue;
             }
             if (item instanceof SqlDialectTranslator.CaseBlock caseBlock) {
                 List<Set<String>> branchTemporaryTables = new ArrayList<>();
                 for (SqlDialectTranslator.CaseWhen branch : caseBlock.branches()) {
                     SqlDialectTranslator.validateProceduralStatement(
-                            "SELECT " + caseBlock.condition(branch), projectId, defaultDatasetId, current);
+                            "SELECT " + caseBlock.condition(branch), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
                     branchTemporaryTables.add(validateProceduralItems(
-                            projectId, jobProjectId, branch.items(), defaultDatasetId, current, false));
+                            projectId, jobProjectId, branch.items(), defaultDatasetId, current, parameters, false));
                 }
                 branchTemporaryTables.add(validateProceduralItems(
-                            projectId, jobProjectId, caseBlock.otherwise(), defaultDatasetId, current, false));
+                            projectId, jobProjectId, caseBlock.otherwise(), defaultDatasetId, current, parameters,
+                            false));
                 current.clear();
                 branchTemporaryTables.forEach(current::addAll);
                 continue;
@@ -1244,18 +1257,21 @@ public class BigQueryService {
                 if (!loop.condition().matches("(?i)\\s*[A-Za-z_][A-Za-z0-9_]*\\s*(<=|>=|!=|<>|=|<|>)\\s*"
                         + "([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)\\s*")) {
                     SqlDialectTranslator.validateProceduralStatement(
-                            "SELECT " + loop.condition(), projectId, defaultDatasetId, current);
+                            "SELECT " + loop.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
                 }
-                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, false);
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
                 continue;
             }
             SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) item;
             SqlDialectTranslator.validateProceduralStatement(
-                    "SELECT " + conditional.condition(), projectId, jobProjectId, defaultDatasetId, current);
+                    "SELECT " + conditional.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                    parameters);
             Set<String> whenTrue = validateProceduralItems(
-                    projectId, jobProjectId, conditional.whenTrue(), defaultDatasetId, current, false);
+                    projectId, jobProjectId, conditional.whenTrue(), defaultDatasetId, current, parameters, false);
             Set<String> whenFalse = validateProceduralItems(
-                    projectId, jobProjectId, conditional.whenFalse(), defaultDatasetId, current, false);
+                    projectId, jobProjectId, conditional.whenFalse(), defaultDatasetId, current, parameters, false);
             current.clear();
             current.addAll(whenTrue);
             current.addAll(whenFalse);
@@ -1319,9 +1335,14 @@ public class BigQueryService {
                                          QueryOptions options, StoredJob job, JobLocation jobLocation) {
         ProceduralContext context = new ProceduralContext();
         try {
-            for (SqlDialectTranslator.ScriptItem item : script.items()) {
-                executeProceduralItem(projectId, jobProjectId, item, options, job, context, jobLocation);
-            }
+            // A script's default dataset may name another project, so the stores must see the project
+            // its statements read from. Saved results stay in the job's project below.
+            inProject(jobProjectId, projectId, () -> {
+                for (SqlDialectTranslator.ScriptItem item : script.items()) {
+                    executeProceduralItem(projectId, jobProjectId, item, options, job, context, jobLocation);
+                }
+                return null;
+            });
         } catch (LoopControlSignal signal) {
             throw QueryEngine.invalidQuery(signal.label != null
                     ? "Loop control label " + signal.label + " does not name an enclosing block or loop."
@@ -1334,7 +1355,7 @@ public class BigQueryService {
             job.setTotalRows(result.rows().size());
             job.setDestinationDatasetId(ANON_DATASET);
             job.setDestinationTableId("anon_" + job.getJobId());
-            materializeResult(projectId, job, result.schema(), result.rows());
+            materializeResult(jobProjectId, job, result.schema(), result.rows());
         }
     }
 
@@ -2239,10 +2260,12 @@ public class BigQueryService {
         if (arithmetic.matches()) {
             Object left = scriptOperand(arithmetic.group(1), context);
             Object right = scriptOperand(arithmetic.group(3), context);
-            if (!(left instanceof Number leftNumber) || !(right instanceof Number rightNumber)) {
+            // Arithmetic with NULL is NULL, so `DECLARE x INT64; SET x = x + 1` keeps x NULL.
+            if (left == null || right == null) {
+                evaluated = null;
+            } else if (!(left instanceof Number leftNumber) || !(right instanceof Number rightNumber)) {
                 throw QueryEngine.invalidQuery("Variable arithmetic requires numeric operands.");
-            }
-            if ("FLOAT64".equals(type) || "FLOAT".equals(type)
+            } else if ("FLOAT64".equals(type) || "FLOAT".equals(type)
                     || left instanceof Double || right instanceof Double) {
                 evaluated = switch (arithmetic.group(2)) {
                     case "+" -> leftNumber.doubleValue() + rightNumber.doubleValue();
@@ -2510,9 +2533,6 @@ public class BigQueryService {
         if (value.matches("[-+]?[0-9]+\\.[0-9]+")) {
             return Double.valueOf(value);
         }
-        if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
-            return value.substring(1, value.length() - 1).replace("''", "'");
-        }
         Object variable = context.variables().get(value.toLowerCase(Locale.ROOT));
         if (variable == null && !context.variables().containsKey(value.toLowerCase(Locale.ROOT))) {
             throw QueryEngine.invalidQuery("Variable " + value + " has not been declared.");
@@ -2564,21 +2584,20 @@ public class BigQueryService {
 
     private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
                                          ProceduralContext context, JobLocation jobLocation) {
-        Set<String> columnNames = new LinkedHashSet<>();
+        Set<String> columnNames = temporaryColumnNames(sql, context);
         SqlDialectTranslator.Translation translation;
         try {
-            translation = SqlDialectTranslator.translate(sql, projectId, options.defaultDatasetId(),
-                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()));
+            translation = SqlDialectTranslator.translateStatement(sql, projectId, jobProjectId,
+                    options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    context.temporaryTables());
         } catch (GcpException e) {
             // Variable substitution runs before statement-specific handling. Non-query script statements
             // cannot be translated here, but their statements are validated and executed afterward.
-            return expandScriptVariables(sql, context, Set.of());
+            return expandScriptVariables(sql, context, columnNames);
         }
         BigQuerySqlEngine.Tables availableTables = tables(projectId, jobLocation);
         for (SqlDialectTranslator.TableRef tableRef : translation.tables()) {
-            if (context.temporaryTables().contains(tableRef.tableId())) {
-                continue;
-            }
             Table table;
             try {
                 table = availableTables.table(tableRef.datasetId(), tableRef.tableId());
@@ -2597,6 +2616,46 @@ public class BigQueryService {
         return expandScriptVariables(sql, context, columnNames);
     }
 
+    /**
+     * Columns of the request-local tables a statement names. A temporary table has no entry in the
+     * store, so its schema comes from the script context; without these names a variable of the same
+     * name would replace a column reference or a DML column list.
+     */
+    private static Set<String> temporaryColumnNames(String sql, ProceduralContext context) {
+        Set<String> columnNames = new LinkedHashSet<>();
+        if (context.temporaryTables().isEmpty()) {
+            return columnNames;
+        }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
+                continue;
+            }
+            String name = token.identifierText();
+            if (!context.temporaryTables().contains(name) || !temporaryTablePosition(tokens, index)) {
+                continue;
+            }
+            for (TableFieldSchema field : context.temporaryTableColumns(name)) {
+                columnNames.add(field.getName().toLowerCase(Locale.ROOT));
+            }
+        }
+        return columnNames;
+    }
+
+    private static boolean temporaryTablePosition(List<SqlDialectTranslator.Token> tokens, int index) {
+        int previous = previousSignificantToken(tokens, index - 1);
+        if (previous < 0) {
+            return false;
+        }
+        SqlDialectTranslator.Token token = tokens.get(previous);
+        if (token.isPunct(".")) {
+            int qualifier = previousSignificantToken(tokens, previous - 1);
+            return qualifier >= 0 && "_SESSION".equalsIgnoreCase(tokens.get(qualifier).identifierText());
+        }
+        return Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "USING").contains(token.upper());
+    }
+
     private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
         Set<String> aliases = new LinkedHashSet<>();
@@ -2609,6 +2668,7 @@ public class BigQueryService {
             }
         }
         StringBuilder expanded = new StringBuilder();
+        boolean[] aliasReferences = aliasReferencePositions(tokens);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             String name = token.text.toLowerCase(Locale.ROOT);
@@ -2620,7 +2680,7 @@ public class BigQueryService {
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnNames.contains(name)
-                    || aliases.contains(name)) {
+                    || aliases.contains(name) && aliasReferences[index]) {
                 expanded.append(token.text);
                 continue;
             }
@@ -2690,6 +2750,39 @@ public class BigQueryService {
         return -1;
     }
 
+    /**
+     * Positions where an unqualified name may stand for a select-list alias instead of a script
+     * variable. BigQuery resolves aliases in GROUP BY, ORDER BY, HAVING and QUALIFY, but a
+     * select-list expression or a WHERE predicate does not see them, so a variable there has to be
+     * substituted: {@code DECLARE id INT64 DEFAULT 99; SELECT id AS id} selects 99. Identifiers inside
+     * a nested expression stay protected, which keeps the conservative behavior for subqueries.
+     */
+    private static boolean[] aliasReferencePositions(List<SqlDialectTranslator.Token> tokens) {
+        boolean[] protectedPositions = new boolean[tokens.size()];
+        int depth = 0;
+        String clause = null;
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
+                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    depth++;
+                } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                    depth--;
+                }
+            } else if (depth == 0 && token.kind == SqlDialectTranslator.Kind.IDENT) {
+                switch (token.upper()) {
+                    case "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "QUALIFY", "WINDOW",
+                            "UNION", "INTERSECT", "EXCEPT", "LIMIT", "OFFSET" -> clause = token.upper();
+                    default -> { }
+                }
+            }
+            protectedPositions[index] = depth > 0
+                    || "GROUP".equals(clause) || "ORDER".equals(clause) || "HAVING".equals(clause)
+                    || "QUALIFY".equals(clause) || "WINDOW".equals(clause);
+        }
+        return protectedPositions;
+    }
+
     private static String sqlVariableLiteral(Object value) {
         if (value == null) {
             return "NULL";
@@ -2709,7 +2802,8 @@ public class BigQueryService {
 
     private static String sqlVariableLiteral(Object value, String type) {
         if (value == null) {
-            return "NULL";
+            return "STRUCT".equalsIgnoreCase(type) ? "NULL"
+                    : sqlVariableLiteral(null, new ScriptVariableTypeParser(type).parse());
         }
         if ("STRUCT".equalsIgnoreCase(type) && value instanceof Map<?, ?>) {
             return sqlVariableLiteral(value);
@@ -2719,7 +2813,9 @@ public class BigQueryService {
 
     private static String sqlVariableLiteral(Object value, ScriptVariableType type) {
         if (value == null) {
-            return "NULL";
+            // A NULL variable keeps its declared type, so `DECLARE s STRING; SELECT s` reports STRING
+            // and a null STRUCT still exposes its fields to `s.field`.
+            return "CAST(NULL AS " + scriptVariableTypeSql(type) + ")";
         }
         if (type.isArray()) {
             if (!(value instanceof List<?> values)) {
@@ -2753,8 +2849,8 @@ public class BigQueryService {
             case "DATETIME" -> "DATETIME '" + coerceScriptDateTime(value).toString().replace('T', ' ') + "'";
             case "TIME" -> "TIME '" + coerceScriptTime(value) + "'";
             case "BYTES" -> "FROM_BASE64('" + coerceScriptBytes(value) + "')";
-            case "JSON" -> "CAST('" + coerceScriptJson(value).replace("'", "''") + "' AS JSON)";
-            case "STRING" -> "'" + value.toString().replace("'", "''") + "'";
+            case "JSON" -> "CAST(" + scriptStringLiteral(coerceScriptJson(value)) + " AS JSON)";
+            case "STRING" -> scriptStringLiteral(value.toString());
             case "BOOL" -> value.toString();
             case "INT64", "FLOAT64" -> value.toString();
             default -> throw QueryEngine.invalidQuery(
@@ -2762,38 +2858,60 @@ public class BigQueryService {
         };
     }
 
-    private static Boolean evaluateScriptCondition(String condition, ProceduralContext context) {
+    /**
+     * A GoogleSQL string literal. The substitution result is lexed again for DuckDB, so a backslash
+     * has to be escaped or it would be read as the start of a character escape.
+     */
+    private static String scriptStringLiteral(String value) {
+        return '\'' + value.replace("\\", "\\\\").replace("'", "\\'") + '\'';
+    }
+
+    /** A directly evaluated condition: {@code resolved} is false when the SQL engine has to answer. */
+    private record ScriptCondition(boolean resolved, Boolean value) {
+
+        private static final ScriptCondition UNRESOLVED = new ScriptCondition(false, null);
+
+        private static ScriptCondition of(Boolean value) {
+            return new ScriptCondition(true, value);
+        }
+    }
+
+    private static ScriptCondition evaluateScriptCondition(String condition, ProceduralContext context) {
         String expression = condition.trim();
         if (expression.matches("(?i)TRUE|FALSE")) {
-            return Boolean.valueOf(expression);
+            return ScriptCondition.of(Boolean.valueOf(expression));
         }
         if (expression.regionMatches(true, 0, "NOT ", 0, 4)) {
-            Boolean nested = evaluateScriptCondition(expression.substring(4), context);
-            return nested != null ? !nested : null;
+            ScriptCondition nested = evaluateScriptCondition(expression.substring(4), context);
+            if (!nested.resolved()) {
+                return ScriptCondition.UNRESOLVED;
+            }
+            // NOT NULL is NULL, not TRUE: an unknown condition keeps its unknown value through negation.
+            return ScriptCondition.of(nested.value() == null ? null : !nested.value());
         }
         Matcher nullCheck = Pattern.compile("(?i)^(.+?)\\s+IS\\s+(NOT\\s+)?NULL$").matcher(expression);
         if (nullCheck.matches()) {
             try {
                 boolean isNull = scriptOperand(nullCheck.group(1), context) == null;
-                return nullCheck.group(2) != null ? !isNull : isNull;
+                return ScriptCondition.of(nullCheck.group(2) != null ? !isNull : isNull);
             } catch (GcpException e) {
-                return null;
+                return ScriptCondition.UNRESOLVED;
             }
         }
         try {
             Object value = scriptOperand(expression, context);
-            if (value instanceof Boolean booleanValue) {
-                return booleanValue;
-            }
             if (value == null) {
-                return false;
+                return ScriptCondition.of(null);
+            }
+            if (value instanceof Boolean booleanValue) {
+                return ScriptCondition.of(booleanValue);
             }
         } catch (GcpException ignored) {
             // Non-scalar conditions are delegated to the configured SQL engine.
         }
         Matcher comparison = Pattern.compile("^(.+?)\\s*(<=|>=|!=|<>|=|<|>)\\s*(.+)$").matcher(expression);
         if (!comparison.matches()) {
-            return null;
+            return ScriptCondition.UNRESOLVED;
         }
         Object left;
         Object right;
@@ -2801,22 +2919,23 @@ public class BigQueryService {
             left = scriptOperand(comparison.group(1), context);
             right = scriptOperand(comparison.group(3), context);
         } catch (GcpException e) {
-            return null;
+            return ScriptCondition.UNRESOLVED;
         }
         if (left == null || right == null) {
-            return false;
+            // A comparison with NULL is NULL, which the caller treats as false only when choosing a branch.
+            return ScriptCondition.of(null);
         }
         int order;
         if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
-            order = Double.compare(leftNumber.doubleValue(), rightNumber.doubleValue());
+            order = compareScriptNumbers(leftNumber, rightNumber);
         } else if (left instanceof String leftString && right instanceof String rightString) {
             order = leftString.compareTo(rightString);
         } else if (left instanceof Boolean leftBoolean && right instanceof Boolean rightBoolean) {
             order = Boolean.compare(leftBoolean, rightBoolean);
         } else {
-            return null;
+            return ScriptCondition.UNRESOLVED;
         }
-        return switch (comparison.group(2)) {
+        return ScriptCondition.of(switch (comparison.group(2)) {
             case "=" -> order == 0;
             case "!=", "<>" -> order != 0;
             case "<" -> order < 0;
@@ -2824,7 +2943,18 @@ public class BigQueryService {
             case ">" -> order > 0;
             case ">=" -> order >= 0;
             default -> null;
-        };
+        });
+    }
+
+    /**
+     * Integral operands compare exactly: routing INT64 through a double would report
+     * 9007199254740993 and 9007199254740992 as equal. A FLOAT64 operand makes BigQuery coerce both.
+     */
+    private static int compareScriptNumbers(Number left, Number right) {
+        boolean integral = !(left instanceof Double || left instanceof Float)
+                && !(right instanceof Double || right instanceof Float);
+        return integral ? Long.compare(left.longValue(), right.longValue())
+                : Double.compare(left.doubleValue(), right.doubleValue());
     }
 
     private void executeProceduralFor(String projectId, String jobProjectId, SqlDialectTranslator.ForBlock loop,
@@ -2905,9 +3035,9 @@ public class BigQueryService {
 
     private boolean proceduralCondition(String projectId, String jobProjectId, String condition,
                                         QueryOptions options, ProceduralContext context, JobLocation jobLocation) {
-        Boolean directCondition = evaluateScriptCondition(condition, context);
-        if (directCondition != null) {
-            return directCondition;
+        ScriptCondition directCondition = evaluateScriptCondition(condition, context);
+        if (directCondition.resolved()) {
+            return Boolean.TRUE.equals(directCondition.value());
         }
         BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
                 context.prependTo("SELECT " + expandScriptVariables(condition, context, Set.of())
@@ -2929,9 +3059,9 @@ public class BigQueryService {
                                          QueryOptions options, StoredJob job, ProceduralContext context,
                                          JobLocation jobLocation) {
         for (int iteration = 0; iteration < 1000; iteration++) {
-            Boolean evaluatedCondition = evaluateScriptCondition(loop.condition(), context);
-            if (evaluatedCondition != null) {
-                if (!evaluatedCondition) {
+            ScriptCondition evaluatedCondition = evaluateScriptCondition(loop.condition(), context);
+            if (evaluatedCondition.resolved()) {
+                if (!Boolean.TRUE.equals(evaluatedCondition.value())) {
                     return;
                 }
                 try {
@@ -2999,10 +3129,10 @@ public class BigQueryService {
                     }
                 }
             } finally {
-                context.variables().clear();
-                context.variables().putAll(variables);
-                context.variableTypes().clear();
-                context.variableTypes().putAll(variableTypes);
+                // A block scopes only the variables it declares. An assignment to a variable declared
+                // outside the block survives it, as it does in BigQuery.
+                context.variables().keySet().removeIf(name -> !variables.containsKey(name));
+                context.variableTypes().keySet().removeIf(name -> !variableTypes.containsKey(name));
             }
             return;
         }
@@ -3098,10 +3228,10 @@ public class BigQueryService {
             return;
         }
         SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) item;
-        Boolean directCondition = evaluateScriptCondition(conditional.condition(), context);
+        ScriptCondition directCondition = evaluateScriptCondition(conditional.condition(), context);
         boolean matches;
-        if (directCondition != null) {
-            matches = directCondition;
+        if (directCondition.resolved()) {
+            matches = Boolean.TRUE.equals(directCondition.value());
         } else {
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
                     context.prependTo("SELECT " + expandScriptVariables(conditional.condition(), context, Set.of())
@@ -3388,6 +3518,12 @@ public class BigQueryService {
                 throw new IllegalStateException("Temporary table was not materialized: " + name);
             }
             return result;
+        }
+
+        private List<TableFieldSchema> temporaryTableColumns(String name) {
+            BigQuerySqlEngine.Result result = temporaryTableResults.get(name);
+            return result != null && result.schema() != null && result.schema().getFields() != null
+                    ? result.schema().getFields() : List.of();
         }
 
         private String prependTo(String sql) {

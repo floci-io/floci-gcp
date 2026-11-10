@@ -163,7 +163,7 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - `JOIN` (all kinds, including correlated `LEFT JOIN UNNEST(array) alias`), `GROUP BY`, `HAVING`,
   `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
   `UNION`/`INTERSECT`/`EXCEPT` (`ALL` and `DISTINCT`), subqueries, `WITH` (CTEs), window
-  functions, `QUALIFY`, `PIVOT`, `UNNEST` (including `WITH OFFSET`,
+  functions, `QUALIFY`, `PIVOT`, `UNPIVOT`, `UNNEST` (including `WITH OFFSET`,
   `FROM t, t.array_column AS x`, and `x IN UNNEST(...)`), `SELECT * EXCEPT (...)`, and
   `SELECT * REPLACE (...)`.
 - `SELECT * EXCEPT (...)` and `SELECT * REPLACE (...)` also apply to a `STRUCT` expression
@@ -171,10 +171,11 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   subquery. The same item keeps BigQuery's `DISTINCT`, `LIMIT`/`OFFSET` and `ORDER BY` behavior,
   a positional `GROUP BY` and `GROUP BY ALL` count the projected fields, and a column of the
   query's own sources that an aggregate still needs is projected next to the expansion.
-  A duplicate output name takes BigQuery's `_1` suffix, including a sibling that collides with an
-  expanded field under a positional `GROUP BY` or `GROUP BY ALL`. An indexed aggregate star such
-  as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, and
-  a hoisted ordering can dereference a nested field of a source `STRUCT` column (`ORDER BY u.n`).
+  An indexed aggregate star such
+  as `ARRAY_AGG(t ORDER BY id DESC LIMIT 1)[OFFSET(0)].* EXCEPT (id)` applies its star list, with or
+  without parentheses around the aggregate, and a hoisted ordering can dereference a nested field of a
+  source `STRUCT` column (`ORDER BY u.n`). A plain `t.s.*` with no star list groups by position or
+  `GROUP BY ALL` as BigQuery does.
   Replacement expressions read the original query's sources, including correlated columns.
   A bare name in a replacement, such as an `UNNEST` range variable, its `WITH OFFSET` alias or a
   column of a subquery without an alias, reads the `FROM` row, not a same-named field of the struct.
@@ -188,6 +189,23 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   when joined sources expose same-named struct columns.
   A correlated `SELECT AS STRUCT input.* EXCEPT (id)` hides `_PARTITIONDATE` and `_PARTITIONTIME`
   in any query whose `FROM` provides `input`.
+- A duplicate output name takes BigQuery's `_1` suffix in the result schema, including a sibling that
+  collides with an expanded field under a positional `GROUP BY` or `GROUP BY ALL`, and a star over a
+  subquery that repeats a name. A name two select outputs or two source columns expose is ambiguous
+  wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
+  `HAVING`, `QUALIFY` and a window in the select list), and a suffix generated for a duplicate is
+  unrecognized unless a source column carries that name. A bare `GROUP BY` name resolves a unique
+  output alias first, while a qualified item such as `GROUP BY t.b` still names its source alias. A
+  window in the select list reads input columns rather than sibling aliases, and a window in `ORDER BY`,
+  `HAVING` or `QUALIFY` resolves a unique output alias first, as the rest of that clause does. A star's
+  `EXCEPT` list drops every output written with the name across the query's sources, including columns
+  merged by a `USING` join, and a `REPLACE` on the same star is still applied to the surviving outputs.
+  `REPLACE` rejects a name it would replace more than once. A bare star over an `UNPIVOT` source,
+  including each `UNPIVOT` that decorates a source of a join, returns the surviving source columns,
+  then the value columns, then the name column, as BigQuery does. A star's `EXCEPT` and `REPLACE` over `PIVOT` output resolve
+  against the pivot's generated column names, and `PIVOT` and `UNPIVOT` reject a duplicated name they
+  reference. A `CREATE TABLE` or `CREATE VIEW` whose query repeats a name is rejected, and querying a
+  view whose definition repeats a name fails, as both fail in BigQuery.
 - Terminal-prefix wildcard tables such as ``events_*`` are expanded across matching base tables
   and expose `_TABLE_SUFFIX` for filtering.
 - GoogleSQL literals: double-quoted and triple-quoted strings, raw strings (`r'...'`), bytes
@@ -544,10 +562,17 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
+- A window in `ORDER BY`, `HAVING` or `QUALIFY` accepts a name BigQuery resolves to a unique select
+  alias, but DuckDB binds that name to a source column of the same name when one exists, so a window
+  whose name shadows a source column can order differently. Ambiguity checks follow BigQuery.
 - Struct-star `EXCEPT` / `REPLACE` translation does not cover every combination allowed by the
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):
   a sibling unqualified `*` beside a struct star can fail with `invalidQuery`.
+- A star over a join that mixes `USING` with `ON` or comma joins, or an `UNPIVOT` combined with a
+  `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
+  name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived
+  from literal `IN` values and aggregate aliases is not validated.
 - Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
   `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
   yet; they fail with `invalidQuery`.

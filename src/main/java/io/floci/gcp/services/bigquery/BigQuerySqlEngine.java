@@ -28,9 +28,19 @@ interface BigQuerySqlEngine {
         }
     }
 
-    /** Result rows are in the stored representation {@link RowCodec} encodes onto the wire. */
+    /**
+     * Result rows are in the stored representation {@link RowCodec} encodes onto the wire.
+     * {@code duplicateOutputNames} lists the select-list names that were written more than once before
+     * its schema took BigQuery's suffixes; a CREATE TABLE or CREATE VIEW statement rejects those.
+     */
     record Result(TableSchema schema, List<Map<String, Object>> rows, String statementType,
-                  long totalBytesProcessed) {}
+                  long totalBytesProcessed, List<String> duplicateOutputNames) {
+
+        Result(TableSchema schema, List<Map<String, Object>> rows, String statementType,
+               long totalBytesProcessed) {
+            this(schema, rows, statementType, totalBytesProcessed, List.of());
+        }
+    }
 
     /** Read access to the request project's tables; lookups of missing tables throw 404. */
     interface Tables {

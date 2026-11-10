@@ -2082,8 +2082,10 @@ class SqlDialectTranslatorTest {
                 sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
         String replaced = sql("SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
                 + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL");
-        assertTrue(replaced.startsWith("SELECT * FROM (SELECT 5 AS b"), replaced);
-        assertTrue(replaced.contains(") AS \"_floci_duplicate_names\""), replaced);
+        assertEquals("SELECT 5 AS b, * REPLACE (9 AS a) RENAME (\"b\" AS \"b_1\")"
+                        + " FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                replaced);
 
         String reserved = sql("SELECT t.s.* EXCEPT(a), t.id AS b, -t.id AS b_1"
                 + " FROM (SELECT STRUCT(1 AS a, 2 AS b) s, 1 AS id"
@@ -2096,6 +2098,271 @@ class SqlDialectTranslatorTest {
                 + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1), 2) t GROUP BY ALL");
         assertTrue(expanded.contains("AS \"b_2\""), expanded);
         assertFalse(expanded.contains("b_1_1"), expanded);
+    }
+
+    @Test
+    void plainStructStarWithNoListGroupsByPositionAndAll() {
+        assertEquals("SELECT * FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+        assertEquals("SELECT *, 5 AS \"b_1\" FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+        assertEquals("SELECT *, 5 AS \"b_1\" FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY 1, 2, 3",
+                sql("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY 1, 2, 3"));
+        assertEquals("SELECT 5 AS b, * RENAME (\"b\" AS \"b_1\") FROM (SELECT unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2} AS \"s\") t) AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT 5 AS b, t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"));
+    }
+
+    @Test
+    void indexedAggregateStructStarAcceptsParentheses() {
+        String excluded = sql("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* EXCEPT (id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+        assertTrue(excluded.contains("EXCLUDE (\"id\")"), excluded);
+        assertFalse(excluded.contains(").*"), excluded);
+
+        String replaced = sql("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* REPLACE (99 AS id)"
+                + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t");
+        assertTrue(replaced.contains("REPLACE (99 AS id)"), replaced);
+        assertFalse(replaced.contains(").*"), replaced);
+    }
+
+    @Test
+    void structStarDuplicateNamesSkipASuffixALaterFieldUses() {
+        assertEquals("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_1\""
+                        + " FROM (SELECT * EXCLUDE (\"a\") FROM (SELECT 5 AS b, unnest(t.s)"
+                        + " FROM (SELECT {'a': 1, 'b': 2, 'b_1': 3} AS \"s\") t) AS \"_expanded\")"
+                        + " AS \"_floci_names\"",
+                sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"));
+        assertFalse(sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t")
+                .contains("_floci_names"), "DuckDB numbering already matches BigQuery");
+
+        String twoSiblings = sql("SELECT 5 AS b, 6 AS b, t.s.* EXCEPT(a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t");
+        assertTrue(twoSiblings.contains("#1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_3\", #4 AS \"b_1\""),
+                twoSiblings);
+
+        String ordered = sql("SELECT 5 AS b, t.s.* EXCEPT(a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t ORDER BY b_1");
+        assertTrue(ordered.endsWith("AS \"_floci_names\" ORDER BY b_1"), ordered);
+
+        String grouped = sql("SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t GROUP BY ALL");
+        assertEquals("SELECT 5 AS b, * REPLACE (9 AS a) RENAME (\"b\" AS \"b_2\")"
+                        + " FROM (SELECT unnest(t.s) FROM (SELECT {'a': 1, 'b': 2, 'b_1': 3} AS \"s\") t)"
+                        + " AS \"_expanded\" GROUP BY ALL",
+                grouped);
+        assertFalse(grouped.contains("_floci_duplicate_names"), grouped);
+    }
+
+    @Test
+    void orderByRejectsANameTwoSelectOutputsWereWrittenWith() {
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY IF(b > 0, 1, 0)").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1) UNION ALL SELECT 7, 8 FROM (SELECT 1)"
+                        + " ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT t.* FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t ORDER BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT ROW_NUMBER() OVER (ORDER BY b) FROM (SELECT 5 AS b, 6 AS b)").getMessage());
+        assertEquals("Name b in GROUP BY clause is ambiguous; it may refer to multiple columns in the SELECT-list",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) GROUP BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) HAVING b > 0").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c)"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY b) > 0").getMessage());
+        sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY 1");
+        sql("SELECT 5 AS b, 6 AS c FROM (SELECT 1) UNION ALL SELECT 7, 8 FROM (SELECT 1) ORDER BY b");
+        sql("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS b_1) ORDER BY b_1");
+        sql("SELECT 5 AS b, 6 AS c FROM (SELECT 1 AS c) GROUP BY b");
+    }
+
+    @Test
+    void nestedDuplicateOutputNamesTakeBigQuerySuffixes() {
+        String nested = sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)");
+        assertTrue(nested.startsWith("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_1\" FROM ("), nested);
+
+        String sibling = sql("SELECT 9 AS b, * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)");
+        assertTrue(sibling.startsWith("SELECT #1 AS \"b\", #2 AS \"b_2\", #3 AS \"b_3\", #4 AS \"b_1\" FROM ("),
+                sibling);
+    }
+
+    @Test
+    void sourceReferencesRejectADuplicatedColumnNameOutsideTheResolvingClauses() {
+        for (String sql : List.of(
+                "SELECT b FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT SUM(b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT ROW_NUMBER() OVER (PARTITION BY b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) WHERE b > 0",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) x JOIN (SELECT 1 AS c) y ON b > 0",
+                "SELECT COUNT(*) FROM (SELECT 5 AS b, 7 AS b) GROUP BY b + 0")) {
+            assertEquals("Column name b is ambiguous", invalid(sql).getMessage());
+        }
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT t.b FROM (SELECT 5 AS b, 7 AS b) t").getMessage());
+        assertEquals("Unrecognized name: b",
+                invalid("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) WHERE b > 0").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT * FROM (SELECT 5 AS b, 6 AS b) WHERE b_1 > 0").getMessage());
+        assertEquals("Unrecognized name: b_2",
+                invalid("SELECT b_2 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)").getMessage());
+        sql("SELECT b_1 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) WHERE b_1 > 0");
+        sql("SELECT t.b FROM (SELECT 1 AS b) t WHERE t.b > 0");
+        sql("SELECT id FROM (SELECT 1 AS id, 2 AS x) a JOIN (SELECT 1 AS id, 3 AS y) b USING(id)");
+    }
+
+    @Test
+    void pivotAndUnpivotRejectADuplicatedSourceName() {
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (b))").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(b) FOR k IN ('x'))").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR b IN (5, 7))").getMessage());
+        sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))");
+        sql("SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (c))");
+        String pivot = sql("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                + " PIVOT(SUM(v) FOR k IN ('x'))");
+        assertTrue(pivot.contains("(?i)^(b|b_1)$"), pivot);
+        assertEquals("Column b_1 in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(b_1) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
+    }
+
+    @Test
+    void unpivotStarTakesBigQueryColumnOrder() {
+        String translated = sql("SELECT * FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(translated.startsWith("SELECT #2 AS \"v\", #1 AS \"n\" FROM ("), translated);
+        String multi = sql("SELECT * FROM (SELECT 1 AS a1, 2 AS a2, 3 AS b1, 4 AS b2, 5 AS r)"
+                + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))");
+        assertTrue(multi.startsWith("SELECT #1 AS \"r\", #3 AS \"v1\", #4 AS \"v2\", #2 AS \"n\" FROM ("),
+                multi);
+        String replaced = sql("SELECT * REPLACE(9 AS v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(replaced.startsWith("SELECT 9 AS \"v\", #1 AS \"n\" FROM ("), replaced);
+        String exceptAndReplace = sql("SELECT * EXCEPT(n) REPLACE(9 AS v)"
+                + " FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))");
+        assertTrue(exceptAndReplace.startsWith("SELECT 9 AS \"v\" FROM ("), exceptAndReplace);
+        assertEquals("Column b in SELECT * REPLACE list is ambiguous",
+                invalid("SELECT * REPLACE(9 AS b) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)"
+                        + " UNPIVOT(v FOR n IN (c))").getMessage());
+    }
+
+    @Test
+    void multiSourceStarExclusionsDropEveryWrittenName() {
+        String bare = sql("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y");
+        assertTrue(bare.startsWith("SELECT #3 AS \"c\" FROM ("), bare);
+        String qualified = sql("SELECT y2.* EXCEPT(c)"
+                + " FROM (SELECT 5 AS b) x, (SELECT 1 AS c, 2 AS c, 3 AS d) y2");
+        assertTrue(qualified.startsWith("SELECT #4 AS \"d\" FROM ("), qualified);
+        assertEquals("SELECT * expands to zero columns after applying EXCEPT",
+                invalid("SELECT * EXCEPT(b) FROM (SELECT 5 AS b)").getMessage());
+        assertEquals("SELECT .* expands to zero columns after applying EXCEPT",
+                invalid("SELECT x.* EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS y) y2")
+                        .getMessage());
+    }
+
+    @Test
+    void pivotStarListsResolveAgainstGeneratedColumnNames() {
+        assertEquals("Column nope in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(nope) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
+        assertEquals("Column k in SELECT * EXCEPT list does not exist",
+                invalid("SELECT * EXCEPT(k) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))").getMessage());
+        String multi = sql("SELECT * EXCEPT(m_x) FROM (SELECT 'x' AS k, 1 AS v)"
+                + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))");
+        assertTrue(multi.contains("\"x_total\" AS \"total_x\"") && multi.contains("\"x_m\" AS \"m_x\""),
+                multi);
+    }
+
+    @Test
+    void sourceStarReplaceSurvivesPositionalExclusion() {
+        assertEquals("SELECT 9 AS \"c\" FROM (SELECT 5 AS b, 7 AS b, 8 AS c) AS \"_floci_derived_0\"",
+                sql("SELECT * EXCEPT(b) REPLACE(9 AS c) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)"));
+        assertEquals("SELECT 9 AS \"c\", #4 AS \"c_1\""
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1) AS \"_floci_derived_0\"",
+                sql("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1)"));
+        assertEquals("Column b cannot occur in both SELECT * EXCEPT and REPLACE",
+                invalid("SELECT * EXCEPT(b) REPLACE(9 AS b) FROM (SELECT 5 AS b, 7 AS b, 8 AS c)")
+                        .getMessage());
+    }
+
+    @Test
+    void windowsResolveInputRowsBeforeSiblingAliases() {
+        sql("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn FROM (SELECT 1 AS x)");
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 5 AS x, 6 AS x FROM (SELECT 1 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)").getMessage());
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                        + " FROM (SELECT 2 AS x, 3 AS x)").getMessage());
+    }
+
+    @Test
+    void windowsInOrderByAndQualifyResolveAUniqueOutputAliasFirst() {
+        sql("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x) ORDER BY ROW_NUMBER() OVER (ORDER BY x)");
+        sql("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x) QUALIFY ROW_NUMBER() OVER (ORDER BY x) = 1");
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 1 AS y FROM (SELECT 2 AS x, 3 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)").getMessage());
+    }
+
+    @Test
+    void groupByPrefersAUniqueOutputAliasOverDuplicateSources() {
+        sql("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b");
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b").getMessage());
+        assertEquals("Column name b is ambiguous",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b + 0")
+                        .getMessage());
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b")
+                        .getMessage());
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b + 0")
+                        .getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT 1 AS y, COUNT(*) FROM (SELECT 1 AS b, 2 AS b) GROUP BY b_1")
+                        .getMessage());
+    }
+
+    @Test
+    void eachJoinedUnpivotSourceIsShaped() {
+        assertEquals("SELECT #2 AS \"v\", #1 AS \"n\", #4 AS \"w\", #3 AS \"m\""
+                        + " FROM (SELECT 1 AS a) AS \"_floci_derived_0\" UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) AS \"_floci_derived_1\" UNPIVOT(w FOR m IN(b))",
+                sql("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) UNPIVOT(w FOR m IN(b))"));
+        assertEquals("SELECT #2 AS \"v\", #1 AS \"n\", #3 AS \"b\""
+                        + " FROM (SELECT 1 AS a) AS \"_floci_derived_0\" UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) AS \"_floci_derived_1\"",
+                sql("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)), (SELECT 2 AS b)"));
+    }
+
+    @Test
+    void orderByRejectsASuffixGeneratedForADuplicate() {
+        assertEquals("Unrecognized name: b_2",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"
+                        + " ORDER BY b_2").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b_1").getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT * FROM (SELECT 5 AS b, 6 AS b) ORDER BY b_1").getMessage());
+        sql("SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s, 9 AS b_2) t"
+                + " ORDER BY b_2");
     }
 
     @Test

@@ -294,6 +294,32 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void plainStructStarGroupsLikeBigQuery() {
+        assertResultColumns("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("a", "b"), List.of("1", "2"));
+        assertResultColumns("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("a", "b", "b_1"), List.of("1", "2", "5"));
+        assertResultColumns("SELECT t.s.*, 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY 1, 2, 3",
+                List.of("a", "b", "b_1"), List.of("1", "2", "5"));
+        assertResultColumns("SELECT 5 AS b, t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL",
+                List.of("b", "a", "b_1"), List.of("5", "1", "2"));
+        assertResultColumns("SELECT t.s.* FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t GROUP BY ALL"
+                + " ORDER BY b DESC", List.of("a", "b"), List.of("1", "2"));
+    }
+
+    @Test
+    @Order(2)
+    void indexedAggregateStructStarAcceptsParentheses() {
+        assertResultColumns("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* EXCEPT (id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                List.of("name"), List.of("x"));
+        assertResultColumns("SELECT (ARRAY_AGG(t ORDER BY id))[OFFSET(0)].* REPLACE (99 AS id)"
+                        + " FROM (SELECT 1 AS id, 'x' AS name UNION ALL SELECT 2, 'y') t",
+                List.of("id", "name"), List.of("99", "x"));
+    }
+
+    @Test
+    @Order(2)
     void structStarGroupedDuplicateNamesAndSourceStructOrderingMatchBigQuery() {
         query(Map.of("query", "SELECT t.s.* EXCEPT(a), 5 AS b FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
                         + " GROUP BY 1, 2", "useLegacySql", false))
@@ -351,6 +377,42 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[0].v", equalTo("9"))
                 .body("rows[0].f[1].v.f[0].v", equalTo("1"))
                 .body("rows[1].f[1].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
+    void structStarDuplicateNamesSkipASuffixALaterFieldUses() {
+        query(Map.of("query", "SELECT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT DISTINCT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, 6 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_3", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "6", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* EXCEPT(a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 2 AS b, 4 AS b_1)) t ORDER BY b_1 DESC",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "2", "4")))
+                .body("rows[1].f.v", equalTo(List.of("5", "2", "3")));
+        query(Map.of("query", "SELECT 5 AS b, t.s.* REPLACE(9 AS a)"
+                        + " FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s"
+                        + " UNION ALL SELECT STRUCT(1 AS a, 7 AS b, 4 AS b_1)) t"
+                        + " GROUP BY ALL ORDER BY b_1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "a", "b_2", "b_1")))
+                .body("rows[0].f.v", equalTo(List.of("5", "9", "2", "3")))
+                .body("rows[1].f.v", equalTo(List.of("5", "9", "7", "4")));
     }
 
     @Test
@@ -1627,6 +1689,290 @@ class BigQueryDuckIntegrationTest {
         }
     }
 
+    @Test
+    @Order(5)
+    void duplicateOutputNamesTakeBigQuerySuffixes() {
+        assertResultColumns("SELECT 5 AS b, 6 AS b", List.of("b", "b_1"), List.of("5", "6"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b_1, 7 AS b", List.of("b", "b_1", "b_2"),
+                List.of("5", "6", "7"));
+        assertResultColumns("SELECT 5 AS f0_, 6 AS f0_", List.of("f0_", "f0__1"), List.of("5", "6"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b, 1 + 1", List.of("b", "b_1", "f0_"), List.of("5", "6", "2"));
+        assertResultColumns("SELECT 5 AS b, 6 AS b FROM (SELECT 1) ORDER BY 1", List.of("b", "b_1"),
+                List.of("5", "6"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)", List.of("b", "b_2", "b_1"),
+                List.of("5", "7", "6"));
+        assertResultColumns("SELECT 9 AS b, * FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b", "b_2", "b_3", "b_1"), List.of("9", "5", "7", "6"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 6 AS b)", List.of("b", "b_1"), List.of("5", "6"));
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT t.* EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT * EXCEPT(b_1) FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)",
+                List.of("b", "b_1"), List.of("5", "7"));
+        query("{\"query\": \"SELECT * REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b in SELECT * REPLACE list is ambiguous"));
+        query("{\"query\": \"SELECT * EXCEPT(b_2)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b_2 in SELECT * EXCEPT list does not exist"));
+        assertResultColumns("WITH x AS (SELECT 5 AS b, 7 AS b, 6 AS b_1) SELECT * FROM x",
+                List.of("b", "b_2", "b_1"), List.of("5", "7", "6"));
+        query("""
+                {"query": "SELECT 5 AS b, 6 AS b", "dryRun": true, "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")))
+                .body("rows", nullValue());
+        query(Map.of("query", "CREATE TABLE shop.dup_as_select AS SELECT 5 AS b, 6 AS b",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CREATE TABLE has columns with duplicate name b"));
+        query(Map.of("query", "CREATE VIEW shop.dup_view AS SELECT 5 AS b, 6 AS b", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CREATE VIEW has columns with duplicate name b"));
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "dup_api_view"},
+                 "view": {"query": "SELECT 5 AS b, 6 AS b", "useLegacySql": false}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1")));
+        query(Map.of("query", "SELECT * FROM shop.dup_api_view", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Duplicate column name 'b' in definition of view 'shop.dup_api_view'"));
+    }
+
+    @Test
+    @Order(5)
+    void pivotUnpivotAndMultiSourceStarsMatchBigQuery() {
+        assertResultColumns("SELECT * FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v", "n"), List.of("8", "c"));
+        query(Map.of("query", "SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 9 AS d)"
+                        + " UNPIVOT(v FOR n IN (c, d))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("b", "b_1", "v", "n")))
+                .body("rows[0].f.v", equalTo(List.of("5", "7", "8", "c")))
+                .body("rows[1].f.v", equalTo(List.of("5", "7", "9", "d")));
+        assertResultColumns("SELECT * EXCEPT(v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("n"), List.of("c"));
+        assertResultColumns("SELECT * REPLACE(9 AS v) FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v", "n"), List.of("9", "c"));
+        assertResultColumns("SELECT * EXCEPT(n) REPLACE(9 AS v)"
+                        + " FROM (SELECT 8 AS c) UNPIVOT(v FOR n IN (c))",
+                List.of("v"), List.of("9"));
+        query("{\"query\": \"SELECT * REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (c))\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column b in SELECT * REPLACE list is ambiguous"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a1, 2 AS a2, 3 AS b1, 4 AS b2, 5 AS r)"
+                        + " UNPIVOT((v1, v2) FOR n IN ((a1, a2), (b1, b2)))",
+                List.of("r", "v1", "v2", "n"), List.of("5", "1", "2", "a1_a2"));
+        assertResultColumns("SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("b", "b_1", "x"), List.of("5", "7", "1"));
+        assertResultColumns("SELECT * FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))",
+                List.of("total_x", "m_x"), List.of("1", "1"));
+        assertResultColumns("SELECT * EXCEPT(m_x) FROM (SELECT 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) AS total, MAX(v) AS m FOR k IN ('x'))",
+                List.of("total_x"), List.of("1"));
+        for (String sql : List.of(
+                "SELECT * EXCEPT(nope) FROM (SELECT 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))",
+                "SELECT * EXCEPT(k) FROM (SELECT 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("in SELECT * EXCEPT list does not exist"));
+        }
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("x"), List.of("1"));
+        assertResultColumns("SELECT * EXCEPT(x) FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v)"
+                        + " PIVOT(SUM(v) FOR k IN ('x'))",
+                List.of("b", "b_1"), List.of("5", "7"));
+        query("{\"query\": \"SELECT * EXCEPT(b_1)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR k IN ('x'))\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b_1 in SELECT * EXCEPT list does not exist"));
+        for (String sql : List.of(
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 8 AS c) UNPIVOT(v FOR n IN (b))",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(b) FOR k IN ('x'))",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b, 'x' AS k, 1 AS v) PIVOT(SUM(v) FOR b IN (5, 7))")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        assertResultColumns("SELECT * EXCEPT(b) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y",
+                List.of("c"), List.of("1"));
+        assertResultColumns("SELECT * EXCEPT(c) FROM (SELECT 5 AS b, 7 AS b) x, (SELECT 1 AS c) y",
+                List.of("b", "b_1"), List.of("5", "7"));
+        assertResultColumns("SELECT x.* EXCEPT(b)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c) x, (SELECT 1 AS y) y2",
+                List.of("c"), List.of("8"));
+        assertResultColumns("SELECT y2.* EXCEPT(c)"
+                        + " FROM (SELECT 5 AS b) x, (SELECT 1 AS c, 2 AS c, 3 AS d) y2",
+                List.of("d"), List.of("3"));
+    }
+
+    @Test
+    @Order(5)
+    void usingJoinsAndUnpivotInAJoinMatchBigQuery() {
+        assertResultColumns("SELECT * EXCEPT(id) FROM (SELECT 1 AS id, 2 AS x) a"
+                + " JOIN (SELECT 1 AS id, 3 AS y) b USING(id)", List.of("x", "y"), List.of("2", "3"));
+        assertResultColumns("SELECT * EXCEPT(c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)",
+                List.of("id", "d"), List.of("1", "4"));
+        assertResultColumns("SELECT * EXCEPT(id, c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)", List.of("d"), List.of("4"));
+        assertResultColumns("SELECT a.* EXCEPT(c) FROM (SELECT 1 AS id, 2 AS c, 3 AS c) a"
+                + " JOIN (SELECT 1 AS id, 4 AS d) b USING(id)", List.of("id"), List.of("1"));
+        query(Map.of("query", "SELECT * EXCEPT(id) FROM (SELECT 1 AS id, 2 AS x) a"
+                + " RIGHT JOIN (SELECT 2 AS id, 3 AS y) b USING(id)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "y")))
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, "3")));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS m) a,"
+                        + " (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c))",
+                List.of("m", "b", "b_1", "v", "n"), List.of("1", "5", "7", "8", "c"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS m) a"
+                        + " JOIN (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c)) ON a.m > 0",
+                List.of("m", "b", "b_1", "v", "n"), List.of("1", "5", "7", "8", "c"));
+        assertResultColumns("SELECT * EXCEPT(v) FROM (SELECT 1 AS m) a,"
+                        + " (SELECT 5 AS b, 7 AS b, 8 AS c) u UNPIVOT(v FOR n IN (c))",
+                List.of("m", "b", "b_1", "n"), List.of("1", "5", "7", "c"));
+    }
+
+    @Test
+    @Order(5)
+    void greptileFollowUpsMatchBigQuery() {
+        assertResultColumns("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c)",
+                List.of("c"), List.of("9"));
+        assertResultColumns("SELECT * EXCEPT(b) REPLACE(9 AS c)"
+                        + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c, 3 AS c_1)",
+                List.of("c", "c_1"), List.of("9", "3"));
+        query("{\"query\": \"SELECT * EXCEPT(b) REPLACE(9 AS b)"
+                + " FROM (SELECT 5 AS b, 7 AS b, 8 AS c)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "Column b cannot occur in both SELECT * EXCEPT and REPLACE"));
+
+        assertResultColumns("SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                        + " FROM (SELECT 1 AS x)",
+                List.of("x", "x_1", "rn"), List.of("5", "6", "1"));
+        query("{\"query\": \"SELECT 5 AS x, 6 AS x FROM (SELECT 1 AS x)"
+                + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column name x is ambiguous"));
+        query("{\"query\": \"SELECT 5 AS x, 6 AS x, ROW_NUMBER() OVER (ORDER BY x) AS rn"
+                + " FROM (SELECT 2 AS x, 3 AS x)\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Column name x is ambiguous"));
+        assertResultColumns("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)",
+                List.of("x"), List.of("1"));
+        assertResultColumns("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x)"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY x) = 1",
+                List.of("x"), List.of("1"));
+
+        assertResultColumns("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b",
+                List.of("b", "n"), List.of("1", "1"));
+        for (String sql : List.of(
+                "SELECT COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b",
+                "SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b + 0")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        query("{\"query\": \"SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b is ambiguous inside t"));
+        query("{\"query\": \"SELECT 1 AS y, COUNT(*) FROM (SELECT 1 AS b, 2 AS b) GROUP BY b_1\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b_1"));
+
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b) UNPIVOT(w FOR m IN(b))",
+                List.of("v", "n", "w", "m"), List.of("1", "a", "2", "b"));
+        assertResultColumns("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
+                        + " (SELECT 2 AS b)",
+                List.of("v", "n", "b"), List.of("1", "a", "2"));
+    }
+
+    @Test
+    @Order(5)
+    void sourceReferencesRejectADuplicatedColumnName() {
+        for (String sql : List.of(
+                "SELECT b FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT SUM(b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT ROW_NUMBER() OVER (PARTITION BY b) FROM (SELECT 5 AS b, 7 AS b)",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) WHERE b > 0",
+                "SELECT * FROM (SELECT 5 AS b, 7 AS b) x JOIN (SELECT 1 AS c) y ON b > 0",
+                "SELECT COUNT(*) FROM (SELECT 5 AS b, 7 AS b) GROUP BY b + 0")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        query("{\"query\": \"SELECT t.b FROM (SELECT 5 AS b, 7 AS b) t\", \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b is ambiguous inside t"));
+        query("{\"query\": \"SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) WHERE b > 0\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b"));
+        query("{\"query\": \"SELECT b_2 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1)\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b_2"));
+        assertResultColumns("SELECT b_1 FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) WHERE b_1 > 0",
+                List.of("b_1"), List.of("6"));
+        assertResultColumns("SELECT id FROM (SELECT 1 AS id, 2 AS x) a"
+                + " JOIN (SELECT 1 AS id, 3 AS y) b USING(id)", List.of("id"), List.of("1"));
+    }
+
+    @Test
+    @Order(5)
+    void orderByRejectsARepeatedSelectNameAndAGeneratedSuffix() {
+        for (String sql : List.of(
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY b",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) ORDER BY IF(b > 0, 1, 0)",
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b",
+                "SELECT t.* FROM (SELECT 5 AS b, 7 AS b, 6 AS b_1) t ORDER BY b",
+                "SELECT ROW_NUMBER() OVER (ORDER BY b) FROM (SELECT 5 AS b, 6 AS b)",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) HAVING b > 0",
+                "SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) QUALIFY ROW_NUMBER() OVER (ORDER BY b) > 0")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Column name b is ambiguous"));
+        }
+        query("{\"query\": \"SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS c) GROUP BY b\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b in GROUP BY clause is ambiguous;"
+                        + " it may refer to multiple columns in the SELECT-list"));
+        for (String sql : List.of(
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b, 3 AS b_1) s) t"
+                        + " ORDER BY b_2",
+                "SELECT 5 AS b, t.s.* EXCEPT(a) FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t"
+                        + " GROUP BY ALL ORDER BY b_1",
+                "SELECT * FROM (SELECT 5 AS b, 6 AS b) ORDER BY b_1")) {
+            query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Unrecognized name"));
+        }
+        assertResultColumns("SELECT 5 AS b, 6 AS b FROM (SELECT 1 AS b_1) ORDER BY b_1",
+                List.of("b", "b_1"), List.of("5", "6"));
+    }
+
     private static void assertResultColumns(String sql, List<String> names, List<String> firstRow) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(200)
@@ -2161,8 +2507,10 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "SELECT * FROM (SELECT 1 AS id) d"
                         + " JOIN shop.reviewed_partition a USING(id)"
                         + " JOIN shop.reviewed_partition b ON b.id = a.id", "useLegacySql", false))
-                .then().statusCode(400)
-                .body("error.message", containsString("duplicate(s): id"));
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "name", "secret",
+                        "id_1", "name_1", "secret_1")))
+                .body("rows[0].f.v", equalTo(List.of("1", "ana", "hidden", "1", "ana", "hidden")));
 
         query(Map.of("query", "SELECT e.* REPLACE(id + 1 AS id),"
                         + " DATE '2026-10-01' AS _PARTITIONDATE FROM shop.reviewed_partition e",

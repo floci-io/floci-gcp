@@ -193,9 +193,11 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   collides with an expanded field under a positional `GROUP BY` or `GROUP BY ALL`, and a star over a
   subquery that repeats a name. A name two select outputs or two source columns expose is ambiguous
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
-  `HAVING`, `QUALIFY` and inside a window), and a suffix generated for a duplicate is unrecognized
-  unless a source column carries that name. A bare `GROUP BY` name resolves a unique output alias
-  first, and a window in the select list reads input columns rather than sibling aliases. A star's
+  `HAVING`, `QUALIFY` and a window in the select list), and a suffix generated for a duplicate is
+  unrecognized unless a source column carries that name. A bare `GROUP BY` name resolves a unique
+  output alias first, while a qualified item such as `GROUP BY t.b` still names its source alias. A
+  window in the select list reads input columns rather than sibling aliases, and a window in `ORDER BY`,
+  `HAVING` or `QUALIFY` resolves a unique output alias first, as the rest of that clause does. A star's
   `EXCEPT` list drops every output written with the name across the query's sources, including columns
   merged by a `USING` join, and a `REPLACE` on the same star is still applied to the surviving outputs.
   `REPLACE` rejects a name it would replace more than once. A bare star over an `UNPIVOT` source,
@@ -560,6 +562,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 
 ## Deviations from real BigQuery
 
+- A window in `ORDER BY`, `HAVING` or `QUALIFY` accepts a name BigQuery resolves to a unique select
+  alias, but DuckDB binds that name to a source column of the same name when one exists, so a window
+  whose name shadows a source column can order differently. Ambiguity checks follow BigQuery.
 - Struct-star `EXCEPT` / `REPLACE` translation does not cover every combination allowed by the
   GoogleSQL [star-list rules](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#select_replace)
   and [correlated subquery semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#correlated_subqueries):

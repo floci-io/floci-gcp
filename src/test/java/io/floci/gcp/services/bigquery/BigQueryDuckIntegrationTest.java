@@ -1855,6 +1855,12 @@ class BigQueryDuckIntegrationTest {
                 + " FROM (SELECT 2 AS x, 3 AS x)\", \"useLegacySql\": false}")
                 .then().statusCode(400)
                 .body("error.message", containsString("Column name x is ambiguous"));
+        assertResultColumns("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)",
+                List.of("x"), List.of("1"));
+        assertResultColumns("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x)"
+                        + " QUALIFY ROW_NUMBER() OVER (ORDER BY x) = 1",
+                List.of("x"), List.of("1"));
 
         assertResultColumns("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b",
                 List.of("b", "n"), List.of("1", "1"));
@@ -1865,6 +1871,14 @@ class BigQueryDuckIntegrationTest {
                     .then().statusCode(400)
                     .body("error.message", containsString("Column name b is ambiguous"));
         }
+        query("{\"query\": \"SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Name b is ambiguous inside t"));
+        query("{\"query\": \"SELECT 1 AS y, COUNT(*) FROM (SELECT 1 AS b, 2 AS b) GROUP BY b_1\","
+                + " \"useLegacySql\": false}")
+                .then().statusCode(400)
+                .body("error.message", containsString("Unrecognized name: b_1"));
 
         assertResultColumns("SELECT * FROM (SELECT 1 AS a) UNPIVOT(v FOR n IN(a)),"
                         + " (SELECT 2 AS b) UNPIVOT(w FOR m IN(b))",

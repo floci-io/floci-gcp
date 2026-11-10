@@ -2311,12 +2311,30 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void windowsInOrderByAndQualifyResolveAUniqueOutputAliasFirst() {
+        sql("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x) ORDER BY ROW_NUMBER() OVER (ORDER BY x)");
+        sql("SELECT 1 AS x FROM (SELECT 2 AS x, 3 AS x) QUALIFY ROW_NUMBER() OVER (ORDER BY x) = 1");
+        assertEquals("Column name x is ambiguous",
+                invalid("SELECT 1 AS y FROM (SELECT 2 AS x, 3 AS x)"
+                        + " ORDER BY ROW_NUMBER() OVER (ORDER BY x)").getMessage());
+    }
+
+    @Test
     void groupByPrefersAUniqueOutputAliasOverDuplicateSources() {
         sql("SELECT 1 AS b, COUNT(*) AS n FROM (SELECT 2 AS b, 3 AS b) GROUP BY b");
         assertEquals("Column name b is ambiguous",
                 invalid("SELECT COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b").getMessage());
         assertEquals("Column name b is ambiguous",
                 invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) GROUP BY b + 0")
+                        .getMessage());
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b")
+                        .getMessage());
+        assertEquals("Name b is ambiguous inside t",
+                invalid("SELECT 1 AS b, COUNT(*) FROM (SELECT 2 AS b, 3 AS b) t GROUP BY t.b + 0")
+                        .getMessage());
+        assertEquals("Unrecognized name: b_1",
+                invalid("SELECT 1 AS y, COUNT(*) FROM (SELECT 1 AS b, 2 AS b) GROUP BY b_1")
                         .getMessage());
     }
 

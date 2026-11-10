@@ -7271,43 +7271,60 @@ final class SqlDialectTranslator {
         Set<String> sourceGenerated = sourceGeneratedNames(select);
         Map<String, Map<String, Integer>> aliasColumns = sourceAliasColumnCounts(select, depth);
         Set<Integer> implicitAliases = implicitAliasTokens(items);
+        ReferenceScope scope = new ReferenceScope(select, written, generated, sources, sourceGenerated,
+                aliasColumns);
         for (ReferenceRange range : referenceRanges(select, items, depth, end)) {
             if (range.groupBy()) {
-                validateGroupByReferences(range, select, depth, written, sources);
+                validateGroupByReferences(range, scope, depth);
                 continue;
             }
-            for (int i = range.start(); i < range.end(); i++) {
-                if (isPrecededByDot(i) || insideNestedQuery(i, select)
-                        || !isReferenceName(i, range.end(), implicitAliases)) {
+            validateReferenceNames(range.start(), range.end(), range.aliasesHidden(), scope,
+                    implicitAliases);
+        }
+    }
+
+    /** The names a query's select list and sources expose, as a reference in it resolves them. */
+    private record ReferenceScope(int select, Map<String, Integer> written, Set<String> generated,
+                                  Map<String, Integer> sources, Set<String> sourceGenerated,
+                                  Map<String, Map<String, Integer>> aliasColumns) {}
+
+    /**
+     * Rejects a bare name in a clause that resolves against the query's sources when it names more than
+     * one of their columns, or when only a suffix generated for a duplicate carries it.
+     */
+    private void validateReferenceNames(int start, int end, boolean aliasesHidden, ReferenceScope scope,
+                                        Set<Integer> implicitAliases) {
+        for (int i = start; i < end; i++) {
+            if (isPrecededByDot(i) || insideNestedQuery(i, scope.select())
+                    || !isReferenceName(i, end, implicitAliases)) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            String name = token.identifierText();
+            String key = name.toLowerCase(Locale.ROOT);
+            int dot = nextSignificant(i + 1, end);
+            if (dot >= 0 && tokens.get(dot).isPunct(".")) {
+                if (ambiguousField(scope.aliasColumns(), key, dot, end)) {
                     continue;
                 }
-                Token token = tokens.get(i);
-                String name = token.identifierText();
-                String key = name.toLowerCase(Locale.ROOT);
-                int dot = nextSignificant(i + 1, range.end());
-                if (dot >= 0 && tokens.get(dot).isPunct(".")) {
-                    if (ambiguousField(aliasColumns, key, dot, range.end())) {
-                        continue;
-                    }
-                    if (aliasColumns.containsKey(key)) {
-                        continue;
-                    }
-                    // A struct column of the query's sources, not a table alias.
-                }
-                if (sources == null) {
+                if (scope.aliasColumns().containsKey(key)) {
                     continue;
                 }
-                int occurrences = sources.getOrDefault(key, 0);
-                if (occurrences > 1) {
-                    throw invalidQuery("Column name " + name + " is ambiguous");
-                }
-                if (occurrences == 0 && sourceGenerated.contains(key)) {
-                    throw invalidQuery("Unrecognized name: " + name);
-                }
-                if (range.aliasesHidden() && occurrences == 0
-                        && (written.containsKey(key) || generated.contains(key))) {
-                    throw invalidQuery("Unrecognized name: " + name);
-                }
+                // A struct column of the query's sources, not a table alias.
+            }
+            if (scope.sources() == null) {
+                continue;
+            }
+            int occurrences = scope.sources().getOrDefault(key, 0);
+            if (occurrences > 1) {
+                throw invalidQuery("Column name " + name + " is ambiguous");
+            }
+            if (occurrences == 0 && scope.sourceGenerated().contains(key)) {
+                throw invalidQuery("Unrecognized name: " + name);
+            }
+            if (aliasesHidden && occurrences == 0
+                    && (scope.written().containsKey(key) || scope.generated().contains(key))) {
+                throw invalidQuery("Unrecognized name: " + name);
             }
         }
     }
@@ -7332,31 +7349,20 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * A bare GROUP BY item names a unique select alias first; only an expression falls back to the
+     * A bare GROUP BY item names a unique select alias first; every other item resolves against the
      * sources, where a repeated name is ambiguous. BigQuery resolves {@code GROUP BY b} to the output
-     * alias even when the input exposes several columns named b.
+     * alias even when the input exposes several columns named b, but a qualified item such as
+     * {@code GROUP BY t.b} still names the source alias.
      */
-    private void validateGroupByReferences(ReferenceRange range, int select, int depth,
-                                           Map<String, Integer> written, Map<String, Integer> sources) {
+    private void validateGroupByReferences(ReferenceRange range, ReferenceScope scope, int depth) {
         for (int[] item : topLevelRanges(range.start(), range.end(), depth)) {
             List<Token> itemTokens = significant(item[0], item[1]);
-            if (itemTokens.size() == 1 && isName(itemTokens.getFirst())
-                    && written.getOrDefault(itemTokens.getFirst().identifierText().toLowerCase(Locale.ROOT), 0) == 1) {
+            String alias = itemTokens.size() == 1 && isName(itemTokens.getFirst())
+                    ? itemTokens.getFirst().identifierText() : null;
+            if (alias != null && scope.written().getOrDefault(alias.toLowerCase(Locale.ROOT), 0) == 1) {
                 continue;
             }
-            for (int i = item[0]; i < item[1]; i++) {
-                if (isPrecededByDot(i) || insideNestedQuery(i, select)
-                        || !isReferenceName(i, item[1], Set.of())) {
-                    continue;
-                }
-                if (sources == null) {
-                    continue;
-                }
-                Token token = tokens.get(i);
-                if (sources.getOrDefault(token.identifierText().toLowerCase(Locale.ROOT), 0) > 1) {
-                    throw invalidQuery("Column name " + token.identifierText() + " is ambiguous");
-                }
-            }
+            validateReferenceNames(item[0], item[1], false, scope, Set.of());
         }
     }
 
@@ -7514,8 +7520,9 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * A window specification reads the query's input row, not its select-list aliases, so a name two
-     * source columns expose is ambiguous there even when unique aliases shadow it elsewhere.
+     * A window in the select list reads the query's input row, not its sibling aliases, so a name two
+     * source columns expose is ambiguous there. A window in ORDER BY, HAVING or QUALIFY resolves a bare
+     * name to a unique select alias first, as the rest of that clause does.
      */
     private void validateWindowReferences() {
         for (int over = 0; over < tokens.size(); over++) {
@@ -7527,7 +7534,9 @@ final class SqlDialectTranslator {
                 continue;
             }
             int close = matchingParen(open);
-            int select = precedingSelect(over, parenthesisDepth(over));
+            int depth = parenthesisDepth(over);
+            boolean aliasesVisible = insideSelectAliasClause(over, depth);
+            int select = aliasesVisible ? firstSelectAtDepth(over, depth) : precedingSelect(over, depth);
             if (close < 0 || select < 0) {
                 continue;
             }
@@ -7535,6 +7544,7 @@ final class SqlDialectTranslator {
             if (sources == null) {
                 continue;
             }
+            Map<String, Integer> written = aliasesVisible ? writtenOutputCounts(select) : Map.of();
             for (int i = open + 1; i < close; i++) {
                 if (isPrecededByDot(i) || insideNestedQuery(i, select)) {
                     continue;
@@ -7547,11 +7557,49 @@ final class SqlDialectTranslator {
                     continue;
                 }
                 Token token = tokens.get(i);
-                if (sources.getOrDefault(token.identifierText().toLowerCase(Locale.ROOT), 0) > 1) {
+                String key = token.identifierText().toLowerCase(Locale.ROOT);
+                int aliases = written.getOrDefault(key, 0);
+                if (aliases > 0) {
+                    if (aliases > 1) {
+                        throw invalidQuery("Column name " + token.identifierText() + " is ambiguous");
+                    }
+                    continue;
+                }
+                if (sources.getOrDefault(key, 0) > 1) {
                     throw invalidQuery("Column name " + token.identifierText() + " is ambiguous");
                 }
             }
         }
+    }
+
+    /**
+     * True when {@code index} sits in a clause that resolves a bare name to a select-list alias: ORDER BY,
+     * HAVING or QUALIFY. A select-list item and the WHERE clause resolve against the sources instead.
+     */
+    private boolean insideSelectAliasClause(int index, int depth) {
+        for (int i = index - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) != depth || tokens.get(i).kind != Kind.IDENT) {
+                continue;
+            }
+            if (tokens.get(i).isKeyword("ORDER") || tokens.get(i).isKeyword("HAVING")
+                    || tokens.get(i).isKeyword("QUALIFY")) {
+                return true;
+            }
+            if (CLAUSE_END_KEYWORDS.contains(tokens.get(i).upper())) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** How many outputs a select list writes under each name, before BigQuery assigns suffixes. */
+    private Map<String, Integer> writtenOutputCounts(int select) {
+        List<int[]> items = selectItems(select);
+        if (items == null) {
+            return Map.of();
+        }
+        List<String> names = orderedWrittenOutputNames(select, items);
+        return names == null ? writtenOutputNameCounts(select, items) : nameCounts(names);
     }
 
     /**

@@ -1612,6 +1612,33 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void orderByAMissingFieldOfASourceStructNamesTheFieldLikeBigQuery() {
+        String source = "(SELECT STRUCT(1 AS n, STRUCT('a' AS k) AS m) AS s) t";
+        for (String[] c : new String[][] {
+                {"SELECT t.s AS s FROM " + source + " ORDER BY s.zz", "Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"},
+                {"SELECT t.s AS r FROM " + source + " ORDER BY r.zz", "Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"},
+                {"SELECT t.s AS s FROM " + source + " ORDER BY s.m.zz", "Field name zz does not exist in STRUCT<k STRING>"},
+                {"SELECT t.s AS s FROM " + source + " ORDER BY s.n.zz", "Cannot access field zz on a value with type INT64"},
+                {"SELECT * FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1]) x) ORDER BY s.zz",
+                        "Field name zz does not exist in STRUCT<n INT64>"},
+                {"SELECT STRUCT(1 AS n) AS s FROM UNNEST([1]) UNION ALL SELECT STRUCT(2 AS n) FROM UNNEST([1]) ORDER BY s.zz",
+                        "Field name zz does not exist in STRUCT<n INT64>"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo(c[1]));
+        }
+        query(Map.of("query", "SELECT t.s AS s FROM " + source + " ORDER BY s.zz", "useLegacySql", false, "dryRun", true))
+                .then().statusCode(400)
+                .body("error.message", equalTo("Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"));
+        query(Map.of("query", "SELECT t.s AS s FROM (SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n)) t ORDER BY s.n",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

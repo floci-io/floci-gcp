@@ -1472,6 +1472,30 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scriptArithmeticOverflowIsAnInvalidQuery() {
+        // Live BigQuery: "Integer Overflow at [2:9]", an invalid query rather than a server error.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 9223372036854775807;
+                SET x = x + 1;
+                SELECT x;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("Integer Overflow"));
+        // jobs.insert reports the same failure in the job status, not as a server error.
+        given().contentType("application/json").body("""
+                {"configuration": {"query": {"query":
+                  "DECLARE x INT64 DEFAULT 9223372036854775807;\\nSET x = x + 1;\\nSELECT x;",
+                  "useLegacySql": false}}}
+                """).when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult.reason", equalTo("invalidQuery"))
+                .body("status.errorResult.message", containsString("Integer Overflow"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

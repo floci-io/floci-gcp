@@ -2337,11 +2337,16 @@ public class BigQueryService {
                     default -> leftNumber.doubleValue() * rightNumber.doubleValue();
                 };
             } else {
-                evaluated = switch (arithmetic.group(2)) {
-                    case "+" -> Math.addExact(leftNumber.longValue(), rightNumber.longValue());
-                    case "-" -> Math.subtractExact(leftNumber.longValue(), rightNumber.longValue());
-                    default -> Math.multiplyExact(leftNumber.longValue(), rightNumber.longValue());
-                };
+                try {
+                    evaluated = switch (arithmetic.group(2)) {
+                        case "+" -> Math.addExact(leftNumber.longValue(), rightNumber.longValue());
+                        case "-" -> Math.subtractExact(leftNumber.longValue(), rightNumber.longValue());
+                        default -> Math.multiplyExact(leftNumber.longValue(), rightNumber.longValue());
+                    };
+                } catch (ArithmeticException overflow) {
+                    // BigQuery reports an out-of-range INT64 result as an invalid query.
+                    throw QueryEngine.invalidQuery("Integer Overflow");
+                }
             }
         } else {
             try {

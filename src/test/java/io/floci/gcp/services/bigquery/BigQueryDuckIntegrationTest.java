@@ -1644,6 +1644,20 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("7"))
                 .body("rows[0].f[1].v", equalTo("7"));
+        // An alias stays visible inside a parenthesised or function-call condition: 2.
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                SELECT COUNT(*) AS total FROM UNNEST([1,2]) AS n HAVING (total > 1);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("total"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                SELECT COUNT(*) AS total FROM UNNEST([1,2]) AS n HAVING COALESCE(total, 0) > 1;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
         // A CTE reference inside a nested query still names the table.
         query(Map.of("query", """
                 DECLARE x INT64 DEFAULT 7;

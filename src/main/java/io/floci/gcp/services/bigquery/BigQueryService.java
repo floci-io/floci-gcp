@@ -3128,8 +3128,8 @@ public class BigQueryService {
 
         /**
          * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo} and, when
-         * {@code depth} is not negative, at that parenthesis depth and deeper only: a nested query's alias
-         * names a column inside its own query, not in the query that encloses it.
+         * {@code depth} is not negative, at that query depth and deeper only: a nested query's alias names a
+         * column inside its own query, not in the query that encloses it.
          */
         private record HiddenName(Set<String> names, int excludedFrom, int excludedTo, int depth) {}
 
@@ -3175,24 +3175,31 @@ public class BigQueryService {
         int[] depths = new int[tokens.size()];
         String[] clauseByToken = new String[tokens.size()];
         Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
+        List<Integer> queryDepths = new ArrayList<>();
+        queryDepths.add(0);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
                 if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    // A parenthesis that opens a query is a scope of its own; one that groups an expression
+                    // keeps the clause and the alias scope around it.
+                    boolean query = token.isPunct("(") && startsQuery(tokens, index);
                     if (token.isPunct("(")) {
                         addDerivedTableColumns(tokens, index, clauses.getLast(), hiddenNames);
                     }
-                    clauses.add(null);
+                    clauses.add(query ? null : clauses.getLast());
                     withClauses.add(false);
+                    queryDepths.add(query ? queryDepths.getLast() + 1 : queryDepths.getLast());
                 } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
                         && clauses.size() > 1) {
                     clauses.removeLast();
                     withClauses.removeLast();
+                    queryDepths.removeLast();
                 }
-                depths[index] = clauses.size() - 1;
+                depths[index] = queryDepths.getLast();
                 continue;
             }
-            depths[index] = clauses.size() - 1;
+            depths[index] = queryDepths.getLast();
             if (token.kind != SqlDialectTranslator.Kind.IDENT) {
                 continue;
             }
@@ -3211,21 +3218,21 @@ public class BigQueryService {
             String name = token.text.toLowerCase(Locale.ROOT);
             clauseByToken[index] = clauses.get(depth);
             if (previous >= 0 && tokens.get(previous).isKeyword("AS") && "SELECT".equals(clauses.get(depth))) {
-                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(depth);
+                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(depths[index]);
             }
             if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
                 int open = nextSignificantToken(tokens, next + 1);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
                     // The name a CTE declares is visible outside its own definition.
                     hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open,
-                            matchingParenthesis(tokens, open), depth));
+                            matchingParenthesis(tokens, open), depths[index]));
                     continue;
                 }
             }
             if ("FROM".equals(clauses.get(depth)) && previous >= 0 && tokens.get(previous).isKeyword("AS")) {
                 // The alias of a table, UNNEST or derived table names a column scope of its own, which is
                 // visible in the query that declares it and in a query nested inside it.
-                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1, depth));
+                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1, depths[index]));
                 continue;
             }
             if ("SELECT".equals(clauses.get(depth)) && startsSelectItem(tokens, previous)) {
@@ -3286,6 +3293,13 @@ public class BigQueryService {
             // A derived table exposes its columns to the query that reads it, so any depth qualifies.
             hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, -1));
         }
+    }
+
+    /** Whether the parenthesis at {@code open} opens a query rather than grouping an expression. */
+    private static boolean startsQuery(List<SqlDialectTranslator.Token> tokens, int open) {
+        int next = nextSignificantToken(tokens, open + 1);
+        return next >= 0 && (tokens.get(next).isPunct("(") || tokens.get(next).isKeyword("SELECT")
+                || tokens.get(next).isKeyword("WITH"));
     }
 
     /** The first token of a select item, skipping the {@code DISTINCT} or {@code ALL} that may precede it. */

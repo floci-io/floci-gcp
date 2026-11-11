@@ -3132,10 +3132,15 @@ public class BigQueryService {
      * the names the statement binds to something else: a CTE name, the alias of a FROM item, and the columns
      * a derived table exposes.
      */
-    private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames) {
+    private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames,
+                                        int[] depths) {
 
-        /** {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo}. */
-        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo) {}
+        /**
+         * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo} and, when
+         * {@code depth} is not negative, at that parenthesis depth and deeper only: a nested query's alias
+         * names a column inside its own query, not in the query that encloses it.
+         */
+        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo, int depth) {}
 
         private boolean startsSelectItem(int index) {
             return selectItemStarts.contains(index);
@@ -3144,6 +3149,7 @@ public class BigQueryService {
         private boolean hides(String name, int index) {
             for (HiddenName hidden : hiddenNames) {
                 if (hidden.names().contains(name)
+                        && (hidden.depth() < 0 || depths[index] >= hidden.depth())
                         && (index < hidden.excludedFrom() || index > hidden.excludedTo())) {
                     return true;
                 }
@@ -3159,6 +3165,7 @@ public class BigQueryService {
         clauses.add(null);
         List<Boolean> withClauses = new ArrayList<>();
         withClauses.add(false);
+        int[] depths = new int[tokens.size()];
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
@@ -3173,8 +3180,10 @@ public class BigQueryService {
                     clauses.removeLast();
                     withClauses.removeLast();
                 }
+                depths[index] = clauses.size() - 1;
                 continue;
             }
+            depths[index] = clauses.size() - 1;
             if (token.kind != SqlDialectTranslator.Kind.IDENT) {
                 continue;
             }
@@ -3196,20 +3205,21 @@ public class BigQueryService {
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
                     // The name a CTE declares is visible outside its own definition.
                     hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open,
-                            matchingParenthesis(tokens, open)));
+                            matchingParenthesis(tokens, open), depth));
                     continue;
                 }
             }
             if ("FROM".equals(clauses.get(depth)) && previous >= 0 && tokens.get(previous).isKeyword("AS")) {
-                // The alias of a table, UNNEST or derived table names a column scope of its own.
-                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1));
+                // The alias of a table, UNNEST or derived table names a column scope of its own, which is
+                // visible in the query that declares it and in a query nested inside it.
+                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1, depth));
                 continue;
             }
             if ("SELECT".equals(clauses.get(depth)) && startsSelectItem(tokens, previous)) {
                 selectItemStarts.add(index);
             }
         }
-        return new ScriptNameResolution(selectItemStarts, hiddenNames);
+        return new ScriptNameResolution(selectItemStarts, hiddenNames, depths);
     }
 
     /**
@@ -3260,7 +3270,8 @@ public class BigQueryService {
             }
         }
         if (!names.isEmpty()) {
-            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close));
+            // A derived table exposes its columns to the query that reads it, so any depth qualifies.
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, -1));
         }
     }
 

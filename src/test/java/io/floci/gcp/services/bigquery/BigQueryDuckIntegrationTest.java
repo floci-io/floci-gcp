@@ -1628,6 +1628,22 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].name", equalTo("v"))
                 .body("rows[0].f[0].v", equalTo("5"));
+        // A nested query's alias hides the variable inside that query only: 7 and 1.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                SELECT x AS v, (SELECT x FROM UNNEST([1]) AS x) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        // A CTE reference inside a nested query still names the table.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                WITH x AS (SELECT 5 AS v) SELECT v FROM (SELECT v FROM x) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("5"));
     }
 
     @Test

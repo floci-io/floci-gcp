@@ -137,3 +137,25 @@ def test_confluent_serializer_route(endpoint, registry):
 
     with urllib.request.urlopen(f"{endpoint}/v1/{registry}/schemas/ids/{schema_id}") as r:
         assert json.loads(json.loads(r.read())["schema"])["name"] == "User"
+
+
+def test_contexts_and_raw_schemas(client, registry, endpoint):
+    """GetContext and SchemaRegistry.contexts through the client. The methods
+    returning google.api.HttpBody are read over HTTP: the client's REST transport
+    parses the response as an HttpBody message ({"contentType", "data"}), while
+    HTTP transcoding serves an HttpBody as the raw body, which is what a
+    Confluent serializer reads."""
+    subject = f"{registry}/contexts/.team/subjects/ctx-value"
+    created = client.create_version(parent=subject, schema=USER_V1)
+
+    context = client.get_context(name=f"{registry}/contexts/.team")
+    assert context.name == f"{registry}/contexts/.team"
+    assert list(context.subjects) == [f"{registry}/contexts/.team/subjects/ctx-value"]
+    assert f"{registry}/contexts/.team" in client.get_schema_registry(name=registry).contexts
+
+    base = f"{endpoint}/v1/{registry}"
+    assert _http_get(f"{base}/contexts") == [".", ".team"]
+    assert _http_get(f"{base}/contexts/.team/schemas/ids/{created.id}/schema")["name"] == "User"
+    assert _http_get(f"{base}/contexts/.team/subjects/ctx-value/versions/1/schema")["name"] == "User"
+    assert sorted(_http_get(f"{base}/schemas/types")) == ["AVRO", "JSON", "PROTOBUF"]
+    assert _http_get(f"{base}/contexts/.team/schemas/ids/{created.id}/subjects") == [":.team:ctx-value"]

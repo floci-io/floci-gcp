@@ -10,10 +10,15 @@ import io.floci.gcp.services.kafka.model.StoredSchemaRegistry;
  * ({@code {"error_code": ..., "message": ...}}) as a {@link SchemaRegistryException}.
  * {@link SchemaRegistryService} maps both to the Google resource shapes and errors.
  *
- * <p>{@code version} arguments are the path segment as given: a number, {@code latest} or
- * {@code -1}. {@code subject} is {@code null} for the registry-wide config and mode.
+ * <p>Data calls take a {@link Scope}: the registry, and the context the request names
+ * ({@code null} for the default context). {@code version} arguments are the path segment as
+ * given: a number, {@code latest} or {@code -1}. {@code subject} is {@code null} for the
+ * registry- or context-wide config and mode.
  */
 public interface SchemaRegistryDataPlane {
+
+    /** A registry, and the context a request is addressed to ({@code null}: the default context). */
+    record Scope(StoredSchemaRegistry registry, String context) {}
 
     /** Makes the registry's data reachable, starting whatever backs it if needed. */
     void ensureRunning(StoredSchemaRegistry registry);
@@ -24,38 +29,55 @@ public interface SchemaRegistryDataPlane {
     /** Stops whatever backs the registry and drops its data. */
     void delete(StoredSchemaRegistry registry);
 
-    JsonNode listSubjects(StoredSchemaRegistry registry, String subjectPrefix, boolean deleted);
+    /** The registry's contexts, as Confluent names them ({@code "."} for the default). */
+    JsonNode listContexts(StoredSchemaRegistry registry);
 
-    JsonNode deleteSubject(StoredSchemaRegistry registry, String subject, boolean permanent);
+    JsonNode listSubjects(Scope scope, String subjectPrefix, boolean deleted);
+
+    JsonNode deleteSubject(Scope scope, String subject, boolean permanent);
 
     /** {@code schema} carries {@code schema}, and optionally {@code schemaType} and {@code references}. */
-    JsonNode lookupVersion(StoredSchemaRegistry registry, String subject, ObjectNode schema,
-            boolean normalize, boolean deleted);
+    JsonNode lookupVersion(Scope scope, String subject, ObjectNode schema, boolean normalize, boolean deleted);
 
-    JsonNode getVersion(StoredSchemaRegistry registry, String subject, String version, boolean deleted);
+    JsonNode getVersion(Scope scope, String subject, String version, boolean deleted);
 
-    JsonNode listVersions(StoredSchemaRegistry registry, String subject, boolean deleted);
+    /** The version's schema text alone. */
+    String getRawSchemaVersion(Scope scope, String subject, String version, boolean deleted);
+
+    JsonNode listVersions(Scope scope, String subject, boolean deleted);
 
     /** {@code schema} may also carry an explicit {@code version} and {@code id} (import mode only). */
-    JsonNode createVersion(StoredSchemaRegistry registry, String subject, ObjectNode schema, boolean normalize);
+    JsonNode createVersion(Scope scope, String subject, ObjectNode schema, boolean normalize);
 
-    JsonNode deleteVersion(StoredSchemaRegistry registry, String subject, String version, boolean permanent);
+    JsonNode deleteVersion(Scope scope, String subject, String version, boolean permanent);
 
-    JsonNode getSchema(StoredSchemaRegistry registry, int id, String subject);
+    /** Ids of the schemas whose references name this version. */
+    JsonNode listReferencedSchemas(Scope scope, String subject, String version);
+
+    JsonNode getSchema(Scope scope, int id, String subject);
+
+    /** The schema's text alone. */
+    String getRawSchema(Scope scope, int id, String subject);
+
+    /** {@code [{"subject": ..., "version": ...}]} for every version that uses the schema. */
+    JsonNode listSchemaVersions(Scope scope, int id, String subject, boolean deleted);
+
+    JsonNode listSubjectsBySchemaId(Scope scope, int id, String subject, boolean deleted);
+
+    JsonNode listSchemaTypes(Scope scope);
 
     /** Checks {@code schema} against one version of the subject. */
-    JsonNode checkCompatibility(StoredSchemaRegistry registry, String subject, String version, ObjectNode schema,
-            boolean verbose);
+    JsonNode checkCompatibility(Scope scope, String subject, String version, ObjectNode schema, boolean verbose);
 
-    JsonNode getConfig(StoredSchemaRegistry registry, String subject, boolean defaultToGlobal);
+    JsonNode getConfig(Scope scope, String subject, boolean defaultToGlobal);
 
-    JsonNode updateConfig(StoredSchemaRegistry registry, String subject, String compatibility);
+    JsonNode updateConfig(Scope scope, String subject, String compatibility);
 
-    JsonNode deleteConfig(StoredSchemaRegistry registry, String subject);
+    JsonNode deleteConfig(Scope scope, String subject);
 
-    JsonNode getMode(StoredSchemaRegistry registry, String subject);
+    JsonNode getMode(Scope scope, String subject);
 
-    JsonNode updateMode(StoredSchemaRegistry registry, String subject, String mode);
+    JsonNode updateMode(Scope scope, String subject, String mode);
 
-    JsonNode deleteMode(StoredSchemaRegistry registry, String subject);
+    JsonNode deleteMode(Scope scope, String subject);
 }

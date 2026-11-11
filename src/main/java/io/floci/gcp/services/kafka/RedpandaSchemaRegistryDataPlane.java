@@ -195,102 +195,168 @@ public class RedpandaSchemaRegistryDataPlane implements SchemaRegistryDataPlane 
     // ── Confluent API ─────────────────────────────────────────────────────────
 
     @Override
-    public JsonNode listSubjects(StoredSchemaRegistry registry, String subjectPrefix, boolean deleted) {
+    public JsonNode listContexts(StoredSchemaRegistry registry) {
+        return send(new Scope(registry, null), "GET", "/contexts", List.of(), null);
+    }
+
+    @Override
+    public JsonNode listSubjects(Scope scope, String subjectPrefix, boolean deleted) {
         List<String> query = new ArrayList<>();
         if (subjectPrefix != null) {
             query.add("subjectPrefix=" + encode(subjectPrefix));
         }
         query.add("deleted=" + deleted);
-        return send(registry, "GET", "/subjects", query, null);
+        return send(scope, "GET", "/subjects", query, null);
     }
 
     @Override
-    public JsonNode deleteSubject(StoredSchemaRegistry registry, String subject, boolean permanent) {
-        return send(registry, "DELETE", "/subjects/" + encode(subject), List.of("permanent=" + permanent), null);
+    public JsonNode deleteSubject(Scope scope, String subject, boolean permanent) {
+        return send(scope, "DELETE", subjectPath(subject), List.of("permanent=" + permanent), null);
     }
 
     @Override
-    public JsonNode lookupVersion(StoredSchemaRegistry registry, String subject, ObjectNode schema,
-            boolean normalize, boolean deleted) {
-        return send(registry, "POST", "/subjects/" + encode(subject),
-                List.of("normalize=" + normalize, "deleted=" + deleted), schema);
+    public JsonNode lookupVersion(Scope scope, String subject, ObjectNode schema, boolean normalize,
+            boolean deleted) {
+        return send(scope, "POST", subjectPath(subject), List.of("normalize=" + normalize, "deleted=" + deleted),
+                schema);
     }
 
     @Override
-    public JsonNode getVersion(StoredSchemaRegistry registry, String subject, String version, boolean deleted) {
-        return send(registry, "GET", "/subjects/" + encode(subject) + "/versions/" + encode(version),
-                List.of("deleted=" + deleted), null);
+    public JsonNode getVersion(Scope scope, String subject, String version, boolean deleted) {
+        return send(scope, "GET", versionPath(subject, version), List.of("deleted=" + deleted), null);
     }
 
     @Override
-    public JsonNode listVersions(StoredSchemaRegistry registry, String subject, boolean deleted) {
-        return send(registry, "GET", "/subjects/" + encode(subject) + "/versions", List.of("deleted=" + deleted), null);
+    public String getRawSchemaVersion(Scope scope, String subject, String version, boolean deleted) {
+        return exchange(scope, "GET", versionPath(subject, version) + "/schema", List.of("deleted=" + deleted), null)
+                .body();
     }
 
     @Override
-    public JsonNode createVersion(StoredSchemaRegistry registry, String subject, ObjectNode schema, boolean normalize) {
-        return send(registry, "POST", "/subjects/" + encode(subject) + "/versions",
-                List.of("normalize=" + normalize), schema);
+    public JsonNode listVersions(Scope scope, String subject, boolean deleted) {
+        return send(scope, "GET", subjectPath(subject) + "/versions", List.of("deleted=" + deleted), null);
     }
 
     @Override
-    public JsonNode deleteVersion(StoredSchemaRegistry registry, String subject, String version, boolean permanent) {
-        return send(registry, "DELETE", "/subjects/" + encode(subject) + "/versions/" + encode(version),
-                List.of("permanent=" + permanent), null);
+    public JsonNode createVersion(Scope scope, String subject, ObjectNode schema, boolean normalize) {
+        return send(scope, "POST", subjectPath(subject) + "/versions", List.of("normalize=" + normalize), schema);
     }
 
     @Override
-    public JsonNode getSchema(StoredSchemaRegistry registry, int id, String subject) {
-        return send(registry, "GET", "/schemas/ids/" + id,
-                subject != null ? List.of("subject=" + encode(subject)) : List.of(), null);
+    public JsonNode deleteVersion(Scope scope, String subject, String version, boolean permanent) {
+        return send(scope, "DELETE", versionPath(subject, version), List.of("permanent=" + permanent), null);
     }
 
     @Override
-    public JsonNode checkCompatibility(StoredSchemaRegistry registry, String subject, String version,
-            ObjectNode schema, boolean verbose) {
-        return send(registry, "POST", "/compatibility/subjects/" + encode(subject) + "/versions/" + encode(version),
-                List.of("verbose=" + verbose), schema);
+    public JsonNode listReferencedSchemas(Scope scope, String subject, String version) {
+        return send(scope, "GET", versionPath(subject, version) + "/referencedby", List.of(), null);
     }
 
     @Override
-    public JsonNode getConfig(StoredSchemaRegistry registry, String subject, boolean defaultToGlobal) {
+    public JsonNode getSchema(Scope scope, int id, String subject) {
+        return send(scope, "GET", "/schemas/ids/" + id, subjectQuery(subject), null);
+    }
+
+    @Override
+    public String getRawSchema(Scope scope, int id, String subject) {
+        return exchange(scope, "GET", "/schemas/ids/" + id + "/schema", subjectQuery(subject), null).body();
+    }
+
+    @Override
+    public JsonNode listSchemaVersions(Scope scope, int id, String subject, boolean deleted) {
+        List<String> query = new ArrayList<>(subjectQuery(subject));
+        query.add("deleted=" + deleted);
+        return send(scope, "GET", "/schemas/ids/" + id + "/versions", query, null);
+    }
+
+    @Override
+    public JsonNode listSubjectsBySchemaId(Scope scope, int id, String subject, boolean deleted) {
+        List<String> query = new ArrayList<>(subjectQuery(subject));
+        query.add("deleted=" + deleted);
+        return send(scope, "GET", "/schemas/ids/" + id + "/subjects", query, null);
+    }
+
+    @Override
+    public JsonNode listSchemaTypes(Scope scope) {
+        return send(scope, "GET", "/schemas/types", List.of(), null);
+    }
+
+    @Override
+    public JsonNode checkCompatibility(Scope scope, String subject, String version, ObjectNode schema,
+            boolean verbose) {
+        return send(scope, "POST", "/compatibility" + versionPath(subject, version), List.of("verbose=" + verbose),
+                schema);
+    }
+
+    @Override
+    public JsonNode getConfig(Scope scope, String subject, boolean defaultToGlobal) {
         if (subject == null) {
-            return send(registry, "GET", "/config", List.of(), null);
+            return send(scope, "GET", "/config", List.of(), null);
         }
-        return send(registry, "GET", "/config/" + encode(subject), List.of("defaultToGlobal=" + defaultToGlobal), null);
+        return send(scope, "GET", "/config/" + encode(subject), List.of("defaultToGlobal=" + defaultToGlobal), null);
     }
 
     @Override
-    public JsonNode updateConfig(StoredSchemaRegistry registry, String subject, String compatibility) {
-        return send(registry, "PUT", subject == null ? "/config" : "/config/" + encode(subject), List.of(),
+    public JsonNode updateConfig(Scope scope, String subject, String compatibility) {
+        return send(scope, "PUT", subject == null ? "/config" : "/config/" + encode(subject), List.of(),
                 MAPPER.createObjectNode().put("compatibility", compatibility));
     }
 
     @Override
-    public JsonNode deleteConfig(StoredSchemaRegistry registry, String subject) {
-        return send(registry, "DELETE", "/config/" + encode(subject), List.of(), null);
+    public JsonNode deleteConfig(Scope scope, String subject) {
+        return send(scope, "DELETE", "/config/" + encode(subject), List.of(), null);
     }
 
     @Override
-    public JsonNode getMode(StoredSchemaRegistry registry, String subject) {
-        return send(registry, "GET", subject == null ? "/mode" : "/mode/" + encode(subject), List.of(), null);
+    public JsonNode getMode(Scope scope, String subject) {
+        return send(scope, "GET", subject == null ? "/mode" : "/mode/" + encode(subject), List.of(), null);
     }
 
     @Override
-    public JsonNode updateMode(StoredSchemaRegistry registry, String subject, String mode) {
-        return send(registry, "PUT", subject == null ? "/mode" : "/mode/" + encode(subject), List.of(),
+    public JsonNode updateMode(Scope scope, String subject, String mode) {
+        return send(scope, "PUT", subject == null ? "/mode" : "/mode/" + encode(subject), List.of(),
                 MAPPER.createObjectNode().put("mode", mode));
     }
 
     @Override
-    public JsonNode deleteMode(StoredSchemaRegistry registry, String subject) {
-        return send(registry, "DELETE", "/mode/" + encode(subject), List.of(), null);
+    public JsonNode deleteMode(Scope scope, String subject) {
+        return send(scope, "DELETE", "/mode/" + encode(subject), List.of(), null);
     }
 
-    private JsonNode send(StoredSchemaRegistry registry, String method, String path, List<String> query,
+    private static String subjectPath(String subject) {
+        return "/subjects/" + encode(subject);
+    }
+
+    private static String versionPath(String subject, String version) {
+        return subjectPath(subject) + "/versions/" + encode(version);
+    }
+
+    private static List<String> subjectQuery(String subject) {
+        return subject != null ? List.of("subject=" + encode(subject)) : List.of();
+    }
+
+    /**
+     * Redpanda serves a context's API under {@code /contexts/{context}}; the default context
+     * ({@code null} or {@code "."}) is the root.
+     */
+    private static String contextPrefix(Scope scope) {
+        String context = scope.context();
+        return context == null || context.equals(".") ? "" : "/contexts/" + encode(context);
+    }
+
+    private JsonNode send(Scope scope, String method, String path, List<String> query, JsonNode body) {
+        HttpResponse<String> response = exchange(scope, method, path, query, body);
+        JsonNode json = parse(scope.registry(), method, path, response);
+        return json != null ? json : MAPPER.nullNode();
+    }
+
+    /** Sends the request and returns a successful response; a Confluent error is thrown. */
+    private HttpResponse<String> exchange(Scope scope, String method, String path, List<String> query,
             JsonNode body) {
+        StoredSchemaRegistry registry = scope.registry();
         Running target = running(registry);
-        String url = target.baseUrl() + path + (query.isEmpty() ? "" : "?" + String.join("&", query));
+        String url = target.baseUrl() + contextPrefix(scope) + path
+                + (query.isEmpty() ? "" : "?" + String.join("&", query));
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(30))
                 .header("Accept", CONTENT_TYPE);
@@ -311,14 +377,14 @@ public class RedpandaSchemaRegistryDataPlane implements SchemaRegistryDataPlane 
             Thread.currentThread().interrupt();
             throw GcpException.unavailable("Interrupted calling schema registry " + registry.getName());
         }
-        JsonNode json = parse(registry, method, path, response);
         if (response.statusCode() >= 400) {
+            JsonNode json = parse(registry, method, path, response);
             int errorCode = json != null ? json.path("error_code").asInt(response.statusCode()) : response.statusCode();
             String message = json != null && json.hasNonNull("message") ? json.get("message").asText()
                     : "Schema registry returned HTTP " + response.statusCode();
             throw new SchemaRegistryException(response.statusCode(), errorCode, message);
         }
-        return json != null ? json : MAPPER.nullNode();
+        return response;
     }
 
     /**

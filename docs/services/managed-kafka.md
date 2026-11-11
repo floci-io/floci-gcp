@@ -108,15 +108,15 @@ curl -X DELETE \
 **Schema Registry (`ManagedSchemaRegistry`):**
 
 - `CreateSchemaRegistry`, `GetSchemaRegistry`, `ListSchemaRegistries`, `DeleteSchemaRegistry`
-- `CreateVersion`, `LookupVersion`, `GetVersion`, `ListVersions`, `DeleteVersion`
-- `ListSubjects`, `DeleteSubject`, `GetSchema`, `CheckCompatibility`
+- `GetContext`, `ListContexts`
+- `CreateVersion`, `LookupVersion`, `GetVersion`, `GetRawSchemaVersion`, `ListVersions`, `DeleteVersion`
+- `ListSubjects`, `DeleteSubject`, `ListReferencedSchemas`
+- `GetSchema`, `GetRawSchema`, `ListSchemaVersions`, `ListSubjectsBySchemaId`, `ListSchemaTypes`
+- `CheckCompatibility`
 - `GetSchemaConfig`, `UpdateSchemaConfig`, `DeleteSchemaConfig`
 - `GetSchemaMode`, `UpdateSchemaMode`, `DeleteSchemaMode`
 
-This is the full `ManagedKafka` v1 RPC surface plus `ManagedKafkaConnect`, and the Schema Registry
-methods above. Contexts (`GetContext`, `ListContexts` and the `contexts/*` bindings), `GetRawSchema`,
-`GetRawSchemaVersion`, `ListSchemaVersions`, `ListSchemaTypes`, `ListSubjectsBySchemaId` and
-`ListReferencedSchemas` are not served yet.
+This is the full `ManagedKafka` v1 RPC surface plus `ManagedKafkaConnect` and `ManagedSchemaRegistry`.
 
 ## ACLs
 
@@ -261,14 +261,41 @@ curl -X PUT "$R/my_registry/config/orders-value" -H 'Content-Type: application/j
 curl -X PUT "$R/my_registry/mode" -H 'Content-Type: application/json' -d '{"mode":"READONLY"}'
 ```
 
+### Contexts
+
+Every route under a registry also takes the proto's `contexts/{context}` binding, which scopes it
+to that context: `.../schemaRegistries/r/contexts/.team/subjects/orders/versions` registers
+`orders` in context `.team`. Contexts follow the Confluent API: each has its own schema ids, a
+subject written `:.team:orders` belongs to `.team` wherever it is addressed, subjects outside the
+default context are reported in that qualified form, and a context with no config or mode of its
+own uses the built in default (`BACKWARD`, `READWRITE`), not the registry's. A context exists once a subject is registered in it; the default context,
+`.`, always exists. HTTP clients collapse a `contexts/.` path segment, so the default context is
+addressed by leaving the `contexts/{context}` binding out.
+
+`ListContexts` returns the Confluent context ids (`[".", ".team"]`), `SchemaRegistry.contexts`
+their resource names (`.../schemaRegistries/r/contexts/.team`), and `GetContext` a context's name
+and the resource names of its subjects (`.../contexts/.team/subjects/orders`). Listing registries reads each
+registry's contexts, so after an emulator restart it starts every registry's container.
+
 Deviations and unverified behaviour:
 
-- `ListSubjects`, `DeleteSubject`, `ListVersions` and `DeleteVersion` return `google.api.HttpBody`
-  in the proto; floci returns the Confluent JSON (`["orders-value"]`, `[1, 2]`, `2`) as the body.
+- The methods that return `google.api.HttpBody` in the proto (`ListContexts`, `ListSubjects`,
+  `DeleteSubject`, `ListVersions`, `DeleteVersion`, `ListSchemaVersions`, `ListSchemaTypes`,
+  `ListSubjectsBySchemaId`, `ListReferencedSchemas`) return the Confluent JSON as the body.
+  `GetRawSchema` and `GetRawSchemaVersion` return the schema text: `application/json` for Avro and
+  JSON Schema, `text/plain` for a Protobuf schema.
+- The resource names in `SchemaRegistry.contexts` and `Context.subjects`, and the name of the
+  default context (`.`), follow the proto's patterns but were not checked against production.
 - Registry errors use the Google error envelope with the Confluent message: an unknown subject,
   version or schema is `404 NOT_FOUND`, an incompatible schema is `400 FAILED_PRECONDITION`, and an
   invalid schema, compatibility level or mode, or a write in `READONLY` mode, is
   `400 INVALID_ARGUMENT`. Production's status codes and messages for these were not verified.
+- A context with no context level config answers `404` with code `40408` and the message
+  `Context '.team' does not have context-level compatibility configured`, as Redpanda does;
+  Confluent's message for the same case is
+  `Subject ':.team:' does not have subject-level compatibility configured`.
+- Which config and mode production applies to a context with none of its own was not verified;
+  floci follows Confluent 7.9 and Redpanda (the built in default, not the registry's).
 - `UpdateSchemaConfig` with `normalize: true` is `400 INVALID_ARGUMENT`: Redpanda does not store
   `normalize` in a config. Pass `normalize` on `CreateVersion` or `LookupVersion` instead.
 - `CheckCompatibility` against `compatibility/subjects/<subject>/versions` (no version) checks

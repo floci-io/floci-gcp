@@ -2,11 +2,13 @@ package io.floci.gcp.services.kafka;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.storage.InMemoryStorage;
+import io.floci.gcp.services.kafka.SchemaRegistryDataPlane.Scope;
 import io.floci.gcp.services.kafka.model.StoredSchemaRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +33,7 @@ class SchemaRegistryServiceTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String P = "proj";
     private static final String L = "us-central1";
+    private static final SchemaRegistryService.Target REG = new SchemaRegistryService.Target(P, L, "reg", null);
 
     private FakeDataPlane plane;
     private InMemoryStorage<String, StoredSchemaRegistry> store;
@@ -73,6 +76,18 @@ class SchemaRegistryServiceTest {
     }
 
     @Test
+    void createAnswersWithTheDefaultContextWithoutAskingTheBackend() {
+        plane.failContexts = true;
+
+        Map<String, Object> created = service.createRegistry(P, L, "reg");
+
+        assertEquals(List.of("projects/proj/locations/us-central1/schemaRegistries/reg/contexts/."),
+                created.get("contexts"));
+        plane.failContexts = false;
+        assertEquals(created, service.getRegistry(P, L, "reg"));
+    }
+
+    @Test
     void aSecondCreateOfTheSameIdWaitsForTheFirstAndFailsAlreadyExists() throws Exception {
         plane.blockStart = new Gate();
         FutureTask<Map<String, Object>> first = new FutureTask<>(() -> service.createRegistry(P, L, "reg"));
@@ -95,7 +110,7 @@ class SchemaRegistryServiceTest {
     void aDeleteWaitsForAnInFlightCallAndLaterCallsSeeNotFound() throws Exception {
         service.createRegistry(P, L, "reg");
         plane.blockList = new Gate();
-        FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(P, L, "reg", null, false));
+        FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(REG, null, false));
         new Thread(call).start();
         plane.blockList.awaitEntered();
 
@@ -110,7 +125,7 @@ class SchemaRegistryServiceTest {
         delete.get(10, TimeUnit.SECONDS);
         assertEquals(1, plane.deleted.get());
         plane.blockList = null;
-        GcpException e = assertThrows(GcpException.class, () -> service.listSubjects(P, L, "reg", null, false));
+        GcpException e = assertThrows(GcpException.class, () -> service.listSubjects(REG, null, false));
         assertEquals(404, e.getHttpStatus());
         assertEquals(1, plane.listCalls.get(), "a call after the delete must not reach the data plane");
     }
@@ -123,7 +138,7 @@ class SchemaRegistryServiceTest {
         new Thread(delete).start();
         plane.blockDelete.awaitEntered();
 
-        FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(P, L, "reg", null, false));
+        FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(REG, null, false));
         Thread callThread = new Thread(call);
         callThread.start();
         awaitParked(callThread);
@@ -141,18 +156,18 @@ class SchemaRegistryServiceTest {
         service.createRegistry(P, L, "reg");
         plane.listError = new SchemaRegistryException(409, 409, "incompatible");
         GcpException conflict = assertThrows(GcpException.class,
-                () -> service.listSubjects(P, L, "reg", null, false));
+                () -> service.listSubjects(REG, null, false));
         assertEquals(400, conflict.getHttpStatus());
         assertEquals("FAILED_PRECONDITION", conflict.getGcpStatus());
         assertEquals("incompatible", conflict.getMessage());
 
         plane.listError = new SchemaRegistryException(404, 40401, "Subject 's' not found.");
         assertEquals(404, assertThrows(GcpException.class,
-                () -> service.listSubjects(P, L, "reg", null, false)).getHttpStatus());
+                () -> service.listSubjects(REG, null, false)).getHttpStatus());
 
         plane.listError = new SchemaRegistryException(422, 42201, "Invalid schema");
         assertEquals("INVALID_ARGUMENT", assertThrows(GcpException.class,
-                () -> service.listSubjects(P, L, "reg", null, false)).getGcpStatus());
+                () -> service.listSubjects(REG, null, false)).getGcpStatus());
     }
 
     @Test
@@ -161,15 +176,27 @@ class SchemaRegistryServiceTest {
         ObjectNode body = MAPPER.createObjectNode().put("schema", "\"string\"");
 
         plane.compatibility = "BACKWARD";
-        service.checkCompatibility(P, L, "reg", "s", null, body, null);
+        service.checkCompatibility(REG, "s", null, body, null);
         assertEquals(List.of("latest"), plane.checkedVersions);
 
         plane.checkedVersions.clear();
         plane.compatibility = "FULL_TRANSITIVE";
         plane.incompatibleVersion = "2";
-        JsonNode result = service.checkCompatibility(P, L, "reg", "s", null, body, null);
+        JsonNode result = service.checkCompatibility(REG, "s", null, body, null);
         assertEquals(List.of("1", "2", "3"), plane.checkedVersions);
         assertFalse(result.get("is_compatible").asBoolean());
+    }
+
+    @Test
+    void theDefaultContextListsItsUnqualifiedSubjects() {
+        service.createRegistry(P, L, "reg");
+        plane.subjects = List.of("users", ":.team:orders");
+        String name = "projects/proj/locations/us-central1/schemaRegistries/reg/contexts/.";
+
+        Map<String, Object> context = service.getContext(new SchemaRegistryService.Target(P, L, "reg", "."));
+
+        assertEquals(name, context.get("name"));
+        assertEquals(List.of(name + "/subjects/users"), context.get("subjects"));
     }
 
     @Test
@@ -177,7 +204,7 @@ class SchemaRegistryServiceTest {
         service.createRegistry(P, L, "reg");
         ObjectNode body = MAPPER.createObjectNode().put("compatibility", "FULL").put("normalize", true);
 
-        GcpException e = assertThrows(GcpException.class, () -> service.updateConfig(P, L, "reg", null, body));
+        GcpException e = assertThrows(GcpException.class, () -> service.updateConfig(REG, null, body));
         assertEquals(400, e.getHttpStatus());
     }
 
@@ -222,6 +249,7 @@ class SchemaRegistryServiceTest {
         final AtomicInteger deleted = new AtomicInteger();
         final AtomicInteger listCalls = new AtomicInteger();
         volatile boolean failStart;
+        volatile boolean failContexts;
         volatile Gate blockStart;
         volatile Gate blockList;
         volatile Gate blockDelete;
@@ -229,6 +257,7 @@ class SchemaRegistryServiceTest {
         volatile String compatibility = "BACKWARD";
         volatile String incompatibleVersion;
         final List<String> checkedVersions = new CopyOnWriteArrayList<>();
+        volatile List<String> subjects = List.of();
 
         @Override
         public void ensureRunning(StoredSchemaRegistry registry) {
@@ -254,7 +283,7 @@ class SchemaRegistryServiceTest {
         }
 
         @Override
-        public JsonNode listSubjects(StoredSchemaRegistry registry, String subjectPrefix, boolean deleted) {
+        public JsonNode listSubjects(Scope registry, String subjectPrefix, boolean deleted) {
             listCalls.incrementAndGet();
             if (blockList != null) {
                 blockList.pass();
@@ -262,47 +291,69 @@ class SchemaRegistryServiceTest {
             if (listError != null) {
                 throw listError;
             }
-            return MAPPER.createArrayNode();
+            ArrayNode result = MAPPER.createArrayNode();
+            subjects.forEach(result::add);
+            return result;
         }
 
         @Override
-        public JsonNode listVersions(StoredSchemaRegistry registry, String subject, boolean deleted) {
+        public JsonNode listVersions(Scope registry, String subject, boolean deleted) {
             return MAPPER.createArrayNode().add(1).add(2).add(3);
         }
 
         @Override
-        public JsonNode checkCompatibility(StoredSchemaRegistry registry, String subject, String version,
+        public JsonNode checkCompatibility(Scope registry, String subject, String version,
                 ObjectNode schema, boolean verbose) {
             checkedVersions.add(version);
             return MAPPER.createObjectNode().put("is_compatible", !version.equals(incompatibleVersion));
         }
 
         @Override
-        public JsonNode getConfig(StoredSchemaRegistry registry, String subject, boolean defaultToGlobal) {
+        public JsonNode getConfig(Scope registry, String subject, boolean defaultToGlobal) {
             return MAPPER.createObjectNode().put("compatibilityLevel", compatibility);
         }
 
         @Override
-        public JsonNode deleteSubject(StoredSchemaRegistry r, String s, boolean p) { throw new UnsupportedOperationException(); }
+        public JsonNode listContexts(StoredSchemaRegistry registry) {
+            if (failContexts) {
+                throw GcpException.unavailable("registry went away");
+            }
+            return MAPPER.createArrayNode().add(".");
+        }
+
         @Override
-        public JsonNode lookupVersion(StoredSchemaRegistry r, String s, ObjectNode b, boolean n, boolean d) { throw new UnsupportedOperationException(); }
+        public String getRawSchemaVersion(Scope r, String s, String v, boolean d) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode getVersion(StoredSchemaRegistry r, String s, String v, boolean d) { throw new UnsupportedOperationException(); }
+        public JsonNode listReferencedSchemas(Scope r, String s, String v) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode createVersion(StoredSchemaRegistry r, String s, ObjectNode b, boolean n) { throw new UnsupportedOperationException(); }
+        public String getRawSchema(Scope r, int id, String s) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode deleteVersion(StoredSchemaRegistry r, String s, String v, boolean p) { throw new UnsupportedOperationException(); }
+        public JsonNode listSchemaVersions(Scope r, int id, String s, boolean d) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode getSchema(StoredSchemaRegistry r, int id, String s) { throw new UnsupportedOperationException(); }
+        public JsonNode listSubjectsBySchemaId(Scope r, int id, String s, boolean d) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode updateConfig(StoredSchemaRegistry r, String s, String c) { throw new UnsupportedOperationException(); }
+        public JsonNode listSchemaTypes(Scope r) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode deleteConfig(StoredSchemaRegistry r, String s) { throw new UnsupportedOperationException(); }
+        public JsonNode deleteSubject(Scope r, String s, boolean p) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode getMode(StoredSchemaRegistry r, String s) { throw new UnsupportedOperationException(); }
+        public JsonNode lookupVersion(Scope r, String s, ObjectNode b, boolean n, boolean d) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode updateMode(StoredSchemaRegistry r, String s, String m) { throw new UnsupportedOperationException(); }
+        public JsonNode getVersion(Scope r, String s, String v, boolean d) { throw new UnsupportedOperationException(); }
         @Override
-        public JsonNode deleteMode(StoredSchemaRegistry r, String s) { throw new UnsupportedOperationException(); }
+        public JsonNode createVersion(Scope r, String s, ObjectNode b, boolean n) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode deleteVersion(Scope r, String s, String v, boolean p) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode getSchema(Scope r, int id, String s) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode updateConfig(Scope r, String s, String c) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode deleteConfig(Scope r, String s) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode getMode(Scope r, String s) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode updateMode(Scope r, String s, String m) { throw new UnsupportedOperationException(); }
+        @Override
+        public JsonNode deleteMode(Scope r, String s) { throw new UnsupportedOperationException(); }
     }
 }

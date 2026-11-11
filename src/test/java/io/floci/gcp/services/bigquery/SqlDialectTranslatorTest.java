@@ -866,7 +866,8 @@ class SqlDialectTranslatorTest {
         for (String visible : List.of("([10, 20, 30])[1]", "((SPLIT(s)))[1]", "ARRAY_AGG(x) OVER (ORDER BY x)[0]", "SPLIT(s)[1]", "ARRAY(SELECT 1)[0]", "GENERATE_ARRAY(1, 5)[0]",
                 "ARRAY_AGG(x ORDER BY x)[1]", "ARRAY_CONCAT_AGG(a)[0]", "ARRAY<INT64>[1, 2, 3][1]",
                 "ARRAY<STRUCT<n INT64>>[(1)][0]", "ARRAY<INT64>[][0]",
-                "CAST([1, 2, 3] AS ARRAY<INT64>)[1]", "SAFE_CAST([1, 2] AS ARRAY<INT64>)[0]")) {
+                "CAST([1, 2, 3] AS ARRAY<INT64>)[1]", "SAFE_CAST([1, 2] AS ARRAY<INT64>)[0]",
+                "REGEXP_EXTRACT_ALL(x, '[0-9]')[0]", "ARRAY_SLICE([1, 2, 3], 1, 2)[0]")) {
             String rendered = sql("SELECT " + visible + " AS v FROM ds.t");
             assertTrue(rendered.startsWith("SELECT (list_transform([struct_pack(a := ") && rendered.contains("_s.a[_s.i + 1]"),
                     visible + " -> " + rendered);
@@ -3986,5 +3987,26 @@ class SqlDialectTranslatorTest {
                 .toList();
         return SqlDialectTranslator.translate(sql, "test-project", null,
                 new SqlDialectTranslator.QueryParameters(parameters, "POSITIONAL")).sql();
+    }
+
+    @Test
+    void regexCaptureGroupsRespectCharacterClassesAndNamedGroups() {
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("[(]"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("[]()]x"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("\\(x\\)"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("(?:ab)+"));
+        assertTrue(SqlDialectTranslator.regexHasCaptureGroup("[a-z]([0-9]+)"));
+        assertTrue(SqlDialectTranslator.regexHasCaptureGroup("(?P<d>[0-9]+)"));
+        assertTrue(SqlDialectTranslator.regexHasCaptureGroup("[(](x)"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("\\Q(\\E"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("\\Q("));
+        assertTrue(SqlDialectTranslator.regexHasCaptureGroup("\\Q(\\E?([0-9])"));
+        assertFalse(SqlDialectTranslator.regexHasCaptureGroup("[[:alpha:](]"));
+        assertTrue(SqlDialectTranslator.regexHasCaptureGroup("[[:alpha:]]([0-9])"));
+        String computed = sql("SELECT REGEXP_EXTRACT(x, CASE WHEN TRUE THEN 'a([0-9])' ELSE 'b' END) AS v FROM ds.t");
+        assertTrue(computed.contains("END, 1)"), computed);
+        String slice = sql("SELECT ARRAY_SLICE(a, RAND(), 2) AS s FROM ds.t");
+        assertTrue(slice.contains("list_transform([RANDOM()], _floci_slice_offset ->")
+                || slice.contains("list_transform([random()], _floci_slice_offset ->"), slice);
     }
 }

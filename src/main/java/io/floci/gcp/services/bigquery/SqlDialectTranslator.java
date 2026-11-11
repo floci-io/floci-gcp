@@ -103,14 +103,15 @@ final class SqlDialectTranslator {
             "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP", "ANY_VALUE",
             "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
-            "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_REPLACE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
+            "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_EXTRACT_ALL", "REGEXP_REPLACE", "CURRENT_TIMESTAMP",
+            "CURRENT_DATE",
             "CURRENT_DATETIME", "UNIX_SECONDS", "UNIX_MILLIS", "UNIX_MICROS", "UNIX_DATE",
             "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS", "TIMESTAMP_ADD", "DATETIME_ADD",
             "TIME_ADD", "TIMESTAMP_SUB", "DATETIME_SUB", "TIME_SUB", "DATE_ADD", "DATE_SUB",
             "TIMESTAMP_DIFF", "DATETIME_DIFF", "DATE_DIFF", "TIME_DIFF", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
             "DATE_TRUNC", "FORMAT_TIMESTAMP", "FORMAT_DATETIME", "FORMAT_DATE", "FORMAT_TIME",
             "PARSE_TIMESTAMP", "PARSE_DATETIME", "PARSE_DATE", "DATE", "DATETIME", "TIMESTAMP",
-            "GENERATE_UUID");
+            "GENERATE_UUID", "ARRAY_SLICE");
 
     /**
      * Words DuckDB reserves (or restricts) that GoogleSQL allows as plain column names; they
@@ -608,7 +609,8 @@ final class SqlDialectTranslator {
 
     /** Functions that always return an ARRAY, so a bare subscript on a call to one is an array subscript. */
     private static final Set<String> ARRAY_FUNCTIONS = Set.of("ARRAY_AGG", "ARRAY_CONCAT", "ARRAY_CONCAT_AGG",
-            "ARRAY_REVERSE", "SPLIT", "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY");
+            "ARRAY_REVERSE", "ARRAY_SLICE", "SPLIT", "REGEXP_EXTRACT_ALL", "GENERATE_ARRAY", "GENERATE_DATE_ARRAY",
+            "GENERATE_TIMESTAMP_ARRAY");
 
     /**
      * True when the operand from {@code start} to {@code last} is an array by its own tokens: an array literal,
@@ -12172,6 +12174,8 @@ final class SqlDialectTranslator {
             case "LOGICAL_OR" -> "bool_or(" + String.join(", ", a) + ")";
             case "ARRAY_LENGTH" -> "len(" + String.join(", ", a) + ")";
             case "ARRAY_REVERSE" -> "list_reverse(" + String.join(", ", a) + ")";
+            case "ARRAY_SLICE" -> args(a, 3, name, "array_slice(" + at(a, 0) + ", " + sliceOffset(at(a, 1)) + ", "
+                    + sliceOffset(at(a, 2)) + ")");
             // DuckDB's generate_series is integral-only. Build the integral positions first,
             // then map them to DOUBLE quantile positions for quantile_disc. BigQuery's
             // APPROX_QUANTILES returns observed/discrete values rather than interpolating.
@@ -12211,6 +12215,8 @@ final class SqlDialectTranslator {
                     + " WHEN 'DOUBLE' THEN 'number' END)");
             case "REGEXP_CONTAINS" -> "regexp_matches(" + String.join(", ", a) + ")";
             case "REGEXP_EXTRACT" -> args(a, 2, name, "regexp_extract(" + at(a, 0) + ", " + at(a, 1) + ", "
+                    + (hasCaptureGroup(open, close) ? "1" : "0") + ")");
+            case "REGEXP_EXTRACT_ALL" -> args(a, 2, name, "regexp_extract_all(" + at(a, 0) + ", " + at(a, 1) + ", "
                     + (hasCaptureGroup(open, close) ? "1" : "0") + ")");
             case "REGEXP_REPLACE" -> args(a, 3, name, "regexp_replace(" + at(a, 0) + ", " + at(a, 1) + ", "
                     + at(a, 2) + ", 'g')");
@@ -12944,21 +12950,76 @@ final class SqlDialectTranslator {
                 depth--;
             } else if (depth == 0 && t.isPunct(",")) {
                 commas++;
-            } else if (commas == 1 && depth == 0 && t.kind == Kind.STRING) {
-                String pattern = t.value;
-                for (int p = 0; p < pattern.length() - 1; p++) {
-                    if (pattern.charAt(p) == '\\') {
-                        p++;
-                        continue;
-                    }
-                    if (pattern.charAt(p) == '(' && pattern.charAt(p + 1) != '?') {
-                        return true;
-                    }
-                }
-                return false;
+            } else if (commas == 1 && depth == 0
+                    && (t.kind == Kind.STRING || t.kind == Kind.NAMED_PARAM || t.kind == Kind.POSITIONAL_PARAM)) {
+                // The first literal or parameter of the pattern argument, which may sit in an expression such
+                // as CASE WHEN ... THEN r'a([0-9])' ... END.
+                String pattern = switch (t.kind) {
+                    case STRING -> t.value;
+                    case NAMED_PARAM -> QueryParameters.stringLiteralValue(parameters.named(t.value));
+                    default -> QueryParameters.stringLiteralValue(t.value);
+                };
+                return pattern != null && regexHasCaptureGroup(pattern);
             }
         }
         return false;
+    }
+
+    /**
+     * Whether an RE2 pattern has a capturing group: an unescaped {@code (} outside a character class and outside
+     * a {@code \Q...\E} quote that is not {@code (?...)}, or a named group, {@code (?P<name>...)} or
+     * {@code (?<name>...)}.
+     */
+    static boolean regexHasCaptureGroup(String pattern) {
+        int length = pattern.length();
+        for (int p = 0; p < length; p++) {
+            char c = pattern.charAt(p);
+            if (c == '\\' && p + 1 < length && pattern.charAt(p + 1) == 'Q') {
+                // Everything up to \E, or to the end of the pattern, is literal.
+                int end = pattern.indexOf("\\E", p + 2);
+                p = end < 0 ? length : end + 1;
+            } else if (c == '\\') {
+                p++;
+            } else if (c == '[') {
+                int q = p + 1;
+                if (q < length && pattern.charAt(q) == '^') {
+                    q++;
+                }
+                if (q < length && pattern.charAt(q) == ']') {
+                    // A ] right after [ or [^ is a literal member of the class.
+                    q++;
+                }
+                while (q < length && pattern.charAt(q) != ']') {
+                    int posixEnd = pattern.startsWith("[:", q) ? pattern.indexOf(":]", q + 2) : -1;
+                    if (posixEnd >= 0) {
+                        // A POSIX class such as [:alpha:] ends with its own ], not the class's.
+                        q = posixEnd + 2;
+                    } else {
+                        q += pattern.charAt(q) == '\\' ? 2 : 1;
+                    }
+                }
+                p = q;
+            } else if (c == '(') {
+                if (p + 1 >= length || pattern.charAt(p + 1) != '?' || pattern.startsWith("(?P<", p)
+                        || pattern.startsWith("(?<", p) && !pattern.startsWith("(?<=", p)
+                        && !pattern.startsWith("(?<!", p)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * An {@code ARRAY_SLICE} offset for DuckDB's {@code array_slice}: GoogleSQL counts a non-negative offset from
+     * zero and DuckDB from one, while a negative offset counts back from the last element in both. The offset is
+     * bound once through a one-element lambda, so a volatile one such as {@code RAND()} is read once, and capped
+     * below the largest INT64 before the shift: BigQuery clamps an end past the array, where the addition would
+     * overflow.
+     */
+    private static String sliceOffset(String offset) {
+        return "list_extract(list_transform([" + offset + "], _floci_slice_offset -> CASE WHEN _floci_slice_offset >= 0"
+                + " THEN least(_floci_slice_offset, 9223372036854775806) + 1 ELSE _floci_slice_offset END), 1)";
     }
 
     private String renderCast(String function, int open, int close) {
@@ -13675,6 +13736,15 @@ final class SqlDialectTranslator {
 
         static QueryParameters none() {
             return new QueryParameters(List.of(), null);
+        }
+
+        private static final Pattern STRING_LITERAL = Pattern.compile(
+                "(?:CAST\\()?'((?:[^']|'')*)'(?: AS VARCHAR\\))?", Pattern.DOTALL);
+
+        /** The value of a STRING parameter as {@link #literal} renders it, or null for any other literal. */
+        static String stringLiteralValue(String literal) {
+            Matcher matcher = literal == null ? null : STRING_LITERAL.matcher(literal);
+            return matcher != null && matcher.matches() ? matcher.group(1).replace("''", "'") : null;
         }
 
         String named(String name) {

@@ -1371,6 +1371,13 @@ class BigQueryDuckIntegrationTest {
         given().when().get(BASE + "/datasets/shop/tables/null_elements/data").then().statusCode(200)
                 .body("totalRows", equalTo("1"))
                 .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT ARRAY_SLICE([1, 2, 3], 3, 3) AS a, ARRAY_SLICE([1, 2, 3], 10, 12) AS b,"
+                + " ARRAY_SLICE([1, 2, 3], 2, 10) AS c, ARRAY_SLICE([1, 2, 3], 5, 1) AS d, ARRAY_SLICE([1, 2, 3], -10, -8) AS e,"
+                + " ARRAY_SLICE([1, 2, 3], -5, -4) AS f, ARRAY_SLICE([1, 2, 3], 0, -10) AS g, ARRAY_SLICE(ARRAY<INT64>[], 3, 3) AS h",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.collect { it.v.collect { e -> e.v } }", equalTo(List.of(List.of(), List.of(), List.of("3"),
+                        List.of(), List.of(), List.of(), List.of(), List.of())));
     }
 
     @Test
@@ -1659,6 +1666,73 @@ class BigQueryDuckIntegrationTest {
                 "useLegacySql", false, "dryRun", true))
                 .then().statusCode(400)
                 .body("error.message", equalTo("Field name zz does not exist in STRUCT<n INT64>"));
+    }
+
+    @Test
+    @Order(5)
+    void arraySliceAndRegexpExtractAllFollowBigQuery() {
+        query(Map.of("query", "SELECT ARRAY_SLICE([1, 2, 3], 1, 2) AS a, ARRAY_SLICE([1, 2, 3, 4, 5], -3, -1) AS b,"
+                + " ARRAY_SLICE([1, 2, 3], 1, 10) AS c, ARRAY_SLICE([1, 2, 3], -10, 1) AS d,"
+                + " ARRAY_SLICE([1, 2, 3, 4, 5], -2, 1) AS e, ARRAY_SLICE([1, 2, 3], 2, 1) AS f,"
+                + " ARRAY_SLICE([1, 2, 3], 0, 0) AS g, ARRAY_SLICE([1, 2, 3, 4, 5], 1, -2) AS h", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.collect { it.v.collect { e -> e.v } }", equalTo(List.of(List.of("2", "3"),
+                        List.of("3", "4", "5"), List.of("2", "3"), List.of("1", "2"), List.of(), List.of(), List.of("1"),
+                        List.of("2", "3", "4"))));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b22', r'[a-z]([0-9]+)') AS a,"
+                + " REGEXP_EXTRACT_ALL('a1b22', r'(?:[a-z])([0-9]+)') AS b, REGEXP_EXTRACT_ALL('a1b2', r'[0-9]') AS c,"
+                + " REGEXP_EXTRACT_ALL('abc', r'[0-9]') AS d", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.collect { it.v.collect { e -> e.v } }", equalTo(List.of(List.of("1", "22"),
+                        List.of("1", "22"), List.of("1", "2"), List.of())));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b2', r'[0-9]')[0] AS a, REGEXP_EXTRACT_ALL('a1b2', r'[0-9]')[1] AS b,"
+                + " ARRAY_SLICE([1, 2, 3], 1, 2)[0] AS c, ARRAY_SLICE([1, 2, 3], 1, 2)[1] AS d", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "2", "2", "3")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b2', r'[0-9]')[2] AS a", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Array index 2 is out of bounds (overflow)"));
+        query(Map.of("query", "SELECT ARRAY_SLICE([1, 2, 3], 0, @p) AS a", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "p", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "9223372036854775807")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "2", "3")));
+        query(Map.of("query", "SELECT ARRAY_SLICE([1, 2, 3], 1, 9223372036854775807) AS a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("2", "3")));
+        query(Map.of("query", "SELECT ARRAY_SLICE([1, 2, 3], IF(RAND() < 0.5, -2, 1), 1) AS a"
+                + " FROM UNNEST(GENERATE_ARRAY(1, 20))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.collect { e -> e.v } }.unique()", equalTo(List.of(List.of("2"))));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a(b', r'[(]') AS a, REGEXP_EXTRACT('a(b', r'[(]') AS b,"
+                + " REGEXP_EXTRACT_ALL('a1b22', r'[a-z](?P<d>[0-9]+)') AS c, REGEXP_EXTRACT_ALL('a]1', r'[]a]') AS d",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("(")))
+                .body("rows[0].f[1].v", equalTo("("))
+                .body("rows[0].f[2].v.v", equalTo(List.of("1", "22")))
+                .body("rows[0].f[3].v.v", equalTo(List.of("a", "]")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('x(1(', r'\\Q(\\E') AS a, REGEXP_EXTRACT('x(1', r'\\Q(\\E') AS b,"
+                + " REGEXP_EXTRACT_ALL('a(1', r'[[:alpha:](]') AS c, REGEXP_EXTRACT_ALL('a1b2', r'\\Q(\\E?([0-9])') AS d,"
+                + " REGEXP_EXTRACT_ALL('a1b2', r'[[:alpha:]]([0-9])') AS e", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("(", "(")))
+                .body("rows[0].f[1].v", equalTo("("))
+                .body("rows[0].f[2].v.v", equalTo(List.of("a", "(")))
+                .body("rows[0].f[3].v.v", equalTo(List.of("1", "2")))
+                .body("rows[0].f[4].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT('a1', CASE WHEN TRUE THEN r'a([0-9])' ELSE r'a([0-9])' END) AS a,"
+                + " REGEXP_EXTRACT_ALL('a1a2', CASE WHEN TRUE THEN r'a([0-9])' ELSE r'a([0-9])' END) AS b", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b22', @p) AS a, REGEXP_EXTRACT('a1b22', @p) AS b",
+                "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "p", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "[a-z]([0-9]+)")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1", "22")))
+                .body("rows[0].f[1].v", equalTo("1"));
     }
 
     private static void assertNullElementError(String sql, String field) {

@@ -484,15 +484,22 @@ account or enabling an enabled one has no effect. As the
 documents, "Existing access tokens for the service account are rejected", and after
 the account is re-enabled "its existing access tokens will be accepted". In `enforce`
 mode, a Floci-issued token of a disabled account, or a downscoped token derived from
-one, is refused with `401 UNAUTHENTICATED` over REST or `UNAUTHENTICATED` over gRPC on
-every enforcing surface. Deleting an account in `enforce` mode revokes its Floci-issued
-tokens, which are then unknown tokens and refused the same way, also after an account
-with the same email is created again. In `disabled` mode the field is stored and
-returned, and tokens are not affected.
+one, is refused on every enforcing surface with `401 UNAUTHENTICATED` over REST, or
+`UNAUTHENTICATED` over gRPC, and the message
+`Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.`
+This is Google's answer for the `ACCOUNT_STATE_INVALID` reason of
+[`google/api/error_reason.proto`](https://github.com/googleapis/googleapis/blob/master/google/api/error_reason.proto):
+"the account associated with the provided access token is in an invalid state, such
+as disabled or deleted". The response does not carry the `ErrorInfo` detail Google
+attaches, whose metadata names the API service and method called. Deleting an account
+in `enforce` mode revokes its Floci-issued tokens, which are then refused the same way,
+also after an account with the same email is created again.
 
-Token issuance is not changed: IAM Credentials `generateAccessToken` still issues a
-token for a disabled account, which is refused when used. Google documents that
-"requests for new access tokens will fail", but not the error they return.
+As the reference says "requests for new access tokens will fail", IAM Credentials
+`generateAccessToken`, `generateIdToken`, `signBlob` and `signJwt` refuse a disabled
+target account in `enforce` mode with the same response, instead of issuing a token
+or a signature. In `disabled` mode the field is stored and returned, and neither
+tokens nor IAM Credentials requests are affected.
 
 ## Service Account Keys
 

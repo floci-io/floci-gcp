@@ -338,6 +338,44 @@ abstract class IamEnforcementContract {
         }
     }
 
+    // A token of a disabled or deleted account: Google answers ErrorInfo reason ACCOUNT_STATE_INVALID
+    // (google/api/error_reason.proto), "the account associated with the provided access token is in an invalid
+    // state, such as disabled or deleted", with 401 UNAUTHENTICATED and this message.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void disabledOrDeletedAccountsTokenIsUnauthenticatedOverBothTransports(boolean deleted) {
+        String projectId = project.substring("projects/".length());
+        policies.createServiceAccount(projectId, "reader", "reader", "");
+        grant(project, "roles/browser", null);
+        request().header("Authorization", credential).get("/v1/" + project).then().statusCode(200);
+        grpcRead(authenticated, project);
+
+        String email = member.substring("serviceAccount:".length());
+        if (deleted) {
+            policies.deleteServiceAccount(projectId, email);
+        } else {
+            policies.setServiceAccountDisabled(projectId, email, true);
+        }
+
+        Response response = request().header("Authorization", credential).get("/v1/" + project);
+        if (enforced()) {
+            response.then().statusCode(401)
+                    .body("error.status", equalTo("UNAUTHENTICATED"))
+                    .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE));
+            StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
+                    () -> grpcRead(authenticated, project));
+            assertEquals(Status.Code.UNAUTHENTICATED, error.getStatus().getCode());
+            assertEquals(ACCOUNT_STATE_INVALID_MESSAGE, error.getStatus().getDescription());
+        } else {
+            response.then().statusCode(200);
+            grpcRead(authenticated, project);
+        }
+    }
+
+    private static final String ACCOUNT_STATE_INVALID_MESSAGE = "Request had invalid authentication credentials. "
+            + "Expected OAuth 2 access token, login cookie or other valid authentication credential. "
+            + "See https://developers.google.com/identity/sign-in/web/devconsole-project.";
+
     @Test
     void downscopedTokensCannotExpandTheirBoundaryIntoProjectIam() {
         grant(project, "roles/owner", null);

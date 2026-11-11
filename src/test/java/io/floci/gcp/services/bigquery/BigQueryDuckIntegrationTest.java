@@ -1570,6 +1570,32 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scriptNumericVariablesKeepTheirDeclaredType() {
+        // A FLOAT64 literal stays floating point, so the sum is 0.30000000000000004 and not NUMERIC 0.3.
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 0.1; SELECT f + 0.2 AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("0.30000000000000004"));
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 0.1; SELECT f", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("0.1"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SELECT n * 2 AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SELECT n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("1.5"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SET n = n * 2; SELECT n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("3"));
+    }
+
+    @Test
+    @Order(2)
     void scriptVariablesLeaveTheStatementsOwnNamesAlone() {
         // Live BigQuery resolves the derived table's column first: 2, not the variable.
         query(Map.of("query", "DECLARE x INT64 DEFAULT 1; SELECT x FROM (SELECT 2 AS x)", "useLegacySql", false))

@@ -106,11 +106,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   statements or `IF`/`ELSEIF`/`ELSE` blocks; their statements execute in source order using the
   same temporary objects. Searched and simple `CASE` statements run the first matching branch, with
   optional `ELSE`. `DECLARE`/`SET` supports `INT64`,
-  `BOOL`, `STRING`, `FLOAT64`, `DATE`, `TIMESTAMP`, `BYTES`,
+  `BOOL`, `STRING`, `FLOAT64`, `NUMERIC`, `DATE`, `TIMESTAMP`, `BYTES`,
   `DATETIME`, `TIME`, `JSON`, `STRUCT`, and arrays of those non-array types, including
   `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
   literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
-  evaluated by the configured SQL engine. Variable references are token-substituted as typed literals;
+  evaluated by the configured SQL engine. A `FLOAT64` literal stays floating point, so `f + 0.2` over
+  `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does. Variable references
+  are token-substituted as typed literals;
   the statement's own names win over a variable of the same name: a source column, a column a DML
   statement names, a CTE name, a `FROM` item's alias (a table, `UNNEST` or derived table), the columns a
   derived table exposes, function names, and qualified fields

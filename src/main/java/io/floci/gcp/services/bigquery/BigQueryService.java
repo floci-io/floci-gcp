@@ -2042,7 +2042,7 @@ public class BigQueryService {
 
     private static final class ScriptVariableTypeParser {
         private static final Set<String> SCALAR_TYPES = Set.of("INT64", "INTEGER", "BOOL", "BOOLEAN", "STRING",
-                "FLOAT64", "FLOAT", "DATE", "TIMESTAMP", "BYTES", "DATETIME", "TIME", "JSON");
+                "FLOAT64", "FLOAT", "NUMERIC", "DATE", "TIMESTAMP", "BYTES", "DATETIME", "TIME", "JSON");
 
         private final List<SqlDialectTranslator.Token> tokens;
         private int at;
@@ -2309,6 +2309,9 @@ public class BigQueryService {
         if (value instanceof Double || value instanceof Float) {
             return new ScriptVariableType("FLOAT64", null, null);
         }
+        if (value instanceof BigDecimal) {
+            return new ScriptVariableType("NUMERIC", null, null);
+        }
         if (value instanceof Number) {
             return new ScriptVariableType("INT64", null, null);
         }
@@ -2336,6 +2339,15 @@ public class BigQueryService {
                     case "+" -> leftNumber.doubleValue() + rightNumber.doubleValue();
                     case "-" -> leftNumber.doubleValue() - rightNumber.doubleValue();
                     default -> leftNumber.doubleValue() * rightNumber.doubleValue();
+                };
+            } else if ("NUMERIC".equals(type) || leftNumber instanceof BigDecimal
+                    || rightNumber instanceof BigDecimal) {
+                BigDecimal leftDecimal = scriptDecimal(leftNumber);
+                BigDecimal rightDecimal = scriptDecimal(rightNumber);
+                evaluated = switch (arithmetic.group(2)) {
+                    case "+" -> leftDecimal.add(rightDecimal);
+                    case "-" -> leftDecimal.subtract(rightDecimal);
+                    default -> leftDecimal.multiply(rightDecimal);
                 };
             } else {
                 try {
@@ -2407,6 +2419,7 @@ public class BigQueryService {
                 }
                 throw QueryEngine.invalidQuery("Value cannot be coerced to FLOAT64.");
             }
+            case "NUMERIC" -> coerceScriptNumeric(value);
             case "BOOL" -> {
                 if (value instanceof Boolean) {
                     yield value;
@@ -2428,6 +2441,37 @@ public class BigQueryService {
             default -> throw QueryEngine.invalidQuery(
                     "Variable type " + type.scalarType() + " is not supported.");
         };
+    }
+
+    /** A NUMERIC value: BigQuery keeps 38 digits with 9 after the point, and rejects a value that needs more. */
+    private static BigDecimal coerceScriptNumeric(Object value) {
+        BigDecimal decimal;
+        try {
+            if (value instanceof BigDecimal exact) {
+                decimal = exact;
+            } else if (value instanceof Double || value instanceof Float) {
+                decimal = BigDecimal.valueOf(((Number) value).doubleValue());
+            } else if (value instanceof Number number) {
+                decimal = new BigDecimal(number.toString());
+            } else if (value instanceof String text) {
+                decimal = new BigDecimal(text.trim());
+            } else {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to NUMERIC.");
+            }
+        } catch (NumberFormatException e) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + value);
+        }
+        if (decimal.scale() > 9 && decimal.stripTrailingZeros().scale() > 9) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + decimal.toPlainString());
+        }
+        if (decimal.precision() - decimal.scale() > 29) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + decimal.toPlainString());
+        }
+        return decimal.setScale(Math.min(9, decimal.scale()));
+    }
+
+    private static BigDecimal scriptDecimal(Number value) {
+        return value instanceof BigDecimal decimal ? decimal : BigDecimal.valueOf(value.doubleValue());
     }
 
     private static ScriptVariableField scriptStructField(ScriptVariableType type, String name) {
@@ -3367,7 +3411,11 @@ public class BigQueryService {
             case "JSON" -> "CAST(" + scriptStringLiteral(coerceScriptJson(value)) + " AS JSON)";
             case "STRING" -> scriptStringLiteral(value.toString());
             case "BOOL" -> value.toString();
-            case "INT64", "FLOAT64" -> value.toString();
+            case "INT64" -> value.toString();
+            // A FLOAT64 literal is a DOUBLE, so arithmetic over it stays floating point: DuckDB reads a
+            // bare decimal as NUMERIC, which would make `f + 0.2` a NUMERIC of a different value.
+            case "FLOAT64" -> "CAST(" + value + " AS DOUBLE)";
+            case "NUMERIC" -> "CAST('" + coerceScriptNumeric(value).toPlainString() + "' AS NUMERIC)";
             default -> throw QueryEngine.invalidQuery(
                     "Variable type " + type.scalarType() + " is not supported.");
         };
@@ -3466,6 +3514,9 @@ public class BigQueryService {
      * 9007199254740993 and 9007199254740992 as equal. A FLOAT64 operand makes BigQuery coerce both.
      */
     private static int compareScriptNumbers(Number left, Number right) {
+        if (left instanceof BigDecimal || right instanceof BigDecimal) {
+            return scriptDecimal(left).compareTo(scriptDecimal(right));
+        }
         boolean integral = !(left instanceof Double || left instanceof Float)
                 && !(right instanceof Double || right instanceof Float);
         return integral ? Long.compare(left.longValue(), right.longValue())

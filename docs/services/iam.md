@@ -410,15 +410,27 @@ token is not a recognized identity. In `enforce` mode:
 - `exp` must not precede `iat`, must be at most 65 minutes after it, and must not
   have passed; otherwise the response is `invalid_grant` with
   `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.`
-- `scope` must be present and not empty; otherwise the response is `400` with
-  `invalid_scope` and `Invalid OAuth scope or ID token audience provided.`, which
-  Google documents for "No scopes were requested (empty list of scopes), or one of
-  the requested scopes doesn't exist (i.e. is invalid)." Scope names are not checked
-  yet: an unknown scope name is accepted.
+- `scope` must be present, not empty, and name only Google OAuth 2.0 scopes;
+  otherwise the response is `400` with `invalid_scope` and
+  `Invalid OAuth scope or ID token audience provided.`, which Google documents for
+  "No scopes were requested (empty list of scopes), or one of the requested scopes
+  doesn't exist (i.e. is invalid)." The scopes are checked against the bundled
+  catalog described below, so a scope of an API Floci does not emulate is accepted.
 - The access token is valid for 3600 seconds and acts as the service account on
   every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
 
 The response has no `scope` field.
+
+The scope catalog, `src/main/resources/oauth/oauth-scopes.json`, is the union of the
+scopes that every API version listed by the
+[Google API Discovery directory](https://discovery.googleapis.com/discovery/v1/apis)
+(all versions, not only the preferred ones) declares under `auth.oauth2.scopes`, plus
+`email`, `openid` and `profile`, which
+[OAuth 2.0 Scopes for Google APIs](https://developers.google.com/identity/protocols/oauth2/scopes)
+lists under "Google Sign-In". The file names its sources and its generation date. To
+regenerate it, run `python3 tools/regen_oauth_scopes.py` from the repository root; it
+uses only the Python standard library and the network, and nothing reads the network
+at build or test time.
 
 ### Remaining limitations
 

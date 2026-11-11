@@ -162,6 +162,32 @@ class OAuthTokenEnforceRestIntegrationTest {
     }
 
     @Test
+    void scopesOfGoogleApisAreAcceptedEvenWhenFlociDoesNotEmulateTheApi() throws Exception {
+        KeyFile key = createKey(email);
+
+        for (String scope : List.of("https://www.googleapis.com/auth/gmail.readonly",
+                SCOPE + "  https://www.googleapis.com/auth/admin.directory.user openid email profile")) {
+            Map<String, Object> claims = claims(key.email(), AUDIENCE, 0, 3600);
+            claims.put("scope", scope);
+            exchange("/token", assertion(key, claims, "RS256", key.keyId())).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void anUnknownScopeIsAnInvalidScopeAloneOrAmongValidOnes() throws Exception {
+        KeyFile key = createKey(email);
+
+        for (String scope : List.of("https://www.googleapis.com/auth/not-a-google-scope",
+                SCOPE + " https://www.googleapis.com/auth/not-a-google-scope", "cloud-platform")) {
+            Map<String, Object> claims = claims(key.email(), AUDIENCE, 0, 3600);
+            claims.put("scope", scope);
+            exchange("/token", assertion(key, claims, "RS256", key.keyId())).then().statusCode(400)
+                    .body("error", equalTo("invalid_scope"))
+                    .body("error_description", equalTo("Invalid OAuth scope or ID token audience provided."));
+        }
+    }
+
+    @Test
     void legacyV4EndpointAndJsonBodiesAreVerifiedToo() throws Exception {
         KeyFile key = createKey(email);
         String assertion = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());

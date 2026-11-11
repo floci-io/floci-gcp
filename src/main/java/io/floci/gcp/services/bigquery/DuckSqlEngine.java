@@ -136,11 +136,35 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             TableFieldSchema field = column.field();
             if (column.name().equalsIgnoreCase(missing.alias()) && "RECORD".equals(field.getType())
                     && !"REPEATED".equals(field.getMode())) {
-                type = InformationSchema.dataType(field);
+                type = structType(field, missing.anonymousFields(), List.of());
                 break;
             }
         }
         throw SqlDialectTranslator.invalidQuery("Field name " + missing.field() + " does not exist in " + type);
+    }
+
+    /**
+     * A STRUCT column's GoogleSQL type as BigQuery writes it in an error: an anonymous field by its type alone, at
+     * any depth; {@code anonymousFields} holds their paths as name segments below {@code prefix}. A name that is not a
+     * plain identifier is quoted, as in {@code `m._field_1` INT64}.
+     */
+    private static final Pattern PLAIN_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
+    private static String structType(TableFieldSchema field, Set<List<String>> anonymousFields, List<String> prefix) {
+        List<String> parts = new ArrayList<>();
+        for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
+            List<String> path = new ArrayList<>(prefix);
+            path.add(child.getName().toLowerCase(Locale.ROOT));
+            boolean struct = ("RECORD".equals(child.getType()) || "STRUCT".equals(child.getType()))
+                    && !"REPEATED".equals(child.getMode());
+            String childType = struct
+                    ? structType(child, anonymousFields, path)
+                    : InformationSchema.dataType(child);
+            String name = PLAIN_IDENTIFIER.matcher(child.getName()).matches()
+                    ? child.getName() : "`" + child.getName().replace("`", "\\`") + "`";
+            parts.add(anonymousFields.contains(path) ? childType : name + " " + childType);
+        }
+        return "STRUCT<" + String.join(", ", parts) + ">";
     }
 
     /**

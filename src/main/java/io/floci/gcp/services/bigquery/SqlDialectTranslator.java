@@ -8,7 +8,6 @@ import java.time.DateTimeException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -61,7 +60,7 @@ final class SqlDialectTranslator {
      * An {@code alias.field} in ORDER BY naming a field the STRUCT select alias does not have, as written, and
      * whether it belongs to the outermost query, whose aliases are the result's columns.
      */
-    record MissingStructField(String alias, String field, boolean outermost) {}
+    record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields) {}
 
     /**
      * The dotted paths, such as {@code s.zz}, left in the outermost query's ORDER BY once the translator has
@@ -156,11 +155,11 @@ final class SqlDialectTranslator {
     private boolean needsUnicodeCaseFold;
     private final List<MissingStructField> missingStructFields = new ArrayList<>();
     /**
-     * Field maps from {@link #googleSqlStructFields} that include an anonymous field. Such a struct is never
-     * reported as missing a field, since floci cannot write its type the way BigQuery's message does.
+     * The {@code _field_<position>} keys of anonymous fields, per field map from {@link #googleSqlStructFields}.
+     * Star expansion reads those keys, but no {@code alias.field} reference can name an anonymous field, as in
+     * BigQuery, and the missing-field message writes it by type alone.
      */
-    private final Set<Map<String, List<Token>>> structFieldsWithAnonymous = Collections.newSetFromMap(
-            new IdentityHashMap<>());
+    private final Map<Map<String, List<Token>>, Set<List<String>>> anonymousStructFields = new IdentityHashMap<>();
     private boolean queryResult;
 
     private List<Token> tokens;
@@ -10022,12 +10021,16 @@ final class SqlDialectTranslator {
                 continue;
             }
             Map<String, List<Token>> fields = aliases.get(alias.identifierText().toLowerCase(Locale.ROOT));
-            List<Token> expression = fields == null
+            String fieldKey = tokens.get(field).identifierText().toLowerCase(Locale.ROOT);
+            Set<List<String>> anonymousFields = fields == null
+                    ? Set.of()
+                    : anonymousStructFields.getOrDefault(fields, Set.of());
+            List<Token> expression = fields == null || anonymousFields.contains(List.of(fieldKey))
                     ? null
-                    : fields.get(tokens.get(field).identifierText().toLowerCase(Locale.ROOT));
-            if (fields != null && expression == null && orderBy && !structFieldsWithAnonymous.contains(fields)) {
+                    : fields.get(fieldKey);
+            if (fields != null && expression == null && orderBy) {
                 missingStructFields.add(new MissingStructField(alias.identifierText(),
-                        tokens.get(field).identifierText(), parenthesisDepth(start) == 0));
+                        tokens.get(field).identifierText(), parenthesisDepth(start) == 0, Set.copyOf(anonymousFields)));
                 String message = "Field name " + tokens.get(field).identifierText() + " does not exist in STRUCT";
                 expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
             }
@@ -10301,10 +10304,32 @@ final class SqlDialectTranslator {
         return fields;
     }
 
+    /**
+     * For a field written as an untyped {@code STRUCT(...)}, adds the paths of its anonymous fields as name segments,
+     * such as [_field_1, _field_1], so the missing-field message can write them by type at any depth. Segments keep a
+     * quoted name holding a dot apart from a nested path.
+     */
+    private void addNestedAnonymousFields(int start, int end, String field, Set<List<String>> anonymous) {
+        int keyword = nextSignificant(start, end);
+        int open = keyword < 0 ? -1 : nextSignificant(keyword + 1, end);
+        if (open < 0 || !tokens.get(keyword).isKeyword("STRUCT") || !tokens.get(open).isPunct("(")) {
+            return;
+        }
+        int close = matchingParen(open);
+        if (close < 0 || close >= end || nextSignificant(close + 1, end) >= 0) {
+            return;
+        }
+        for (List<String> path : anonymousStructFields.getOrDefault(googleSqlStructFields(open, close), Set.of())) {
+            List<String> nested = new ArrayList<>(List.of(field));
+            nested.addAll(path);
+            anonymous.add(List.copyOf(nested));
+        }
+    }
+
     private Map<String, List<Token>> googleSqlStructFields(int open, int close) {
         Map<String, List<Token>> fields = new HashMap<>();
         int position = 1;
-        boolean anonymous = false;
+        Set<List<String>> anonymous = new HashSet<>();
         int start = nextSignificant(open + 1, close);
         while (start >= 0 && start < close) {
             int end = structArgumentEnd(start, close);
@@ -10322,14 +10347,14 @@ final class SqlDialectTranslator {
             }
             int field = as < 0 ? implicitStructFieldName(start, end) : nextSignificant(as + 1, end);
             if (as < 0 && field < 0) {
-                // An anonymous field, named by position as renderStruct names it; its struct is never
-                // reported as missing a field.
+                // An anonymous field, named by position as renderStruct names it, for star expansion.
                 List<Token> anonymousExpression = new ArrayList<>(tokens.subList(start, end));
                 while (!anonymousExpression.isEmpty() && anonymousExpression.getLast().kind == Kind.SPACE) {
                     anonymousExpression.removeLast();
                 }
                 fields.put("_field_" + position, anonymousExpression);
-                anonymous = true;
+                anonymous.add(List.of("_field_" + position));
+                addNestedAnonymousFields(start, end, "_field_" + position, anonymous);
                 position++;
                 start = nextSignificant(end + 1, close);
                 continue;
@@ -10344,11 +10369,12 @@ final class SqlDialectTranslator {
             }
             String name = as < 0 ? pathSegments(tokens.get(field)).getLast() : tokens.get(field).identifierText();
             fields.put(name.toLowerCase(Locale.ROOT), expression);
+            addNestedAnonymousFields(start, expressionEnd, name.toLowerCase(Locale.ROOT), anonymous);
             position++;
             start = nextSignificant(end + 1, close);
         }
-        if (anonymous) {
-            structFieldsWithAnonymous.add(fields);
+        if (!anonymous.isEmpty()) {
+            anonymousStructFields.put(fields, anonymous);
         }
         return fields;
     }

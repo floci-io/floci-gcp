@@ -3277,12 +3277,16 @@ class SqlDialectTranslatorTest {
         String mixed = sql("SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t ORDER BY s.n");
         assertTrue(mixed.endsWith("ORDER BY list_extract([x], 1)"), mixed);
         String mixedMissing = sql("SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t ORDER BY s.zz");
-        assertTrue(mixedMissing.endsWith("ORDER BY s.zz"), mixedMissing);
+        assertTrue(mixedMissing.endsWith("ORDER BY list_extract([error('Field name zz does not exist in STRUCT')], 1)"),
+                mixedMissing);
+        String anonymousKey = sql("SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t ORDER BY s._field_1");
+        assertTrue(anonymousKey.endsWith("ORDER BY list_extract([error('Field name _field_1 does not exist in STRUCT')], 1)"),
+                anonymousKey);
         String twoStars = sql("SELECT t.s.* EXCEPT(n), u.s.* EXCEPT(m) FROM (SELECT STRUCT(x + 1, x AS n) AS s FROM ds.t) t,"
                 + " (SELECT STRUCT(y + 1, y AS m) AS s FROM ds.u) u");
         assertFalse(twoStars.contains("\"\""), twoStars);
         String anonymous = sql("SELECT STRUCT(x + 1) AS s FROM ds.t ORDER BY s.x");
-        assertTrue(anonymous.endsWith("ORDER BY s.x"), anonymous);
+        assertTrue(anonymous.endsWith("ORDER BY list_extract([error('Field name x does not exist in STRUCT')], 1)"), anonymous);
         String missing = sql("SELECT STRUCT(x AS n) AS s FROM ds.t ORDER BY s.zz");
         assertTrue(missing.endsWith("ORDER BY list_extract([error('Field name zz does not exist in STRUCT')], 1)"), missing);
         String havingMissing = sql("SELECT STRUCT(x AS n) AS s FROM ds.t GROUP BY x HAVING s.zz > 0");

@@ -34,6 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IamServiceAccountEnforcementIntegrationTest {
 
     private static final String CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+    private static final String ACCOUNT_STATE_INVALID_MESSAGE = "Request had invalid authentication credentials. "
+            + "Expected OAuth 2 access token, login cookie or other valid authentication credential. "
+            + "See https://developers.google.com/identity/sign-in/web/devconsole-project.";
 
     @Inject
     CredentialTokenService tokens;
@@ -385,9 +388,11 @@ class IamServiceAccountEnforcementIntegrationTest {
         iam.setServiceAccountDisabled(project, targetEmail, true);
 
         given().header("Authorization", targetAuthorization).when().get(accountPath)
-                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"))
+                .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE));
         given().header("Authorization", targetAuthorization).when().get("/v1/projects/" + project)
-                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"))
+                .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE));
 
         iam.setServiceAccountDisabled(project, targetEmail, false);
 
@@ -411,7 +416,42 @@ class IamServiceAccountEnforcementIntegrationTest {
         iam.createServiceAccount(project, "target", "replacement", "");
 
         given().header("Authorization", targetAuthorization).when().get(accountsPath)
-                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"))
+                .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE));
+    }
+
+    // serviceAccounts.disable: "requests for new access tokens will fail"
+    // (https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable).
+    @Test
+    void credentialRequestsForADisabledAccountAreUnauthenticatedUntilItIsEnabled() {
+        String uniqueId = iam.createServiceAccount(project, "target", "target", "").getUniqueId();
+        setPolicy("projects/" + project + "/serviceAccounts/" + targetEmail, "roles/iam.serviceAccountTokenCreator",
+                callerEmail, null);
+        Map<String, Map<String, Object>> requests = Map.of(
+                "generateAccessToken", Map.of("scope", List.of(CLOUD_PLATFORM_SCOPE)),
+                "generateIdToken", Map.of("audience", "https://foo.bar"),
+                "signBlob", Map.of("payload", "aGVsbG8="),
+                "signJwt", Map.of("payload", "{}"));
+        long tokensBefore = credentialStore.scan(key -> true).size();
+
+        iam.setServiceAccountDisabled(project, targetEmail, true);
+
+        for (String account : List.of(targetEmail, uniqueId)) {
+            requests.forEach((method, body) -> given().header("Authorization", callerAuthorization)
+                    .urlEncodingEnabled(false).contentType("application/json").body(body)
+                    .when().post("/v1/projects/-/serviceAccounts/" + account + ":" + method)
+                    .then().statusCode(401)
+                    .body("error.status", equalTo("UNAUTHENTICATED"))
+                    .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE)));
+        }
+        assertEquals(tokensBefore, credentialStore.scan(key -> true).size());
+
+        iam.setServiceAccountDisabled(project, targetEmail, false);
+
+        requests.forEach((method, body) -> given().header("Authorization", callerAuthorization)
+                .urlEncodingEnabled(false).contentType("application/json").body(body)
+                .when().post("/v1/projects/-/serviceAccounts/" + targetEmail + ":" + method)
+                .then().statusCode(200));
     }
 
     @Test

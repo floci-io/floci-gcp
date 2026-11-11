@@ -19,8 +19,6 @@ public class IamPrincipalResolver {
     private static final String BEARER_PREFIX = "Bearer ";
     private static final String SERVICE_ACCOUNT_RESOURCE_MARKER = "/serviceAccounts/";
 
-    static final String DISABLED_ACCOUNT_MESSAGE = "The service account of this credential is disabled";
-
     private final CredentialTokenService tokenService;
     private final EmulatorConfig config;
     private final Instance<IamService> accounts;
@@ -70,8 +68,7 @@ public class IamPrincipalResolver {
         }
         String email = principal.member().substring("serviceAccount:".length());
         if (accounts.get().findServiceAccount(email).map(StoredServiceAccount::isDisabled).orElse(false)) {
-            throw new CredentialAuthenticationException(
-                    CredentialAuthenticationException.Failure.ACCOUNT_STATE_INVALID, DISABLED_ACCOUNT_MESSAGE);
+            throw CredentialAuthenticationException.accountStateInvalid();
         }
     }
 

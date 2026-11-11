@@ -117,6 +117,9 @@ public class CredentialTokenService {
         StoredCredentialToken token = tokenStore.get(bearerToken)
                 .orElseThrow(() -> new CredentialAuthenticationException(
                         CredentialAuthenticationException.Failure.UNKNOWN, "Unknown Floci credential token"));
+        if (token.isRevoked()) {
+            throw CredentialAuthenticationException.accountStateInvalid();
+        }
         if (token.getExpireTime() == null || !token.getExpireTime().isAfter(now)) {
             // Keep the record so retries report the same expired-credential outcome.
             throw new CredentialAuthenticationException(
@@ -127,16 +130,19 @@ public class CredentialTokenService {
 
     /**
      * Revokes every token, downscoped ones included, issued for the service account with this email,
-     * whichever form its principal was recorded in.
+     * whichever form its principal was recorded in. Revoked tokens are kept, so that they keep being
+     * refused as the token of a deleted account rather than as an unknown token.
      */
     public void revokeServiceAccountTokens(String email) {
-        List<String> revoked = tokenStore.scan(key -> true).stream()
+        List<StoredCredentialToken> revoked = tokenStore.scan(key -> true).stream()
                 .filter(token -> token.getPrincipal() != null && (token.getPrincipal().equals(email)
                         || token.getPrincipal().equals("serviceAccount:" + email)
                         || token.getPrincipal().endsWith("/serviceAccounts/" + email)))
-                .map(StoredCredentialToken::getTokenValue)
                 .toList();
-        revoked.forEach(tokenStore::delete);
+        for (StoredCredentialToken token : revoked) {
+            token.setRevoked(true);
+            tokenStore.put(token.getTokenValue(), token);
+        }
     }
 
     public void clear() {

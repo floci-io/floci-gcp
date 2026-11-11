@@ -20,6 +20,7 @@ public class StoredCredentialToken {
 	private String sourceToken;
 	private String principal;
 	private List<CredentialAccessBoundaryRule> gcsRules = new ArrayList<>();
+	private boolean revoked;
 
 	public StoredCredentialToken() {
 	}
@@ -80,5 +81,13 @@ public class StoredCredentialToken {
 
 	public void setGcsRules(List<CredentialAccessBoundaryRule> gcsRules) {
 		this.gcsRules = gcsRules == null ? new ArrayList<>() : new ArrayList<>(gcsRules);
+	}
+
+	public boolean isRevoked() {
+		return revoked;
+	}
+
+	public void setRevoked(boolean revoked) {
+		this.revoked = revoked;
 	}
 }

@@ -23,7 +23,7 @@ class CredentialTokenServiceTest {
             new CredentialTokenService(store, Clock.fixed(NOW, ZoneOffset.UTC));
 
     @Test
-    void revokingAServiceAccountsTokensRemovesEveryFormOfItsPrincipalAndNoOtherAccounts() {
+    void revokingAServiceAccountsTokensRefusesEveryFormOfItsPrincipalAndNoOtherAccounts() {
         String email = "app@test-project.iam.gserviceaccount.com";
         List<StoredCredentialToken> revoked = List.of(
                 service.mintImpersonatedToken(email, NOW.plusSeconds(600)),
@@ -39,7 +39,10 @@ class CredentialTokenServiceTest {
         for (StoredCredentialToken token : List.of(revoked.get(0), revoked.get(1), revoked.get(2), downscoped)) {
             CredentialAuthenticationException error = assertThrows(CredentialAuthenticationException.class,
                     () -> service.lookupBearerToken(token.getTokenValue()));
-            assertEquals(CredentialAuthenticationException.Failure.UNKNOWN, error.failure());
+            assertEquals(CredentialAuthenticationException.Failure.ACCOUNT_STATE_INVALID, error.failure());
+            assertEquals("Request had invalid authentication credentials. Expected OAuth 2 access token, login "
+                    + "cookie or other valid authentication credential. "
+                    + "See https://developers.google.com/identity/sign-in/web/devconsole-project.", error.getMessage());
         }
         assertTrue(service.lookupBearerToken(kept.getTokenValue()).isPresent());
     }

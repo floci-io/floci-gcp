@@ -309,6 +309,25 @@ class IamCredentialsRestIntegrationTest {
                 .body("error.status", equalTo("PERMISSION_DENIED"));
     }
 
+    // Refusing a disabled account's credential requests is an enforce-mode behavior; the default mode is unchanged.
+    @Test
+    void disabledAccountStillGetsCredentialsWhenAuthorizationIsDisabled() {
+        String sa = createServiceAccount("rest-disabled");
+        given().contentType("application/json").body(Map.of())
+                .when().post("/v1/projects/sign-project/serviceAccounts/" + sa + ":disable")
+                .then().statusCode(200);
+
+        Map<String, Map<String, Object>> requests = Map.of(
+                "generateAccessToken", Map.of("scope", List.of(IamCredentialsService.CLOUD_PLATFORM_SCOPE)),
+                "generateIdToken", Map.of("audience", "https://foo.bar"),
+                "signBlob", Map.of("payload", "aGVsbG8="),
+                "signJwt", Map.of("payload", "{}"));
+        requests.forEach((method, body) -> given().urlEncodingEnabled(false).contentType("application/json")
+                .body(body)
+                .when().post("/v1/projects/-/serviceAccounts/" + sa + ":" + method)
+                .then().statusCode(200));
+    }
+
     private static String createServiceAccount(String accountId) {
         return given().urlEncodingEnabled(false).contentType("application/json")
                 .body(Map.of("accountId", accountId))

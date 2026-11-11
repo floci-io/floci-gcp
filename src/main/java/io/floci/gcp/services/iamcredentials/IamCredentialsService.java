@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.IamService;
@@ -25,6 +26,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -89,6 +91,7 @@ public class IamCredentialsService {
             throw GcpException.invalidArgument("service account is required");
         }
         validateScopes(scopes);
+        requireEnabledTarget(serviceAccount);
 
         long lifetimeSeconds = parseLifetimeSeconds(lifetime);
         Instant expireTime = clock.instant().plusSeconds(lifetimeSeconds);
@@ -103,6 +106,7 @@ public class IamCredentialsService {
         if (payload == null || payload.isEmpty()) {
             throw GcpException.invalidArgument("payload is required");
         }
+        requireEnabledTarget(serviceAccount);
         IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount,
                 ProtoJsonBytes.decode(payload, "payload"));
         Map<String, String> response = new LinkedHashMap<>();
@@ -130,6 +134,7 @@ public class IamCredentialsService {
             throw GcpException.invalidArgument("payload must be a JSON object of JWT claims");
         }
         validateExpiry(claims.get("exp"));
+        requireEnabledTarget(serviceAccount);
 
         SignedJwt signed = signClaims(serviceAccount, account -> payload);
         Map<String, String> response = new LinkedHashMap<>();
@@ -146,10 +151,29 @@ public class IamCredentialsService {
         if (audience == null || audience.isEmpty()) {
             throw GcpException.invalidArgument("audience is required");
         }
+        requireEnabledTarget(serviceAccount);
         Map<String, String> response = new LinkedHashMap<>();
         response.put("token", signClaims(serviceAccount,
                 account -> idTokenClaims(account, audience, includeEmail)).jwt());
         return response;
+    }
+
+    /**
+     * serviceAccounts.disable: "requests for new access tokens will fail"
+     * (https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable), as a token of
+     * the disabled account is refused. Only enforce mode evaluates identities; the default mode is unchanged.
+     */
+    private void requireEnabledTarget(String serviceAccount) {
+        if (config == null || iamService == null
+                || config.services().iam().authorizationMode() != EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+            return;
+        }
+        Optional<StoredServiceAccount> account = serviceAccount.chars().allMatch(Character::isDigit)
+                ? Optional.of(iamService.getServiceAccount(WILDCARD_PROJECT, serviceAccount))
+                : iamService.findServiceAccount(serviceAccount);
+        if (account.map(StoredServiceAccount::isDisabled).orElse(false)) {
+            throw CredentialAuthenticationException.accountStateInvalid();
+        }
     }
 
     private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {

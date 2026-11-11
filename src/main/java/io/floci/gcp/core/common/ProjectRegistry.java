@@ -130,6 +130,25 @@ public class ProjectRegistry {
     }
 
     /**
+     * Maps the project segment of {@code projects/{number}/...} to the ID of the known project with
+     * that number, keeping the rest of the name; any other name is returned unchanged. Never
+     * registers a project.
+     */
+    public String canonicalResourceName(String resource) {
+        if (resource == null || !resource.startsWith("projects/")) {
+            return resource;
+        }
+        int end = resource.indexOf('/', "projects/".length());
+        String project = end < 0 ? resource.substring("projects/".length())
+                : resource.substring("projects/".length(), end);
+        if (!isNumber(project)) {
+            return resource;
+        }
+        String rest = end < 0 ? "" : resource.substring(end);
+        return find(project).map(found -> "projects/" + found.getProjectId() + rest).orElse(resource);
+    }
+
+    /**
      * Creates a project, or adopts one that was only registered implicitly. The lookup and the write
      * run under the lock implicit registration uses, so concurrent creates and first-use requests
      * cannot interleave.

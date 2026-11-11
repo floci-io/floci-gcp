@@ -1,10 +1,18 @@
 package io.floci.gcp.core.common;
 
 import com.google.datastore.v1.LookupRequest;
+import com.google.protobuf.Message;
 import com.google.pubsub.v1.Topic;
+import com.google.pubsub.v1.UpdateTopicRequest;
+import com.google.storage.v2.Object;
+import com.google.storage.v2.RewriteObjectRequest;
+import com.google.storage.v2.WriteObjectRequest;
+import com.google.storage.v2.WriteObjectSpec;
+import io.floci.gcp.core.storage.StorageFactory;
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
+import io.grpc.Status;
 import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTest;
 import io.smallrye.common.vertx.VertxContext;
@@ -21,7 +29,12 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 class ProjectContextGrpcInterceptorTest {
@@ -30,6 +43,9 @@ class ProjectContextGrpcInterceptorTest {
 
     @Inject
     Vertx vertx;
+
+    @Inject
+    ProjectRegistry projects;
 
     @Test
     void handlerSeesTheProjectTheMessageNames() {
@@ -70,7 +86,7 @@ class ProjectContextGrpcInterceptorTest {
                 seen.add(currentProject());
             }
         };
-        new ProjectContextGrpcInterceptor("fallback")
+        new ProjectContextGrpcInterceptor("fallback", projects, Set.of())
                 .interceptCall(mock(ServerCall.class), new Metadata(), next)
                 .onMessage(LookupRequest.newBuilder().setProjectId("p3").build());
 
@@ -149,6 +165,111 @@ class ProjectContextGrpcInterceptorTest {
         assertEquals(List.of("first", "first"), seen);
     }
 
+    @Test
+    void aRegisteredProjectNumberTheMessageNamesResolvesToItsId() {
+        String id = "grpc-ctx-message";
+        projects.observe(id);
+        ServerCall.Listener<Topic> listener = intercept(new Metadata());
+        listener.onMessage(Topic.newBuilder().setName("projects/" + ProjectNumbers.of(id) + "/topics/t").build());
+        listener.onHalfClose();
+
+        assertEquals(List.of(id, id), seen);
+    }
+
+    @Test
+    void aRegisteredProjectNumberTheRoutingHeaderNamesResolvesToItsIdFromTheStartOfTheCall() {
+        String id = "grpc-ctx-header";
+        projects.observe(id);
+        List<String> atStart = new ArrayList<>();
+        ServerCallHandler<Topic, Topic> next = (call, metadata) -> {
+            atStart.add(currentProject());
+            return recording();
+        };
+        ServerCall.Listener<Topic> listener = new ProjectContextGrpcInterceptor("fallback", projects, Set.of())
+                .interceptCall(mockCall(), routedTo(ProjectNumbers.of(id)), next);
+        listener.onMessage(Topic.getDefaultInstance());
+
+        assertEquals(List.of(id), atStart);
+        assertEquals(List.of(id), seen);
+    }
+
+    @Test
+    void anUnregisteredProjectNumberIsKeptAsGiven() {
+        String number = "990000000146";
+        ServerCall.Listener<Topic> listener = intercept(new Metadata());
+        listener.onMessage(Topic.newBuilder().setName("projects/" + number + "/topics/t").build());
+
+        assertEquals(List.of(number), seen);
+        assertTrue(projects.find(number).isEmpty());
+    }
+
+    @Test
+    void aProjectNamedForTheFirstTimeIsRegisteredSoItsNumberResolvesLater() {
+        String id = "grpc-ctx-first-use";
+        ServerCall.Listener<Topic> first = intercept(new Metadata());
+        first.onMessage(Topic.newBuilder().setName("projects/" + id + "/topics/t").build());
+        ServerCall.Listener<Topic> second = intercept(new Metadata());
+        second.onMessage(Topic.newBuilder().setName("projects/" + ProjectNumbers.of(id) + "/topics/t").build());
+
+        assertEquals(List.of(id, id), seen);
+    }
+
+    @Test
+    void strictProjectsRejectAnUnknownProjectIdWithoutRunningTheHandler() {
+        assertRejected(Topic.newBuilder().setName("projects/grpc-unknown/topics/t").build(), new Metadata());
+    }
+
+    @Test
+    void strictProjectsRejectAnUnknownProjectNumberWithoutRunningTheHandler() {
+        assertRejected(Topic.newBuilder().setName("projects/990000000147/topics/t").build(), new Metadata());
+    }
+
+    @Test
+    void strictProjectsRejectAnUnknownProjectInTheRoutingHeaderWhenTheMessageNamesNone() {
+        assertRejected(Topic.getDefaultInstance(), routedTo("grpc-unknown"));
+    }
+
+    @Test
+    void strictProjectsCheckTheMessagesProjectRatherThanTheRoutingHeaders() {
+        ServerCall<Topic, Topic> call = mockCall();
+        ServerCall.Listener<Topic> listener = new ProjectContextGrpcInterceptor("fallback", strictProjects(), Set.of())
+                .interceptCall(call, routedTo("grpc-unknown"), (c, h) -> recording());
+        listener.onMessage(Topic.newBuilder().setName("projects/fallback/topics/t").build());
+
+        assertEquals(List.of("fallback"), seen);
+        verify(call, times(0)).close(any(), any());
+    }
+
+    @Test
+    void strictProjectsResolveTheDefaultProjectByIdAndNumber() {
+        ServerCall<Topic, Topic> call = mockCall();
+        ProjectContextGrpcInterceptor interceptor = new ProjectContextGrpcInterceptor("fallback", strictProjects(), Set.of());
+        interceptor.interceptCall(call, new Metadata(), (c, h) -> recording())
+                .onMessage(Topic.newBuilder().setName("projects/fallback/topics/t").build());
+        interceptor.interceptCall(call, new Metadata(), (c, h) -> recording())
+                .onMessage(Topic.newBuilder().setName("projects/" + ProjectNumbers.of("fallback") + "/topics/t").build());
+
+        assertEquals(List.of("fallback", "fallback"), seen);
+        verify(call, times(0)).close(any(), any());
+    }
+
+    @Test
+    void aRejectionAfterTheHandlerClosedTheCallDoesNotCloseItTwice() {
+        ServerCall<Topic, Topic> call = mockCall();
+        ServerCallHandler<Topic, Topic> closing = (held, metadata) -> new ServerCall.Listener<>() {
+            @Override
+            public void onMessage(Topic message) {
+                held.close(Status.OK, new Metadata());
+            }
+        };
+        ServerCall.Listener<Topic> listener = new ProjectContextGrpcInterceptor("fallback", strictProjects(), Set.of())
+                .interceptCall(call, new Metadata(), closing);
+        listener.onMessage(Topic.getDefaultInstance());
+        listener.onMessage(Topic.newBuilder().setName("projects/grpc-unknown/topics/t").build());
+
+        verify(call, times(1)).close(any(), any());
+    }
+
     /**
      * The interceptor reads a request through its method's proto schema, because in a native image
      * the message's own descriptor is reached by reflection; a hand-built method without a schema
@@ -177,9 +298,106 @@ class ProjectContextGrpcInterceptorTest {
         done.get(5, TimeUnit.SECONDS);
     }
 
+    private void assertRejected(Topic message, Metadata headers) {
+        ServerCall<Topic, Topic> call = mockCall();
+        ServerCall.Listener<Topic> listener = new ProjectContextGrpcInterceptor("fallback", strictProjects(), Set.of())
+                .interceptCall(call, headers, (c, h) -> recording());
+        listener.onMessage(message);
+        listener.onHalfClose();
+        listener.onComplete();
+
+        assertEquals(List.of("cancelled"), seen);
+        verify(call, times(1)).close(
+                argThat(status -> status.getCode() == Status.Code.PERMISSION_DENIED), any());
+    }
+
+    private static ProjectRegistry strictProjects() {
+        return new ProjectRegistry(StorageFactory.createInMemory(), "fallback", true);
+    }
+
+    private static Metadata routedTo(String project) {
+        Metadata headers = new Metadata();
+        headers.put(RequestTarget.ROUTING_HEADER, "name=projects%2F" + project + "%2Ftopics%2Ft");
+        return headers;
+    }
+
     @SuppressWarnings("unchecked")
+    @Test
+    void aKeyInAnotherProjectIsNotRegisteredAsAProjectOfTheCall() {
+        String keyProject = "grpc-ctx-kms-key";
+
+        runOnMessage(projects, Set.of("storage.googleapis.com"), writeWithKeyIn(keyProject), new Metadata());
+
+        assertTrue(projects.find(keyProject).isEmpty());
+    }
+
+    @Test
+    void aTopLevelKeyInAnotherProjectIsNotRegisteredEither() {
+        String keyProject = "grpc-ctx-kms-top";
+
+        runOnMessage(projects, Set.of("storage.googleapis.com"), RewriteObjectRequest.newBuilder()
+                .setDestinationKmsKey(keyName(keyProject)).build(), new Metadata());
+
+        assertTrue(projects.find(keyProject).isEmpty());
+    }
+
+    @Test
+    void strictProjectsDoNotRejectACallForAKeyInAnotherProject() {
+        ServerCall<Message, Message> call = runOnMessage(strictProjects(), Set.of("storage.googleapis.com"),
+                writeWithKeyIn("grpc-unknown-key"), new Metadata());
+
+        verify(call, times(0)).close(any(), any());
+    }
+
+    @Test
+    void strictProjectsStillCheckTheRoutingHeaderWhenTheMessageNamesOnlyAKey() {
+        ServerCall<Message, Message> call = runOnMessage(strictProjects(), Set.of("storage.googleapis.com"),
+                writeWithKeyIn("fallback"), routedTo("grpc-unknown"));
+
+        verify(call).close(argThat(status -> status.getCode() == Status.Code.PERMISSION_DENIED), any());
+    }
+
+    @Test
+    void strictProjectsRejectAnUnknownProjectInTheServicesOwnNestedResource() {
+        ServerCall<Message, Message> call = runOnMessage(strictProjects(), Set.of("pubsub.googleapis.com"),
+                UpdateTopicRequest.newBuilder()
+                        .setTopic(Topic.newBuilder().setName("projects/grpc-unknown/topics/t")).build(),
+                new Metadata());
+
+        verify(call).close(argThat(status -> status.getCode() == Status.Code.PERMISSION_DENIED), any());
+    }
+
+    private static WriteObjectRequest writeWithKeyIn(String project) {
+        return WriteObjectRequest.newBuilder().setWriteObjectSpec(WriteObjectSpec.newBuilder()
+                .setResource(Object.newBuilder().setBucket("projects/_/buckets/b").setKmsKey(keyName(project))))
+                .build();
+    }
+
+    private static String keyName(String project) {
+        return "projects/" + project + "/locations/l/keyRings/r/cryptoKeys/c";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ServerCall<Message, Message> runOnMessage(ProjectRegistry registry, Set<String> domains,
+            Message message, Metadata headers) {
+        ServerCall<Message, Message> call = mock(ServerCall.class);
+        new ProjectContextGrpcInterceptor("fallback", registry, domains)
+                .interceptCall(call, headers, (c, h) -> new ServerCall.Listener<Message>() {})
+                .onMessage(message);
+        return call;
+    }
+
+    private static ServerCall<Topic, Topic> mockCall() {
+        return mock(ServerCall.class);
+    }
+
     private ServerCall.Listener<Topic> intercept(Metadata headers) {
-        ServerCallHandler<Topic, Topic> next = (call, metadata) -> new ServerCall.Listener<>() {
+        return new ProjectContextGrpcInterceptor("fallback", projects, Set.of())
+                .interceptCall(mockCall(), headers, (call, metadata) -> recording());
+    }
+
+    private ServerCall.Listener<Topic> recording() {
+        return new ServerCall.Listener<>() {
             @Override
             public void onMessage(Topic message) {
                 seen.add(currentProject());
@@ -189,8 +407,12 @@ class ProjectContextGrpcInterceptorTest {
             public void onHalfClose() {
                 seen.add(currentProject());
             }
+
+            @Override
+            public void onCancel() {
+                seen.add("cancelled");
+            }
         };
-        return new ProjectContextGrpcInterceptor("fallback").interceptCall(mock(ServerCall.class), headers, next);
     }
 
     private static String currentProject() {

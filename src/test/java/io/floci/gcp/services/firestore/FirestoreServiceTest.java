@@ -549,6 +549,49 @@ class FirestoreServiceTest {
                 .build();
     }
 
+    @Test
+    void aNameCursorNamingTheProjectByNumberPositionsAmongDocumentsStoredUnderTheId() {
+        String byNumber = "projects/123456789012/databases/(default)/documents";
+        service = new FirestoreService(storage, name -> name.replace("projects/123456789012/", "projects/p1/"));
+        for (String id : List.of("a", "b", "c")) {
+            service.applyWrite(Write.newBuilder().setUpdate(Document.newBuilder()
+                    .setName(byNumber + "/customers/" + id)).build(), Instant.now());
+        }
+        Value b = Value.newBuilder().setReferenceValue(byNumber + "/customers/b").build();
+        StructuredQuery.Builder byName = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setCollectionId("customers"))
+                .addOrderBy(StructuredQuery.Order.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("__name__")));
+
+        assertEquals(List.of("c"), ids(service.runQuery(byNumber,
+                byName.clone().setStartAt(Cursor.newBuilder().addValues(b)).build())));
+        assertEquals(List.of("a", "b"), ids(service.runQuery(byNumber,
+                byName.clone().setEndAt(Cursor.newBuilder().addValues(b)).build())));
+    }
+
+    @Test
+    void documentsSavedUnderAProjectNumberMoveToTheProjectIdAtStartup() {
+        String byNumber = "projects/123456789012/databases/(default)/documents/customers/";
+        String byId = DB + "/documents/customers/";
+        storage.put(byNumber + "old", new StoredDocument(byNumber + "old", "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z", Map.of("v", StoredValue.fromProto(
+                        Value.newBuilder().setStringValue("saved").build()))));
+        storage.put(byNumber + "both", new StoredDocument(byNumber + "both", "t", "t", Map.of()));
+        storage.put(byId + "both", new StoredDocument(byId + "both", "t", "t", Map.of()));
+        service = new FirestoreService(storage, name -> name.replace("projects/123456789012/", "projects/p1/"));
+
+        assertEquals(1, service.renameNumberNamedDocuments());
+
+        StoredDocument moved = service.getDocument(byNumber + "old").orElseThrow();
+        assertEquals(byId + "old", moved.getName());
+        assertEquals("2026-01-01T00:00:00Z", moved.getCreateTime());
+        assertEquals("saved", moved.getFields().get("v").getStringValue());
+        assertTrue(storage.get(byNumber + "old").isEmpty());
+        assertTrue(storage.get(byNumber + "both").isPresent());
+        assertEquals(List.of("both", "old"), ids(service.listDocuments(DB + "/documents", "customers", "")));
+        assertEquals(0, service.renameNumberNamedDocuments());
+    }
+
     private static List<String> ids(List<StoredDocument> docs) {
         return docs.stream().map(d -> d.getName().substring(d.getName().lastIndexOf('/') + 1)).toList();
     }

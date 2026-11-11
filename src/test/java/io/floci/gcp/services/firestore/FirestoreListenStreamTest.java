@@ -140,6 +140,31 @@ class FirestoreListenStreamTest {
     }
 
     @Test
+    void targetsAndWritesNamingTheProjectByNumberMeetUnderTheProjectId() {
+        String byNumber = "projects/123456789012/databases/(default)/documents";
+        service = new FirestoreService(new InMemoryStorage<String, StoredDocument>(),
+                name -> name.replace("projects/123456789012/", "projects/p1/"));
+        controller = new FirestoreController(service);
+        Target query = lessThan3(1).toBuilder()
+                .setQuery(lessThan3(1).getQuery().toBuilder().setParent(byNumber)).build();
+        Recorder queries = listen(query);
+        Recorder documents = listen(Target.newBuilder().setTargetId(2)
+                .setDocuments(Target.DocumentsTarget.newBuilder().addDocuments(byNumber + "/col/a")).build());
+
+        int queryMark = queries.size();
+        int documentMark = documents.size();
+        service.applyWrite(Write.newBuilder().setUpdate(Document.newBuilder().setName(byNumber + "/col/a")
+                .putFields("n", Value.newBuilder().setIntegerValue(1).build())).build(), Instant.now());
+
+        for (List<ListenResponse> changes : List.of(queries.messagesSince(queryMark),
+                documents.messagesSince(documentMark))) {
+            assertEquals(2, changes.size(), changes::toString);
+            assertEquals(PARENT + "/col/a", changes.get(0).getDocumentChange().getDocument().getName());
+        }
+        assertTrue(service.getDocument(byNumber + "/col/a").isPresent());
+    }
+
+    @Test
     void aDocumentsTargetReportsAMissingDocumentAsDeletedAndThenItsCreation() {
         put("col/b", 6);
         Recorder recorder = listen(Target.newBuilder().setTargetId(2)

@@ -118,9 +118,12 @@ See [IAM enforcement and limitations](iam.md#opt-in-enforcement).
 
 ## Scope and deviations
 
-- Strict mode and number-to-ID mapping apply to REST requests only. gRPC services take
-  the project from the full resource name and do not consult the registry, so strict mode
-  does not reject unknown projects over gRPC.
+- Strict mode applies to REST and gRPC requests. A number maps to its ID as the project of the
+  request on both. Over gRPC the resource names in the request are mapped too (see
+  [Multi-project](../configuration/multi-project.md#project-ids-and-project-numbers) for which fields), so
+  `projects/{number}/...` and `projects/{id}/...` address the same data; over REST, services that
+  key on the resource name in the path still keep them apart. See
+  [Multi-project: known gaps](../configuration/multi-project.md#known-gaps).
 - Deleted projects are never purged, so a deleted project ID cannot be reused, just as in
   GCP.
 - `getAncestry` returns the project and its direct parent only. Folders and organizations

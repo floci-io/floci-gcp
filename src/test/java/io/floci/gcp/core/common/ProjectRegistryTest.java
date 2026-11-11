@@ -65,6 +65,22 @@ class ProjectRegistryTest {
     }
 
     @Test
+    void canonicalResourceNameMapsTheProjectSegmentOfAnyName() {
+        ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
+        registry.observe("seen-proj");
+        String number = ProjectNumbers.of("seen-proj");
+
+        assertEquals("projects/seen-proj/topics/t", registry.canonicalResourceName("projects/" + number + "/topics/t"));
+        assertEquals("projects/seen-proj", registry.canonicalResourceName("projects/" + number));
+        assertEquals("projects/123456789012/topics/t", registry.canonicalResourceName("projects/123456789012/topics/t"));
+        assertEquals("projects/seen-proj/topics/t", registry.canonicalResourceName("projects/seen-proj/topics/t"));
+        assertEquals("projects/_/buckets/b", registry.canonicalResourceName("projects/_/buckets/b"));
+        assertEquals("//pubsub.googleapis.com/projects/" + number + "/topics/t",
+                registry.canonicalResourceName("//pubsub.googleapis.com/projects/" + number + "/topics/t"));
+        assertFalse(registry.find("123456789012").isPresent());
+    }
+
+    @Test
     void resolvesRegisteredProjectsAndDefaultProjectByNumber() {
         ProjectRegistry registry = new ProjectRegistry(new InMemoryStorage<>(), "default-proj", false);
         registry.observe("seen-proj");

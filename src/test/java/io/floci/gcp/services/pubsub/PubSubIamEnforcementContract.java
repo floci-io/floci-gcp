@@ -27,6 +27,8 @@ import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Topic;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
@@ -70,6 +72,8 @@ abstract class PubSubIamEnforcementContract {
     IamService policies;
     @Inject
     CredentialTokenService tokens;
+    @Inject
+    ProjectRegistry projects;
     @TestHTTPResource
     URI endpoint;
 
@@ -529,6 +533,52 @@ abstract class PubSubIamEnforcementContract {
         assertTrue(closed.await(5, TimeUnit.SECONDS));
         assertEquals(Status.Code.PERMISSION_DENIED, Status.fromThrowable(error.get()).getCode());
         assertEquals("queued", service.pull(subscription, 1).getFirst().getMessage().getData().toStringUtf8());
+    }
+
+    @Test
+    void aResourceConditionMatchesTheProjectIdWhenTheCallerNamesTheProjectByNumber() {
+        String byNumber = registeredByNumber();
+        grant(project, "roles/pubsub.admin", "resource.name == '" + project + "/topics/allowed'");
+        PublisherGrpc.PublisherBlockingStub publisher = PublisherGrpc.newBlockingStub(caller)
+                .withDeadlineAfter(5, TimeUnit.SECONDS);
+
+        publisher.createTopic(Topic.newBuilder().setName(byNumber + "/topics/allowed").build());
+        service.getTopic(project + "/topics/allowed");
+        if (enforced()) {
+            StatusRuntimeException error = assertThrows(StatusRuntimeException.class,
+                    () -> publisher.createTopic(Topic.newBuilder().setName(byNumber + "/topics/excluded").build()));
+            assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
+            assertThrows(GcpException.class, () -> service.getTopic(project + "/topics/excluded"));
+        }
+    }
+
+    @Test
+    void streamingPullDeliversWhenTheCallerNamesTheProjectByNumber() throws InterruptedException {
+        String byNumber = registeredByNumber();
+        String topic = project + "/topics/stream-by-number";
+        String subscription = project + "/subscriptions/stream-by-number";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        grant(subscription, "roles/pubsub.subscriber", null);
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("by-number")).build()));
+
+        CountDownLatch closed = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        StreamObserver<StreamingPullRequest> requests = streamingRequests(closed, error, delivered);
+        requests.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription(byNumber + "/subscriptions/stream-by-number").build());
+
+        assertTrue(delivered.await(5, TimeUnit.SECONDS), () -> "stream closed with " + error.get());
+        requests.onCompleted();
+    }
+
+    /** Registers the test's project and returns its name in the number form. */
+    private String registeredByNumber() {
+        String id = project.substring("projects/".length());
+        projects.observe(id);
+        return "projects/" + ProjectNumbers.of(id);
     }
 
     private StreamObserver<StreamingPullRequest> streamingRequests(CountDownLatch closed,

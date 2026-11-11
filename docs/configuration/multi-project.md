@@ -45,15 +45,20 @@ show up in the [Resource Manager](../services/resource-manager.md) API.
 
 gRPC requests resolve the project in this order: the request message's own target
 (`projects/{project}/topics/{topic}`, or a `project_id` field), then the `x-goog-request-params`
-routing header, then the default project. Over gRPC a project number is not yet mapped to its
-project ID.
+routing header, then the default project. As on REST, the project found this way is registered
+on first use, and a known project's number resolves to its ID as the project of the call.
+The resource names in the request message reach the service with a known project's number
+replaced by its ID, so `projects/{number}/topics/t` and `projects/{id}/topics/t` name the same
+topic, and responses return the ID form. A number that belongs to no known project is passed
+on unchanged.
 
 ## Strict Mode
 
 By default any project ID works. Set `FLOCI_GCP_PROJECTS_STRICT=true` to make only the
 default project and projects created with `POST /v1/projects` exist. REST requests for any
 other project then return `403 PERMISSION_DENIED`, as GCP does for a project you cannot
-see. gRPC requests are not checked. See
+see, and gRPC calls fail with `PERMISSION_DENIED`. A gRPC call is checked against the project
+that decides its context, so another project a request only refers to is not checked. See
 [Resource Manager: strict mode](../services/resource-manager.md#strict-mode).
 
 ## Working with Multiple Projects
@@ -133,8 +138,12 @@ gets the same number and no setup is needed. Resource Manager reports it
 (`GET /v1/projects/{project}`), Cloud Storage uses it in bucket resources (`projectNumber`,
 `projects/{projectNumber}`), and Firebase Auth uses it in `securetoken` responses.
 
-Cloud Storage accepts either the ID or the number when listing buckets. Other services expect
-the project ID in resource names.
+Cloud Storage accepts either the ID or the number when listing buckets. Over gRPC, a known
+project's number is mapped to its ID in the request's own `name`, `parent`, `resource`,
+`project`, `project_id` and `database` fields and repeated name lists, and in every field the
+API's protos annotate as a resource name, nested ones included. Firestore also maps the document
+names of writes, cursors and listen targets. Over REST, other services expect the project ID
+there.
 
 ## The `-` Wildcard
 
@@ -151,7 +160,9 @@ Where GCP documents `-` as a wildcard, floci-gcp accepts it:
 
 In the `persistent`, `hybrid` and `wal` [storage modes](storage.md) the project is saved with
 every resource (in its name, as a key prefix, or as the owner of a bucket), so projects stay
-isolated across restarts.
+isolated across restarts. Firestore documents that an earlier version saved under a known
+project's number are moved to the project ID at startup; a document already saved under the ID
+is kept, and the number-form copy is left unchanged.
 
 ## Opt-in Modes
 
@@ -166,10 +177,16 @@ evaluated. These settings make it stricter. All are off by default.
 ## Known Gaps
 
 - No organizations or folders: every project stands alone, and there are no organization policies.
-- Services that store by resource name keep the project as the request names it, so
-  `projects/{number}/...` and `projects/{id}/...` address different data there. A number
-  maps to the ID only for the request project on REST (the services that store by request
-  project, Cloud Storage bucket listing), for Service Usage enablement, and for project IAM
-  policies.
+- On REST, services that store by the resource name in the path keep the project as the request
+  names it, so `projects/{number}/...` and `projects/{id}/...` address different data there. A
+  number maps to the ID for the request project, for Service Usage enablement, and for project
+  IAM policies. Cloud Storage bucket listing accepts a number directly.
+- Over gRPC, a name in a nested field that the API's protos do not annotate as a resource name is
+  kept as the request names it. Firestore is the exception: its document names are mapped
+  wherever they appear.
+- A gRPC response names the project by ID even when the request used its number. Real Secret
+  Manager returns the project number in resource names whichever form the request used.
+- Only the first message of a gRPC stream is mapped; later messages of the same stream (upload
+  chunks, appended rows, acknowledgements) are passed on as sent.
 - Project numbers are derived from the ID. They are stable, but they are not the numbers real
   GCP would assign.

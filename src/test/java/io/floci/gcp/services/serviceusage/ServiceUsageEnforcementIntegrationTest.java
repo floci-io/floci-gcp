@@ -225,7 +225,7 @@ class ServiceUsageEnforcementIntegrationTest {
         assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
 
         enable(project, "pubsub.googleapis.com");
-        assertEquals(topic.getName(), publisher.createTopic(topic).getName());
+        assertEquals("projects/" + project + "/topics/n1", publisher.createTopic(topic).getName());
     }
 
     @Test

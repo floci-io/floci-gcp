@@ -3040,17 +3040,7 @@ public class BigQueryService {
                                                 Set<Integer> columnPositions) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
         ScriptNameResolution resolution = scriptNameResolution(tokens);
-        Set<String> aliases = new LinkedHashSet<>();
-        for (int index = 0; index < tokens.size(); index++) {
-            if (tokens.get(index).isKeyword("AS")) {
-                int aliasIndex = nextSignificantToken(tokens, index + 1);
-                if (aliasIndex >= 0 && tokens.get(aliasIndex).kind == SqlDialectTranslator.Kind.IDENT) {
-                    aliases.add(tokens.get(aliasIndex).text.toLowerCase(Locale.ROOT));
-                }
-            }
-        }
         StringBuilder expanded = new StringBuilder();
-        boolean[] aliasReferences = aliasReferencePositions(tokens);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             String name = token.text.toLowerCase(Locale.ROOT);
@@ -3064,7 +3054,7 @@ public class BigQueryService {
                     || resolution.hides(name, index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnName
-                    || aliases.contains(name) && aliasReferences[index]) {
+                    || resolution.isAliasReference(name, index)) {
                 expanded.append(token.text);
                 continue;
             }
@@ -3133,7 +3123,8 @@ public class BigQueryService {
      * a derived table exposes.
      */
     private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames,
-                                        int[] depths) {
+                                        int[] depths, String[] clauses,
+                                        Map<String, Set<Integer>> aliasDepths) {
 
         /**
          * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo} and, when
@@ -3144,6 +3135,22 @@ public class BigQueryService {
 
         private boolean startsSelectItem(int index) {
             return selectItemStarts.contains(index);
+        }
+
+        /**
+         * Whether the name is an alias of the query at this token: an unqualified name there stands for the
+         * select-list alias instead of a script variable, but only in the clauses that resolve aliases and
+         * only where that query declares it. BigQuery resolves {@code ORDER BY id} against
+         * {@code SELECT name AS id}, while a select-list item of the same name, and a query nested inside,
+         * still name the variable: {@code DECLARE id INT64 DEFAULT 99; SELECT id AS id} selects 99.
+         */
+        private boolean isAliasReference(String name, int index) {
+            String clause = clauses[index];
+            if (clause == null || !ALIAS_CLAUSES.contains(clause)) {
+                return false;
+            }
+            Set<Integer> declaredDepths = aliasDepths.get(name);
+            return declaredDepths != null && declaredDepths.contains(depths[index]);
         }
 
         private boolean hides(String name, int index) {
@@ -3166,6 +3173,8 @@ public class BigQueryService {
         List<Boolean> withClauses = new ArrayList<>();
         withClauses.add(false);
         int[] depths = new int[tokens.size()];
+        String[] clauseByToken = new String[tokens.size()];
+        Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
@@ -3200,6 +3209,10 @@ public class BigQueryService {
                 withClauses.set(depth, false);
             }
             String name = token.text.toLowerCase(Locale.ROOT);
+            clauseByToken[index] = clauses.get(depth);
+            if (previous >= 0 && tokens.get(previous).isKeyword("AS") && "SELECT".equals(clauses.get(depth))) {
+                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(depth);
+            }
             if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
                 int open = nextSignificantToken(tokens, next + 1);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
@@ -3219,7 +3232,7 @@ public class BigQueryService {
                 selectItemStarts.add(index);
             }
         }
-        return new ScriptNameResolution(selectItemStarts, hiddenNames, depths);
+        return new ScriptNameResolution(selectItemStarts, hiddenNames, depths, clauseByToken, aliasDepths);
     }
 
     /**
@@ -3325,6 +3338,9 @@ public class BigQueryService {
     private static final Set<String> SCRIPT_CLAUSE_KEYWORDS = Set.of("FROM", "WHERE", "GROUP", "HAVING",
             "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT");
 
+    /** The clauses where BigQuery resolves an unqualified name against the select-list aliases. */
+    private static final Set<String> ALIAS_CLAUSES = Set.of("GROUP", "ORDER", "HAVING", "QUALIFY", "WINDOW");
+
     private static int nextSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
         for (int index = from; index < tokens.size(); index++) {
             if (tokens.get(index).kind != SqlDialectTranslator.Kind.SPACE) {
@@ -3332,39 +3348,6 @@ public class BigQueryService {
             }
         }
         return -1;
-    }
-
-    /**
-     * Positions where an unqualified name may stand for a select-list alias instead of a script
-     * variable. BigQuery resolves aliases in GROUP BY, ORDER BY, HAVING and QUALIFY, but a
-     * select-list expression or a WHERE predicate does not see them, so a variable there has to be
-     * substituted: {@code DECLARE id INT64 DEFAULT 99; SELECT id AS id} selects 99. Identifiers inside
-     * a nested expression stay protected, which keeps the conservative behavior for subqueries.
-     */
-    private static boolean[] aliasReferencePositions(List<SqlDialectTranslator.Token> tokens) {
-        boolean[] protectedPositions = new boolean[tokens.size()];
-        int depth = 0;
-        String clause = null;
-        for (int index = 0; index < tokens.size(); index++) {
-            SqlDialectTranslator.Token token = tokens.get(index);
-            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
-                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
-                    depth++;
-                } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
-                    depth--;
-                }
-            } else if (depth == 0 && token.kind == SqlDialectTranslator.Kind.IDENT) {
-                switch (token.upper()) {
-                    case "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "QUALIFY", "WINDOW",
-                            "UNION", "INTERSECT", "EXCEPT", "LIMIT", "OFFSET" -> clause = token.upper();
-                    default -> { }
-                }
-            }
-            protectedPositions[index] = depth > 0
-                    || "GROUP".equals(clause) || "ORDER".equals(clause) || "HAVING".equals(clause)
-                    || "QUALIFY".equals(clause) || "WINDOW".equals(clause);
-        }
-        return protectedPositions;
     }
 
     private static String sqlVariableLiteral(Object value) {

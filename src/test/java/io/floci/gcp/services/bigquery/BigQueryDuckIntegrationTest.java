@@ -1636,6 +1636,14 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("7"))
                 .body("rows[0].f[1].v", equalTo("1"));
+        // A subquery that aliases the name still names the variable inside it: 7 and 7.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                SELECT x AS v, (SELECT x AS x FROM UNNEST([1]) AS u) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", equalTo("7"));
         // A CTE reference inside a nested query still names the table.
         query(Map.of("query", """
                 DECLARE x INT64 DEFAULT 7;

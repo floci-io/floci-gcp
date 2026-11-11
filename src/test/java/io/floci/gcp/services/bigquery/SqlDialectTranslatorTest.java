@@ -330,6 +330,20 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aRequestOfOneProceduralStatementIsAScript() {
+        // BigQuery runs a lone declaration, assignment or block as a script and answers with no rows;
+        // a lone query, or DDL that needs a session, stays an ordinary statement.
+        assertTrue(SqlDialectTranslator.singleStatementScript("DECLARE x INT64;"));
+        assertTrue(SqlDialectTranslator.singleStatementScript("SET x = 1;"));
+        assertTrue(SqlDialectTranslator.singleStatementScript("BREAK;"));
+        // A block spans several statements, which the multi-statement check already routes.
+        assertTrue(SqlDialectTranslator.multiStatementScript("WHILE FALSE DO SET x = 1; END WHILE;"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("SELECT 1"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("SELECT 1; SELECT 2"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("CREATE TEMP TABLE t (x INT64);"));
+    }
+
+    @Test
     void aPositionalParameterInOneDynamicStatementBindsThroughPrependedTemporarySetup() {
         List<Map<String, Object>> parameters = List.of(Map.of(
                 "parameterType", Map.of("type", "INT64"),

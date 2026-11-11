@@ -1496,6 +1496,28 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void singleProceduralStatementsRunAsScripts() {
+        // Live BigQuery accepts a request made only of declarations and returns no rows.
+        query(Map.of("query", "DECLARE x INT64;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", anyOf(nullValue(), hasSize(0)));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 5;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", anyOf(nullValue(), hasSize(0)));
+        // Live BigQuery returns 1: control flow is a script even when it is the whole request.
+        query(Map.of("query", "IF TRUE THEN SELECT 1 AS a; END IF;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("a"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // Live BigQuery rejects an assignment to an undeclared variable.
+        query(Map.of("query", "SET x = 1;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("has not been declared"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

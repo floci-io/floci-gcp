@@ -801,6 +801,7 @@ public class BigQueryService {
         }
         String dataProjectId = options.dataProjectId(projectId);
         boolean script = SqlDialectTranslator.multiStatementScript(options.sql())
+                || SqlDialectTranslator.singleStatementScript(options.sql())
                 || isExecuteImmediateStatement(options.sql());
         SqlDialectTranslator.ProceduralScript procedural = script
                 ? SqlDialectTranslator.proceduralScript(options.sql()) : null;

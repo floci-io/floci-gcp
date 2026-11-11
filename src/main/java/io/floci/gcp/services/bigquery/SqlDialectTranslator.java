@@ -101,6 +101,10 @@ final class SqlDialectTranslator {
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET",
             "UNION", "INTERSECT", "EXCEPT", "SELECT");
 
+    /** Statements BigQuery runs as a script even when the request holds only that statement. */
+    private static final Set<String> SCRIPT_STATEMENT_KEYWORDS = Set.of("DECLARE", "SET", "BEGIN", "IF", "WHILE",
+            "LOOP", "REPEAT", "FOR", "CASE", "BREAK", "LEAVE", "CONTINUE", "ITERATE");
+
     private static final Set<String> NON_ALIAS_KEYWORDS = Set.of(
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "UNION",
             "INTERSECT", "EXCEPT", "SELECT", "FROM", "JOIN", "INNER", "LEFT", "RIGHT", "FULL",
@@ -489,6 +493,20 @@ final class SqlDialectTranslator {
             throw invalidQuery("Syntax error: Unexpected end of script");
         }
         return parseStatement(statements.getLast(), projectId, jobProjectId, defaultDatasetId);
+    }
+
+    /**
+     * A request of one statement that only a script can run: a declaration, an assignment, control flow
+     * or a loop-control statement. BigQuery runs such a request as a script, so it returns no rows when
+     * no statement produces a result.
+     */
+    static boolean singleStatementScript(String sql) {
+        List<String> statements = splitScript(sql);
+        if (statements.size() != 1) {
+            return false;
+        }
+        List<Token> tokens = significant(new Lexer(statements.getFirst()).tokenize());
+        return !tokens.isEmpty() && SCRIPT_STATEMENT_KEYWORDS.stream().anyMatch(tokens.getFirst()::isKeyword);
     }
 
     static boolean multiStatementScript(String sql) {

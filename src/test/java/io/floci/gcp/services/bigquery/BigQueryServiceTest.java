@@ -668,6 +668,21 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void outOfRangeIntegerLiteralIsAnInvalidQuery() {
+        // Live BigQuery: "Invalid integer literal: 9223372036854775808", a query error, not a server error.
+        String sql = "DECLARE x INT64 DEFAULT 9223372036854775808; SELECT x;";
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null, sql, null));
+
+        assertEquals("invalidQuery", error.getReason());
+        assertTrue(error.getMessage().contains("Invalid integer literal: 9223372036854775808"));
+
+        StoredJob failed = service.insertQuery(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, List.of(), null, false, false));
+        assertEquals("DONE", failed.getState());
+        assertEquals("invalidQuery", failed.getErrorReason());
+    }
+
+    @Test
     void declareSupportsMultipleNamesAndDefaultTypeInference() {
         seedTwoRows();
         StoredJob job = service.query(PROJECT, "US", null, """

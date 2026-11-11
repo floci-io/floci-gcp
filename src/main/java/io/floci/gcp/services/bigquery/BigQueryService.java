@@ -1602,15 +1602,20 @@ public class BigQueryService {
         }
         Object value;
         String type;
-        try {
-            value = scriptOperand(expression, context);
-            type = value == null ? "STRING" : inferredScriptVariableType(value);
-        } catch (GcpException e) {
-            ScriptExpressionValue evaluated = evaluateScriptSqlExpression(
-                    expression, projectId, jobProjectId, options, context, jobLocation);
-            value = evaluated.value();
-            type = evaluated.type() != null ? evaluated.type()
-                    : value == null ? "STRING" : inferredScriptVariableType(value);
+        if (isScriptIntegerLiteral(expression)) {
+            value = scriptOperand(expression.trim(), context);
+            type = inferredScriptVariableType(value);
+        } else {
+            try {
+                value = scriptOperand(expression, context);
+                type = value == null ? "STRING" : inferredScriptVariableType(value);
+            } catch (GcpException e) {
+                ScriptExpressionValue evaluated = evaluateScriptSqlExpression(
+                        expression, projectId, jobProjectId, options, context, jobLocation);
+                value = evaluated.value();
+                type = evaluated.type() != null ? evaluated.type()
+                        : value == null ? "STRING" : inferredScriptVariableType(value);
+            }
         }
         ScriptVariableType variableType = new ScriptVariableTypeParser(type).parse();
         return new ScriptExpressionValue(coerceScriptVariableValue(value, variableType),
@@ -2378,6 +2383,10 @@ public class BigQueryService {
                     throw QueryEngine.invalidQuery("Integer Overflow");
                 }
             }
+        } else if (isScriptIntegerLiteral(value)) {
+            // An integer literal is a scalar operand, never an engine expression: an out-of-range one is
+            // BigQuery's "Invalid integer literal" rather than a value some wider type could hold.
+            evaluated = scriptOperand(value, context);
         } else {
             try {
                 evaluated = scriptOperand(value, context);
@@ -2691,7 +2700,7 @@ public class BigQueryService {
             return scriptArrayLiteral(value.substring(1, value.length() - 1), context);
         }
         if (value.matches("[-+]?[0-9]+")) {
-            return Long.valueOf(value);
+            return scriptIntegerLiteral(value);
         }
         if (value.matches("[-+]?[0-9]+\\.[0-9]+")) {
             return Double.valueOf(value);
@@ -2701,6 +2710,19 @@ public class BigQueryService {
             throw QueryEngine.invalidQuery("Variable " + value + " has not been declared.");
         }
         return variable;
+    }
+
+    /** An integer literal operand, which BigQuery rejects as a whole when it is out of INT64 range. */
+    private static boolean isScriptIntegerLiteral(String expression) {
+        return expression.trim().matches("[-+]?[0-9]+");
+    }
+
+    private static long scriptIntegerLiteral(String value) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw QueryEngine.invalidQuery("Invalid integer literal: " + value);
+        }
     }
 
     private static byte[] scriptBytesLiteral(String bytes) {

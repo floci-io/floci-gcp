@@ -1051,13 +1051,14 @@ class BigQueryDuckDmlIntegrationTest {
     @Test
     @Order(201)
     void temporaryTablesAcceptSequencedDmlAndReportOnlyTheFinalStatement() {
+        // Live BigQuery applies the sequenced DML and reports no DML counts for the script.
         query("""
                 CREATE TEMP TABLE working AS SELECT 1 AS id;
                 INSERT INTO working VALUES (2);
                 UPDATE working SET id = id + 10 WHERE id = 1;
                 """).then().statusCode(200)
-                .body("numDmlAffectedRows", equalTo("1"))
-                .body("dmlStats.updatedRowCount", equalTo("1"));
+                .body("numDmlAffectedRows", nullValue())
+                .body("dmlStats", nullValue());
 
         assertEquals(List.of(List.of("2"), List.of("11")), rows("""
                 CREATE TEMP TABLE working AS SELECT 1 AS id;
@@ -1599,6 +1600,27 @@ class BigQueryDuckDmlIntegrationTest {
                 DELETE FROM variables.people WHERE name = 'updated';
                 SELECT COUNT(*) FROM variables.people;
                 """));
+    }
+
+    @Test
+    @Order(232)
+    void aScriptReportsNoDmlCounts() {
+        // Live BigQuery's job for a script carries neither numDmlAffectedRows nor dmlStats, and no schema:
+        // its statements are child jobs, and only the final result is the parent's.
+        query("""
+                CREATE TEMP TABLE counted (value INT64);
+                INSERT INTO counted VALUES (1), (2);
+                """).then().statusCode(200)
+                .body("numDmlAffectedRows", nullValue())
+                .body("dmlStats", nullValue())
+                .body("schema", nullValue());
+
+        // A single DML statement outside a script still reports its counts.
+        query("CREATE SCHEMA script_counts").then().statusCode(200);
+        query("CREATE TABLE script_counts.target (value INT64)").then().statusCode(200);
+        query("INSERT INTO script_counts.target VALUES (1), (2)").then().statusCode(200)
+                .body("numDmlAffectedRows", equalTo("2"))
+                .body("dmlStats.insertedRowCount", equalTo("2"));
     }
 
     @Test

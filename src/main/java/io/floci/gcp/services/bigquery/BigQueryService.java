@@ -1365,6 +1365,10 @@ public class BigQueryService {
         }
         BigQuerySqlEngine.Result result = context.lastQueryResult();
         job.setTotalBytesProcessed(String.valueOf(context.totalBytesProcessed()));
+        // A script reports only its final result. BigQuery runs a script's statements as child jobs, so the
+        // parent job carries no DML counts, even when the last statement is DML.
+        job.setNumDmlAffectedRows(null);
+        job.setDmlStats(null);
         if (result != null) {
             job.setTotalRows(result.rows().size());
             job.setDestinationDatasetId(ANON_DATASET);

@@ -100,7 +100,8 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists, where
   `CREATE TEMP FUNCTION` rejects `IF NOT EXISTS`: `Clauses such as IF NOT EXISTS are not yet supported
   with CREATE TEMP FUNCTION`. Results from preceding statements are discarded; the final query or DML
-  statement supplies the result. A declaration, an assignment, or the condition that ends a loop does not
+  statement supplies the result. A script reports no DML counts, `numDmlAffectedRows` or `dmlStats`,
+  since BigQuery runs its statements as child jobs and the parent carries only the final result. A declaration, an assignment, or the condition that ends a loop does not
   discard it, so a loop reports its final iteration's result and a script that declares or assigns
   only answers with no rows. A request that holds only one procedural statement, such as
   `DECLARE x INT64;`, runs as a script, as BigQuery runs it. Procedural `BEGIN`/`END` blocks can be

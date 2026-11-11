@@ -125,6 +125,20 @@ public class CredentialTokenService {
         return Optional.of(token);
     }
 
+    /**
+     * Revokes every token, downscoped ones included, issued for the service account with this email,
+     * whichever form its principal was recorded in.
+     */
+    public void revokeServiceAccountTokens(String email) {
+        List<String> revoked = tokenStore.scan(key -> true).stream()
+                .filter(token -> token.getPrincipal() != null && (token.getPrincipal().equals(email)
+                        || token.getPrincipal().equals("serviceAccount:" + email)
+                        || token.getPrincipal().endsWith("/serviceAccounts/" + email)))
+                .map(StoredCredentialToken::getTokenValue)
+                .toList();
+        revoked.forEach(tokenStore::delete);
+    }
+
     public void clear() {
         tokenStore.clear();
     }

@@ -23,6 +23,28 @@ class CredentialTokenServiceTest {
             new CredentialTokenService(store, Clock.fixed(NOW, ZoneOffset.UTC));
 
     @Test
+    void revokingAServiceAccountsTokensRemovesEveryFormOfItsPrincipalAndNoOtherAccounts() {
+        String email = "app@test-project.iam.gserviceaccount.com";
+        List<StoredCredentialToken> revoked = List.of(
+                service.mintImpersonatedToken(email, NOW.plusSeconds(600)),
+                service.mintImpersonatedToken("projects/-/serviceAccounts/" + email, NOW.plusSeconds(600)),
+                service.mintImpersonatedToken("serviceAccount:" + email, NOW.plusSeconds(600)));
+        StoredCredentialToken downscoped = service.mintDownscopedToken(revoked.getFirst().getTokenValue(), rules())
+                .token();
+        StoredCredentialToken kept = service.mintImpersonatedToken("other@test-project.iam.gserviceaccount.com",
+                NOW.plusSeconds(600));
+
+        service.revokeServiceAccountTokens(email);
+
+        for (StoredCredentialToken token : List.of(revoked.get(0), revoked.get(1), revoked.get(2), downscoped)) {
+            CredentialAuthenticationException error = assertThrows(CredentialAuthenticationException.class,
+                    () -> service.lookupBearerToken(token.getTokenValue()));
+            assertEquals(CredentialAuthenticationException.Failure.UNKNOWN, error.failure());
+        }
+        assertTrue(service.lookupBearerToken(kept.getTokenValue()).isPresent());
+    }
+
+    @Test
     void storesAndRetrievesDownscopedToken() {
         CredentialTokenService.MintedDownscopedToken minted =
                 service.mintDownscopedToken("source-token", rules());

@@ -28,7 +28,7 @@ which mode is active and the supported service list.
 | Cloud Scheduler | REST JSON and gRPC job create/get/list/update/delete/pause/resume/run; project policy inheritance. See [Scheduler IAM enforcement](scheduler.md#iam-enforcement) |
 | Cloud Logging sinks | REST JSON and gRPC create/get/list/update/delete for project and organization sinks. Folder and billing-account parents fail closed for evaluated callers; sink IAM policy methods fail closed in enforce mode. See [Sink management IAM](logging.md#sink-management-iam) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
-| IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `generateIdToken`, `signBlob`, and `signJwt` |
+| IAM service accounts and keys | REST JSON service-account CRUD, disable and enable, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `generateIdToken`, `signBlob`, and `signJwt` |
 | IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
@@ -154,6 +154,8 @@ at the exact Google API method contract. `P` is `projects/{project}`; `SA` is
 | [get](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/get) | `iam.serviceAccounts.get` | SA | REST GET |
 | [update](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/update), [patch](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/patch) | `iam.serviceAccounts.update` | SA | REST PUT, PATCH |
 | [delete](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts/delete) | `iam.serviceAccounts.delete` | SA | REST DELETE |
+| [disable](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable) | `iam.serviceAccounts.disable` | SA | REST POST |
+| [enable](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/enable) | `iam.serviceAccounts.enable` | SA | REST POST |
 | [keys.create](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/create) | `iam.serviceAccountKeys.create` | SA | REST POST |
 | [keys.list](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/list) | `iam.serviceAccountKeys.list` | SA | REST GET |
 | [keys.get](https://docs.cloud.google.com/iam/reference/rest/v1/projects.serviceAccounts.keys/get) | `iam.serviceAccountKeys.get` | K | REST GET |
@@ -194,12 +196,12 @@ defines these finite role slices for the implemented permissions:
 
 | Role | Supported IAM permission slice |
 |---|---|
-| `roles/iam.serviceAccountAdmin` | Service-account create, get, list, update, delete, getIamPolicy, setIamPolicy |
+| `roles/iam.serviceAccountAdmin` | Service-account create, get, list, update, delete, disable, enable, getIamPolicy, setIamPolicy |
 | `roles/iam.serviceAccountKeyAdmin` | Key create, get, list, delete; service-account get, list |
 | `roles/iam.serviceAccountUser` | Service-account get, list; `actAs` is not an implemented operation |
 | `roles/iam.serviceAccountTokenCreator` | Service-account get, list, getAccessToken, getOpenIdToken, signBlob, signJwt |
 | `roles/viewer` | Service-account get, list, getIamPolicy; key get, list |
-| `roles/editor` | Viewer slice plus service-account create, update, delete and key create, delete |
+| `roles/editor` | Viewer slice plus service-account create, update, delete, disable, enable and key create, delete |
 | `roles/owner` | Editor slice plus service-account setIamPolicy |
 
 Each listed predefined IAM role also contributes `resourcemanager.projects.get`
@@ -223,8 +225,8 @@ keys, and policies unchanged; denied credential requests must not issue a token
 or signing response. The existing filters do not hold policy locks across the
 subsequent mutation, so they provide no atomic policy-revocation guarantee.
 
-Service-account enable, disable, undelete, key upload,
-enable/disable, and IAM v1 signJwt
+Service-account undelete, key upload,
+key enable/disable, and IAM v1 signJwt
 are unimplemented. Only the shared IAM policy gRPC mixin is exposed;
 IAM admin and IAM Credentials gRPC services are not implemented. Non-empty
 credential delegation chains fail with `FAILED_PRECONDITION` for evaluated
@@ -472,6 +474,26 @@ The owning project is resolved from the account, and resource names in responses
 the real project. As on GCP, a missing account or key addressed through `-` returns
 `403 PERMISSION_DENIED` instead of `404 NOT_FOUND`.
 
+### Disabling a service account
+
+`serviceAccounts.disable` and `serviceAccounts.enable` set the account's output-only
+`disabled` field, which responses include only while it is `true`, as proto3 JSON
+omits a `false` field. Both return an empty JSON object, and disabling a disabled
+account or enabling an enabled one has no effect. As the
+[disable reference](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable)
+documents, "Existing access tokens for the service account are rejected", and after
+the account is re-enabled "its existing access tokens will be accepted". In `enforce`
+mode, a Floci-issued token of a disabled account, or a downscoped token derived from
+one, is refused with `401 UNAUTHENTICATED` over REST or `UNAUTHENTICATED` over gRPC on
+every enforcing surface. Deleting an account in `enforce` mode revokes its Floci-issued
+tokens, which are then unknown tokens and refused the same way, also after an account
+with the same email is created again. In `disabled` mode the field is stored and
+returned, and tokens are not affected.
+
+Token issuance is not changed: IAM Credentials `generateAccessToken` still issues a
+token for a disabled account, which is refused when used. Google documents that
+"requests for new access tokens will fail", but not the error they return.
+
 ## Service Account Keys
 
 ```bash
@@ -517,6 +539,7 @@ The signing key is not returned by `ListServiceAccountKeys` (real IAM lists it a
 - `UpdateServiceAccount`
 - `PatchServiceAccount`
 - `DeleteServiceAccount`
+- `DisableServiceAccount`, `EnableServiceAccount`
 - `CreateServiceAccountKey` (real RSA-2048 key pair; returns JSON key file)
 - `GetServiceAccountKey`
 - `ListServiceAccountKeys`

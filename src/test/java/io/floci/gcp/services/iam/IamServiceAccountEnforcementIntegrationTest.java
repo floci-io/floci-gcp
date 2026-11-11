@@ -25,6 +25,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -366,6 +367,75 @@ class IamServiceAccountEnforcementIntegrationTest {
                 .body(Map.of("scope", List.of(CLOUD_PLATFORM_SCOPE)))
                 .when().post("/v1/projects/-/serviceAccounts/" + targetEmail + ":generateAccessToken")
                 .then().statusCode(403);
+    }
+
+    // serviceAccounts.disable: "Existing access tokens for the service account are rejected", and "After you
+    // re-enable the service account, its existing access tokens will be accepted"
+    // (https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable).
+    @Test
+    void disabledAccountsTokensAreUnauthenticatedUntilItIsEnabled() {
+        iam.createServiceAccount(project, "target", "target", "");
+        setPolicy("projects/" + project, "roles/iam.serviceAccountAdmin", targetEmail, null);
+        String targetAuthorization = "Bearer " + tokens.mintImpersonatedToken(targetEmail,
+                Instant.now().plusSeconds(300)).getTokenValue();
+        String accountPath = "/v1/projects/" + project + "/serviceAccounts/" + targetEmail;
+        given().header("Authorization", targetAuthorization).when().get(accountPath)
+                .then().statusCode(200);
+
+        iam.setServiceAccountDisabled(project, targetEmail, true);
+
+        given().header("Authorization", targetAuthorization).when().get(accountPath)
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+        given().header("Authorization", targetAuthorization).when().get("/v1/projects/" + project)
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+
+        iam.setServiceAccountDisabled(project, targetEmail, false);
+
+        given().header("Authorization", targetAuthorization).when().get(accountPath)
+                .then().statusCode(200);
+    }
+
+    // Short-lived credentials are revoked by disabling or deleting the account
+    // (https://docs.cloud.google.com/iam/docs/keys-disable-enable); a recreated account does not revive them.
+    @Test
+    void deletedAccountsTokensAreUnauthenticatedEvenAfterTheAccountIsRecreated() {
+        iam.createServiceAccount(project, "target", "target", "");
+        setPolicy("projects/" + project, "roles/iam.serviceAccountAdmin", targetEmail, null);
+        String targetAuthorization = "Bearer " + tokens.mintImpersonatedToken(targetEmail,
+                Instant.now().plusSeconds(300)).getTokenValue();
+        String accountsPath = "/v1/projects/" + project + "/serviceAccounts";
+        given().header("Authorization", targetAuthorization).when().get(accountsPath)
+                .then().statusCode(200);
+
+        iam.deleteServiceAccount(project, targetEmail);
+        iam.createServiceAccount(project, "target", "replacement", "");
+
+        given().header("Authorization", targetAuthorization).when().get(accountsPath)
+                .then().statusCode(401).body("error.status", equalTo("UNAUTHENTICATED"));
+    }
+
+    @Test
+    void disableAndEnableRequireTheirPermissions() {
+        iam.createServiceAccount(project, "target", "target", "");
+        String accountPath = "/v1/projects/" + project + "/serviceAccounts/" + targetEmail;
+        for (String method : List.of("disable", "enable")) {
+            given().header("Authorization", callerAuthorization).contentType("application/json").body(Map.of())
+                    .when().post(accountPath + ":" + method)
+                    .then().statusCode(403).body("error.status", equalTo("PERMISSION_DENIED"));
+        }
+        assertFalse(iam.getServiceAccount(project, targetEmail).isDisabled());
+
+        setPolicy("projects/" + project + "/serviceAccounts/" + targetEmail, "roles/iam.serviceAccountAdmin",
+                callerEmail, null);
+
+        given().header("Authorization", callerAuthorization).contentType("application/json").body(Map.of())
+                .when().post(accountPath + ":disable")
+                .then().statusCode(200);
+        assertTrue(iam.getServiceAccount(project, targetEmail).isDisabled());
+        given().header("Authorization", callerAuthorization).contentType("application/json").body(Map.of())
+                .when().post(accountPath + ":enable")
+                .then().statusCode(200);
+        assertFalse(iam.getServiceAccount(project, targetEmail).isDisabled());
     }
 
     private void setPolicy(String resource, String role, String member, String expression) {

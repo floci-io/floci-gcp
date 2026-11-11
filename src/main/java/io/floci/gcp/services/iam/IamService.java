@@ -14,6 +14,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
@@ -76,13 +77,15 @@ public class IamService {
     private final Instance<SecretManagerService> secretManager;
     private final SecretManagerIamAuthorizationAdapter secretManagerIamAdapter;
     private final ProjectRegistry projects;
+    private final CredentialTokenService tokens;
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
             GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization,
             Instance<SecretManagerService> secretManager,
-            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter, ProjectRegistry projects) {
+            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter, ProjectRegistry projects,
+            CredentialTokenService tokens) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
@@ -90,6 +93,7 @@ public class IamService {
         this.secretManager = secretManager;
         this.secretManagerIamAdapter = secretManagerIamAdapter;
         this.projects = projects;
+        this.tokens = tokens;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -129,6 +133,7 @@ public class IamService {
         this.secretManager = null;
         this.secretManagerIamAdapter = null;
         this.projects = projects;
+        this.tokens = null;
         registerServiceAccountPolicyResolver();
     }
 
@@ -262,6 +267,37 @@ public class IamService {
         });
     }
 
+    /**
+     * IAM v1 {@code serviceAccounts.disable} and {@code enable}. Either is a no-op when the account
+     * is already in that state, as the IAM reference documents for both methods.
+     */
+    public void setServiceAccountDisabled(String project, String emailOrId, boolean disabled) {
+        ServiceAccountRef ref = resolve(project, emailOrId);
+        String key = saKey(ref.project(), ref.email());
+        withPolicyLocks(accountPolicyResources(ref.project(), ref.email()), () -> {
+            StoredServiceAccount sa = saStore.get(key)
+                    .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
+            if (sa.isDisabled() != disabled) {
+                sa.setDisabled(disabled);
+                saStore.put(key, sa);
+            }
+            LOG.debugf("setServiceAccountDisabled project=%s email=%s disabled=%s", ref.project(), ref.email(),
+                    disabled);
+            return null;
+        });
+    }
+
+    /** The stored account with this email, without the not-found and permission errors of a request. */
+    public Optional<StoredServiceAccount> findServiceAccount(String email) {
+        String owner = projectFromEmail(email);
+        if (owner != null) {
+            return saStore.get(saKey(owner, email));
+        }
+        return saStore.scan(k -> k.startsWith("sa:")).stream()
+                .filter(sa -> email.equals(sa.getEmail()))
+                .findFirst();
+    }
+
     public List<StoredServiceAccount> listServiceAccounts(String project) {
         String prefix = "sa:" + project + ":";
         return saStore.scan(k -> k.startsWith(prefix));
@@ -282,6 +318,11 @@ public class IamService {
                 policyStore.delete(policyKey(resource));
             }
             policyStore.checkpoint();
+            // Deleting the account revokes its short-lived credentials
+            // (https://docs.cloud.google.com/iam/docs/keys-disable-enable); only enforce mode evaluates them.
+            if (tokens != null && config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+                tokens.revokeServiceAccountTokens(ref.email());
+            }
             LOG.debugf("deleteServiceAccount project=%s email=%s", ref.project(), ref.email());
             return null;
         });

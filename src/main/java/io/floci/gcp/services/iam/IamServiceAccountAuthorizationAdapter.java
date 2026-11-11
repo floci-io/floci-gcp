@@ -23,9 +23,9 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
 
     private static final String SERVICE = "iam.googleapis.com";
     private static final Set<String> SERVICE_ACCOUNT_ADMIN = Set.of(
-            "iam.serviceAccounts.create", "iam.serviceAccounts.delete", "iam.serviceAccounts.get",
-            "iam.serviceAccounts.getIamPolicy", "iam.serviceAccounts.list", "iam.serviceAccounts.setIamPolicy",
-            "iam.serviceAccounts.update");
+            "iam.serviceAccounts.create", "iam.serviceAccounts.delete", "iam.serviceAccounts.disable",
+            "iam.serviceAccounts.enable", "iam.serviceAccounts.get", "iam.serviceAccounts.getIamPolicy",
+            "iam.serviceAccounts.list", "iam.serviceAccounts.setIamPolicy", "iam.serviceAccounts.update");
     private static final Set<String> SERVICE_ACCOUNT_KEY_ADMIN = Set.of(
             "iam.serviceAccountKeys.create", "iam.serviceAccountKeys.delete",
             "iam.serviceAccountKeys.get", "iam.serviceAccountKeys.list",
@@ -92,7 +92,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
         String project = parts[0];
         String identifier = parts.length == 3 ? parts[2] : null;
         String customMethod = null;
-        for (String candidate : List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob")) {
+        for (String candidate : List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob",
+                "disable", "enable")) {
             if (identifier != null && identifier.endsWith(":" + candidate)) {
                 customMethod = candidate;
                 identifier = identifier.substring(0, identifier.length() - candidate.length() - 1);
@@ -126,6 +127,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
                 case "setIamPolicy" -> "SetIamPolicy";
                 case "testIamPermissions" -> "TestIamPermissions";
                 case "signBlob" -> "SignBlob";
+                case "disable" -> "DisableServiceAccount";
+                case "enable" -> "EnableServiceAccount";
                 default -> throw unsupported("method " + customMethod);
             }, resource);
         }
@@ -167,6 +170,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             case "ListServiceAccounts" -> "iam.serviceAccounts.list";
             case "UpdateServiceAccount" -> "iam.serviceAccounts.update";
             case "DeleteServiceAccount" -> "iam.serviceAccounts.delete";
+            case "DisableServiceAccount" -> "iam.serviceAccounts.disable";
+            case "EnableServiceAccount" -> "iam.serviceAccounts.enable";
             case "CreateServiceAccountKey" -> "iam.serviceAccountKeys.create";
             case "GetServiceAccountKey" -> "iam.serviceAccountKeys.get";
             case "ListServiceAccountKeys" -> "iam.serviceAccountKeys.list";
@@ -220,6 +225,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
                 "iam.serviceAccounts.getIamPolicy", "iam.serviceAccountKeys.get", "iam.serviceAccountKeys.list");
         Set<String> editor = Stream.concat(viewer.stream(), Stream.of(
                 "iam.serviceAccounts.create", "iam.serviceAccounts.update", "iam.serviceAccounts.delete",
+                "iam.serviceAccounts.disable", "iam.serviceAccounts.enable",
                 "iam.serviceAccountKeys.create", "iam.serviceAccountKeys.delete"))
                 .collect(Collectors.toUnmodifiableSet());
         Set<String> owner = Stream.concat(editor.stream(), Stream.of("iam.serviceAccounts.setIamPolicy"))

@@ -1118,8 +1118,8 @@ public class BigQueryService {
                 if (control.label() == null) {
                     if (loopDepth == 0) {
                         throw QueryEngine.invalidQuery(control.continueLoop()
-                                ? "CONTINUE statement must be inside a loop."
-                                : "BREAK statement must be inside a loop.");
+                                ? "CONTINUE is only allowed inside of a loop body"
+                                : "BREAK without label is only allowed inside of a loop body");
                     }
                     continue;
                 }
@@ -1360,8 +1360,8 @@ public class BigQueryService {
         } catch (LoopControlSignal signal) {
             throw QueryEngine.invalidQuery(signal.label != null
                     ? "Loop control label " + signal.label + " does not name an enclosing block or loop."
-                    : signal.continueLoop ? "CONTINUE statement must be inside a loop."
-                    : "BREAK statement must be inside a loop.");
+                    : signal.continueLoop ? "CONTINUE is only allowed inside of a loop body"
+                    : "BREAK without label is only allowed inside of a loop body");
         }
         BigQuerySqlEngine.Result result = context.lastQueryResult();
         job.setTotalBytesProcessed(String.valueOf(context.totalBytesProcessed()));
@@ -1536,8 +1536,8 @@ public class BigQueryService {
         } catch (LoopControlSignal signal) {
             throw QueryEngine.invalidQuery(signal.label != null
                     ? "Loop control label " + signal.label + " does not name an enclosing block or loop."
-                    : signal.continueLoop ? "CONTINUE statement must be inside a loop."
-                    : "BREAK statement must be inside a loop.");
+                    : signal.continueLoop ? "CONTINUE is only allowed inside of a loop body"
+                    : "BREAK without label is only allowed inside of a loop body");
         }
         context.mergeDynamicSqlContext(dynamicContext);
         if (!statement.intoVariables().isEmpty()) {

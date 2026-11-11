@@ -1613,7 +1613,8 @@ class BigQueryDuckDmlIntegrationTest {
         query("EXECUTE IMMEDIATE 'BEGIN DELETE FROM dynamic_block.target WHERE TRUE; BREAK; END'")
                 .then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalidQuery"))
-                .body("error.message", containsString("BREAK statement must be inside a loop"));
+                .body("error.message", containsString(
+                        "BREAK without label is only allowed inside of a loop body"));
         assertEquals(List.of(List.of("2")), rows("SELECT COUNT(*) FROM dynamic_block.target"));
     }
 }

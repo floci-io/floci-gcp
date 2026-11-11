@@ -99,8 +99,8 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
   BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists, where
   `CREATE TEMP FUNCTION` rejects `IF NOT EXISTS`: `Clauses such as IF NOT EXISTS are not yet supported
-  with CREATE TEMP FUNCTION`. Results from preceding statements are discarded; the final query or DML statement
-  supplies the result. A declaration, an assignment, or the condition that ends a loop does not
+  with CREATE TEMP FUNCTION`. Results from preceding statements are discarded; the final query or DML
+  statement supplies the result. A declaration, an assignment, or the condition that ends a loop does not
   discard it, so a loop reports its final iteration's result and a script that declares or assigns
   only answers with no rows. A request that holds only one procedural statement, such as
   `DECLARE x INT64;`, runs as a script, as BigQuery runs it. Procedural `BEGIN`/`END` blocks can be
@@ -114,13 +114,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
   evaluated by the configured SQL engine. A `FLOAT64` literal stays floating point, so `f + 0.2` over
   `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does. Variable references
-  are token-substituted as typed literals;
-  the statement's own names win over a variable of the same name: a source column, a column a DML
-  statement names, a CTE name, a `FROM` item's alias (a table, `UNNEST` or derived table), the columns a
-  derived table exposes, function names, and qualified fields
+  are token-substituted as typed literals; the statement's own names win over a variable of the same
+  name: a source column, a column a DML statement names, a CTE name, a `FROM` item's alias (a table,
+  `UNNEST` or derived table), the columns a derived table exposes, function names, and qualified fields
   are left intact, so a column keeps its name while the values an `INSERT` supplies still bind the
   variables. A variable that is a whole select item keeps its name as the result column, while
-  `SELECT f + 0.2` is named `f0_`, as BigQuery names it. `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
+  `SELECT f + 0.2` is named `f0_`, as BigQuery names it. `EXECUTE IMMEDIATE` supports a single query,
+  supported DDL or DML statement, or `BEGIN`
   block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
   outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or
@@ -640,6 +640,11 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA`, `LOAD DATA`, `ALTER TABLE`, and `ALTER VIEW`
   inside scripts are not supported; they fail with `invalidQuery`.
   Dynamic SQL goes through `EXECUTE IMMEDIATE` and is supported only in the shapes listed above.
+  A `BIGNUMERIC` variable is not supported: DuckDB's `DECIMAL(38,9)` is BigQuery's `NUMERIC` precision
+  and cannot hold its 76 digits. Rejections use floci's own wording in a few places where BigQuery adds
+  a position, for example `IF condition must be a BOOL expression` for `Cannot coerce expression 1 to
+  type BOOL at [1:4]`, and `EXECUTE IMMEDIATE cannot be nested.` for `SQL created by EXECUTE IMMEDIATE
+  contains unsupported statement type: ExecuteImmediateStatement`.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports

@@ -1618,6 +1618,21 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aBareBreakOrContinueReportsBigQuerysWording() {
+        // Live BigQuery: "BREAK without label is only allowed inside of a loop body at [1:1]".
+        query(Map.of("query", "BREAK;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "BREAK without label is only allowed inside of a loop body"));
+        // Live BigQuery: "CONTINUE is only allowed inside of a loop body at [1:1]".
+        query(Map.of("query", "CONTINUE;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CONTINUE is only allowed inside of a loop body"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

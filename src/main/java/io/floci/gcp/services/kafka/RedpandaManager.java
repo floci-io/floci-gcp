@@ -3,6 +3,7 @@ package io.floci.gcp.services.kafka;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.Ports;
@@ -275,6 +276,38 @@ public class RedpandaManager {
 
     public void removeClusterStorage(StoredCluster cluster) {
         ContainerStorageHelper.removeStorage(config, lifecycleManager, volumeName(cluster));
+    }
+
+    /**
+     * Removes the cluster's broker container and, under the storage policy, its volume, and throws
+     * when Docker cannot, where {@link #stopContainer} and {@link #removeClusterStorage} only log: a
+     * delete must not report success over a broker that is still there. The container is found by
+     * name, so a broker that a previous run left running is removed too.
+     */
+    public void removeBroker(StoredCluster cluster) {
+        String containerName = containerName(cluster);
+        try {
+            lifecycleManager.runDockerApi("remove Redpanda container " + containerName, () -> {
+                lifecycleManager.getDockerClient().removeContainerCmd(containerName).withForce(true).exec();
+                return null;
+            });
+        } catch (NotFoundException expected) {
+            // No container by that name: the broker is already gone, which is the goal.
+        }
+        String volumeName = volumeName(cluster);
+        if (!ContainerStorageHelper.removesStorageOnDelete(config)) {
+            LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}", volumeName);
+            return;
+        }
+        try {
+            lifecycleManager.runDockerApi("remove Docker volume " + volumeName, () -> {
+                lifecycleManager.getDockerClient().removeVolumeCmd(volumeName).exec();
+                return null;
+            });
+        } catch (NotFoundException expected) {
+            // No such volume (host-path storage, or already removed): nothing to free.
+        }
+        LOG.infov("Removed the Redpanda broker of Kafka cluster {0}", cluster.getName());
     }
 
     /**

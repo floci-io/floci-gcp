@@ -26,7 +26,7 @@ REST JSON under `/v1/projects/{project}/locations/{location}`:
 | Delete operation | `DELETE /operations/{id}` |
 | Cancel operation | `POST /operations/{id}:cancel` |
 
-Mutations return completed `google.longrunning.Operation` responses, which the operations routes above serve back. They list and return only Eventarc's own operations, not the Cloud Run or Cloud Functions operations floci keeps in the same store. Every Eventarc operation is created done, so cancel succeeds without changing it.
+Mutations return completed `google.longrunning.Operation` responses, which the operations routes above serve back. They list and return only Eventarc's own operations, not the Cloud Run or Cloud Functions operations floci keeps in the same store. Every Eventarc operation is created done, so cancel succeeds without changing it. Managed Kafka serves its operations on the same `/v1` path. A list never mixes the two APIs: it is Eventarc's unless the host is `managedkafka.googleapis.com`, so the Eventarc SDK, which cannot unpack Managed Kafka metadata, lists through floci's own endpoint as before.
 
 ## Event Delivery
 

@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -116,9 +117,11 @@ public class LongRunningOperationsService {
     }
 
     public Operation get(String name) {
-        return operationStore.get(name)
-                .map(this::parse)
-                .orElseThrow(() -> GcpException.notFound("Operation not found: " + name));
+        return find(name).orElseThrow(() -> GcpException.notFound("Operation not found: " + name));
+    }
+
+    public Optional<Operation> find(String name) {
+        return operationStore.get(name).map(this::parse);
     }
 
     public ListOperationsResponse list(String parent, int pageSize, String pageToken) {
@@ -126,19 +129,23 @@ public class LongRunningOperationsService {
     }
 
     public ListOperationsResponse list(String parent, int pageSize, String pageToken, Predicate<Operation> include) {
-        String prefix = operationsPrefix(parent);
-        List<Operation> operations = operationStore.scan(k -> k.startsWith(prefix)).stream()
-                .map(this::parse)
-                .filter(include)
-                .sorted(Comparator.comparing(Operation::getName))
-                .toList();
-        PageToken.Page<Operation> page = PageToken.paginate(operations, pageSize, pageToken);
+        PageToken.Page<Operation> page = PageToken.paginate(all(parent, include), pageSize, pageToken);
         ListOperationsResponse.Builder response = ListOperationsResponse.newBuilder()
                 .addAllOperations(page.items());
         if (page.nextPageToken() != null) {
             response.setNextPageToken(page.nextPageToken());
         }
         return response.build();
+    }
+
+    /** Every operation under {@code parent} that {@code include} accepts, by name. */
+    public List<Operation> all(String parent, Predicate<Operation> include) {
+        String prefix = operationsPrefix(parent);
+        return operationStore.scan(k -> k.startsWith(prefix)).stream()
+                .map(this::parse)
+                .filter(include)
+                .sorted(Comparator.comparing(Operation::getName))
+                .toList();
     }
 
     public void delete(String name) {

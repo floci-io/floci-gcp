@@ -128,7 +128,7 @@ public class LocationsService {
         }
     }
 
-    static String apiFromHost(String host) {
+    public static String apiFromHost(String host) {
         if (host == null || host.isBlank()) {
             return null;
         }

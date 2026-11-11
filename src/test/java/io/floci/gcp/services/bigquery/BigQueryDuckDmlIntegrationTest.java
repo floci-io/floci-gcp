@@ -1430,11 +1430,15 @@ class BigQueryDuckDmlIntegrationTest {
                 SELECT id FROM existing_table;
                 """));
 
-        assertEquals(List.of(List.of("1")), rows("""
+        // BigQuery rejects the clause on a temporary function, so a script that passes here fails there.
+        query("""
                 CREATE TEMP FUNCTION existing_function() AS (1);
                 CREATE TEMP FUNCTION IF NOT EXISTS existing_function() AS (2);
                 SELECT existing_function();
-                """));
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP FUNCTION"));
     }
 
     @Test

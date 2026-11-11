@@ -1012,6 +1012,10 @@ final class SqlDialectTranslator {
         if (declaration.orReplace() && declaration.ifNotExists()) {
             throw invalidQuery("CREATE TEMP FUNCTION cannot combine OR REPLACE and IF NOT EXISTS");
         }
+        if (declaration.ifNotExists()) {
+            // BigQuery rejects the clause outright, as it does on every other clause of the statement.
+            throw invalidQuery("Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP FUNCTION");
+        }
         Token name = declaration.significant().get(declaration.name());
         return new TemporaryFunctionDefinition(name.identifierText(), declaration.orReplace(),
                 declaration.ifNotExists());

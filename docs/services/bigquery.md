@@ -97,7 +97,9 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   function body remain local to that body. Temporary tables accept an explicit schema, an `AS`
   query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
   name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
-  BigQuery does. Results from preceding statements are discarded; the final query or DML statement
+  BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists, where
+  `CREATE TEMP FUNCTION` rejects `IF NOT EXISTS`: `Clauses such as IF NOT EXISTS are not yet supported
+  with CREATE TEMP FUNCTION`. Results from preceding statements are discarded; the final query or DML statement
   supplies the result. A declaration, an assignment, or the condition that ends a loop does not
   discard it, so a loop reports its final iteration's result and a script that declares or assigns
   only answers with no rows. A request that holds only one procedural statement, such as

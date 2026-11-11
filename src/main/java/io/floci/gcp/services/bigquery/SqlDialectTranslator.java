@@ -49,11 +49,11 @@ final class SqlDialectTranslator {
      */
     record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
                        boolean needsUnicodeCaseFold, List<String> duplicateOutputNames,
-                       List<MissingStructField> missingStructFields) {
+                       List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths) {
 
         Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
                     boolean needsUnicodeCaseFold) {
-            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of(), List.of());
+            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of(), List.of(), null);
         }
     }
 
@@ -62,6 +62,12 @@ final class SqlDialectTranslator {
      * whether it belongs to the outermost query, whose aliases are the result's columns.
      */
     record MissingStructField(String alias, String field, boolean outermost) {}
+
+    /**
+     * The dotted paths, such as {@code s.zz}, left in the outermost query's ORDER BY once the translator has
+     * expanded the fields of STRUCT select aliases it can read, and the query rendered without that ORDER BY.
+     */
+    record OrderByFieldPaths(String sqlWithoutOrderBy, List<List<String>> paths) {}
 
     private record UnnestOffset(String name, int nextToken) {}
 
@@ -1441,7 +1447,7 @@ final class SqlDialectTranslator {
             out.append(" RETURNING merge_action");
         }
         return new Translation(out.toString().trim(), tables, informationSchema, needsUnicodeCaseFold,
-                List.of(), List.copyOf(missingStructFields));
+                List.of(), List.copyOf(missingStructFields), null);
     }
 
     /**
@@ -2451,7 +2457,62 @@ final class SqlDialectTranslator {
                     + ") AS \"_floci_star_replace\"";
         }
         return new Translation(rendered, tables, informationSchema, needsUnicodeCaseFold,
-                duplicateOutputNames, List.copyOf(missingStructFields));
+                duplicateOutputNames, List.copyOf(missingStructFields), orderByFieldPaths(replacementStarExclusion));
+    }
+
+    /**
+     * The dotted paths in the outermost query's ORDER BY, with the query rendered without it, or null when there
+     * are none. DuckDB fails to bind {@code s.zz} on a STRUCT column it reads from a source, which the translator
+     * cannot see into, and the engine names the struct's type from the query without its ORDER BY.
+     */
+    private OrderByFieldPaths orderByFieldPaths(String replacementStarExclusion) {
+        int order = -1;
+        int by = -1;
+        for (int i = tokens.size() - 1; i >= 0 && order < 0; i--) {
+            by = nextSignificant(i + 1, tokens.size());
+            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == 0 && by >= 0
+                    && tokens.get(by).isKeyword("BY")) {
+                order = i;
+            }
+        }
+        if (order < 0) {
+            return null;
+        }
+        int end = clauseEnd(by + 1, 0);
+        List<List<String>> paths = new ArrayList<>();
+        for (int i = by + 1; i < end; i++) {
+            int before = previousSignificantBefore(i);
+            if (!isIdentifierToken(i) || before > by && tokens.get(before).isPunct(".")) {
+                continue;
+            }
+            List<String> path = new ArrayList<>(List.of(tokens.get(i).identifierText()));
+            int last = i;
+            int dot = nextSignificant(last + 1, end);
+            int next = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            while (next >= 0 && tokens.get(dot).isPunct(".") && isIdentifierToken(next)) {
+                path.add(tokens.get(next).identifierText());
+                last = next;
+                dot = nextSignificant(last + 1, end);
+                next = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            }
+            if (path.size() > 1) {
+                paths.add(List.copyOf(path));
+            }
+            i = last;
+        }
+        if (paths.isEmpty()) {
+            return null;
+        }
+        String withoutOrderBy = (render(0, order) + render(end, tokens.size())).trim();
+        if (replacementStarExclusion != null) {
+            withoutOrderBy = "SELECT *" + replacementStarExclusion + " FROM (" + withoutOrderBy
+                    + ") AS \"_floci_star_replace\"";
+        }
+        return new OrderByFieldPaths(withoutOrderBy, List.copyOf(paths));
+    }
+
+    private boolean isIdentifierToken(int i) {
+        return tokens.get(i).kind == Kind.IDENT || tokens.get(i).kind == Kind.QIDENT;
     }
 
     /**

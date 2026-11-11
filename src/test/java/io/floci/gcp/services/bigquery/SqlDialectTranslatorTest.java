@@ -3242,6 +3242,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void outermostOrderByPathsComeWithTheQueryWithoutItsOrderBy() {
+        SqlDialectTranslator.Translation translation = SqlDialectTranslator.translate(
+                "SELECT t.s AS s FROM ds.t ORDER BY s.m.zz DESC, x, `s`.n LIMIT 2", "test-project", null,
+                SqlDialectTranslator.QueryParameters.none());
+        SqlDialectTranslator.OrderByFieldPaths orderBy = translation.orderByFieldPaths();
+        assertEquals(List.of(List.of("s", "m", "zz"), List.of("s", "n")), orderBy.paths());
+        assertFalse(orderBy.sqlWithoutOrderBy().contains("ORDER BY"), orderBy.sqlWithoutOrderBy());
+        assertTrue(orderBy.sqlWithoutOrderBy().endsWith("LIMIT 2"), orderBy.sqlWithoutOrderBy());
+        assertNull(SqlDialectTranslator.translate("SELECT x FROM ds.t ORDER BY x", "test-project", null,
+                SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
+        assertNull(SqlDialectTranslator.translate("SELECT STRUCT(x AS n) AS s FROM ds.t ORDER BY s.n", "test-project",
+                null, SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
+    }
+
+    @Test
     void orderByExpandsStructSelectAliasFieldsOnlyInItsOwnQuery() {
         assertTrue(sql("SELECT STRUCT(x * -1 AS n) AS x FROM ds.t ORDER BY x.n").endsWith("ORDER BY list_extract([x * -1], 1)"));
         String borrowed = sql("SELECT ARRAY(SELECT STRUCT(y AS n) AS s FROM UNNEST([1]) y) AS a,"

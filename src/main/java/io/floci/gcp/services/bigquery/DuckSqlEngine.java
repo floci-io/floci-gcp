@@ -9,6 +9,7 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +41,8 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class DuckSqlEngine implements BigQuerySqlEngine {
 
+    private static final Logger LOG = Logger.getLogger(DuckSqlEngine.class);
+
     private final DuckClient client;
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
@@ -70,12 +73,22 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         String sql = translation.sql();
         rejectMissingStructFields(translation, sql, staging.emptySetup(), flociEndpoint);
         if (request.dryRun()) {
-            List<Map<String, Object>> described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+            List<Map<String, Object>> described;
+            try {
+                described = describeRows(sql, staging.emptySetup(), flociEndpoint);
+            } catch (GcpException e) {
+                throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint, e);
+            }
             return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
                     duplicateNames(translation, described));
         }
 
-        DuckClient.DuckResult result = run(sql, staging.setup(), flociEndpoint, null);
+        DuckClient.DuckResult result;
+        try {
+            result = run(sql, staging.setup(), flociEndpoint, null);
+        } catch (GcpException e) {
+            throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint, e);
+        }
         if (result.columns() == null || hasDuplicateNames(result.columns())) {
             // A duplicate output name arrives as repeated keys in the JSON rows, so the values are read
             // again with positional aliases once the schema has BigQuery's names.
@@ -128,6 +141,60 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
         }
         throw SqlDialectTranslator.invalidQuery("Field name " + missing.field() + " does not exist in " + type);
+    }
+
+    /**
+     * DuckDB fails to bind {@code ORDER BY s.zz} in its own words when {@code s} is a STRUCT column it reads from
+     * a source (passed through under an alias, by a star, or named by the first query of a set operation) and has
+     * no field {@code zz}. BigQuery names the struct's type: {@code Field name zz does not exist in STRUCT<n INT64>},
+     * or {@code Cannot access field zz on a value with type INT64} past a scalar field. The type comes from
+     * describing the query without its ORDER BY; any other failure is returned unchanged.
+     */
+    private GcpException orderByFieldFailure(SqlDialectTranslator.Translation translation, String setup,
+                                             String flociEndpoint, GcpException failure) {
+        SqlDialectTranslator.OrderByFieldPaths orderBy = translation.orderByFieldPaths();
+        if (orderBy == null || failure.getMessage() == null || !failure.getMessage().startsWith("Binder Error")) {
+            return failure;
+        }
+        List<Column> columns;
+        try {
+            columns = columns(describeRows(orderBy.sqlWithoutOrderBy(), setup, flociEndpoint));
+        } catch (GcpException e) {
+            LOG.debugf("Could not describe the query without its ORDER BY: %s", e.getMessage());
+            return failure;
+        }
+        for (List<String> path : orderBy.paths()) {
+            TableFieldSchema field = null;
+            for (Column column : columns) {
+                if (column.name().equalsIgnoreCase(path.getFirst())) {
+                    field = column.field();
+                    break;
+                }
+            }
+            for (int i = 1; field != null && i < path.size(); i++) {
+                if ("REPEATED".equals(field.getMode())) {
+                    break;
+                }
+                if (!"RECORD".equals(field.getType())) {
+                    return SqlDialectTranslator.invalidQuery("Cannot access field " + path.get(i)
+                            + " on a value with type " + InformationSchema.dataType(field));
+                }
+                TableFieldSchema child = null;
+                List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+                for (TableFieldSchema candidate : children) {
+                    if (candidate.getName().equalsIgnoreCase(path.get(i))) {
+                        child = candidate;
+                        break;
+                    }
+                }
+                if (child == null) {
+                    return SqlDialectTranslator.invalidQuery("Field name " + path.get(i) + " does not exist in "
+                            + InformationSchema.dataType(field));
+                }
+                field = child;
+            }
+        }
+        return failure;
     }
 
     /**
@@ -200,7 +267,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         try {
             arrow = client.query(translation.sql(), staging.setup(), flociEndpoint, null, true).arrow();
         } catch (DuckClient.DuckSqlException e) {
-            throw SqlDialectTranslator.invalidQuery(queryErrorMessage(e.getMessage()));
+            throw orderByFieldFailure(translation, staging.emptySetup(), flociEndpoint,
+                    SqlDialectTranslator.invalidQuery(queryErrorMessage(e.getMessage())));
         }
         if (arrow == null) {
             throw GcpException.failedPrecondition("ARROW reads need a floci-duck image that returns Arrow IPC;"

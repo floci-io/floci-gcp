@@ -376,14 +376,44 @@ unsupported condition on it then fails the member's evaluated requests on that p
 with `INVALID_ARGUMENT` until the binding is removed by a caller that bypasses
 evaluation or the role is disabled again.
 
-OAuth `/token`, STS exchanges, and metadata credentials retain their existing
-emulator behavior. OAuth's stub exchange does not authenticate a service-account
-JWT; its token is not a recognized service-account identity. Anonymous/external
+STS exchanges and metadata credentials retain their existing emulator behavior.
+The OAuth `/token` exchange authenticates a service-account JWT only in enforce
+mode; see [OAuth token exchange](#oauth-token-exchange). Anonymous/external
 credential bypass makes this emulator a local testing tool, not a security
 boundary. IAM v1 `signBlob` returns the `keyId` and `signature` fields required by
 its contract. IAM v1 and Credentials signing share the emulator's per-account
 RSA key described in [Sign Blob](#sign-blob-v4-signed-urls). This is a local key,
 not a Google-managed production credential.
+
+### OAuth token exchange
+
+The token endpoint (`/token` and the legacy `/oauth2/v4/token`) exchanges a
+service-account JWT for an access token with the `jwt-bearer` grant described in
+[Using OAuth 2.0 for Server to Server Applications](https://developers.google.com/identity/protocols/oauth2/service-account).
+With the default `disabled` mode it returns a token for any assertion, and that
+token is not a recognized identity. In `enforce` mode:
+
+- The JWT must be signed with `RS256` by a user-managed key of the service account
+  named in `iss`, created through `keys.create` and still valid. The `kid` header
+  is tried first; "if an incorrect Key ID is specified, all keys associated with
+  the service account are tried". Otherwise, including for a deleted key or a
+  deleted account, the response is `400` with `invalid_grant` and
+  `Invalid JWT Signature.`, which Google documents for a key "not associated with
+  the service account identified by the client email or the key that was used has
+  been deleted, disabled, or has expired", and for an assertion that is not
+  correctly encoded.
+- `aud` must be `https://oauth2.googleapis.com/token`, the legacy
+  `https://www.googleapis.com/oauth2/v4/token`, or the emulator URL the request was
+  sent to, so that a credential whose `token_uri` points at the emulator works.
+  Another audience is an `invalid_grant`; the exact Google description for it is not
+  documented.
+- `exp` must not precede `iat`, must be at most 65 minutes after it, and must not
+  have passed; otherwise the response is `invalid_grant` with
+  `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.`
+- The access token is valid for 3600 seconds and acts as the service account on
+  every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
+
+The `scope` claim is not checked, and the response has no `scope` field.
 
 ### Remaining limitations
 

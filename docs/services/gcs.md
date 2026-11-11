@@ -60,8 +60,11 @@ credential's `token_uri` to the emulator:
 ```
 
 floci-gcp implements the standard OAuth JWT bearer exchange and returns a
-short-lived Bearer token. As with other emulator credentials, JWT signatures
-and Bearer tokens are not validated.
+short-lived Bearer token. With the default IAM authorization mode, as with other
+emulator credentials, JWT signatures and Bearer tokens are not validated. In
+`enforce` mode the assertion is verified against the service account's keys and
+the token acts as that service account; see
+[OAuth token exchange](iam.md#oauth-token-exchange).
 
 The exchange is served at `/token` (Google's `oauth2.googleapis.com/token`) and
 at `/oauth2/v4/token` (the legacy `www.googleapis.com/oauth2/v4/token`), and

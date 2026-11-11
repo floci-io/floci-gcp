@@ -35,8 +35,10 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -640,6 +642,39 @@ public class IamService {
         ServiceAccountRef ref = resolve(project, emailOrId);
         String prefix = keyStoragePrefix(ref.project(), ref.email());
         return keyStore.scan(k -> k.startsWith(prefix));
+    }
+
+    /**
+     * The public parts of the user-managed keys of the account with this email that are valid at
+     * {@code now}, by key ID. Empty when no such account exists, so a deleted account or key verifies
+     * nothing.
+     */
+    public Map<String, PublicKey> userManagedPublicKeys(String email, Instant now) {
+        String project = email == null ? null : projectFromEmail(email);
+        if (project == null || saStore.get(saKey(project, email)).isEmpty()) {
+            return Map.of();
+        }
+        Map<String, PublicKey> keys = new LinkedHashMap<>();
+        for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
+            boolean valid = (key.getValidAfterTime() == null || !now.isBefore(Instant.parse(key.getValidAfterTime())))
+                    && (key.getValidBeforeTime() == null || now.isBefore(Instant.parse(key.getValidBeforeTime())));
+            if (valid && key.getPublicKeyData() != null) {
+                keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
+            }
+        }
+        return keys;
+    }
+
+    private static PublicKey publicKey(String publicKeyData) {
+        String pem = new String(Base64.getDecoder().decode(publicKeyData), StandardCharsets.UTF_8);
+        String body = pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+        try {
+            return KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(body)));
+        } catch (GeneralSecurityException e) {
+            throw GcpException.internal("Stored service account public key is unreadable: " + e.getMessage());
+        }
     }
 
     // Also drops keys left in storage by an older account with the same email.

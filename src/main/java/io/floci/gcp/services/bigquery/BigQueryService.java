@@ -2433,12 +2433,7 @@ public class BigQueryService {
             return coerced;
         }
         return switch (type.scalarType()) {
-            case "INT64" -> {
-                if (value instanceof Number number) {
-                    yield number.longValue();
-                }
-                throw QueryEngine.invalidQuery("Value cannot be coerced to INT64.");
-            }
+            case "INT64" -> scriptInt64Assignment(value);
             case "FLOAT64" -> {
                 if (value instanceof Number number) {
                     yield number.doubleValue();
@@ -2467,6 +2462,18 @@ public class BigQueryService {
             default -> throw QueryEngine.invalidQuery(
                     "Variable type " + type.scalarType() + " is not supported.");
         };
+    }
+
+    /**
+     * BigQuery assigns to an INT64 variable only a value that already is an exact INT64. A FLOAT64, a
+     * NUMERIC, or an out-of-range value is rejected instead of truncated or wrapped: live BigQuery
+     * answers "Cannot coerce expression 1.9 to type INT64" where the emulator names the target type.
+     */
+    private static long scriptInt64Assignment(Object value) {
+        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+            return ((Number) value).longValue();
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to INT64.");
     }
 
     /** A NUMERIC value: BigQuery keeps 38 digits with 9 after the point, and rejects a value that needs more. */

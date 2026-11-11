@@ -2088,6 +2088,28 @@ class BigQueryServiceTest {
 
     // ── Job location of statements that write ──
 
+    @Test
+    void int64VariablesRejectValuesBigQueryCannotCoerce() {
+        // Live BigQuery: "Cannot coerce expression 1.9 to type INT64". A FLOAT64 or NUMERIC value is not
+        // truncated or wrapped into an INT64 variable; the emulator names the target type instead.
+        for (String sql : List.of(
+                "DECLARE x INT64 DEFAULT 1.9; SELECT x;",
+                "DECLARE x INT64 DEFAULT 1.0; SELECT x;",
+                "DECLARE x INT64; SET x = 1.9; SELECT x;",
+                "DECLARE n NUMERIC DEFAULT 7; DECLARE x INT64 DEFAULT n; SELECT x;")) {
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.query(PROJECT, "US", null, sql, null));
+
+            assertEquals("invalidQuery", error.getReason());
+            assertTrue(error.getMessage().contains("Value cannot be coerced to INT64"), error.getMessage());
+        }
+        // An INT64 variable still holds an INT64 literal.
+        seedTwoRows();
+        StoredJob job = service.query(PROJECT, "US", null,
+                "DECLARE x INT64 DEFAULT 25; SELECT * FROM ds1.t1 WHERE age = x;", null);
+        assertEquals(1, service.queryResults(PROJECT, job).rows().size());
+    }
+
     private void seedEuDataset() {
         service.createDataset(PROJECT, newDataset(DATASET));
         Dataset eu = newDataset("eu_ds");

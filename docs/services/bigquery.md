@@ -122,8 +122,9 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `UNNEST` or derived table), the columns a derived table exposes, function names, and qualified fields
   are left intact, so a column keeps its name while the values an `INSERT` supplies still bind the
   variables. A variable that is a whole select item keeps its name as the result column, while
-  `SELECT f + 0.2` is named `f0_`, as BigQuery names it. `EXECUTE IMMEDIATE` supports a single query,
-  supported DDL or DML statement, or `BEGIN`
+  `SELECT f + 0.2` is named `f0_`, as BigQuery names it; so are a function argument such as
+  `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`.
+  `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
   block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
   outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or

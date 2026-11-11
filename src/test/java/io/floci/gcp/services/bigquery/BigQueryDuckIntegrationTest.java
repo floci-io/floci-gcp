@@ -1666,6 +1666,31 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].name", equalTo("v"))
                 .body("rows[0].f[0].v", equalTo("5"));
+        // A variable that is a function argument or a grouped expression is not a whole select item,
+        // so only the item that is one is named after the variable: live BigQuery answers f0_ and x.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT COALESCE(NULL, x), x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("schema.fields[1].name", equalTo("x"))
+                .body("rows[0].f[1].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT IF(x > 1, x, 0)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT (x) + 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("8"));
+        // A struct field named like the variable is no select-list alias either: live BigQuery
+        // resolves the variable, so the condition holds and the count is 2.
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 5;
+                SELECT STRUCT(COUNT(*) AS total) AS s FROM UNNEST([1,2]) AS u HAVING total > 1;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("s"))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
     }
 
     @Test

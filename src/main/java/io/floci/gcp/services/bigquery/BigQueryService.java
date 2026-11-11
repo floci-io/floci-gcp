@@ -3177,6 +3177,8 @@ public class BigQueryService {
         Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
         List<Integer> queryDepths = new ArrayList<>();
         queryDepths.add(0);
+        List<Boolean> queryScopes = new ArrayList<>();
+        queryScopes.add(true);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
@@ -3190,11 +3192,13 @@ public class BigQueryService {
                     clauses.add(query ? null : clauses.getLast());
                     withClauses.add(false);
                     queryDepths.add(query ? queryDepths.getLast() + 1 : queryDepths.getLast());
+                    queryScopes.add(query);
                 } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
                         && clauses.size() > 1) {
                     clauses.removeLast();
                     withClauses.removeLast();
                     queryDepths.removeLast();
+                    queryScopes.removeLast();
                 }
                 depths[index] = queryDepths.getLast();
                 continue;
@@ -3215,9 +3219,12 @@ public class BigQueryService {
                 // A WITH clause collects CTE names; the query that follows it does not.
                 withClauses.set(depth, false);
             }
+            // Only a query's own select list names its columns. A function call's arguments or a
+            // grouped expression inherit the clause they sit in, but declare nothing there.
+            boolean selectList = queryScopes.get(depth) && "SELECT".equals(clauses.get(depth));
             String name = token.text.toLowerCase(Locale.ROOT);
             clauseByToken[index] = clauses.get(depth);
-            if (previous >= 0 && tokens.get(previous).isKeyword("AS") && "SELECT".equals(clauses.get(depth))) {
+            if (previous >= 0 && tokens.get(previous).isKeyword("AS") && selectList) {
                 aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(depths[index]);
             }
             if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
@@ -3235,7 +3242,7 @@ public class BigQueryService {
                 hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1, depths[index]));
                 continue;
             }
-            if ("SELECT".equals(clauses.get(depth)) && startsSelectItem(tokens, previous)) {
+            if (selectList && startsSelectItem(tokens, previous)) {
                 selectItemStarts.add(index);
             }
         }

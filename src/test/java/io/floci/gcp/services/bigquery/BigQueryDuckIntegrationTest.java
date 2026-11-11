@@ -1511,6 +1511,19 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void executeImmediateUsingTakesAComparisonValueWithAnAlias() {
+        // Live BigQuery returns true: `1 < 2` is the USING value and `AS flag` names it.
+        query(Map.of("query", """
+                DECLARE flag BOOL DEFAULT FALSE;
+                EXECUTE IMMEDIATE 'SELECT @flag AS flag' USING 1 < 2 AS flag;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("true"));
+    }
+
+    @Test
+    @Order(2)
     void singleProceduralStatementsRunAsScripts() {
         // Live BigQuery accepts a request made only of declarations and returns no rows.
         query(Map.of("query", "DECLARE x INT64;", "useLegacySql", false))

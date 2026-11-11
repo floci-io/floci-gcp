@@ -1885,6 +1885,7 @@ public class BigQueryService {
         int brackets = 0;
         int braces = 0;
         int angles = 0;
+        String previousWord = null;
         int index = 0;
         while (index < expression.length()) {
             char current = expression.charAt(index);
@@ -1924,6 +1925,7 @@ public class BigQueryService {
                         index++;
                     }
                 }
+                previousWord = null;
                 continue;
             }
             if (parentheses == 0 && brackets == 0 && braces == 0 && angles == 0
@@ -1934,9 +1936,11 @@ public class BigQueryService {
                         || expression.charAt(wordEnd) == '_')) {
                     wordEnd++;
                 }
-                if (expression.substring(index, wordEnd).equalsIgnoreCase(keyword)) {
+                String word = expression.substring(index, wordEnd);
+                if (word.equalsIgnoreCase(keyword)) {
                     return index;
                 }
+                previousWord = word.toUpperCase(Locale.ROOT);
                 index = wordEnd;
                 continue;
             }
@@ -1947,13 +1951,22 @@ public class BigQueryService {
                 case ']' -> brackets--;
                 case '{' -> braces++;
                 case '}' -> braces--;
-                case '<' -> angles++;
-                case '>' -> angles--;
+                case '<' -> {
+                    if (startsTypeParameters(previousWord)) {
+                        angles++;
+                    }
+                }
+                case '>' -> angles = Math.max(0, angles - 1);
                 default -> { }
             }
+            previousWord = null;
             index++;
         }
         return -1;
+    }
+
+    private static boolean startsTypeParameters(String previousWord) {
+        return "ARRAY".equals(previousWord) || "STRUCT".equals(previousWord);
     }
 
     private static List<String> splitScriptExpressions(String expression) {

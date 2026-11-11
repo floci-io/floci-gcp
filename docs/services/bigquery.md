@@ -98,7 +98,9 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
   name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
   BigQuery does. Results from preceding statements are discarded; the final query or DML statement
-  supplies the result. Procedural `BEGIN`/`END` blocks can be nested and contain supported
+  supplies the result. A declaration, an assignment, or the condition that ends a loop does not
+  discard it, so a loop reports its final iteration's result and a script that declares or assigns
+  only answers with no rows. Procedural `BEGIN`/`END` blocks can be nested and contain supported
   statements or `IF`/`ELSEIF`/`ELSE` blocks; their statements execute in source order using the
   same temporary objects. Searched and simple `CASE` statements run the first matching branch, with
   optional `ELSE`. `DECLARE`/`SET` supports `INT64`,

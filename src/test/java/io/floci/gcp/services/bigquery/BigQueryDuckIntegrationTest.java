@@ -1423,6 +1423,55 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scriptLoopsKeepTheLastQueryResult() {
+        // Live BigQuery returns 42: a loop's result is the last statement that produced one, so the
+        // terminating condition, which runs after the body, does not erase it.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (n < 1) DO
+                  SET n = n + 1;
+                  SELECT 42 AS answer;
+                END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("answer"))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("42"));
+        // Live BigQuery returns 2: each iteration replaces the previous result.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (n < 2) DO
+                  SET n = n + 1;
+                  SELECT n AS v;
+                END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"));
+        // Live BigQuery returns 42: REPEAT tests its condition after the body, like WHILE.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                REPEAT
+                  SET n = n + 1;
+                  SELECT 42 AS answer;
+                UNTIL n >= 1 END REPEAT;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("42"));
+        // Live BigQuery returns 9: a loop that produces no result leaves the earlier one in place.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS a;
+                WHILE n < 1 DO SET n = n + 1; END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

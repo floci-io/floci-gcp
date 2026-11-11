@@ -3371,7 +3371,6 @@ public class BigQueryService {
         }
         boolean matches = !result.rows().isEmpty()
                 && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
-        context.clearQueryResult();
         return matches;
     }
 
@@ -3410,7 +3409,6 @@ public class BigQueryService {
             }
             boolean matches = !result.rows().isEmpty()
                     && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
-            context.clearQueryResult();
             if (!matches) {
                 return;
             }
@@ -3566,7 +3564,6 @@ public class BigQueryService {
             matches = !result.rows().isEmpty()
                     && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
         }
-        context.clearQueryResult();
         for (SqlDialectTranslator.ScriptItem branch : matches ? conditional.whenTrue() : conditional.whenFalse()) {
             executeProceduralItem(projectId, jobProjectId, branch, options, job, context, jobLocation);
         }

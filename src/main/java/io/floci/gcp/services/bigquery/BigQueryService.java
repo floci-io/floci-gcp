@@ -1335,6 +1335,7 @@ public class BigQueryService {
                         request(projectId, jobProjectId, effectiveSql, options, true), tables(projectId, jobLocation));
                 context.recordQueryResult(result);
             } else {
+                admitWrittenDataset(statement, jobLocation);
                 context.recordBytes(validateStatement(
                         projectId, jobProjectId, statement, leafOptions(effectiveSql, options), jobLocation));
                 context.clearQueryResult();
@@ -3858,6 +3859,8 @@ public class BigQueryService {
                 context.recordQueryResult(result);
             } else {
                 job.setTotalBytesProcessed("0");
+                // A script statement writes in the job's location just like a lone statement does.
+                admitWrittenDataset(statement, jobLocation);
                 executeStatement(projectId, jobProjectId, statement, leaf, job, jobLocation);
                 context.recordBytes(Long.parseLong(job.getTotalBytesProcessed()));
                 context.clearQueryResult();

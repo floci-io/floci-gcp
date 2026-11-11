@@ -2149,6 +2149,32 @@ class BigQueryServiceTest {
             "DROP VIEW eu_ds.v",
             "DROP VIEW IF EXISTS eu_ds.missing",
             "DROP SCHEMA eu_ds CASCADE",
+            "ALTER TABLE eu_ds.t1 SET OPTIONS(description='x')",
+            "CREATE TABLE eu_ds.fresh (id INT64)",
+            "CREATE OR REPLACE TABLE eu_ds.t1 (id INT64)",
+            "CREATE TABLE eu_ds.fresh AS SELECT * FROM eu_ds.t1",
+            "CREATE VIEW eu_ds.fresh AS SELECT * FROM eu_ds.t1"})
+    void aScriptStatementMustRunInTheLocationOfItsDataset(String sql) {
+        seedEuDataset();
+        service.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        service.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "ana", "age", 1)));
+        String script = "SELECT * FROM ds1.t1; " + sql + ";";
+
+        assertNotInLocation(assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null, script, null)),
+                "eu_ds", "US");
+        assertNotInLocation(assertThrows(GcpException.class,
+                () -> service.query(PROJECT, "US", null, dryRun(script))), "eu_ds", "US");
+        assertEuDatasetUntouched();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "TRUNCATE TABLE eu_ds.t1",
+            "DROP TABLE eu_ds.t1",
+            "DROP TABLE IF EXISTS eu_ds.missing",
+            "DROP VIEW eu_ds.v",
+            "DROP VIEW IF EXISTS eu_ds.missing",
+            "DROP SCHEMA eu_ds CASCADE",
             "DROP SCHEMA IF EXISTS eu_ds CASCADE",
             "ALTER TABLE eu_ds.t1 SET OPTIONS(description='x')",
             "ALTER TABLE IF EXISTS eu_ds.missing SET OPTIONS(description='x')",

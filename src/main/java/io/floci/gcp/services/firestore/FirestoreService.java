@@ -14,6 +14,7 @@ import com.google.firestore.v1.Write;
 import com.google.protobuf.NullValue;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -23,9 +24,11 @@ import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.firestore.model.StoredDocument;
 import io.floci.gcp.services.firestore.model.StoredValue;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import java.math.BigInteger;
@@ -51,6 +54,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntPredicate;
+import java.util.function.UnaryOperator;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
@@ -76,21 +80,36 @@ public class FirestoreService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
 
+    /**
+     * Maps a document name that uses a known project's number to the project's ID. The gRPC layer
+     * rewrites only the request fields it can recognise as resource names, and Firestore's write
+     * names ({@code Write.update.name}, {@code delete}, {@code transform.document}), listen
+     * targets and the document names a cursor holds are not among them, so every name is mapped
+     * here before it keys the store or is compared with a stored name.
+     */
+    private final UnaryOperator<String> canonicalName;
+
     @Inject
     public FirestoreService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, ProjectRegistry projects) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.documentStore = storageFactory.createGlobal("firestore-documents", "firestore-documents.json",
                 new TypeReference<Map<String, StoredDocument>>() {});
+        this.canonicalName = projects::canonicalResourceName;
     }
 
     FirestoreService(StorageBackend<String, StoredDocument> documentStore) {
+        this(documentStore, UnaryOperator.identity());
+    }
+
+    FirestoreService(StorageBackend<String, StoredDocument> documentStore, UnaryOperator<String> canonicalName) {
         this.documentStore = documentStore;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
+        this.canonicalName = canonicalName;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -105,11 +124,44 @@ public class FirestoreService {
         grpcServerManager.bind(new FirestoreController(this));
     }
 
+    /** Runs after {@code EmulatorLifecycle} has loaded the stores, so saved documents are present. */
+    void onStoresLoaded(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent ev) {
+        int moved = renameNumberNamedDocuments();
+        if (moved > 0) {
+            LOG.infof("Firestore: moved %d saved documents from a project number to the project ID", moved);
+        }
+    }
+
+    /**
+     * Moves documents saved by an earlier version under a known project's number to the name
+     * {@link #canonicalName} gives them, since every lookup now uses that name. A document already
+     * saved under the ID form is kept, and the number-form copy is left where it is.
+     */
+    int renameNumberNamedDocuments() {
+        int moved = 0;
+        synchronized (writeLock) {
+            for (StoredDocument doc : documentStore.scan(name -> !name.equals(canonicalName.apply(name)))) {
+                String canonical = canonicalName.apply(doc.getName());
+                if (documentStore.get(canonical).isPresent()) {
+                    LOG.warnf("Firestore: kept %s, %s already exists", doc.getName(), canonical);
+                    continue;
+                }
+                String saved = doc.getName();
+                documentStore.put(canonical, new StoredDocument(canonical, doc.getCreateTime(),
+                        doc.getUpdateTime(), doc.getFields()));
+                documentStore.delete(saved);
+                moved++;
+            }
+        }
+        return moved;
+    }
+
     // ── Writes ─────────────────────────────────────────────────────────────────
 
     public record WriteCommitResult(String updateTime) {}
 
-    public WriteCommitResult applyWrite(Write write, Instant commitTime) {
+    public WriteCommitResult applyWrite(Write request, Instant commitTime) {
+        Write write = canonical(request);
         synchronized (writeLock) {
             validateFieldPaths(write);
             checkPrecondition(write);
@@ -123,7 +175,8 @@ public class FirestoreService {
      * Applies a commit atomically: transaction read-set validation and all write
      * preconditions are checked against the pre-commit state before any write lands.
      */
-    public List<WriteCommitResult> commit(List<Write> writes, byte[] transactionId, Instant commitTime) {
+    public List<WriteCommitResult> commit(List<Write> requested, byte[] transactionId, Instant commitTime) {
+        List<Write> writes = requested.stream().map(this::canonical).toList();
         synchronized (writeLock) {
             validateTransaction(transactionId);
             for (Write write : writes) {
@@ -138,6 +191,32 @@ public class FirestoreService {
             publishToListeners(writes);
             return results;
         }
+    }
+
+    private Write canonical(Write write) {
+        Write.Builder builder = write.toBuilder();
+        if (write.hasUpdate()) {
+            builder.getUpdateBuilder().setName(canonicalName.apply(write.getUpdate().getName()));
+        }
+        if (!write.getDelete().isEmpty()) {
+            builder.setDelete(canonicalName.apply(write.getDelete()));
+        }
+        if (write.hasTransform()) {
+            builder.getTransformBuilder().setDocument(canonicalName.apply(write.getTransform().getDocument()));
+        }
+        return builder.build();
+    }
+
+    private Target canonical(Target target) {
+        Target.Builder builder = target.toBuilder();
+        if (target.hasDocuments()) {
+            Target.DocumentsTarget.Builder documents = builder.getDocumentsBuilder().clearDocuments();
+            target.getDocuments().getDocumentsList().forEach(name -> documents.addDocuments(canonicalName.apply(name)));
+        }
+        if (target.hasQuery()) {
+            builder.getQueryBuilder().setParent(canonicalName.apply(target.getQuery().getParent()));
+        }
+        return builder.build();
     }
 
     private static void validateFieldPaths(Write write) {
@@ -340,11 +419,12 @@ public class FirestoreService {
 
     public Optional<StoredDocument> getDocument(String name) {
         LOG.debugf("getDocument name=%s", name);
-        return documentStore.get(name);
+        return documentStore.get(canonicalName.apply(name));
     }
 
-    public List<StoredDocument> runQuery(String parent, StructuredQuery query) {
-        LOG.debugf("runQuery parent=%s", parent);
+    public List<StoredDocument> runQuery(String requested, StructuredQuery query) {
+        LOG.debugf("runQuery parent=%s", requested);
+        String parent = canonicalName.apply(requested);
         StructuredQuery.CollectionSelector from = query.getFromCount() > 0
                 ? query.getFrom(0) : StructuredQuery.CollectionSelector.getDefaultInstance();
         List<StoredDocument> results = documentStore.scan(inCollection(parent, from));
@@ -369,7 +449,8 @@ public class FirestoreService {
      * or those of every collection under {@code parent} when {@code collectionId} is empty,
      * ordered by the string {@code order_by} ({@code __name__ ASC} when absent).
      */
-    public List<StoredDocument> listDocuments(String parent, String collectionId, String orderBy) {
+    public List<StoredDocument> listDocuments(String requested, String collectionId, String orderBy) {
+        String parent = canonicalName.apply(requested);
         List<StructuredQuery.Order> explicit = parseOrderBy(orderBy);
         List<StoredDocument> docs = documentStore.scan(inCollection(parent,
                 StructuredQuery.CollectionSelector.newBuilder().setCollectionId(collectionId).build()));
@@ -617,7 +698,7 @@ public class FirestoreService {
     private int compareDocFieldToValue(StoredDocument doc, String path, Value value) {
         if (NAME_FIELD.equals(path)) {
             String target = value.hasReferenceValue() ? value.getReferenceValue() : value.getStringValue();
-            return FirestoreValueOrder.compareResourceNames(doc.getName(), target);
+            return FirestoreValueOrder.compareResourceNames(doc.getName(), canonicalName.apply(target));
         }
         StoredValue stored = resolveFieldPath(doc, path);
         if (stored == null) {
@@ -638,7 +719,7 @@ public class FirestoreService {
 
     public List<String> listCollectionIds(String parent) {
         LOG.debugf("listCollectionIds parent=%s", parent);
-        String prefix = parent + "/";
+        String prefix = canonicalName.apply(parent) + "/";
         TreeSet<String> ids = new TreeSet<>();
         documentStore.scan(k -> k.startsWith(prefix)).forEach(doc -> {
             String relative = doc.getName().substring(prefix.length());
@@ -753,7 +834,7 @@ public class FirestoreService {
     public void recordTransactionRead(byte[] transactionId, String docName) {
         synchronized (writeLock) {
             recordTransactionRead(transactionId, docName,
-                    documentStore.get(docName).map(StoredDocument::getUpdateTime).orElse(null));
+                    documentStore.get(canonicalName.apply(docName)).map(StoredDocument::getUpdateTime).orElse(null));
         }
     }
 
@@ -773,7 +854,7 @@ public class FirestoreService {
             return;
         }
         synchronized (writeLock) {
-            state.readVersions.putIfAbsent(docName, Optional.ofNullable(updateTime));
+            state.readVersions.putIfAbsent(canonicalName.apply(docName), Optional.ofNullable(updateTime));
         }
     }
 
@@ -841,7 +922,7 @@ public class FirestoreService {
             if (stream.isClosed()) {
                 return;
             }
-            stream.addTarget(target, nextListenReadTime());
+            stream.addTarget(canonical(target), nextListenReadTime());
             listenStreams.add(stream);
         }
     }

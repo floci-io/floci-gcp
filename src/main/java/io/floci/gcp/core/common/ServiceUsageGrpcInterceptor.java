@@ -35,9 +35,7 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
         this.gate = gate;
         this.descriptor = descriptor;
         this.defaultProjectId = defaultProjectId;
-        Set<String> gated = new HashSet<>(descriptor.usageAdapter().referenceDomains());
-        gated.add(descriptor.apiName());
-        this.domains = Set.copyOf(gated);
+        this.domains = descriptor.requestDomains();
     }
 
     @Override
@@ -70,7 +68,7 @@ public final class ServiceUsageGrpcInterceptor implements ServerInterceptor {
     }
 
     /** Lets the gate close a call the handler already holds: the handler's later writes are dropped. */
-    private static final class GatedCall<ReqT, RespT>
+    static final class GatedCall<ReqT, RespT>
             extends ForwardingServerCall.SimpleForwardingServerCall<ReqT, RespT> {
 
         private volatile boolean rejected;

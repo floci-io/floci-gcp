@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
 
 /**
  * Finds the fields of a request message that name resources, as the API declares them rather than
@@ -47,7 +48,8 @@ public final class ProtoResourceFields {
     private record Plan(List<Named> annotated, List<FieldDescriptor> bare, List<FieldDescriptor> messages) {}
 
     private static final int MAX_DEPTH = 4;
-    private static final Set<String> TARGET_FIELDS = Set.of("name", "parent", "resource", "project", "project_id");
+    private static final Set<String> TARGET_FIELDS = Set.of("name", "parent", "resource", "project", "project_id",
+            "database");
     private static final Map<Descriptor, Plan> PLANS = new ConcurrentHashMap<>();
     private static final Map<Class<?>, Descriptor> REQUEST_TYPES = new ConcurrentHashMap<>();
     private static final Set<String> METHODS_WITHOUT_SCHEMA = ConcurrentHashMap.newKeySet();
@@ -83,6 +85,82 @@ public final class ProtoResourceFields {
         List<Ref> refs = new ArrayList<>();
         collect(readable(message), true, MAX_DEPTH, refs);
         return refs;
+    }
+
+    /**
+     * The message with every field {@link #refs} reads replaced through {@code rename}, as a message
+     * of the same type; the message itself when nothing changes. The copy is parsed by the message's
+     * own generated parser, so it needs no reflection either.
+     */
+    @SuppressWarnings("unchecked")
+    public static <M extends Message> M rename(M message, BiFunction<String, String, String> rename) {
+        Message renamed = renamed(readable(message), true, MAX_DEPTH, rename);
+        if (renamed == null) {
+            return message;
+        }
+        try {
+            return (M) message.getParserForType().parseFrom(renamed.toByteString());
+        } catch (InvalidProtocolBufferException e) {
+            throw new IllegalStateException("A renamed message failed to parse", e);
+        }
+    }
+
+    /** The renamed message, or null when no field changed. */
+    private static Message renamed(Message message, boolean top, int depth, BiFunction<String, String, String> rename) {
+        Plan plan = PLANS.computeIfAbsent(message.getDescriptorForType(), ProtoResourceFields::plan);
+        Message.Builder builder = null;
+        for (Named named : plan.annotated()) {
+            builder = renameField(message, builder, named.field(), rename);
+        }
+        if (top) {
+            for (FieldDescriptor field : plan.bare()) {
+                builder = renameField(message, builder, field, rename);
+            }
+        }
+        if (depth > 1) {
+            for (FieldDescriptor field : plan.messages()) {
+                if (field.isRepeated()) {
+                    List<?> nested = (List<?>) message.getField(field);
+                    for (int i = 0; i < nested.size(); i++) {
+                        Message changed = renamed((Message) nested.get(i), false, depth - 1, rename);
+                        if (changed != null) {
+                            builder = builder != null ? builder : message.toBuilder();
+                            builder.setRepeatedField(field, i, changed);
+                        }
+                    }
+                } else if (message.hasField(field)) {
+                    Message changed = renamed((Message) message.getField(field), false, depth - 1, rename);
+                    if (changed != null) {
+                        builder = builder != null ? builder : message.toBuilder();
+                        builder.setField(field, changed);
+                    }
+                }
+            }
+        }
+        return builder == null ? null : builder.build();
+    }
+
+    private static Message.Builder renameField(Message message, Message.Builder builder, FieldDescriptor field,
+                                               BiFunction<String, String, String> rename) {
+        if (field.isRepeated()) {
+            List<?> values = (List<?>) message.getField(field);
+            for (int i = 0; i < values.size(); i++) {
+                String value = (String) values.get(i);
+                String changed = value.isEmpty() ? value : rename.apply(field.getName(), value);
+                if (!changed.equals(value)) {
+                    builder = builder != null ? builder : message.toBuilder();
+                    builder.setRepeatedField(field, i, changed);
+                }
+            }
+            return builder;
+        }
+        String value = (String) message.getField(field);
+        String changed = value.isEmpty() ? value : rename.apply(field.getName(), value);
+        if (!changed.equals(value)) {
+            builder = builder != null ? builder : message.toBuilder();
+            builder.setField(field, changed);
+        }
+        return builder;
     }
 
     /**

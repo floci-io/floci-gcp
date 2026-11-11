@@ -2,6 +2,8 @@ package io.floci.gcp.lifecycle;
 
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.ProjectContextGrpcInterceptor;
+import io.floci.gcp.core.common.ProjectNumberGrpcInterceptor;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ProtoResourceFields;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -26,6 +28,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.Optional;
+import java.util.Set;
 
 @Startup
 @ApplicationScoped
@@ -40,6 +43,7 @@ public class GrpcServerManager {
     private final IamGrpcAuthorizationInterceptor authorization;
     private final ServiceRegistry serviceRegistry;
     private final ServiceUsageGate serviceUsageGate;
+    private final ProjectRegistry projectRegistry;
     private final String defaultProjectId;
 
     private GrpcIoServer grpcServer;
@@ -47,13 +51,14 @@ public class GrpcServerManager {
     @Inject
     GrpcServerManager(Vertx vertx, Router router, Instance<BindableService> services,
             IamGrpcAuthorizationInterceptor authorization, ServiceRegistry serviceRegistry,
-            ServiceUsageGate serviceUsageGate, EmulatorConfig config) {
+            ServiceUsageGate serviceUsageGate, ProjectRegistry projectRegistry, EmulatorConfig config) {
         this.vertx = vertx;
         this.router = router;
         this.services = services;
         this.authorization = authorization;
         this.serviceRegistry = serviceRegistry;
         this.serviceUsageGate = serviceUsageGate;
+        this.projectRegistry = projectRegistry;
         this.defaultProjectId = config.defaultProjectId();
     }
 
@@ -103,7 +108,8 @@ public class GrpcServerManager {
     private void bindGated(BindableService service, Optional<ServiceDescriptor> api, ServerInterceptor... interceptors) {
         // Innermost, so the handler and the service's own interceptors see the project of the call.
         ServerServiceDefinition scoped = ServerInterceptors.intercept(service,
-                new ProjectContextGrpcInterceptor(defaultProjectId));
+                new ProjectContextGrpcInterceptor(defaultProjectId, projectRegistry,
+                        api.map(ServiceDescriptor::requestDomains).orElse(Set.of())));
         ProtoResourceFields.register(scoped);
         ServerServiceDefinition authorized = ServerInterceptors.intercept(
                 ServerInterceptors.intercept(scoped, interceptors), authorization);
@@ -113,6 +119,9 @@ public class GrpcServerManager {
                 .map(descriptor -> ServerInterceptors.intercept(authorized,
                         new ServiceUsageGrpcInterceptor(serviceUsageGate, descriptor, defaultProjectId)))
                 .orElse(authorized);
-        GrpcIoServiceBridge.bridge(() -> gated).bind(grpcServer);
+        // Outermost, so the gate and IAM check the project ID the handler acts on, never a number.
+        ServerServiceDefinition canonical = ServerInterceptors.intercept(gated,
+                new ProjectNumberGrpcInterceptor(projectRegistry));
+        GrpcIoServiceBridge.bridge(() -> canonical).bind(grpcServer);
     }
 }

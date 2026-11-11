@@ -1,5 +1,6 @@
 package io.floci.gcp.core.common;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -30,6 +31,15 @@ public record ServiceDescriptor(
         ServiceUsageAdapter usageAdapter,
         List<String> apiVersions
 ) {
+
+    /** The APIs whose resources a request to this service acts on, its own and any it reads through. */
+    public Set<String> requestDomains() {
+        Set<String> domains = new HashSet<>(usageAdapter.referenceDomains());
+        if (apiName != null) {
+            domains.add(apiName);
+        }
+        return Set.copyOf(domains);
+    }
 
     public static Builder builder(String name) {
         return new Builder(name);

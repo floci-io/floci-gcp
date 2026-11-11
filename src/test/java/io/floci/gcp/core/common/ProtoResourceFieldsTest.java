@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class ProtoResourceFieldsTest {
 
@@ -82,5 +83,31 @@ class ProtoResourceFieldsTest {
         assertEquals(List.of(new Ref("project_id", null, true, "p")),
                 ProtoResourceFields.refs(LookupRequest.newBuilder().setProjectId("p")
                         .setDatabaseId("projects/x").build()));
+    }
+
+    @Test
+    void renameRewritesTheFieldsRefsReadsAndNothingElse() {
+        WriteLogEntriesRequest request = WriteLogEntriesRequest.newBuilder()
+                .setLogName("projects/a/logs/l")
+                .addEntries(LogEntry.newBuilder().setLogName("projects/a/logs/m")
+                        .setTextPayload("projects/a/logs/l")
+                        .putLabels("k", "projects/a/logs/l"))
+                .build();
+
+        WriteLogEntriesRequest renamed = ProtoResourceFields.rename(request,
+                (field, value) -> value.replace("projects/a/", "projects/z/"));
+
+        assertEquals("projects/z/logs/l", renamed.getLogName());
+        assertEquals("projects/z/logs/m", renamed.getEntries(0).getLogName());
+        assertEquals("projects/a/logs/l", renamed.getEntries(0).getTextPayload());
+        assertEquals("projects/a/logs/l", renamed.getEntries(0).getLabelsOrThrow("k"));
+    }
+
+    @Test
+    void renameReturnsTheSameMessageWhenNothingChanges() {
+        UpdateSecretRequest request = UpdateSecretRequest.newBuilder()
+                .setSecret(Secret.newBuilder().setName("projects/p/secrets/s")).build();
+
+        assertSame(request, ProtoResourceFields.rename(request, (field, value) -> value));
     }
 }

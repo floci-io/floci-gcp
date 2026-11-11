@@ -5,7 +5,7 @@ import io.floci.gcp.core.common.GcpException;
 /** Credential lookup outcome, independent of the HTTP transport's error representation. */
 public final class CredentialAuthenticationException extends GcpException {
 
-    public enum Failure { UNKNOWN, EXPIRED }
+    public enum Failure { UNKNOWN, EXPIRED, ACCOUNT_STATE_INVALID }
 
     private final Failure failure;
 

@@ -1592,6 +1592,20 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].type", equalTo("NUMERIC"))
                 .body("rows[0].f[0].v", equalTo("3"));
+        // An INT64 operand above 2^53 keeps every digit, as BigQuery's NUMERIC does.
+        query(Map.of("query", """
+                DECLARE n NUMERIC DEFAULT 0;
+                SET n = n + 9007199254740993;
+                SELECT n;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", """
+                DECLARE n NUMERIC DEFAULT 9007199254740993;
+                IF n = 9007199254740993 THEN SELECT 'equal' AS r; ELSE SELECT 'differs' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("equal"));
     }
 
     @Test

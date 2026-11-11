@@ -2474,8 +2474,18 @@ public class BigQueryService {
         return decimal.setScale(Math.min(9, decimal.scale()));
     }
 
+    /** An exact decimal for {@code value}: an integral operand keeps every digit it carries. */
     private static BigDecimal scriptDecimal(Number value) {
-        return value instanceof BigDecimal decimal ? decimal : BigDecimal.valueOf(value.doubleValue());
+        if (value instanceof BigDecimal decimal) {
+            return decimal;
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return BigDecimal.valueOf(value.doubleValue());
+        }
+        if (value instanceof BigInteger integer) {
+            return new BigDecimal(integer);
+        }
+        return BigDecimal.valueOf(value.longValue());
     }
 
     private static ScriptVariableField scriptStructField(ScriptVariableType type, String name) {

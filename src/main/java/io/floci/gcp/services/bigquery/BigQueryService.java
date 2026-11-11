@@ -2981,6 +2981,7 @@ public class BigQueryService {
     private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames,
                                                 Set<Integer> columnPositions) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        ScriptNameResolution resolution = scriptNameResolution(tokens);
         Set<String> aliases = new LinkedHashSet<>();
         for (int index = 0; index < tokens.size(); index++) {
             if (tokens.get(index).isKeyword("AS")) {
@@ -3001,7 +3002,8 @@ public class BigQueryService {
                     .contains(tokens.get(previous).upper());
             boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
-            boolean columnName = columnNames.contains(name) || columnPositions.contains(index);
+            boolean columnName = columnNames.contains(name) || columnPositions.contains(index)
+                    || resolution.hides(name, index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnName
                     || aliases.contains(name) && aliasReferences[index]) {
@@ -3045,16 +3047,202 @@ public class BigQueryService {
                     memberIndex = nestedField;
                 }
                 if (finalFieldIndex != index) {
-                    expanded.append(valueType != null ? sqlVariableLiteral(fieldValue, valueType)
-                            : sqlVariableLiteral(fieldValue));
+                    String literal = valueType != null ? sqlVariableLiteral(fieldValue, valueType)
+                            : sqlVariableLiteral(fieldValue);
+                    // BigQuery names the column after the field a whole select item ends with.
+                    expanded.append(resolution.startsSelectItem(index)
+                            && endsSelectListItem(tokens, finalFieldIndex)
+                            ? literal + " AS " + tokens.get(finalFieldIndex).text
+                            : literal);
                     index = finalFieldIndex;
                     continue;
                 }
             }
-            expanded.append(sqlVariableLiteral(value, context.variableTypes().get(name)));
+            String literal = sqlVariableLiteral(value, context.variableTypes().get(name));
+            // A variable that is a whole select item keeps its name as the column name, as BigQuery's
+            // path expression does, where an expression over it is named f0_, f1_, ...
+            expanded.append(resolution.startsSelectItem(index) && endsSelectListItem(tokens, index)
+                    ? literal + " AS " + token.text
+                    : literal);
         }
         return expanded.toString();
     }
+
+    /**
+     * A statement's own name resolution, which BigQuery applies before a script variable of the same name:
+     * the token positions where a variable is a whole select item, whose column BigQuery names after it, and
+     * the names the statement binds to something else: a CTE name, the alias of a FROM item, and the columns
+     * a derived table exposes.
+     */
+    private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames) {
+
+        /** {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo}. */
+        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo) {}
+
+        private boolean startsSelectItem(int index) {
+            return selectItemStarts.contains(index);
+        }
+
+        private boolean hides(String name, int index) {
+            for (HiddenName hidden : hiddenNames) {
+                if (hidden.names().contains(name)
+                        && (index < hidden.excludedFrom() || index > hidden.excludedTo())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens) {
+        Set<Integer> selectItemStarts = new LinkedHashSet<>();
+        List<ScriptNameResolution.HiddenName> hiddenNames = new ArrayList<>();
+        List<String> clauses = new ArrayList<>();
+        clauses.add(null);
+        List<Boolean> withClauses = new ArrayList<>();
+        withClauses.add(false);
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
+                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    if (token.isPunct("(")) {
+                        addDerivedTableColumns(tokens, index, clauses.getLast(), hiddenNames);
+                    }
+                    clauses.add(null);
+                    withClauses.add(false);
+                } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
+                        && clauses.size() > 1) {
+                    clauses.removeLast();
+                    withClauses.removeLast();
+                }
+                continue;
+            }
+            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+                continue;
+            }
+            int depth = clauses.size() - 1;
+            boolean withClause = withClauses.get(depth);
+            String upper = token.upper();
+            int previous = previousSignificantToken(tokens, index - 1);
+            int next = nextSignificantToken(tokens, index + 1);
+            if ("WITH".equals(upper)) {
+                withClauses.set(depth, true);
+            } else if (SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper)) {
+                clauses.set(depth, upper);
+                // A WITH clause collects CTE names; the query that follows it does not.
+                withClauses.set(depth, false);
+            }
+            String name = token.text.toLowerCase(Locale.ROOT);
+            if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
+                int open = nextSignificantToken(tokens, next + 1);
+                if (open >= 0 && tokens.get(open).isPunct("(")) {
+                    // The name a CTE declares is visible outside its own definition.
+                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open,
+                            matchingParenthesis(tokens, open)));
+                    continue;
+                }
+            }
+            if ("FROM".equals(clauses.get(depth)) && previous >= 0 && tokens.get(previous).isKeyword("AS")) {
+                // The alias of a table, UNNEST or derived table names a column scope of its own.
+                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1));
+                continue;
+            }
+            if ("SELECT".equals(clauses.get(depth)) && startsSelectItem(tokens, previous)) {
+                selectItemStarts.add(index);
+            }
+        }
+        return new ScriptNameResolution(selectItemStarts, hiddenNames);
+    }
+
+    /**
+     * Adds the columns a derived table in a FROM clause exposes: the aliases of its select list and the
+     * names its bare select items carry. A name hides a variable outside the item, where BigQuery
+     * resolves the derived table's column first.
+     */
+    private static void addDerivedTableColumns(List<SqlDialectTranslator.Token> tokens, int open, String clause,
+                                               List<ScriptNameResolution.HiddenName> hiddenNames) {
+        int previous = previousSignificantToken(tokens, open - 1);
+        boolean fromItem = "FROM".equals(clause) && previous >= 0
+                && (tokens.get(previous).isKeyword("FROM") || tokens.get(previous).isKeyword("JOIN")
+                        || tokens.get(previous).isPunct(","));
+        if (!fromItem) {
+            return;
+        }
+        int close = matchingParenthesis(tokens, open);
+        Set<String> names = new LinkedHashSet<>();
+        List<String> innerClauses = new ArrayList<>();
+        innerClauses.add(null);
+        for (int index = open + 1; index < close; index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
+                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    innerClauses.add(null);
+                } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
+                        && innerClauses.size() > 1) {
+                    innerClauses.removeLast();
+                }
+                continue;
+            }
+            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+                continue;
+            }
+            int depth = innerClauses.size() - 1;
+            String upper = token.upper();
+            if (SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper) || "WITH".equals(upper)) {
+                innerClauses.set(depth, upper);
+                continue;
+            }
+            if (!"SELECT".equals(innerClauses.get(depth))) {
+                continue;
+            }
+            int itemStart = previousSignificantToken(tokens, index - 1);
+            if (itemStart >= 0 && tokens.get(itemStart).isKeyword("AS")
+                    || startsSelectItem(tokens, itemStart) && endsSelectListItem(tokens, index)) {
+                names.add(token.text.toLowerCase(Locale.ROOT));
+            }
+        }
+        if (!names.isEmpty()) {
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close));
+        }
+    }
+
+    /** The first token of a select item, skipping the {@code DISTINCT} or {@code ALL} that may precede it. */
+    private static boolean startsSelectItem(List<SqlDialectTranslator.Token> tokens, int previous) {
+        int at = previous;
+        while (at >= 0 && (tokens.get(at).isKeyword("DISTINCT") || tokens.get(at).isKeyword("ALL"))) {
+            at = previousSignificantToken(tokens, at - 1);
+        }
+        return at >= 0 && (tokens.get(at).isKeyword("SELECT") || tokens.get(at).isPunct(","));
+    }
+
+    /** Whether the select item that starts earlier ends at {@code index}. */
+    private static boolean endsSelectListItem(List<SqlDialectTranslator.Token> tokens, int index) {
+        int next = nextSignificantToken(tokens, index + 1);
+        return next < 0 || tokens.get(next).isPunct(",") || tokens.get(next).isPunct(")")
+                || tokens.get(next).isPunct(";")
+                || tokens.get(next).kind == SqlDialectTranslator.Kind.IDENT
+                        && SCRIPT_CLAUSE_KEYWORDS.contains(tokens.get(next).upper());
+    }
+
+    private static int matchingParenthesis(List<SqlDialectTranslator.Token> tokens, int open) {
+        int depth = 0;
+        for (int index = open; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.PUNCT) {
+                continue;
+            }
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                depth--;
+                if (depth == 0) {
+                    return index;
+                }
+            }
+        }
+        return tokens.size() - 1;
+    }
+
 
     private static int previousSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
         for (int index = from; index >= 0; index--) {
@@ -3064,6 +3252,9 @@ public class BigQueryService {
         }
         return -1;
     }
+
+    private static final Set<String> SCRIPT_CLAUSE_KEYWORDS = Set.of("FROM", "WHERE", "GROUP", "HAVING",
+            "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT");
 
     private static int nextSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
         for (int index = from; index < tokens.size(); index++) {

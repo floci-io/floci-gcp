@@ -1518,6 +1518,80 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aSelectedVariableKeepsItsNameAsTheColumnName() {
+        // Live BigQuery names each column after the variable, so a client reads row.output_value.
+        query(Map.of("query", """
+                DECLARE input_value INT64 DEFAULT 7;
+                DECLARE output_value INT64;
+                EXECUTE IMMEDIATE "SELECT @value * 2 AS result" INTO output_value USING input_value AS value;
+                SELECT output_value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("output_value"))
+                .body("rows[0].f[0].v", equalTo("14"));
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 1;
+                BEGIN SET x = 2; END;
+                SELECT x;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                FOR r IN (SELECT 1 AS n UNION ALL SELECT 2) DO
+                  SET total = total + r.n;
+                END FOR;
+                SELECT total;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("total"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        // A tuple assignment names both of its columns.
+        query(Map.of("query", """
+                DECLARE a INT64;
+                DECLARE b INT64;
+                SET (a, b) = (1, 2);
+                SELECT a, b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"));
+        // A path over a struct variable is named after its last field.
+        query(Map.of("query", """
+                DECLARE item STRUCT<id INT64> DEFAULT STRUCT(1 AS id);
+                SELECT item.id;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptVariablesLeaveTheStatementsOwnNamesAlone() {
+        // Live BigQuery resolves the derived table's column first: 2, not the variable.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 1; SELECT x FROM (SELECT 2 AS x)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        // An UNNEST alias is a column scope too: 1.
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 7; SELECT id AS v FROM UNNEST([1]) AS id",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A CTE name names a table, not a variable: 5, as in BigQuery.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 1; WITH x AS (SELECT 5 AS v) SELECT v FROM x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("5"));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateUsesParametersAndAssignsItsResult() {
         query(Map.of("query", """
                 DECLARE input_value INT64 DEFAULT 7;

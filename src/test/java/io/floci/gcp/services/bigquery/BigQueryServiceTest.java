@@ -903,7 +903,9 @@ class BigQueryServiceTest {
         ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
         verify(engine, times(7)).execute(request.capture(), any());
         String sql = request.getAllValues().getLast().sql();
-        assertTrue(sql.contains("SELECT 2, 'second', CAST([CAST(STRUCT(2 AS `id`, 'second' AS `label`)"), sql);
+        assertTrue(sql.contains(
+                "SELECT 2 AS id, 'second' AS label, CAST([CAST(STRUCT(2 AS `id`, 'second' AS `label`)"),
+                sql);
         assertTrue(sql.contains("AS ARRAY<STRUCT<`id` INT64, `label` STRING>>"), sql);
         assertTrue(sql.contains("CAST([CAST(STRUCT(1 AS `id`, 'first' AS `label`)"), sql);
         assertDoesNotThrow(() -> SqlDialectTranslator.translate(sql, PROJECT, null,
@@ -1283,7 +1285,8 @@ class BigQueryServiceTest {
 
         ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
         verify(engine).execute(request.capture(), any());
-        assertEquals("SELECT 'C:\\\\new'", request.getValue().sql());
+        // BigQuery names the column after the variable, so the literal carries its name.
+        assertEquals("SELECT 'C:\\\\new' AS path", request.getValue().sql());
     }
 
     @Test
@@ -1379,7 +1382,7 @@ class BigQueryServiceTest {
 
         ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
         verify(engine, times(2)).execute(request.capture(), any());
-        assertEquals("SELECT 'ab'", request.getAllValues().getLast().sql());
+        assertEquals("SELECT 'ab' AS s", request.getAllValues().getLast().sql());
     }
 
     @Test

@@ -1496,6 +1496,21 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void simpleCaseComparesTheWholeWhenOperand() {
+        // Live BigQuery returns 'right': a simple CASE compares FALSE = (FALSE OR TRUE), so no WHEN matches.
+        query(Map.of("query", """
+                CASE FALSE
+                  WHEN FALSE OR TRUE THEN SELECT 'wrong' AS result;
+                  ELSE SELECT 'right' AS result;
+                END CASE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("result"))
+                .body("rows[0].f[0].v", equalTo("right"));
+    }
+
+    @Test
+    @Order(2)
     void singleProceduralStatementsRunAsScripts() {
         // Live BigQuery accepts a request made only of declarations and returns no rows.
         query(Map.of("query", "DECLARE x INT64;", "useLegacySql", false))

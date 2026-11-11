@@ -88,8 +88,19 @@ final class SqlDialectTranslator {
     record ForBlock(String label, String variable, String query, List<ScriptItem> items) implements ScriptItem {}
     record CaseWhen(String condition, List<ScriptItem> items) {}
     record CaseBlock(String expression, List<CaseWhen> branches, List<ScriptItem> otherwise) implements ScriptItem {
+        private static final Pattern SINGLE_OPERAND = Pattern.compile(
+                "(?i)[A-Za-z_][A-Za-z0-9_.]*|[-+]?[0-9]+(?:\\.[0-9]+)?|'(?:[^']|'')*'");
+
         String condition(CaseWhen branch) {
-            return expression != null ? expression + " = " + branch.condition() : branch.condition();
+            return expression != null
+                    ? groupedOperand(expression) + " = " + groupedOperand(branch.condition())
+                    : branch.condition();
+        }
+
+        /** BigQuery compares the whole WHEN operand, so an expression needs its own parentheses. */
+        private static String groupedOperand(String operand) {
+            String trimmed = operand.trim();
+            return SINGLE_OPERAND.matcher(trimmed).matches() ? trimmed : "(" + trimmed + ")";
         }
     }
     record LoopControl(boolean continueLoop, String label) implements ScriptItem {}

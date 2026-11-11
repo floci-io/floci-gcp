@@ -155,6 +155,21 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void proceduralSimpleCaseGroupsTheWhenOperandBeforeComparing() {
+        // Live BigQuery returns the ELSE branch here: a simple CASE compares the whole WHEN operand,
+        // so FALSE = (FALSE OR TRUE) is false, not FALSE = FALSE OR TRUE.
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                CASE FALSE
+                  WHEN FALSE OR TRUE THEN SELECT 1;
+                  ELSE SELECT 2;
+                END CASE;
+                """);
+
+        SqlDialectTranslator.CaseBlock caseBlock = (SqlDialectTranslator.CaseBlock) script.items().getFirst();
+        assertEquals("FALSE = (FALSE OR TRUE)", caseBlock.condition(caseBlock.branches().getFirst()));
+    }
+
+    @Test
     void proceduralCaseParsesWhenBranchesAndOptionalElse() {
         SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
                 CASE

@@ -1603,6 +1603,31 @@ class BigQueryDuckDmlIntegrationTest {
     }
 
     @Test
+    @Order(233)
+    void temporaryObjectsFollowBigQueryClauseRules() {
+        // BigQuery accepts OR REPLACE on a temporary table, which replaces it.
+        assertEquals(List.of(List.of("2")), rows("""
+                CREATE TEMP TABLE replaced AS SELECT 1 AS x;
+                CREATE OR REPLACE TEMP TABLE replaced AS SELECT 2 AS x;
+                SELECT x AS x FROM replaced;
+                """));
+        // It rejects every clause of a temporary function, OR REPLACE included.
+        query("""
+                CREATE OR REPLACE TEMP FUNCTION replaced_function(value INT64) RETURNS INT64 AS (value + 1);
+                SELECT replaced_function(1) AS answer;
+                """).then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP FUNCTION"));
+        // OR REPLACE after the object name is a syntax error: BigQuery's grammar takes it before TEMP.
+        query("""
+                CREATE TEMP TABLE OR REPLACE after_object (x INT64);
+                SELECT 1 AS answer;
+                """).then().statusCode(400)
+                .body("error.message", containsString("Syntax error: Unexpected keyword OR"));
+    }
+
+    @Test
     @Order(232)
     void aScriptReportsNoDmlCounts() {
         // Live BigQuery's job for a script carries neither numDmlAffectedRows nor dmlStats, and no schema:

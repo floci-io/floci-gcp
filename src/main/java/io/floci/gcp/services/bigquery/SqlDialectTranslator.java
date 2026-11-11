@@ -996,6 +996,10 @@ final class SqlDialectTranslator {
         if (ifNotExists) {
             at += 3;
         }
+        if (at < significant.size() && significant.get(at).isKeyword("OR")) {
+            // BigQuery's grammar takes OR REPLACE before TEMP, so after the object name it is a syntax error.
+            throw invalidQuery("Syntax error: Unexpected keyword OR");
+        }
         return at < significant.size()
                 ? new TemporaryDeclaration(significant, at - 1, at, orReplace, ifNotExists) : null;
     }
@@ -1009,11 +1013,8 @@ final class SqlDialectTranslator {
         if (declaration == null) {
             return null;
         }
-        if (declaration.orReplace() && declaration.ifNotExists()) {
-            throw invalidQuery("CREATE TEMP FUNCTION cannot combine OR REPLACE and IF NOT EXISTS");
-        }
-        if (declaration.ifNotExists()) {
-            // BigQuery rejects the clause outright, as it does on every other clause of the statement.
+        if (declaration.orReplace() || declaration.ifNotExists()) {
+            // BigQuery rejects every clause of the statement, OR REPLACE and IF NOT EXISTS alike.
             throw invalidQuery("Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP FUNCTION");
         }
         Token name = declaration.significant().get(declaration.name());

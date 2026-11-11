@@ -97,9 +97,11 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   function body remain local to that body. Temporary tables accept an explicit schema, an `AS`
   query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
   name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
-  BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists, where
-  `CREATE TEMP FUNCTION` rejects `IF NOT EXISTS`: `Clauses such as IF NOT EXISTS are not yet supported
-  with CREATE TEMP FUNCTION`. Results from preceding statements are discarded; the final query or DML
+  BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists and
+  `CREATE OR REPLACE TEMP TABLE` replaces one, where `CREATE TEMP FUNCTION` rejects a clause such as
+  `IF NOT EXISTS` or `OR REPLACE`: `Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP
+  FUNCTION`. `OR REPLACE` after the object name answers `Syntax error: Unexpected keyword OR`, as
+  BigQuery's grammar takes it before `TEMP`. Results from preceding statements are discarded; the final query or DML
   statement supplies the result. A script reports no DML counts, `numDmlAffectedRows` or `dmlStats`,
   since BigQuery runs its statements as child jobs and the parent carries only the final result. A declaration, an assignment, or the condition that ends a loop does not
   discard it, so a loop reports its final iteration's result and a script that declares or assigns

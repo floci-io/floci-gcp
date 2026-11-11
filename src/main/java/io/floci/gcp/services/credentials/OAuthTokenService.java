@@ -37,7 +37,7 @@ public class OAuthTokenService {
     static final String INVALID_SIGNATURE = "Invalid JWT Signature.";
     static final String INVALID_TIMEFRAME =
             "Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.";
-    static final String INVALID_AUDIENCE = "Invalid JWT: the aud claim must name the token endpoint.";
+    static final String INVALID_SCOPE = "Invalid OAuth scope or ID token audience provided.";
     /** Google documents that it refuses an {@code exp} more than 65 minutes after {@code iat}. */
     static final long MAX_ASSERTION_LIFETIME_SECONDS = 65 * 60;
     static final long TOKEN_LIFETIME_SECONDS = 3600;
@@ -101,7 +101,7 @@ public class OAuthTokenService {
         }
         String audience = claims.path("aud").asText(null);
         if (audience == null || !(GOOGLE_AUDIENCES.contains(audience) || audience.equals(requestUrl))) {
-            return oauthError("invalid_grant", INVALID_AUDIENCE);
+            return oauthError("invalid_grant", INVALID_SIGNATURE);
         }
         JsonNode issuedAt = claims.get("iat");
         JsonNode expiresAt = claims.get("exp");
@@ -112,6 +112,12 @@ public class OAuthTokenService {
         long exp = expiresAt.asLong();
         if (exp < iat || exp - iat > MAX_ASSERTION_LIFETIME_SECONDS || exp <= clock.instant().getEpochSecond()) {
             return oauthError("invalid_grant", INVALID_TIMEFRAME);
+        }
+        // Google answers invalid_scope when "No scopes were requested (empty list of scopes)"; scope names are
+        // not checked against Google's catalog.
+        JsonNode scope = claims.get("scope");
+        if (scope == null || !scope.isTextual() || scope.asText().isBlank()) {
+            return oauthError("invalid_scope", INVALID_SCOPE);
         }
         StoredCredentialToken token = tokens.mintImpersonatedToken(email,
                 clock.instant().plusSeconds(TOKEN_LIFETIME_SECONDS));

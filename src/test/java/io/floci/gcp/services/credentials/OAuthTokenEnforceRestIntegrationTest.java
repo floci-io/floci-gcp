@@ -138,10 +138,27 @@ class OAuthTokenEnforceRestIntegrationTest {
         KeyFile key = createKey(email);
 
         invalidGrant(exchange("/token", assertion(key, claims(key.email(), "https://example.com/token", 0, 3600),
-                "RS256", key.keyId())), OAuthTokenService.INVALID_AUDIENCE);
+                "RS256", key.keyId())), "Invalid JWT Signature.");
         String emulatorAudience = RestAssured.baseURI + ":" + RestAssured.port + "/token";
         exchange("/token", assertion(key, claims(key.email(), emulatorAudience, 0, 3600), "RS256", key.keyId()))
                 .then().statusCode(200);
+    }
+
+    @Test
+    void aMissingOrEmptyScopeIsAnInvalidScope() throws Exception {
+        KeyFile key = createKey(email);
+        Map<String, Object> missing = claims(key.email(), AUDIENCE, 0, 3600);
+        missing.remove("scope");
+        Map<String, Object> empty = claims(key.email(), AUDIENCE, 0, 3600);
+        empty.put("scope", "");
+        Map<String, Object> blank = claims(key.email(), AUDIENCE, 0, 3600);
+        blank.put("scope", "   ");
+
+        for (Map<String, Object> claims : List.of(missing, empty, blank)) {
+            exchange("/token", assertion(key, claims, "RS256", key.keyId())).then().statusCode(400)
+                    .body("error", equalTo("invalid_scope"))
+                    .body("error_description", equalTo("Invalid OAuth scope or ID token audience provided."));
+        }
     }
 
     @Test

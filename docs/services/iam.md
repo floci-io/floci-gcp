@@ -405,15 +405,20 @@ token is not a recognized identity. In `enforce` mode:
 - `aud` must be `https://oauth2.googleapis.com/token`, the legacy
   `https://www.googleapis.com/oauth2/v4/token`, or the emulator URL the request was
   sent to, so that a credential whose `token_uri` points at the emulator works.
-  Another audience is an `invalid_grant`; the exact Google description for it is not
-  documented.
+  Another audience gets the same response as a bad signature: `400` with
+  `invalid_grant` and `Invalid JWT Signature.`.
 - `exp` must not precede `iat`, must be at most 65 minutes after it, and must not
   have passed; otherwise the response is `invalid_grant` with
   `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.`
+- `scope` must be present and not empty; otherwise the response is `400` with
+  `invalid_scope` and `Invalid OAuth scope or ID token audience provided.`, which
+  Google documents for "No scopes were requested (empty list of scopes), or one of
+  the requested scopes doesn't exist (i.e. is invalid)." Scope names are not checked
+  yet: an unknown scope name is accepted.
 - The access token is valid for 3600 seconds and acts as the service account on
   every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
 
-The `scope` claim is not checked, and the response has no `scope` field.
+The response has no `scope` field.
 
 ### Remaining limitations
 

@@ -26,7 +26,6 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -91,13 +90,13 @@ public class IamCredentialsService {
             throw GcpException.invalidArgument("service account is required");
         }
         validateScopes(scopes);
-        requireEnabledTarget(serviceAccount);
 
         long lifetimeSeconds = parseLifetimeSeconds(lifetime);
         Instant expireTime = clock.instant().plusSeconds(lifetimeSeconds);
         String principal = iamService != null && serviceAccount.chars().allMatch(Character::isDigit)
                 ? iamService.getServiceAccount("-", serviceAccount).getEmail() : serviceAccount;
-        StoredCredentialToken token = tokenService.mintImpersonatedToken(principal, expireTime);
+        StoredCredentialToken token = tokenService.mintImpersonatedToken(principal, expireTime,
+                () -> requireEnabledTarget(serviceAccount));
         return new GeneratedAccessToken(token.getTokenValue(), expireTime);
     }
 
@@ -158,17 +157,15 @@ public class IamCredentialsService {
     /**
      * serviceAccounts.disable: "requests for new access tokens will fail"
      * (https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable), as a token of
-     * the disabled account is refused. Only enforce mode evaluates identities; the default mode is unchanged.
+     * the disabled account is refused; a deleted account's tokens are revoked, so it gets none either. Run under
+     * the lock that revocation takes. Only enforce mode evaluates identities; the default mode is unchanged.
      */
     private void requireEnabledTarget(String serviceAccount) {
         if (config == null || iamService == null
                 || config.services().iam().authorizationMode() != EmulatorConfig.IamAuthorizationMode.ENFORCE) {
             return;
         }
-        Optional<StoredServiceAccount> account = serviceAccount.chars().allMatch(Character::isDigit)
-                ? Optional.of(iamService.getServiceAccount(WILDCARD_PROJECT, serviceAccount))
-                : iamService.findServiceAccount(serviceAccount);
-        if (account.map(StoredServiceAccount::isDisabled).orElse(false)) {
+        if (iamService.getServiceAccount(WILDCARD_PROJECT, serviceAccount).isDisabled()) {
             throw CredentialAuthenticationException.accountStateInvalid();
         }
     }

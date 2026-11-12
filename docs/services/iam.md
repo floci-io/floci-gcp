@@ -423,7 +423,12 @@ measured against `https://oauth2.googleapis.com/token` in the review of
   for "No scopes were requested (empty list of scopes)", and a JSON array gets
   `invalid_scope` with `Empty or missing scope not allowed.`.
 - The JWT must be signed with `RS256` by a user-managed key of the account,
-  created through `keys.create` and still valid. The `kid` header is tried first;
+  created through `keys.create` and still valid, or by its Google-managed key, as
+  IAM Credentials `signJwt` signs: Google's
+  [domain-wide delegation best practices](https://knowledge.workspace.google.com/admin/apps/domain-wide-delegation-best-practices)
+  say "Using service account keys is not necessary to perform domain-wide
+  delegation. Use the signJwt API instead.", and that delegation is obtained by
+  exchanging the signed JWT at the token endpoint. The `kid` header is tried first;
   "if an incorrect Key ID is specified, all keys associated with the service
   account are tried". Otherwise, including for a deleted key, the response is
   `invalid_grant` with `Invalid JWT Signature.`, which Google documents for a key

@@ -116,6 +116,25 @@ class OAuthTokenEnforceRestIntegrationTest {
     }
 
     @Test
+    void jwtSignedByIamCredentialsSignJwtGetsATokenThatActsAsTheAccount() throws Exception {
+        String signedJwt = given().urlEncodingEnabled(false).contentType("application/json")
+                .body(Map.of("payload", MAPPER.writeValueAsString(claims(email, AUDIENCE, 0, 3600))))
+                .when().post("/v1/projects/-/serviceAccounts/" + email + ":signJwt")
+                .then().statusCode(200)
+                .extract().path("signedJwt");
+
+        String token = exchange("/token", signedJwt).then().statusCode(200).extract().path("access_token");
+
+        String accountPath = "/v1/projects/" + project + "/serviceAccounts/" + email;
+        grant("projects/" + project, "roles/iam.serviceAccountAdmin", email);
+        given().header("Authorization", "Bearer " + token).when().get(accountPath)
+                .then().statusCode(200).body("email", equalTo(email));
+
+        iam.deleteServiceAccount(project, email);
+        invalidGrant(exchange("/token", signedJwt), OAuthTokenService.ACCOUNT_NOT_FOUND);
+    }
+
+    @Test
     void anIncorrectKeyIdFallsBackToTheAccountsOtherKeys() throws Exception {
         KeyFile key = createKey(email);
         createKey(email);

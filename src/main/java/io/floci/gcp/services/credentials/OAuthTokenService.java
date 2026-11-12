@@ -32,8 +32,8 @@ import java.util.UUID;
 /**
  * The OAuth 2.0 token endpoint's JWT bearer grant, as described in
  * https://developers.google.com/identity/protocols/oauth2/service-account. In IAM enforce mode the
- * assertion is verified against the service account's user-managed keys and the token acts as that
- * account; otherwise any assertion gets an unrecognized token, as before.
+ * assertion is verified against the service account's user-managed keys and its Google-managed key, and
+ * the token acts as that account; otherwise any assertion gets an unrecognized token, as before.
  */
 @ApplicationScoped
 public class OAuthTokenService {
@@ -118,7 +118,7 @@ public class OAuthTokenService {
         }
         String email = claims.path("iss").isTextual() ? claims.get("iss").asText() : null;
         Optional<Map<String, PublicKey>> keys = email == null ? Optional.empty()
-                : accounts.get().userManagedPublicKeys(email, clock.instant());
+                : accounts.get().publicKeys(email, clock.instant());
         if (keys.isEmpty()) {
             return oauthError("invalid_grant", ACCOUNT_NOT_FOUND);
         }

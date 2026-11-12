@@ -37,7 +37,9 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.RSAPublicKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -645,10 +647,11 @@ public class IamService {
     }
 
     /**
-     * The public parts of the user-managed keys of the account with this email that are valid at
-     * {@code now}, by key ID, or empty when no such account exists. A deleted key verifies nothing.
+     * The public parts of the keys that sign for the account with this email at {@code now}, by key ID:
+     * its valid user-managed keys and, once it has signed, its Google-managed key. Empty when no such
+     * account exists. A deleted key verifies nothing.
      */
-    public Optional<Map<String, PublicKey>> userManagedPublicKeys(String email, Instant now) {
+    public Optional<Map<String, PublicKey>> publicKeys(String email, Instant now) {
         String project = email == null ? null : projectFromEmail(email);
         if (project == null || saStore.get(saKey(project, email)).isEmpty()) {
             return Optional.empty();
@@ -661,7 +664,23 @@ public class IamService {
                 keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
             }
         }
+        signingKeyStore.get(signingKeyStorageKey(project, email))
+                .ifPresent(key -> keys.put(key.getKeyId(), signingPublicKey(key)));
         return Optional.of(keys);
+    }
+
+    private static PublicKey signingPublicKey(StoredSigningKey key) {
+        try {
+            KeyFactory factory = KeyFactory.getInstance("RSA");
+            PrivateKey privateKey = factory.generatePrivate(
+                    new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getPrivateKey())));
+            if (!(privateKey instanceof RSAPrivateCrtKey crt)) {
+                throw GcpException.internal("Stored signing key has no public exponent: " + key.getKeyId());
+            }
+            return factory.generatePublic(new RSAPublicKeySpec(crt.getModulus(), crt.getPublicExponent()));
+        } catch (GeneralSecurityException e) {
+            throw GcpException.internal("Stored signing key is unreadable: " + e.getMessage());
+        }
     }
 
     private static PublicKey publicKey(String publicKeyData) {

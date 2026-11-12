@@ -68,6 +68,7 @@ class PubSubIamEnforcementTest {
         project = TestFixtures.uniqueName("pubsub-iam-sdk");
         String email = "reader@" + project + ".iam.gserviceaccount.com";
         member = "serviceAccount:" + email;
+        TestFixtures.createServiceAccount(email);
         HttpRequest request = HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                         + "/v1/projects/-/serviceAccounts/" + email + ":generateAccessToken"))
                 .header("Content-Type", "application/json")

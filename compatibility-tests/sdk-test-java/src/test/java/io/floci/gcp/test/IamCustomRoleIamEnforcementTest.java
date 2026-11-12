@@ -455,6 +455,7 @@ class IamCustomRoleIamEnforcementTest {
     }
 
     private static String accessToken(String email) throws Exception {
+        TestFixtures.createServiceAccount(email);
         HttpRequest request = HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
                         + "/v1/projects/-/serviceAccounts/" + email + ":generateAccessToken"))
                 .header("Content-Type", "application/json")

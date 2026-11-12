@@ -22,11 +22,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.Test;
 
 import java.net.HttpURLConnection;
-import java.net.URI;
 import java.net.URL;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Date;
@@ -105,8 +101,8 @@ class GcsDownscopedTokenTest {
     @EnabledIfEnvironmentVariable(named = "FLOCI_GCP_IAM_ENFORCEMENT_COMPAT", matches = "true")
     void storageClientEnforcesIamPolicyForDownscopedImpersonatedToken() throws Exception {
         // Enforce mode only mints a token for a service account that exists.
-        createServiceAccount(AUTHORIZED_SERVICE_ACCOUNT);
-        createServiceAccount(UNAUTHORIZED_SERVICE_ACCOUNT);
+        TestFixtures.createServiceAccount(AUTHORIZED_SERVICE_ACCOUNT);
+        TestFixtures.createServiceAccount(UNAUTHORIZED_SERVICE_ACCOUNT);
         String bucket = TestFixtures.uniqueName("downscoped-iam");
         BlobId allowed = BlobId.of(bucket, "allowed/report.csv");
         BlobId outside = BlobId.of(bucket, "outside/report.csv");
@@ -137,22 +133,6 @@ class GcsDownscopedTokenTest {
                     .isInstanceOfSatisfying(StorageException.class,
                             exception -> assertThat(exception.getCode()).isEqualTo(403));
         }
-    }
-
-    private static void createServiceAccount(String email) throws Exception {
-        String accountId = email.substring(0, email.indexOf('@'));
-        String project = email.substring(email.indexOf('@') + 1, email.indexOf(".iam.gserviceaccount.com"));
-        HttpRequest request = HttpRequest.newBuilder(URI.create(TestFixtures.endpoint()
-                        + "/v1/projects/" + project + "/serviceAccounts"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"accountId\":\"" + accountId + "\"}"))
-                .build();
-        HttpResponse<String> response;
-        try (HttpClient http = HttpClient.newHttpClient()) {
-            response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        }
-        // 409 means an earlier run against the same emulator already created it.
-        assertThat(response.statusCode()).as(response.body()).isIn(200, 409);
     }
 
 	private static AccessToken downscopedAccessToken(String bucket) throws Exception {

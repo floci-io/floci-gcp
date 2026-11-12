@@ -1652,6 +1652,21 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT x, STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x QUALIFY ROW_NUMBER() OVER (ORDER BY s.zz) <= 2",
                         "zz", "STRUCT<n INT64>"},
                 {"SELECT STRUCT(t.n) AS s FROM (SELECT 1 AS n) t ORDER BY s.t", "t", "STRUCT<n INT64>"},
+                {"SELECT STRUCT(x + 1) AS s FROM UNNEST([2, 1]) x ORDER BY s.x", "x", "STRUCT<INT64>"},
+                {"SELECT STRUCT(x + 1, 'a' AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.x", "x", "STRUCT<INT64, m STRING>"},
+                {"SELECT STRUCT(x + 1, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz", "STRUCT<INT64, n INT64>"},
+                {"SELECT STRUCT(x + 1, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s._field_1", "_field_1",
+                        "STRUCT<INT64, n INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1), x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<STRUCT<INT64>, n INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1, x AS k), x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<STRUCT<INT64, k INT64>, n INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1) AS m, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<m STRUCT<INT64>, n INT64>"},
+                {"SELECT STRUCT(STRUCT(x AS _field_1) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<m STRUCT<_field_1 INT64>>"},
+                {"SELECT STRUCT(STRUCT(x + 1) AS m, x AS `m._field_1`) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<m STRUCT<INT64>, `m._field_1` INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)

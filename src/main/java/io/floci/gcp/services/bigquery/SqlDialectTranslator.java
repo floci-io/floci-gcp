@@ -2449,6 +2449,7 @@ final class SqlDialectTranslator {
         nameAnonymousColumns();
         rewriteStructStarExclusions();
         expandStructStars();
+        orderNanLikeBigQuery();
         wrapDuplicateOutputNames();
         String replacementStarExclusion = replacementStarExclusion();
         String rendered = render(0, tokens.size()).trim();
@@ -9679,6 +9680,301 @@ final class SqlDialectTranslator {
         }
     }
 
+    private static final Set<String> ORDER_BY_END_KEYWORDS = Set.of(
+            "LIMIT", "OFFSET", "FETCH", "ROWS", "RANGE", "GROUPS", "UNION", "INTERSECT", "EXCEPT");
+
+    /**
+     * BigQuery sorts a FLOAT64 NaN as the smallest non-NULL value: right after the NULLs ascending, right before
+     * them descending, and first or last among the non-NULL values under an explicit NULLS LAST or NULLS FIRST.
+     * DuckDB sorts NaN above every other value and has no setting for it, so each ORDER BY key, at query level,
+     * in OVER (...) or in an ordered aggregate, gets a leading key that is NULL for a NULL value, 0 for NaN and 1
+     * otherwise, in the key's own direction and NULLS order. Types are not known here, so the NaN test is guarded
+     * by typeof, and the keys are only added when the query can see a FLOAT64 that may be NaN (see
+     * {@link #mayHoldNan}). A key is left alone in a query with a set operation (DuckDB sorts those by result
+     * column only), in a DISTINCT aggregate (whose ORDER BY may only name its arguments), in a window with a RANGE
+     * frame (which takes one key), when it is an ordinal, and when it holds a positional parameter, which a copy
+     * would renumber. It runs after the struct-star rewrites, which move ORDER BY out of their wrappers.
+     */
+    private void orderNanLikeBigQuery() {
+        if (!mayHoldNan()) {
+            return;
+        }
+        for (int order = tokens.size() - 1; order >= 0; order--) {
+            int by = nextSignificant(order + 1, tokens.size());
+            if (!tokens.get(order).isKeyword("ORDER") || by < 0 || !tokens.get(by).isKeyword("BY")) {
+                continue;
+            }
+            int depth = parenthesisDepth(order);
+            if (hasSetOperatorBefore(order, depth) || inDistinctAggregate(order, depth)) {
+                continue;
+            }
+            int end = by + 1;
+            while (end < tokens.size() && !(parenthesisDepth(end) == depth && tokens.get(end).isPunct(")"))
+                    && !(parenthesisDepth(end) == depth && tokens.get(end).kind == Kind.IDENT
+                    && ORDER_BY_END_KEYWORDS.contains(tokens.get(end).upper()) && !isPrecededByDot(end))) {
+                end++;
+            }
+            if (end < tokens.size() && tokens.get(end).isKeyword("RANGE") || namedWindowExtendedByRange(order, depth)
+                    || groupsByAll(order, depth)) {
+                continue;
+            }
+            Map<String, List<Token>> aliases = selectAliasExpressions(order, depth);
+            List<int[]> keys = new ArrayList<>();
+            int start = by + 1;
+            int nesting = 0;
+            for (int i = by + 1; i <= end; i++) {
+                Token token = i == end ? null : tokens.get(i);
+                if (token != null && (token.isPunct("[") || token.isPunct("{"))) {
+                    nesting++;
+                } else if (token != null && (token.isPunct("]") || token.isPunct("}"))) {
+                    nesting--;
+                }
+                if (i == end || nesting == 0 && parenthesisDepth(i) == depth && token.isPunct(",")) {
+                    keys.add(new int[] {start, i});
+                    start = i + 1;
+                }
+            }
+            for (int k = keys.size() - 1; k >= 0; k--) {
+                addNanSortKey(keys.get(k)[0], keys.get(k)[1], aliases);
+            }
+        }
+    }
+
+    private static final Pattern NAN_TEXT = Pattern.compile("[+-]?nan", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Whether the query can see a FLOAT64 that may be NaN: a 'NaN' string (as in {@code CAST('NaN' AS FLOAT64)}),
+     * an {@code IEEE_DIVIDE} call, a FLOAT64 query parameter, or a table read after FROM or JOIN with a FLOAT64
+     * column. Only those queries get the NaN sort key.
+     */
+    private boolean mayHoldNan() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            int next = nextSignificant(i + 1, tokens.size());
+            if (token.kind == Kind.STRING && token.value != null && NAN_TEXT.matcher(token.value).matches()) {
+                return true;
+            }
+            if (token.isKeyword("IEEE_DIVIDE") && next >= 0 && tokens.get(next).isPunct("(")) {
+                return true;
+            }
+            if ((token.isKeyword("FROM") || token.isKeyword("JOIN")) && next >= 0 && readsFloatColumn(next)) {
+                return true;
+            }
+        }
+        return parameters.hasFloat();
+    }
+
+    private boolean readsFloatColumn(int start) {
+        Token first = tokens.get(start);
+        if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT) {
+            return false;
+        }
+        List<String> segments = new ArrayList<>(pathSegments(first));
+        int dot = nextSignificant(start + 1, tokens.size());
+        while (dot >= 0 && tokens.get(dot).isPunct(".")) {
+            int part = nextSignificant(dot + 1, tokens.size());
+            if (part < 0) {
+                break;
+            }
+            segments.addAll(pathSegments(tokens.get(part)));
+            dot = nextSignificant(part + 1, tokens.size());
+        }
+        TableRef ref = tableRefOrNull(segments);
+        List<TableFieldSchema> fields = ref == null ? null : fieldsOf.apply(ref);
+        return fields != null && hasFloatField(fields);
+    }
+
+    private static boolean hasFloatField(List<TableFieldSchema> fields) {
+        for (TableFieldSchema field : fields) {
+            if ("FLOAT".equals(field.getType()) || "FLOAT64".equals(field.getType())
+                    || field.getFields() != null && hasFloatField(field.getFields())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a UNION, INTERSECT or EXCEPT sits at {@code depth} in the query that holds {@code order}. */
+    private boolean hasSetOperatorBefore(int order, int depth) {
+        for (int i = order - 1; i >= 0 && parenthesisDepth(i) >= depth; i--) {
+            Token token = tokens.get(i);
+            if (parenthesisDepth(i) == depth && (token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+                    || token.isKeyword("EXCEPT"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code order} is inside the parentheses of a call whose arguments start with DISTINCT. */
+    private boolean inDistinctAggregate(int order, int depth) {
+        for (int i = order - 1; i >= 0; i--) {
+            if (tokens.get(i).isPunct("(") && parenthesisDepth(i) == depth - 1) {
+                int name = previousSignificantBefore(i);
+                int first = nextSignificant(i + 1, order);
+                return name >= 0 && tokens.get(name).kind == Kind.IDENT && !tokens.get(name).isKeyword("OVER")
+                        && first >= 0 && tokens.get(first).isKeyword("DISTINCT");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the query holding {@code order} (the enclosing one, for a window) uses GROUP BY ALL: DuckDB derives
+     * its keys from the select list, so the leading key, which reads a column outside any select item, is not
+     * grouped and fails to bind.
+     */
+    private boolean groupsByAll(int order, int depth) {
+        int window = windowSpecificationOpen(order, depth);
+        int select = window >= 0 ? precedingSelect(window, depth - 1) : precedingSelect(order, depth);
+        if (select < 0) {
+            return false;
+        }
+        int queryDepth = parenthesisDepth(select);
+        for (int i = select; i < order; i++) {
+            int by = tokens.get(i).isKeyword("GROUP") && parenthesisDepth(i) == queryDepth
+                    ? nextSignificant(i + 1, order) : -1;
+            int all = by < 0 ? -1 : nextSignificant(by + 1, order);
+            if (all >= 0 && tokens.get(by).isKeyword("BY") && tokens.get(all).isKeyword("ALL")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static final Set<String> VOLATILE_FUNCTIONS = Set.of("RAND", "GENERATE_UUID");
+
+    /** The {@code (} of the window specification holding {@code order}, OVER (...) or WINDOW name AS (...), or -1. */
+    private int windowSpecificationOpen(int order, int depth) {
+        if (depth == 0) {
+            return -1;
+        }
+        for (int i = order - 1; i >= 0; i--) {
+            if (tokens.get(i).isPunct("(") && parenthesisDepth(i) == depth - 1) {
+                int before = previousSignificantBefore(i);
+                int first = nextSignificant(i + 1, order + 1);
+                boolean query = first >= 0 && (tokens.get(first).isKeyword("SELECT")
+                        || tokens.get(first).isKeyword("WITH") || tokens.get(first).isPunct("("));
+                boolean window = before >= 0
+                        && (tokens.get(before).isKeyword("OVER") || tokens.get(before).isKeyword("AS") && !query);
+                return window ? i : -1;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether {@code order} sits in a named window, WINDOW name AS (ORDER BY ...), that an OVER (name RANGE ...)
+     * extends: DuckDB takes one sort key for a RANGE frame.
+     */
+    private boolean namedWindowExtendedByRange(int order, int depth) {
+        int open = windowSpecificationOpen(order, depth);
+        int as = open < 0 ? -1 : previousSignificantBefore(open);
+        int name = as < 0 ? -1 : previousSignificantBefore(as);
+        if (name < 0 || !tokens.get(as).isKeyword("AS")
+                || tokens.get(name).kind != Kind.IDENT && tokens.get(name).kind != Kind.QIDENT) {
+            return false;
+        }
+        String window = tokens.get(name).identifierText();
+        for (int i = 0; i < tokens.size(); i++) {
+            int paren = tokens.get(i).isKeyword("OVER") ? nextSignificant(i + 1, tokens.size()) : -1;
+            int ref = paren < 0 ? -1 : nextSignificant(paren + 1, tokens.size());
+            int frame = ref < 0 ? -1 : nextSignificant(ref + 1, tokens.size());
+            if (frame >= 0 && tokens.get(paren).isPunct("(")
+                    && (tokens.get(ref).kind == Kind.IDENT || tokens.get(ref).kind == Kind.QIDENT)
+                    && tokens.get(ref).identifierText().equalsIgnoreCase(window)
+                    && tokens.get(frame).isKeyword("RANGE")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * For a query-level ORDER BY, each select alias with the tokens of its expression, so the NaN key reads the
+     * selected value as the sort key does rather than a source column of the same name; empty in a window.
+     */
+    private Map<String, List<Token>> selectAliasExpressions(int order, int depth) {
+        int select = windowSpecificationOpen(order, depth) >= 0 ? -1 : precedingSelect(order, depth);
+        List<int[]> items = select < 0 || leavesDepth(select, order, depth) ? null : selectItems(select);
+        if (items == null) {
+            return Map.of();
+        }
+        Map<String, List<Token>> aliases = new HashMap<>();
+        for (int[] item : items) {
+            String name = outputName(item[0], item[1]);
+            if (name == null) {
+                continue;
+            }
+            int itemDepth = parenthesisDepth(item[0]);
+            int as = -1;
+            for (int i = item[0]; i < item[1]; i++) {
+                if (parenthesisDepth(i) == itemDepth && tokens.get(i).isKeyword("AS")) {
+                    as = i;
+                }
+            }
+            int first = nextSignificant(item[0], item[1]);
+            int last = previousSignificantBefore(as < 0 ? item[1] : as);
+            int beforeLast = as < 0 && last > first ? previousSignificantBefore(last) : -1;
+            if (beforeLast >= first && !tokens.get(beforeLast).isPunct(".")
+                    && (tokens.get(last).kind == Kind.IDENT || tokens.get(last).kind == Kind.QIDENT)
+                    && tokens.get(last).identifierText().equalsIgnoreCase(name)) {
+                // An implicit alias, x * 2 `y`: the expression ends before it.
+                last = beforeLast;
+            }
+            if (first >= 0 && last >= first) {
+                aliases.putIfAbsent(name.toLowerCase(Locale.ROOT), new ArrayList<>(tokens.subList(first, last + 1)));
+            }
+        }
+        return aliases;
+    }
+
+    private void addNanSortKey(int start, int end, Map<String, List<Token>> aliases) {
+        int last = previousSignificantBefore(end);
+        String nulls = "";
+        if (last > start && (tokens.get(last).isKeyword("FIRST") || tokens.get(last).isKeyword("LAST"))) {
+            int before = previousSignificantBefore(last);
+            if (before > start && tokens.get(before).isKeyword("NULLS")) {
+                nulls = " NULLS " + tokens.get(last).upper();
+                last = previousSignificantBefore(before);
+            }
+        }
+        String direction = "";
+        if (last > start && (tokens.get(last).isKeyword("ASC") || tokens.get(last).isKeyword("DESC"))) {
+            direction = tokens.get(last).isKeyword("DESC") ? " DESC" : "";
+            last = previousSignificantBefore(last);
+        }
+        int first = nextSignificant(start, end);
+        if (first < 0 || last < first || first == last && tokens.get(first).kind == Kind.NUMBER) {
+            return;
+        }
+        List<Token> key = new ArrayList<>(tokens.subList(first, last + 1));
+        if (first == last && (tokens.get(first).kind == Kind.IDENT || tokens.get(first).kind == Kind.QIDENT)) {
+            List<Token> aliased = aliases.get(tokens.get(first).identifierText().toLowerCase(Locale.ROOT));
+            if (aliased != null && aliased.stream().anyMatch(token -> token.isKeyword("OVER")
+                    || token.kind == Kind.IDENT && VOLATILE_FUNCTIONS.contains(token.upper()))) {
+                // A window function, or a call that draws a new value each time it runs: a copy would sort by
+                // another value than the one selected.
+                return;
+            }
+            if (aliased != null) {
+                key = new ArrayList<>(aliased);
+            }
+        }
+        if (key.stream().anyMatch(token -> token.kind == Kind.POSITIONAL_PARAM)) {
+            return;
+        }
+        List<Token> flag = new ArrayList<>();
+        flag.add(Token.raw("(CASE WHEN ("));
+        flag.addAll(key);
+        flag.add(Token.raw(") IS NULL THEN NULL WHEN typeof("));
+        flag.addAll(key);
+        flag.add(Token.raw(") IN ('DOUBLE', 'FLOAT') AND isnan(TRY_CAST(CAST(("));
+        flag.addAll(key);
+        flag.add(Token.raw(") AS VARCHAR) AS DOUBLE)) THEN 0 ELSE 1 END)" + direction + nulls + ", "));
+        tokens.addAll(first, flag);
+    }
+
     private boolean followsSetOperator(int select) {
         int before = significantBefore(select);
         return before >= 0 && (tokens.get(before).isKeyword("UNION") || tokens.get(before).isKeyword("INTERSECT")
@@ -13806,6 +14102,23 @@ final class SqlDialectTranslator {
         static String stringLiteralValue(String literal) {
             Matcher matcher = literal == null ? null : STRING_LITERAL.matcher(literal);
             return matcher != null && matcher.matches() ? matcher.group(1).replace("''", "'") : null;
+        }
+
+        /** Whether any parameter is a FLOAT64, alone or inside an ARRAY or STRUCT type. */
+        boolean hasFloat() {
+            return parameters.stream().anyMatch(p -> isFloatType(p.get("parameterType")));
+        }
+
+        private static boolean isFloatType(Object type) {
+            if (!(type instanceof Map<?, ?> map)) {
+                return false;
+            }
+            if ("FLOAT64".equals(map.get("type")) || "FLOAT".equals(map.get("type"))
+                    || isFloatType(map.get("arrayType"))) {
+                return true;
+            }
+            return map.get("structTypes") instanceof List<?> fields
+                    && fields.stream().anyMatch(f -> f instanceof Map<?, ?> field && isFloatType(field.get("type")));
         }
 
         String named(String name) {

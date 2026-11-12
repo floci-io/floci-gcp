@@ -148,7 +148,8 @@ class OAuthTokenEnforceRestIntegrationTest {
     void assertionTimesOutsideTheDocumentedWindowAreInvalidGrants() throws Exception {
         KeyFile key = createKey(email);
 
-        for (long[] window : new long[][] {{0, 66 * 60}, {0, -1}, {-7200, -3600}}) {
+        for (long[] window : new long[][] {{0, 66 * 60}, {0, -1}, {-7200, -3600}, {600, 600 + 3600},
+                {365L * 24 * 3600, 365L * 24 * 3600 + 3600}}) {
             invalidGrant(exchange("/token", assertion(key, claims(key.email(), AUDIENCE, window[0], window[1]),
                     "RS256", key.keyId())), "Invalid JWT: Token must be a short-lived token (60 minutes) and in a "
                     + "reasonable timeframe. Check your iat and exp values in the JWT claim.");
@@ -167,6 +168,14 @@ class OAuthTokenEnforceRestIntegrationTest {
                 "Invalid JWT: iat (issued at) is not set.");
         invalidGrant(exchange("/token", assertion(key, noExpiration, "RS256", key.keyId())),
                 "Invalid JWT: exp (expiration time) is not set.");
+    }
+
+    @Test
+    void anAssertionIssuedSlightlyAheadOfTheClockIsAccepted() throws Exception {
+        KeyFile key = createKey(email);
+
+        exchange("/token", assertion(key, claims(key.email(), AUDIENCE, 120, 120 + 3600), "RS256", key.keyId()))
+                .then().statusCode(200);
     }
 
     @Test

@@ -52,6 +52,12 @@ public class OAuthTokenService {
     static final String SCOPE_NOT_A_STRING = "Empty or missing scope not allowed.";
     /** Google documents that it refuses an {@code exp} more than 65 minutes after {@code iat}. */
     static final long MAX_ASSERTION_LIFETIME_SECONDS = 65 * 60;
+    /**
+     * How far ahead of the clock {@code iat} may be. Google refuses an {@code iat} 10 minutes ahead and
+     * accepts one 2 minutes ahead (measured in review); 5 minutes is the time skew Google's own token
+     * verifier allows by default ({@code IdTokenVerifier.DEFAULT_TIME_SKEW_SECONDS} in google-oauth-java-client).
+     */
+    static final long MAX_CLOCK_SKEW_SECONDS = 5 * 60;
     static final long TOKEN_LIFETIME_SECONDS = 3600;
     private static final Set<String> GOOGLE_AUDIENCES = Set.of(
             "https://oauth2.googleapis.com/token", "https://www.googleapis.com/oauth2/v4/token");
@@ -133,7 +139,9 @@ public class OAuthTokenService {
         }
         long iat = issuedAt.asLong();
         long exp = expiresAt.asLong();
-        if (exp < iat || exp - iat > MAX_ASSERTION_LIFETIME_SECONDS || exp <= clock.instant().getEpochSecond()) {
+        long now = clock.instant().getEpochSecond();
+        if (exp < iat || exp - iat > MAX_ASSERTION_LIFETIME_SECONDS || exp <= now
+                || iat > now + MAX_CLOCK_SKEW_SECONDS) {
             return oauthError("invalid_grant", INVALID_TIMEFRAME);
         }
         // Google answers invalid_scope when "No scopes were requested (empty list of scopes), or one of the

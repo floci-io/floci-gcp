@@ -413,7 +413,9 @@ measured against `https://oauth2.googleapis.com/token` in the review of
 - `iat` and `exp` must be set, or the response is `invalid_grant` with
   `Invalid JWT: iat (issued at) is not set.` or
   `Invalid JWT: exp (expiration time) is not set.`. `exp` must not precede `iat`,
-  must be at most 65 minutes after it, and must not have passed; otherwise the
+  must be at most 65 minutes after it, and must not have passed, and `iat` must
+  not be more than 5 minutes ahead of the emulator's clock (Google refuses an
+  `iat` 10 minutes ahead and accepts one 2 minutes ahead); otherwise the
   response is `invalid_grant` with
   `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim.`
 - `scope` must be a non-empty string; a missing or blank one gets `invalid_scope`

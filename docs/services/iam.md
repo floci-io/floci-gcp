@@ -376,14 +376,84 @@ unsupported condition on it then fails the member's evaluated requests on that p
 with `INVALID_ARGUMENT` until the binding is removed by a caller that bypasses
 evaluation or the role is disabled again.
 
-OAuth `/token`, STS exchanges, and metadata credentials retain their existing
-emulator behavior. OAuth's stub exchange does not authenticate a service-account
-JWT; its token is not a recognized service-account identity. Anonymous/external
+STS exchanges and metadata credentials retain their existing emulator behavior.
+The OAuth `/token` exchange authenticates a service-account JWT only in enforce
+mode; see [OAuth token exchange](#oauth-token-exchange). Anonymous/external
 credential bypass makes this emulator a local testing tool, not a security
 boundary. IAM v1 `signBlob` returns the `keyId` and `signature` fields required by
 its contract. IAM v1 and Credentials signing share the emulator's per-account
 RSA key described in [Sign Blob](#sign-blob-v4-signed-urls). This is a local key,
 not a Google-managed production credential.
+
+### OAuth token exchange
+
+The token endpoint (`/token` and the legacy `/oauth2/v4/token`) exchanges a
+service-account JWT for an access token with the `jwt-bearer` grant described in
+[Using OAuth 2.0 for Server to Server Applications](https://developers.google.com/identity/protocols/oauth2/service-account).
+With the default `disabled` mode it returns a token for any assertion, and that
+token is not a recognized identity. In `enforce` mode the assertion is checked
+as below, and every refusal is `400`. The checks run in the order Google's token
+endpoint runs them, so an assertion with several faults gets the answer of the first: an
+assertion signed with an unrelated key still gets the audience, timeframe,
+missing claim and empty scope answers below, and only one that passes them gets
+`Invalid JWT Signature.`. The messages Google's documentation does not list were
+measured against `https://oauth2.googleapis.com/token` in the review of
+[#644](https://github.com/floci-io/floci-gcp/pull/644).
+
+- The assertion must be three Base64url segments, the first two JSON objects;
+  otherwise the response is `invalid_request` with `Bad Request`.
+- `iss` must name an existing service account; otherwise, including for a
+  deleted account, the response is `invalid_grant` with
+  `Invalid grant: account not found`.
+- `aud` must be `https://oauth2.googleapis.com/token`, the legacy
+  `https://www.googleapis.com/oauth2/v4/token`, or the emulator URL the request was
+  sent to, so that a credential whose `token_uri` points at the emulator works.
+  A missing or other audience gets `invalid_grant` with
+  `Invalid JWT: Failed audience check.`.
+- `iat` and `exp` must be set, or the response is `invalid_grant` with
+  `Invalid JWT: iat (issued at) is not set.` or
+  `Invalid JWT: exp (expiration time) is not set.`. `exp` must not precede `iat`,
+  must be at most 65 minutes after it, and must not have passed, and `iat` must
+  not be more than 5 minutes ahead of the emulator's clock (Google refuses an
+  `iat` 10 minutes ahead and accepts one 2 minutes ahead); otherwise the
+  response is `invalid_grant` with
+  `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim.`
+- `scope` must be a non-empty string; a missing or blank one gets `invalid_scope`
+  with `Invalid OAuth scope or ID token audience provided.`, which Google documents
+  for "No scopes were requested (empty list of scopes)", and a JSON array gets
+  `invalid_scope` with `Empty or missing scope not allowed.`.
+- The JWT must be signed with `RS256` by a user-managed key of the account,
+  created through `keys.create` and still valid, or by its Google-managed key, as
+  IAM Credentials `signJwt` signs: Google's
+  [domain-wide delegation best practices](https://knowledge.workspace.google.com/admin/apps/domain-wide-delegation-best-practices)
+  say "Using service account keys is not necessary to perform domain-wide
+  delegation. Use the signJwt API instead.", and that delegation is obtained by
+  exchanging the signed JWT at the token endpoint. The `kid` header is tried first;
+  "if an incorrect Key ID is specified, all keys associated with the service
+  account are tried". Otherwise, including for a deleted key, the response is
+  `invalid_grant` with `Invalid JWT Signature.`, which Google documents for a key
+  "not associated with the service account identified by the client email or the
+  key that was used has been deleted, disabled, or has expired".
+- Every scope must be a Google OAuth 2.0 scope; otherwise the response is
+  `invalid_scope` with `Invalid OAuth scope or ID token audience provided.`, which
+  Google documents for "one of the requested scopes doesn't exist (i.e. is
+  invalid)." The scopes are checked against the bundled catalog described below,
+  so a scope of an API Floci does not emulate is accepted.
+- The access token is valid for 3600 seconds and acts as the service account on
+  every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
+
+The response has no `scope` field.
+
+The scope catalog, `src/main/resources/oauth/oauth-scopes.json`, is the union of the
+scopes that every API version listed by the
+[Google API Discovery directory](https://discovery.googleapis.com/discovery/v1/apis)
+(all versions, not only the preferred ones) declares under `auth.oauth2.scopes`, plus
+`email`, `openid` and `profile`, which
+[OAuth 2.0 Scopes for Google APIs](https://developers.google.com/identity/protocols/oauth2/scopes)
+lists under "Google Sign-In". The file names its sources and its generation date. To
+regenerate it, run `python3 tools/regen_oauth_scopes.py` from the repository root; it
+uses only the Python standard library and the network, and nothing reads the network
+at build or test time.
 
 ### Remaining limitations
 

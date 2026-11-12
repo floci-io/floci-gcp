@@ -7,6 +7,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,7 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
     private static final String CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
     private static final String SOURCE_SERVICE_ACCOUNT = "reader@test-project.iam.gserviceaccount.com";
     private static final String UNAUTHORIZED_SERVICE_ACCOUNT = "other@test-project.iam.gserviceaccount.com";
+    private static final List<String> SERVICE_ACCOUNT_IDS = List.of("reader", "other");
 
     @Inject CredentialTokenService tokenService;
     @Inject GcsService gcsService;
@@ -37,6 +39,10 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
     @BeforeEach
     void setUp() {
         tokenService.clear();
+        // Enforce mode only mints a token for a service account that exists.
+        for (String accountId : SERVICE_ACCOUNT_IDS) {
+            iamService.createServiceAccount(PROJECT, accountId, accountId, "");
+        }
         bucket = "downscoped-iam-" + UUID.randomUUID().toString().substring(0, 8);
         given().contentType("application/json").body(Map.of("name", bucket))
                 .when().post("/storage/v1/b?project=" + PROJECT).then().statusCode(200);
@@ -45,6 +51,13 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
         gcsService.putObject(bucket, "outside/report.csv", "text/csv",
                 "outside".getBytes(StandardCharsets.UTF_8), GcsCustomerEncryption.none(), "http://localhost:4588");
         iamService.setPolicy("buckets/" + bucket, policyFor(SOURCE_SERVICE_ACCOUNT));
+    }
+
+    @AfterEach
+    void tearDown() {
+        for (String accountId : SERVICE_ACCOUNT_IDS) {
+            iamService.deleteServiceAccount(PROJECT, accountId + "@" + PROJECT + ".iam.gserviceaccount.com");
+        }
     }
 
     @Test

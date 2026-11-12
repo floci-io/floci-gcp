@@ -9,11 +9,16 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class CredentialTokenServiceTest {
 
@@ -45,6 +50,127 @@ class CredentialTokenServiceTest {
                     + "See https://developers.google.com/identity/sign-in/web/devconsole-project.", error.getMessage());
         }
         assertTrue(service.lookupBearerToken(kept.getTokenValue()).isPresent());
+    }
+
+    // Each test pauses the minting thread just before it stores its token, starts the revocation of the
+    // account, and lets the mint finish only once the revocation has either completed or is waiting for it.
+    // Without a lock shared by both, the revocation scans before the token is stored and misses it.
+
+    @Test
+    void aDownscopedTokenMintedWhileItsAccountIsRevokedIsRevokedToo() throws Exception {
+        PausingStore paused = new PausingStore(CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX);
+        CredentialTokenService tokens = new CredentialTokenService(paused, Clock.fixed(NOW, ZoneOffset.UTC));
+        String email = "app@test-project.iam.gserviceaccount.com";
+        String source = tokens.mintImpersonatedToken(email, NOW.plusSeconds(600)).getTokenValue();
+
+        CompletableFuture<StoredCredentialToken> child =
+                CompletableFuture.supplyAsync(() -> tokens.mintDownscopedToken(source, rules()).token());
+        StoredCredentialToken minted = paused.raceWith(child, () -> tokens.revokeServiceAccountTokens(email));
+
+        assertAccountStateInvalid(tokens, minted.getTokenValue());
+    }
+
+    @Test
+    void aDownscopedTokenOfAnAlreadyRevokedAccountIsRefused() {
+        String email = "app@test-project.iam.gserviceaccount.com";
+        String source = service.mintImpersonatedToken(email, NOW.plusSeconds(600)).getTokenValue();
+        service.revokeServiceAccountTokens(email);
+        long stored = store.scan(key -> true).size();
+
+        CredentialAuthenticationException error = assertThrows(CredentialAuthenticationException.class,
+                () -> service.mintDownscopedToken(source, rules()));
+
+        assertEquals(CredentialAuthenticationException.Failure.ACCOUNT_STATE_INVALID, error.failure());
+        assertEquals(stored, store.scan(key -> true).size());
+    }
+
+    @Test
+    void anImpersonatedTokenMintedWhileItsAccountIsDeletedIsRevoked() throws Exception {
+        PausingStore paused = new PausingStore(CredentialTokenService.IMPERSONATED_TOKEN_PREFIX);
+        CredentialTokenService tokens = new CredentialTokenService(paused, Clock.fixed(NOW, ZoneOffset.UTC));
+        String email = "app@test-project.iam.gserviceaccount.com";
+        AtomicBoolean accountExists = new AtomicBoolean(true);
+
+        CompletableFuture<StoredCredentialToken> token = CompletableFuture.supplyAsync(() ->
+                tokens.mintImpersonatedToken(email, NOW.plusSeconds(600), () -> requireAccount(accountExists)));
+        StoredCredentialToken minted = paused.raceWith(token, () -> {
+            accountExists.set(false);
+            tokens.revokeServiceAccountTokens(email);
+        });
+
+        assertAccountStateInvalid(tokens, minted.getTokenValue());
+    }
+
+    @Test
+    void anImpersonatedTokenOfADeletedAccountIsNotMinted() {
+        AtomicBoolean accountExists = new AtomicBoolean(false);
+
+        assertThrows(GcpException.class, () -> service.mintImpersonatedToken(
+                "app@test-project.iam.gserviceaccount.com", NOW.plusSeconds(600),
+                () -> requireAccount(accountExists)));
+        assertTrue(store.scan(key -> true).isEmpty());
+    }
+
+    private static void requireAccount(AtomicBoolean accountExists) {
+        if (!accountExists.get()) {
+            throw GcpException.notFound("Service account not found");
+        }
+    }
+
+    private static void assertAccountStateInvalid(CredentialTokenService tokens, String token) {
+        CredentialAuthenticationException error = assertThrows(CredentialAuthenticationException.class,
+                () -> tokens.lookupBearerToken(token));
+        assertEquals(CredentialAuthenticationException.Failure.ACCOUNT_STATE_INVALID, error.failure());
+    }
+
+    /** Holds the first token stored with {@code prefix} until {@link #raceWith} lets it through. */
+    private static final class PausingStore extends InMemoryStorage<String, StoredCredentialToken> {
+        private final String prefix;
+        private final AtomicBoolean armed = new AtomicBoolean(true);
+        private final CountDownLatch paused = new CountDownLatch(1);
+        private final CountDownLatch released = new CountDownLatch(1);
+
+        PausingStore(String prefix) {
+            this.prefix = prefix;
+        }
+
+        @Override
+        public void put(String key, StoredCredentialToken value) {
+            if (key.startsWith(prefix) && armed.compareAndSet(true, false)) {
+                paused.countDown();
+                try {
+                    if (!released.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("The paused store was never released");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+            super.put(key, value);
+        }
+
+        /**
+         * Waits for {@code mint} to pause before storing, runs {@code competitor} on another thread until it
+         * completes or blocks on a monitor, then lets the mint store its token and returns it.
+         */
+        StoredCredentialToken raceWith(CompletableFuture<StoredCredentialToken> mint, Runnable competitor)
+                throws Exception {
+            assertTrue(paused.await(10, TimeUnit.SECONDS), "the mint never reached the store");
+            Thread thread = new Thread(competitor);
+            thread.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (thread.isAlive() && thread.getState() != Thread.State.BLOCKED) {
+                if (System.nanoTime() > deadline) {
+                    fail("the competing operation neither completed nor blocked");
+                }
+                Thread.onSpinWait();
+            }
+            released.countDown();
+            thread.join(TimeUnit.SECONDS.toMillis(10));
+            assertTrue(!thread.isAlive(), "the competing operation did not complete");
+            return mint.get(10, TimeUnit.SECONDS);
+        }
     }
 
     @Test

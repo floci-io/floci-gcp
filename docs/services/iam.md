@@ -493,7 +493,9 @@ This is Google's answer for the `ACCOUNT_STATE_INVALID` reason of
 as disabled or deleted". The response does not carry the `ErrorInfo` detail Google
 attaches, whose metadata names the API service and method called. Deleting an account
 in `enforce` mode revokes its Floci-issued tokens, which are then refused the same way,
-also after an account with the same email is created again.
+also after an account with the same email is created again. Revocation is serialized
+with `generateAccessToken` and STS token exchanges, so a token minted while the account
+is being deleted is revoked with the others, and one requested after it is refused.
 
 As the reference says "requests for new access tokens will fail", IAM Credentials
 `generateAccessToken`, `generateIdToken`, `signBlob` and `signJwt`, and IAM v1

@@ -17,6 +17,9 @@ charges, budgets or billing account resources.
 |---|---|---|
 | `GET` | `/v1/projects/{project}/billingInfo` | `ProjectBillingInfo` for the project |
 | `PUT` | `/v1/projects/{project}/billingInfo` | Links `billingAccountName`; empty or absent unlinks |
+| `GET` | `/v1/billingAccounts` | Lists the default account and every account a project is linked to; `pageSize`, `pageToken` |
+| `GET` | `/v1/billingAccounts/{account}` | Any well-formed account ID returns an open `BillingAccount`; a malformed one is `400` |
+| `GET` | `/v1/billingAccounts/{account}/projects` | `ProjectBillingInfo` of the projects linked to the account; `pageSize`, `pageToken` |
 | `POST` | `/v1/billingAccounts/{account}:testIamPermissions` | Returns every requested permission |
 
 `ProjectBillingInfo` has the shape:
@@ -37,11 +40,17 @@ the configured storage mode and follows the same strict-mode rules.
 
 ## Scope and deviations
 
-- Billing accounts are not modelled. Any `billingAccounts/{id}` is accepted, and
+- Billing accounts are not stored. `billingAccounts.list` returns `billingAccounts/000000-000000-000000`
+  ("My Billing Account", the name GCP gives a new account) plus every account a project links to,
+  each `open`, with `currencyCode` `USD` and empty `masterBillingAccount` and `parent`;
+  `billingAccounts.get` returns any well-formed ID (`XXXXXX-XXXXXX-XXXXXX`) as an open account.
+- A malformed account ID returns `400 INVALID_ARGUMENT`, as in GCP. GCP answers `403` (get) or
+  `404` (projects) for an account the caller cannot see; floci has no unknown accounts, so it
+  does not.
+- Any `billingAccounts/{id}` is accepted when linking a project, and
   `testIamPermissions` grants everything so Terraform's
   `billing.resourceAssociations.create` pre-check passes.
-- Billing account IAM policies, listing billing accounts and their projects, services and
-  SKUs are not implemented.
+- Billing account IAM policies, creating billing accounts, services and SKUs are not implemented.
 
 ## IAM enforcement
 

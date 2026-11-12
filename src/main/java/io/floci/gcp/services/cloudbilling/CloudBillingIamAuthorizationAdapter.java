@@ -54,6 +54,9 @@ public class CloudBillingIamAuthorizationAdapter implements IamAuthorizationAdap
             case "UpdateBillingInfo" -> List.of();
             // Billing accounts have no policies here; the stub answers every requested permission.
             case "TestIamPermissions" -> List.of();
+            // GCP checks billing.accounts.list/get and billing.resourceAssociations.list on the billing
+            // account, and billing accounts have no policies here, so these reads are not evaluated.
+            case "ListBillingAccounts", "GetBillingAccount", "ListProjectBillingInfo" -> List.of();
             default -> throw unsupported("operation " + operation.name());
         };
     }

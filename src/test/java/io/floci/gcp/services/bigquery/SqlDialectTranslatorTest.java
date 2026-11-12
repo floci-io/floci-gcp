@@ -1501,7 +1501,7 @@ class SqlDialectTranslatorTest {
         // Every item is an aggregate, so GROUP BY ALL has no key: one row, no grouping in the rewrite.
         assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(\"_floci_star\"), \"n\""
                         + " FROM (SELECT ANY_VALUE(t.s) AS \"_floci_star\", COUNT(*) AS n"
-                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'x'} AS \"$col1\") t)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT ROW(2, 'x') AS \"$col1\") t)"
                         + " AS \"_floci_group\") AS \"_expanded\"",
                 sql("SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n"
                         + " FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t"
@@ -1679,7 +1679,7 @@ class SqlDialectTranslatorTest {
     void structStarGroupedOrderByAReplacedPathSortsByTheStructField() {
         assertEquals("SELECT * EXCLUDE (\"_floci_struct_0\") REPLACE (-\"_floci_struct_0\".\"a\" AS a), COUNT(*) AS n"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\" FROM (SELECT {'a': 1} AS \"s\""
-                        + " UNION ALL SELECT {'a': 2} AS \"$col1\") t) AS \"_expanded\""
+                        + " UNION ALL SELECT ROW(2) AS \"$col1\") t) AS \"_expanded\""
                         + " GROUP BY 1,\"a\" ORDER BY \"_expanded\".\"a\" LIMIT 1",
                 sql("SELECT t.s.* REPLACE(-t.s.a AS a), COUNT(*) AS n"
                         + " FROM (SELECT STRUCT(1 AS a) s UNION ALL SELECT STRUCT(2 AS a)) t"
@@ -2038,7 +2038,7 @@ class SqlDialectTranslatorTest {
     void structStarReplaceMovesOrderByAfterTheReplacement() {
         assertEquals("SELECT * EXCLUDE (\"_floci_struct_0\") REPLACE (-\"_floci_struct_0\".\"b\" AS b)"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
-                        + " FROM (SELECT {'b': 1} AS \"s\" UNION ALL SELECT {'b': 2} AS \"$col1\") t)"
+                        + " FROM (SELECT {'b': 1} AS \"s\" UNION ALL SELECT ROW(2) AS \"$col1\") t)"
                         + " AS \"_expanded\" ORDER BY b LIMIT 1",
                 sql("SELECT t.s.* REPLACE (-t.s.b AS b)"
                         + " FROM (SELECT STRUCT(1 AS b) s UNION ALL SELECT STRUCT(2 AS b)) t ORDER BY b LIMIT 1"));
@@ -2065,7 +2065,7 @@ class SqlDialectTranslatorTest {
     void structStarOrderByReplacedFieldPathSortsByTheReplacement() {
         assertEquals("SELECT * EXCLUDE (\"_floci_source_0\") REPLACE ({'n': \"_floci_source_0\"} AS a)"
                         + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
-                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id UNION ALL SELECT {'a': 2} AS \"$col1\", 3 AS \"$col2\") t)"
+                        + " FROM (SELECT {'a': 1} AS \"s\", 5 AS id UNION ALL SELECT ROW(2) AS \"$col1\", 3 AS \"$col2\") t)"
                         + " AS \"_expanded\" ORDER BY ({'n': \"_floci_source_0\"}).n DESC",
                 sql("SELECT t.s.* REPLACE(STRUCT(t.id AS n) AS a)"
                         + " FROM (SELECT STRUCT(1 AS a) s, 5 AS id UNION ALL SELECT STRUCT(2 AS a), 3) t"
@@ -2416,14 +2416,14 @@ class SqlDialectTranslatorTest {
     @Test
     void structStarGroupByAllKeepsQualifyWithExplicitGroupingPositions() {
         assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
-                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'x'} AS \"$col1\""
-                        + " UNION ALL SELECT {'a': 3, 'b': 'y'} AS \"$col1\") t) AS \"_expanded\" GROUP BY 1"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT ROW(2, 'x') AS \"$col1\""
+                        + " UNION ALL SELECT ROW(3, 'y') AS \"$col1\") t) AS \"_expanded\" GROUP BY 1"
                         + " QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1",
                 sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
                         + " UNION ALL SELECT STRUCT(2 AS a, 'x' AS b) UNION ALL SELECT STRUCT(3 AS a, 'y' AS b)) t"
                         + " GROUP BY ALL QUALIFY ROW_NUMBER() OVER (ORDER BY n DESC) = 1"));
         assertEquals("SELECT * EXCLUDE (\"a\"), COUNT(*) AS n FROM (SELECT unnest(t.s)"
-                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT {'a': 2, 'b': 'y'} AS \"$col1\") t)"
+                        + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\" UNION ALL SELECT ROW(2, 'y') AS \"$col1\") t)"
                         + " AS \"_expanded\" GROUP BY 1 HAVING COUNT(*) > 0"
                         + " QUALIFY ROW_NUMBER() OVER (ORDER BY b DESC) = 1 ORDER BY b DESC LIMIT 1",
                 sql("SELECT t.s.* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s"
@@ -3254,6 +3254,19 @@ class SqlDialectTranslatorTest {
                 SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
         assertNull(SqlDialectTranslator.translate("SELECT STRUCT(x AS n) AS s FROM ds.t ORDER BY s.n", "test-project",
                 null, SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
+    }
+
+    @Test
+    void laterSetOperationStructsRenderAsUnnamedRows() {
+        String union = sql("SELECT STRUCT(x AS n) AS s FROM ds.t UNION ALL SELECT STRUCT(y AS z) FROM ds.u");
+        assertTrue(union.contains("{'n': x}"), union);
+        assertTrue(union.contains("SELECT ROW(y)"), union);
+        String nested = sql("SELECT STRUCT(x AS n) AS s FROM ds.t UNION ALL SELECT STRUCT(y AS z).z FROM ds.u");
+        assertFalse(nested.contains("ROW("), nested);
+        String inner = sql("SELECT ARRAY(SELECT STRUCT(x AS n) FROM ds.t) AS a");
+        assertFalse(inner.contains("ROW("), inner);
+        String wrapped = sql("SELECT STRUCT(x AS n) AS s FROM ds.t UNION ALL SELECT (STRUCT(y AS q)) FROM ds.u");
+        assertTrue(wrapped.contains("SELECT (ROW(y))"), wrapped);
     }
 
     @Test

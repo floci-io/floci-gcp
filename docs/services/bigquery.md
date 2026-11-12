@@ -224,7 +224,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `DATE_ADD`/`DATE_SUB`, `*_DIFF`, `*_TRUNC`, `FORMAT_TIMESTAMP`/`FORMAT_DATETIME`/`FORMAT_DATE`/`FORMAT_TIME`,
   `PARSE_TIMESTAMP`/`PARSE_DATETIME`/`PARSE_DATE`,
   `DATE(...)`/`DATETIME(...)`/`TIMESTAMP(...)`, `EXTRACT` (including `DAYOFWEEK`, 1 = Sunday) and
-  `STRUCT(... AS name)`. Functions with the same name and meaning in both dialects (`COALESCE`,
+  `STRUCT(... AS name)`, including the typed `STRUCT<name type, ...>(...)` constructor.
+  Functions with the same name and meaning in both dialects (`COALESCE`,
   `IFNULL`, `LOWER`, `STRING_AGG`, `ARRAY_AGG`, `ROUND`, and many more) pass through.
 - `COUNTIF(DISTINCT condition)` counts distinct `TRUE` results, returning zero for empty,
   false-only, or null-only inputs, following [COUNTIF semantics](https://cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#countif).
@@ -604,6 +605,15 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `CAST(STRUCT([1, 2] AS a) AS STRUCT<a ARRAY<INT64>>).a[1]`, is read as DuckDB's one-based subscript (`1`
   here, where BigQuery returns `2`): the translator does not know the field is an array. Write `[OFFSET(i)]`
   or `[ORDINAL(i)]` there.
+- A typed `STRUCT<name type, ...>(...)` constructor casts each value to its declared type, where BigQuery
+  coerces it at analysis time: a value that does not coerce, such as `STRUCT<n INT64>('abc')`, fails while
+  the query runs with DuckDB's `Could not convert string 'abc' to INT64` (BigQuery: `Struct field 1 has
+  type STRING which does not coerce to INT64`), and one BigQuery rejects but DuckDB can cast, such as
+  `STRUCT<n INT64>('1')`, succeeds. A value for a nested `STRUCT<...>` field must use the declared field
+  names, since DuckDB casts structs by name where BigQuery matches them by position.
+- A `STRUCT<...>` type with an unnamed field, such as `CAST(STRUCT(1) AS STRUCT<INT64>)` or the nested
+  `STRUCT<a STRUCT<INT64>>` of a typed constructor, fails with `Syntax error in type: expected ">"`, where
+  BigQuery names the field `_field_1`. Name each field of a nested `STRUCT` type.
 - A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
   compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
   time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. Three forms differ: a lowercase `t`

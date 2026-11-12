@@ -4054,4 +4054,18 @@ class SqlDialectTranslatorTest {
         String dotted = sql("SELECT t.limit FROM ds.t" + nan + " ORDER BY t.limit");
         assertTrue(dotted.contains("ORDER BY (CASE WHEN (t.\"limit\") IS NULL") || dotted.contains("ORDER BY (CASE WHEN (t.limit) IS NULL"), dotted);
     }
+
+    @Test
+    void typedStructConstructorBecomesACastStructLiteral() {
+        String typed = sql("SELECT STRUCT<n INT64, m STRING>(x, 'a') AS s FROM ds.t");
+        assertTrue(typed.contains("{'n': CAST(x AS BIGINT), 'm': CAST('a' AS VARCHAR)} AS s"), typed);
+        String unnamed = sql("SELECT STRUCT<INT64>(x) AS s FROM ds.t");
+        assertTrue(unnamed.contains("{'_field_1': CAST(x AS BIGINT)}"), unnamed);
+        String ordered = sql("SELECT STRUCT<n INT64>(x) AS s FROM ds.t ORDER BY s.n");
+        assertTrue(ordered.endsWith("ORDER BY list_extract([CAST(x AS BIGINT)], 1)"), ordered);
+        String joined = sql("SELECT STRUCT<n INT64>(1) AS s FROM (SELECT 1 AS n) a CROSS JOIN (SELECT 2 AS n) b");
+        assertTrue(joined.contains("{'n': CAST(1 AS BIGINT)} AS s"), joined);
+        String inIf = sql("SELECT IF(b, STRUCT<n INT64, m STRING>(x, 'a'), NULL) AS s FROM ds.t");
+        assertTrue(inIf.contains("THEN {'n': CAST(x AS BIGINT), 'm': CAST('a' AS VARCHAR)} ELSE NULL"), inIf);
+    }
 }

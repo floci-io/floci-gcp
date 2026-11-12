@@ -1826,6 +1826,52 @@ class BigQueryDuckIntegrationTest {
                 .body("rows.collect { it.f[0].v }", equalTo(List.of("1.0", "NaN")));
     }
 
+    @Test
+    @Order(5)
+    void typedStructConstructorBuildsTheDeclaredFieldsLikeBigQuery() {
+        query(Map.of("query", "SELECT STRUCT<n INT64, m STRING>(x, 'a') AS s FROM UNNEST([2, 1]) x ORDER BY s.n",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("n", "m")))
+                .body("rows.collect { it.f[0].v.f.v }", equalTo(List.of(List.of("1", "a"), List.of("2", "a"))));
+        query(Map.of("query", "SELECT STRUCT<n FLOAT64>(x) AS s FROM UNNEST([2, 1]) x ORDER BY s.n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.type", equalTo(List.of("FLOAT")))
+                .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("1.0", "2.0")));
+        query(Map.of("query", "SELECT STRUCT<INT64, STRING>(x, 'a') AS s FROM UNNEST([1]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("_field_1", "_field_2")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "a")));
+        query(Map.of("query", "SELECT STRUCT<a STRUCT<b INT64>, c ARRAY<STRING>>(STRUCT(x AS b), ['z']) AS s"
+                + " FROM UNNEST([1]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[0].v.f[1].v.v", equalTo(List.of("z")));
+        query(Map.of("query", "SELECT TO_JSON_STRING(STRUCT<n INT64, m STRING>(1, 'x')) AS v,"
+                + " IF(TRUE, STRUCT<n INT64, m STRING>(1, 'x'), NULL).m AS w", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("{\"n\":1,\"m\":\"x\"}", "x")));
+        query(Map.of("query", "SELECT STRUCT<n INT64, n STRING>(1, 'a') AS s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("n", "_field_2")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "a")));
+        query(Map.of("query", "SELECT STRUCT<n INT64>(1) AS s FROM (SELECT 1 AS n) a CROSS JOIN (SELECT 2 AS n) b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"));
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT<n INT64>(,1) AS s", "Syntax error: Unexpected \",\""},
+                {"SELECT STRUCT<n INT64, m INT64>(1,,2) AS s", "Syntax error: Unexpected \",\""},
+                {"SELECT STRUCT<n INT64>(1,) AS s", "Syntax error: Unexpected \")\""},
+                {"SELECT STRUCT<n INT64, m STRING>(1) AS s", "STRUCT type has 2 fields but constructor call has 1 fields"},
+                {"SELECT STRUCT<n INT64>(1, 'x') AS s", "STRUCT type has 1 fields but constructor call has 2 fields"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo(c[1]));
+        }
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

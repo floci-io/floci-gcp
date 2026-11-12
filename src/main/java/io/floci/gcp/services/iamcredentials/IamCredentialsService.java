@@ -106,7 +106,6 @@ public class IamCredentialsService {
         if (payload == null || payload.isEmpty()) {
             throw GcpException.invalidArgument("payload is required");
         }
-        requireEnabledTarget(serviceAccount);
         IamService.SignedBytes signed = iamService.sign(WILDCARD_PROJECT, serviceAccount,
                 ProtoJsonBytes.decode(payload, "payload"));
         Map<String, String> response = new LinkedHashMap<>();
@@ -134,7 +133,6 @@ public class IamCredentialsService {
             throw GcpException.invalidArgument("payload must be a JSON object of JWT claims");
         }
         validateExpiry(claims.get("exp"));
-        requireEnabledTarget(serviceAccount);
 
         SignedJwt signed = signClaims(serviceAccount, account -> payload);
         Map<String, String> response = new LinkedHashMap<>();
@@ -151,7 +149,6 @@ public class IamCredentialsService {
         if (audience == null || audience.isEmpty()) {
             throw GcpException.invalidArgument("audience is required");
         }
-        requireEnabledTarget(serviceAccount);
         Map<String, String> response = new LinkedHashMap<>();
         response.put("token", signClaims(serviceAccount,
                 account -> idTokenClaims(account, audience, includeEmail)).jwt());

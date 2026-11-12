@@ -455,6 +455,35 @@ class IamServiceAccountEnforcementIntegrationTest {
     }
 
     @Test
+    void iamV1SignBlobForADisabledAccountIsUnauthenticatedOnEveryPath() {
+        iam.createServiceAccount(project, "target", "target", "");
+        setPolicy("projects/" + project + "/serviceAccounts/" + targetEmail, "roles/iam.serviceAccountTokenCreator",
+                callerEmail, null);
+        List<String> paths = List.of("/v1/projects/-/serviceAccounts/" + targetEmail + ":signBlob",
+                "/v1/projects/" + project + "/serviceAccounts/" + targetEmail + ":signBlob");
+
+        iam.setServiceAccountDisabled(project, targetEmail, true);
+
+        for (String path : paths) {
+            given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                    .contentType("application/json").body(Map.of("bytesToSign", "aGVsbG8="))
+                    .when().post(path)
+                    .then().statusCode(401)
+                    .body("error.status", equalTo("UNAUTHENTICATED"))
+                    .body("error.message", equalTo(ACCOUNT_STATE_INVALID_MESSAGE));
+        }
+
+        iam.setServiceAccountDisabled(project, targetEmail, false);
+
+        for (String path : paths) {
+            given().header("Authorization", callerAuthorization).urlEncodingEnabled(false)
+                    .contentType("application/json").body(Map.of("bytesToSign", "aGVsbG8="))
+                    .when().post(path)
+                    .then().statusCode(200).body("signature", notNullValue());
+        }
+    }
+
+    @Test
     void disableAndEnableRequireTheirPermissions() {
         iam.createServiceAccount(project, "target", "target", "");
         String accountPath = "/v1/projects/" + project + "/serviceAccounts/" + targetEmail;

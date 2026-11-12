@@ -14,6 +14,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
@@ -746,6 +747,12 @@ public class IamService {
             account = saStore.get(saKey(ref.project(), ref.email()))
                     .filter(found -> namesAccount(emailOrId, found))
                     .orElseThrow(() -> GcpException.notFound("Service account not found: " + emailOrId));
+            // Every signing route (IAM v1 signBlob, IAM Credentials signBlob, signJwt and generateIdToken)
+            // comes through here, so a disabled account signs nothing on any of them.
+            if (account.isDisabled() && config != null
+                    && config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+                throw CredentialAuthenticationException.accountStateInvalid();
+            }
             key = signingKey(ref);
         }
         byte[] data = input.apply(account, key.getKeyId());

@@ -496,9 +496,10 @@ in `enforce` mode revokes its Floci-issued tokens, which are then refused the sa
 also after an account with the same email is created again.
 
 As the reference says "requests for new access tokens will fail", IAM Credentials
-`generateAccessToken`, `generateIdToken`, `signBlob` and `signJwt` refuse a disabled
-target account in `enforce` mode with the same response, instead of issuing a token
-or a signature. In `disabled` mode the field is stored and returned, and neither
+`generateAccessToken`, `generateIdToken`, `signBlob` and `signJwt`, and IAM v1
+`signBlob` (with `payload` or `bytesToSign`, under `projects/-` or the account's
+project), refuse a disabled target account in `enforce` mode with the same response,
+instead of issuing a token or a signature. In `disabled` mode the field is stored and returned, and neither
 tokens nor IAM Credentials requests are affected.
 
 ## Service Account Keys

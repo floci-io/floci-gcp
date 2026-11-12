@@ -25,6 +25,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -39,9 +40,16 @@ public class OAuthTokenService {
 
     static final String JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer";
     static final String INVALID_SIGNATURE = "Invalid JWT Signature.";
-    static final String INVALID_TIMEFRAME =
-            "Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.";
+    static final String INVALID_TIMEFRAME = "Invalid JWT: Token must be a short-lived token (60 minutes) and in a "
+            + "reasonable timeframe. Check your iat and exp values in the JWT claim.";
     static final String INVALID_SCOPE = "Invalid OAuth scope or ID token audience provided.";
+    // The messages below are not in Google's documentation: they are what https://oauth2.googleapis.com/token
+    // answered on 2026-11-12 (floci-io/floci-gcp#644).
+    static final String ACCOUNT_NOT_FOUND = "Invalid grant: account not found";
+    static final String FAILED_AUDIENCE_CHECK = "Invalid JWT: Failed audience check.";
+    static final String ISSUED_AT_NOT_SET = "Invalid JWT: iat (issued at) is not set.";
+    static final String EXPIRATION_NOT_SET = "Invalid JWT: exp (expiration time) is not set.";
+    static final String SCOPE_NOT_A_STRING = "Empty or missing scope not allowed.";
     /** Google documents that it refuses an {@code exp} more than 65 minutes after {@code iat}. */
     static final long MAX_ASSERTION_LIFETIME_SECONDS = 65 * 60;
     static final long TOKEN_LIFETIME_SECONDS = 3600;
@@ -79,10 +87,15 @@ public class OAuthTokenService {
         return verifiedExchange(assertion, requestUrl);
     }
 
+    /**
+     * Checks in the order Google does, so an assertion with several faults gets Google's answer: the
+     * account, the audience, the timeframe and an empty scope before the signature, and the scopes'
+     * names last.
+     */
     private Response verifiedExchange(String assertion, String requestUrl) {
         String[] parts = assertion.split("\\.", -1);
         if (parts.length != 3) {
-            return oauthError("invalid_grant", INVALID_SIGNATURE);
+            return oauthError("invalid_request", "Bad Request");
         }
         JsonNode header;
         JsonNode claims;
@@ -92,27 +105,30 @@ public class OAuthTokenService {
             claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
             signature = Base64.getUrlDecoder().decode(parts[2]);
         } catch (IllegalArgumentException | IOException e) {
-            // Google lists an assertion that is not Base64url-encoded JSON under the same error.
-            return oauthError("invalid_grant", INVALID_SIGNATURE);
+            return oauthError("invalid_request", "Bad Request");
         }
         if (header == null || !header.isObject() || claims == null || !claims.isObject()) {
-            return oauthError("invalid_grant", INVALID_SIGNATURE);
+            return oauthError("invalid_request", "Bad Request");
         }
-        String email = claims.path("iss").asText(null);
-        Map<String, PublicKey> keys = email == null ? Map.of()
+        String email = claims.path("iss").isTextual() ? claims.get("iss").asText() : null;
+        Optional<Map<String, PublicKey>> keys = email == null ? Optional.empty()
                 : accounts.get().userManagedPublicKeys(email, clock.instant());
-        byte[] signedInput = (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII);
-        if (!"RS256".equals(header.path("alg").asText(null))
-                || !verifies(keys, header.path("kid").asText(null), signedInput, signature)) {
-            return oauthError("invalid_grant", INVALID_SIGNATURE);
+        if (keys.isEmpty()) {
+            return oauthError("invalid_grant", ACCOUNT_NOT_FOUND);
         }
-        String audience = claims.path("aud").asText(null);
+        String audience = claims.path("aud").isTextual() ? claims.get("aud").asText() : null;
         if (audience == null || !(GOOGLE_AUDIENCES.contains(audience) || audience.equals(requestUrl))) {
-            return oauthError("invalid_grant", INVALID_SIGNATURE);
+            return oauthError("invalid_grant", FAILED_AUDIENCE_CHECK);
         }
         JsonNode issuedAt = claims.get("iat");
         JsonNode expiresAt = claims.get("exp");
-        if (issuedAt == null || !issuedAt.canConvertToLong() || expiresAt == null || !expiresAt.canConvertToLong()) {
+        if (issuedAt == null || issuedAt.isNull()) {
+            return oauthError("invalid_grant", ISSUED_AT_NOT_SET);
+        }
+        if (expiresAt == null || expiresAt.isNull()) {
+            return oauthError("invalid_grant", EXPIRATION_NOT_SET);
+        }
+        if (!issuedAt.canConvertToLong() || !expiresAt.canConvertToLong()) {
             return oauthError("invalid_grant", INVALID_TIMEFRAME);
         }
         long iat = issuedAt.asLong();
@@ -123,8 +139,16 @@ public class OAuthTokenService {
         // Google answers invalid_scope when "No scopes were requested (empty list of scopes), or one of the
         // requested scopes doesn't exist (i.e. is invalid)."
         JsonNode scope = claims.get("scope");
+        if (scope != null && scope.isArray()) {
+            return oauthError("invalid_scope", SCOPE_NOT_A_STRING);
+        }
         if (scope == null || !scope.isTextual() || scope.asText().isBlank()) {
             return oauthError("invalid_scope", INVALID_SCOPE);
+        }
+        byte[] signedInput = (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII);
+        if (!"RS256".equals(header.path("alg").asText(null))
+                || !verifies(keys.get(), header.path("kid").asText(null), signedInput, signature)) {
+            return oauthError("invalid_grant", INVALID_SIGNATURE);
         }
         if (!Arrays.stream(scope.asText().trim().split("\\s+")).allMatch(GOOGLE_SCOPES::contains)) {
             return oauthError("invalid_scope", INVALID_SCOPE);
@@ -149,7 +173,7 @@ public class OAuthTokenService {
                 if (verifier.verify(signature)) {
                     return true;
                 }
-            } catch (GeneralSecurityException e) {
+            } catch (GeneralSecurityException expected) {
                 // A signature that does not parse for this key verifies nothing; the next key is tried.
                 continue;
             }

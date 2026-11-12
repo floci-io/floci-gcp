@@ -391,31 +391,47 @@ The token endpoint (`/token` and the legacy `/oauth2/v4/token`) exchanges a
 service-account JWT for an access token with the `jwt-bearer` grant described in
 [Using OAuth 2.0 for Server to Server Applications](https://developers.google.com/identity/protocols/oauth2/service-account).
 With the default `disabled` mode it returns a token for any assertion, and that
-token is not a recognized identity. In `enforce` mode:
+token is not a recognized identity. In `enforce` mode the assertion is checked
+as below, and every refusal is `400`. The checks run in the order Google's token
+endpoint runs them, so an assertion with several faults gets the answer of the first: an
+assertion signed with an unrelated key still gets the audience, timeframe,
+missing claim and empty scope answers below, and only one that passes them gets
+`Invalid JWT Signature.`. The messages Google's documentation does not list were
+measured against `https://oauth2.googleapis.com/token` in the review of
+[#644](https://github.com/floci-io/floci-gcp/pull/644).
 
-- The JWT must be signed with `RS256` by a user-managed key of the service account
-  named in `iss`, created through `keys.create` and still valid. The `kid` header
-  is tried first; "if an incorrect Key ID is specified, all keys associated with
-  the service account are tried". Otherwise, including for a deleted key or a
-  deleted account, the response is `400` with `invalid_grant` and
-  `Invalid JWT Signature.`, which Google documents for a key "not associated with
-  the service account identified by the client email or the key that was used has
-  been deleted, disabled, or has expired", and for an assertion that is not
-  correctly encoded.
+- The assertion must be three Base64url segments, the first two JSON objects;
+  otherwise the response is `invalid_request` with `Bad Request`.
+- `iss` must name an existing service account; otherwise, including for a
+  deleted account, the response is `invalid_grant` with
+  `Invalid grant: account not found`.
 - `aud` must be `https://oauth2.googleapis.com/token`, the legacy
   `https://www.googleapis.com/oauth2/v4/token`, or the emulator URL the request was
   sent to, so that a credential whose `token_uri` points at the emulator works.
-  Another audience gets the same response as a bad signature: `400` with
-  `invalid_grant` and `Invalid JWT Signature.`.
-- `exp` must not precede `iat`, must be at most 65 minutes after it, and must not
-  have passed; otherwise the response is `invalid_grant` with
-  `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe.`
-- `scope` must be present, not empty, and name only Google OAuth 2.0 scopes;
-  otherwise the response is `400` with `invalid_scope` and
-  `Invalid OAuth scope or ID token audience provided.`, which Google documents for
-  "No scopes were requested (empty list of scopes), or one of the requested scopes
-  doesn't exist (i.e. is invalid)." The scopes are checked against the bundled
-  catalog described below, so a scope of an API Floci does not emulate is accepted.
+  A missing or other audience gets `invalid_grant` with
+  `Invalid JWT: Failed audience check.`.
+- `iat` and `exp` must be set, or the response is `invalid_grant` with
+  `Invalid JWT: iat (issued at) is not set.` or
+  `Invalid JWT: exp (expiration time) is not set.`. `exp` must not precede `iat`,
+  must be at most 65 minutes after it, and must not have passed; otherwise the
+  response is `invalid_grant` with
+  `Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim.`
+- `scope` must be a non-empty string; a missing or blank one gets `invalid_scope`
+  with `Invalid OAuth scope or ID token audience provided.`, which Google documents
+  for "No scopes were requested (empty list of scopes)", and a JSON array gets
+  `invalid_scope` with `Empty or missing scope not allowed.`.
+- The JWT must be signed with `RS256` by a user-managed key of the account,
+  created through `keys.create` and still valid. The `kid` header is tried first;
+  "if an incorrect Key ID is specified, all keys associated with the service
+  account are tried". Otherwise, including for a deleted key, the response is
+  `invalid_grant` with `Invalid JWT Signature.`, which Google documents for a key
+  "not associated with the service account identified by the client email or the
+  key that was used has been deleted, disabled, or has expired".
+- Every scope must be a Google OAuth 2.0 scope; otherwise the response is
+  `invalid_scope` with `Invalid OAuth scope or ID token audience provided.`, which
+  Google documents for "one of the requested scopes doesn't exist (i.e. is
+  invalid)." The scopes are checked against the bundled catalog described below,
+  so a scope of an API Floci does not emulate is accepted.
 - The access token is valid for 3600 seconds and acts as the service account on
   every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
 

@@ -646,13 +646,12 @@ public class IamService {
 
     /**
      * The public parts of the user-managed keys of the account with this email that are valid at
-     * {@code now}, by key ID. Empty when no such account exists, so a deleted account or key verifies
-     * nothing.
+     * {@code now}, by key ID, or empty when no such account exists. A deleted key verifies nothing.
      */
-    public Map<String, PublicKey> userManagedPublicKeys(String email, Instant now) {
+    public Optional<Map<String, PublicKey>> userManagedPublicKeys(String email, Instant now) {
         String project = email == null ? null : projectFromEmail(email);
         if (project == null || saStore.get(saKey(project, email)).isEmpty()) {
-            return Map.of();
+            return Optional.empty();
         }
         Map<String, PublicKey> keys = new LinkedHashMap<>();
         for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
@@ -662,7 +661,7 @@ public class IamService {
                 keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
             }
         }
-        return keys;
+        return Optional.of(keys);
     }
 
     private static PublicKey publicKey(String publicKeyData) {

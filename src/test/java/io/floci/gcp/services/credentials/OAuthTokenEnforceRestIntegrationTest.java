@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
+import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
@@ -90,7 +91,19 @@ class OAuthTokenEnforceRestIntegrationTest {
         iam.deleteServiceAccount(project, email);
 
         invalidGrant(exchange("/token", assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId())),
-                OAuthTokenService.INVALID_SIGNATURE);
+                OAuthTokenService.ACCOUNT_NOT_FOUND);
+    }
+
+    @Test
+    void aMissingOrUnknownIssuerIsAccountNotFound() throws Exception {
+        KeyFile key = createKey(email);
+        Map<String, Object> missing = claims(key.email(), AUDIENCE, 0, 3600);
+        missing.remove("iss");
+
+        invalidGrant(exchange("/token", assertion(key, missing, "RS256", key.keyId())),
+                OAuthTokenService.ACCOUNT_NOT_FOUND);
+        invalidGrant(exchange("/token", assertion(key, claims("nobody@" + project + ".iam.gserviceaccount.com",
+                AUDIENCE, 0, 3600), "RS256", key.keyId())), OAuthTokenService.ACCOUNT_NOT_FOUND);
     }
 
     @Test
@@ -112,12 +125,20 @@ class OAuthTokenEnforceRestIntegrationTest {
     }
 
     @Test
-    void malformedOrUnsignedAssertionsAreInvalidGrants() throws Exception {
+    void anAssertionThatIsNotThreeBase64urlJsonSegmentsIsABadRequest() {
+        for (String path : List.of("/token", "/oauth2/v4/token")) {
+            for (String assertion : List.of("header.payload.signature", "a.b")) {
+                badRequest(exchange(path, assertion));
+            }
+        }
+    }
+
+    @Test
+    void unsignedAssertionsAreInvalidGrants() throws Exception {
         KeyFile key = createKey(email);
         String signed = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());
         String unsigned = signed.substring(0, signed.lastIndexOf('.') + 1);
 
-        invalidGrant(exchange("/token", "header.payload.signature"), OAuthTokenService.INVALID_SIGNATURE);
         invalidGrant(exchange("/token", unsigned), OAuthTokenService.INVALID_SIGNATURE);
         invalidGrant(exchange("/token", assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "none", key.keyId())),
                 OAuthTokenService.INVALID_SIGNATURE);
@@ -129,16 +150,35 @@ class OAuthTokenEnforceRestIntegrationTest {
 
         for (long[] window : new long[][] {{0, 66 * 60}, {0, -1}, {-7200, -3600}}) {
             invalidGrant(exchange("/token", assertion(key, claims(key.email(), AUDIENCE, window[0], window[1]),
-                    "RS256", key.keyId())), OAuthTokenService.INVALID_TIMEFRAME);
+                    "RS256", key.keyId())), "Invalid JWT: Token must be a short-lived token (60 minutes) and in a "
+                    + "reasonable timeframe. Check your iat and exp values in the JWT claim.");
         }
+    }
+
+    @Test
+    void missingIssuedAtOrExpirationIsNamed() throws Exception {
+        KeyFile key = createKey(email);
+        Map<String, Object> noIssuedAt = claims(key.email(), AUDIENCE, 0, 3600);
+        noIssuedAt.remove("iat");
+        Map<String, Object> noExpiration = claims(key.email(), AUDIENCE, 0, 3600);
+        noExpiration.remove("exp");
+
+        invalidGrant(exchange("/token", assertion(key, noIssuedAt, "RS256", key.keyId())),
+                "Invalid JWT: iat (issued at) is not set.");
+        invalidGrant(exchange("/token", assertion(key, noExpiration, "RS256", key.keyId())),
+                "Invalid JWT: exp (expiration time) is not set.");
     }
 
     @Test
     void audienceMustNameTheTokenEndpoint() throws Exception {
         KeyFile key = createKey(email);
+        Map<String, Object> missing = claims(key.email(), AUDIENCE, 0, 3600);
+        missing.remove("aud");
 
         invalidGrant(exchange("/token", assertion(key, claims(key.email(), "https://example.com/token", 0, 3600),
-                "RS256", key.keyId())), "Invalid JWT Signature.");
+                "RS256", key.keyId())), "Invalid JWT: Failed audience check.");
+        invalidGrant(exchange("/token", assertion(key, missing, "RS256", key.keyId())),
+                "Invalid JWT: Failed audience check.");
         String emulatorAudience = RestAssured.baseURI + ":" + RestAssured.port + "/token";
         exchange("/token", assertion(key, claims(key.email(), emulatorAudience, 0, 3600), "RS256", key.keyId()))
                 .then().statusCode(200);
@@ -159,6 +199,47 @@ class OAuthTokenEnforceRestIntegrationTest {
                     .body("error", equalTo("invalid_scope"))
                     .body("error_description", equalTo("Invalid OAuth scope or ID token audience provided."));
         }
+    }
+
+    @Test
+    void aScopeClaimThatIsAJsonArrayIsAnInvalidScope() throws Exception {
+        KeyFile key = createKey(email);
+        Map<String, Object> claims = claims(key.email(), AUDIENCE, 0, 3600);
+        claims.put("scope", List.of(SCOPE));
+
+        exchange("/token", assertion(key, claims, "RS256", key.keyId())).then().statusCode(400)
+                .body("error", equalTo("invalid_scope"))
+                .body("error_description", equalTo("Empty or missing scope not allowed."));
+    }
+
+    @Test
+    void claimsAreCheckedBeforeTheSignature() throws Exception {
+        KeyFile unrelated = unrelatedKey(email);
+        Map<String, Object> noIssuedAt = claims(email, AUDIENCE, 0, 3600);
+        noIssuedAt.remove("iat");
+        Map<String, Object> noScope = claims(email, AUDIENCE, 0, 3600);
+        noScope.remove("scope");
+
+        invalidGrant(exchange("/token", assertion(unrelated, claims(email, "https://example.com/token", 0, 3600),
+                "RS256", null)), OAuthTokenService.FAILED_AUDIENCE_CHECK);
+        invalidGrant(exchange("/token", assertion(unrelated, claims(email, AUDIENCE, 0, 66 * 60), "RS256", null)),
+                OAuthTokenService.INVALID_TIMEFRAME);
+        invalidGrant(exchange("/token", assertion(unrelated, noIssuedAt, "RS256", null)),
+                OAuthTokenService.ISSUED_AT_NOT_SET);
+        exchange("/token", assertion(unrelated, noScope, "RS256", null)).then().statusCode(400)
+                .body("error", equalTo("invalid_scope"))
+                .body("error_description", equalTo(OAuthTokenService.INVALID_SCOPE));
+        invalidGrant(exchange("/token", assertion(unrelated, claims(email, AUDIENCE, 0, 3600), "RS256", null)),
+                OAuthTokenService.INVALID_SIGNATURE);
+    }
+
+    @Test
+    void anUnknownScopeIsCheckedAfterTheSignature() throws Exception {
+        Map<String, Object> claims = claims(email, AUDIENCE, 0, 3600);
+        claims.put("scope", "https://www.googleapis.com/auth/not-a-google-scope");
+
+        invalidGrant(exchange("/token", assertion(unrelatedKey(email), claims, "RS256", null)),
+                OAuthTokenService.INVALID_SIGNATURE);
     }
 
     @Test
@@ -197,11 +278,12 @@ class OAuthTokenEnforceRestIntegrationTest {
                 .body(Map.of("grant_type", OAuthTokenService.JWT_BEARER_GRANT_TYPE, "assertion", assertion))
                 .when().post("/token")
                 .then().statusCode(200);
-        invalidGrant(exchange("/oauth2/v4/token", "header.payload.signature"), OAuthTokenService.INVALID_SIGNATURE);
-        invalidGrant(given().contentType("application/json")
+        badRequest(given().contentType("application/json")
                 .body(Map.of("grant_type", OAuthTokenService.JWT_BEARER_GRANT_TYPE,
                         "assertion", "header.payload.signature"))
-                .when().post("/oauth2/v4/token"), OAuthTokenService.INVALID_SIGNATURE);
+                .when().post("/oauth2/v4/token"));
+        invalidGrant(exchange("/oauth2/v4/token", assertion(key, claims(key.email(), "https://example.com/token",
+                0, 3600), "RS256", key.keyId())), OAuthTokenService.FAILED_AUDIENCE_CHECK);
     }
 
     private KeyFile createKey(String account) throws Exception {
@@ -214,6 +296,12 @@ class OAuthTokenEnforceRestIntegrationTest {
         PrivateKey privateKey = KeyFactory.getInstance("RSA")
                 .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(pem)));
         return new KeyFile(file.get("client_email").asText(), key.getKeyId(), privateKey);
+    }
+
+    private static KeyFile unrelatedKey(String account) throws GeneralSecurityException {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        return new KeyFile(account, null, generator.generateKeyPair().getPrivate());
     }
 
     private static Map<String, Object> claims(String issuer, String audience, long iatOffset, long expOffset) {
@@ -232,7 +320,9 @@ class OAuthTokenEnforceRestIntegrationTest {
         Map<String, Object> header = new LinkedHashMap<>();
         header.put("alg", algorithm);
         header.put("typ", "JWT");
-        header.put("kid", keyId);
+        if (keyId != null) {
+            header.put("kid", keyId);
+        }
         Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
         String input = encoder.encodeToString(MAPPER.writeValueAsBytes(header)) + "."
                 + encoder.encodeToString(MAPPER.writeValueAsBytes(claims));
@@ -251,6 +341,12 @@ class OAuthTokenEnforceRestIntegrationTest {
                 .formParam("grant_type", OAuthTokenService.JWT_BEARER_GRANT_TYPE)
                 .formParam("assertion", assertion)
                 .when().post(path);
+    }
+
+    private static void badRequest(Response response) {
+        response.then().statusCode(400)
+                .body("error", equalTo("invalid_request"))
+                .body("error_description", equalTo("Bad Request"));
     }
 
     private static void invalidGrant(Response response, String description) {

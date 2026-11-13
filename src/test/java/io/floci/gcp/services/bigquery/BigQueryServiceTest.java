@@ -928,6 +928,97 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void typedArrayVariablesKeepTheElementTypeOfTheirLiteral() {
+        // Live BigQuery: `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` returns an empty ARRAY<FLOAT64>, and
+        // `ARRAY<FLOAT64>[1]` holds a FLOAT64. Neither element type can be inferred from the values.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("numbers", "FLOAT", "REPEATED"),
+                        field("empty", "FLOAT", "REPEATED"))),
+                List.of(Map.of("numbers", List.of(1.0), "empty", List.of())), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null, """
+                DECLARE numbers DEFAULT ARRAY<FLOAT64>[1];
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                SELECT numbers, empty;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        String sql = request.getValue().sql();
+        assertTrue(sql.contains("CAST([CAST(1.0 AS DOUBLE)] AS ARRAY<FLOAT64>)"), sql);
+        assertTrue(sql.contains("CAST([] AS ARRAY<FLOAT64>)"), sql);
+    }
+
+    @Test
+    void typedArrayLiteralElementsCoerceToTheDeclaredElementType() {
+        // Live BigQuery reports "Array element type FLOAT64 does not coerce to INT64" for
+        // `DECLARE xs DEFAULT ARRAY<INT64>[1.5]`.
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE xs DEFAULT ARRAY<INT64>[1.5]; SELECT xs;", null));
+
+        assertEquals("invalidQuery", error.getReason());
+    }
+
+    @Test
+    void structVariablesTakeDefaultFieldsByPosition() {
+        // Live BigQuery returns a=1, b=2 for `STRUCT(1 AS b, 2 AS a)` assigned to
+        // `STRUCT<a INT64, b INT64>`: the source field names do not swap the values.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        TableFieldSchema structValue = field("_floci_script_value", "RECORD", null);
+        structValue.setFields(List.of(field("b", "INTEGER", null), field("a", "INTEGER", null)));
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("b", 1L);
+        source.put("a", 2L);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(structValue)),
+                        List.of(Map.of("_floci_script_value", source)), "SELECT", 0),
+                new BigQuerySqlEngine.Result(
+                        new TableSchema(List.of(field("a", "INTEGER", null), field("b", "INTEGER", null))),
+                        List.of(Map.of("a", 1L, "b", 2L)), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null,
+                "DECLARE s STRUCT<a INT64, b INT64> DEFAULT STRUCT(1 AS b, 2 AS a); SELECT s;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        String sql = request.getAllValues().getLast().sql();
+        assertTrue(sql.contains("CAST(STRUCT(1 AS `a`, 2 AS `b`) AS STRUCT<`a` INT64, `b` INT64>)"), sql);
+    }
+
+    @Test
+    void structAssignmentsTakeSetFieldsByPosition() {
+        // Live BigQuery returns a=2, b=1 for `SET s = STRUCT(2 AS b, 1 AS a)` on
+        // `STRUCT<a INT64, b INT64>`: an assignment is by position as well.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        TableFieldSchema structValue = field("_floci_script_value", "RECORD", null);
+        structValue.setFields(List.of(field("b", "INTEGER", null), field("a", "INTEGER", null)));
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("b", 2L);
+        source.put("a", 1L);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(structValue)),
+                        List.of(Map.of("_floci_script_value", source)), "SELECT", 0),
+                new BigQuerySqlEngine.Result(
+                        new TableSchema(List.of(field("a", "INTEGER", null), field("b", "INTEGER", null))),
+                        List.of(Map.of("a", 2L, "b", 1L)), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null,
+                "DECLARE s STRUCT<a INT64, b INT64>; SET s = STRUCT(2 AS b, 1 AS a); SELECT s;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        String sql = request.getAllValues().getLast().sql();
+        assertTrue(sql.contains("CAST(STRUCT(2 AS `a`, 1 AS `b`) AS STRUCT<`a` INT64, `b` INT64>)"), sql);
+    }
+
+    @Test
     void bytesDateTimeTimeAndJsonVariablesCanBeDeclaredAndAssigned() {
         BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
         TableFieldSchema jsonResult = field("_floci_script_value", "JSON", null);

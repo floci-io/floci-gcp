@@ -665,6 +665,9 @@ public class BigQueryService {
             "(?is)^SET\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.+)$");
     private static final Pattern SCRIPT_SET_TUPLE = Pattern.compile(
             "(?is)^SET\\s*\\((.*)\\)\\s*=\\s*\\((.*)\\)$");
+    /** A typed array literal, whose element type BigQuery keeps instead of inferring one. */
+    private static final Pattern SCRIPT_TYPED_ARRAY_LITERAL = Pattern.compile(
+            "(?is)^ARRAY\\s*<\\s*([^<>]+?)\\s*>\\s*\\[(.*)]$");
     private static final DateTimeFormatter HOUR_PARTITION = DateTimeFormatter.ofPattern("uuuuMMddHH")
             .withResolverStyle(ResolverStyle.STRICT);
     private static final DateTimeFormatter DAY_PARTITION = DateTimeFormatter.ofPattern("uuuuMMdd")
@@ -1609,7 +1612,9 @@ public class BigQueryService {
         } else {
             try {
                 value = scriptOperand(expression, context);
-                type = value == null ? "STRING" : inferredScriptVariableType(value);
+                String literalType = scriptLiteralType(expression);
+                type = literalType != null ? literalType
+                        : value == null ? "STRING" : inferredScriptVariableType(value);
             } catch (GcpException e) {
                 ScriptExpressionValue evaluated = evaluateScriptSqlExpression(
                         expression, projectId, jobProjectId, options, context, jobLocation);
@@ -1842,7 +1847,10 @@ public class BigQueryService {
                 }
             }
             if (type == null) {
-                type = inferredScriptVariableType(value);
+                // `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` keeps the literal's element type, which an
+                // empty list cannot provide on its own.
+                String literalType = defaultExpression != null ? scriptLiteralType(defaultExpression) : null;
+                type = literalType != null ? literalType : inferredScriptVariableType(value);
             }
             value = coerceScriptVariableValue(value, type);
             for (String name : names) {
@@ -2420,12 +2428,14 @@ public class BigQueryService {
             if (!(value instanceof Map<?, ?> values) || values.size() != type.fields().size()) {
                 throw QueryEngine.invalidQuery("Value cannot be coerced to " + scriptVariableTypeSql(type) + ".");
             }
+            // BigQuery assigns a STRUCT by field position, whatever the source calls its fields, so
+            // `STRUCT(1 AS b, 2 AS a)` reaches `STRUCT<a INT64, b INT64>` as a=1, b=2.
             List<Map.Entry<?, ?>> entries = new ArrayList<>(values.entrySet());
             Map<String, Object> coerced = new LinkedHashMap<>();
             for (int index = 0; index < type.fields().size(); index++) {
                 ScriptVariableField field = type.fields().get(index);
-                Map.Entry<?, ?> entry = structFieldEntry(entries, field.name(), index);
-                if (entry == null || !(entry.getKey() instanceof String sourceName)) {
+                Map.Entry<?, ?> entry = entries.get(index);
+                if (!(entry.getKey() instanceof String sourceName)) {
                     throw QueryEngine.invalidQuery("STRUCT variable fields must have string names.");
                 }
                 String targetName = field.name() != null ? field.name() : sourceName;
@@ -2699,10 +2709,9 @@ public class BigQueryService {
         if (tokens.size() == 1 && tokens.getFirst().kind == SqlDialectTranslator.Kind.BYTES) {
             return scriptBytesLiteral(tokens.getFirst().value);
         }
-        Matcher typedArray = Pattern.compile("(?is)^ARRAY\\s*<\\s*[^<>]+\\s*>\\s*\\[(.*)]$")
-                .matcher(value);
+        Matcher typedArray = SCRIPT_TYPED_ARRAY_LITERAL.matcher(value);
         if (typedArray.matches()) {
-            return scriptArrayLiteral(typedArray.group(1), context);
+            return scriptArrayLiteral(typedArray.group(2), context);
         }
         if (value.startsWith("[") && value.endsWith("]")) {
             return scriptArrayLiteral(value.substring(1, value.length() - 1), context);
@@ -2739,6 +2748,12 @@ public class BigQueryService {
             value[index] = (byte) bytes.charAt(index);
         }
         return value;
+    }
+
+    /** The declared type of a typed array literal, or null when the expression is anything else. */
+    private static String scriptLiteralType(String expression) {
+        Matcher literal = SCRIPT_TYPED_ARRAY_LITERAL.matcher(expression.trim());
+        return literal.matches() ? "ARRAY<" + normalizeScriptVariableType(literal.group(1)) + ">" : null;
     }
 
     private static List<Object> scriptArrayLiteral(String expression, ProceduralContext context) {

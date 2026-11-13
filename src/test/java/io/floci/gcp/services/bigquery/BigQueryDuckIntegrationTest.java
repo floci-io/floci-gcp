@@ -1291,6 +1291,45 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void typedArrayLiteralsKeepTheirElementTypeOnDuck() {
+        // Live BigQuery: `ARRAY<FLOAT64>[]` and `ARRAY<FLOAT64>[1]` both return ARRAY<FLOAT64> when the
+        // declaration has no type of its own, the empty one included.
+        query(Map.of("query", """
+                DECLARE numbers DEFAULT ARRAY<FLOAT64>[1];
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                SELECT numbers, empty, ARRAY_LENGTH(empty) AS empty_length;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "FLOAT", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[1].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("1.0")))
+                .body("rows[0].f[1].v.v", equalTo(List.of()))
+                .body("rows[0].f[2].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(2)
+    void structValuesAreAssignedByFieldPositionOnDuck() {
+        // Live BigQuery assigns a STRUCT by position: the default and the SET both keep source order,
+        // so the differently named `STRUCT(1 AS b, 2 AS a)` still reaches a=1, b=2.
+        query(Map.of("query", """
+                DECLARE by_default STRUCT<a INT64, b INT64> DEFAULT STRUCT(1 AS b, 2 AS a);
+                DECLARE by_set STRUCT<a INT64, b INT64>;
+                SET by_set = STRUCT(2 AS b, 1 AS a);
+                SELECT by_default.a AS default_a, by_default.b AS default_b,
+                       by_set.a AS set_a, by_set.b AS set_b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("default_a", "default_b", "set_a", "set_b")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"))
+                .body("rows[0].f[2].v", equalTo("2"))
+                .body("rows[0].f[3].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
     void temporaryTableColumnsWinOverSameNamedVariables() {
         // Live BigQuery returns 1: a temporary table's column shadows the script variable.
         query(Map.of("query", "DECLARE id INT64 DEFAULT 99; CREATE TEMP TABLE t AS SELECT 1 AS id; "

@@ -116,7 +116,10 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
   literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
   evaluated by the configured SQL engine. A `FLOAT64` literal stays floating point, so `f + 0.2` over
-  `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does. Variable references
+  `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does. A typed array literal
+  keeps its element type, so `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` declares an empty `ARRAY<FLOAT64>`, and
+  a `STRUCT` value is assigned by field position, so `STRUCT(1 AS b, 2 AS a)` reaches
+  `STRUCT<a INT64, b INT64>` as `a = 1, b = 2`. Variable references
   are token-substituted as typed literals; the statement's own names win over a variable of the same
   name: a source column, a column a DML statement names, a CTE name, a `FROM` item's alias (a table,
   `UNNEST` or derived table), the columns a derived table exposes, function names, and qualified fields

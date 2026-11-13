@@ -1769,6 +1769,20 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("1"))
                 .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL(s, p) AS a, REGEXP_EXTRACT(s, p) AS b FROM (SELECT 1 AS k, 'a1b2' AS s,"
+                + " r'[a-z]([0-9])' AS p UNION ALL SELECT 2, 'a1b2', r'[0-9]' UNION ALL SELECT 3, 'a1b2', CAST(NULL AS STRING))"
+                + " ORDER BY k", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.collect { e -> e.v } }", equalTo(List.of(List.of("1", "2"), List.of("1", "2"),
+                        List.of())))
+                .body("rows.collect { it.f[1].v }", equalTo(Arrays.asList("1", "1", null)));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1', CASE WHEN 'x(' = 'x(' THEN r'[0-9]' ELSE r'[0-9]' END) AS a,"
+                + " REGEXP_EXTRACT('a1', CASE WHEN 'y' = 'x' THEN r'[0-9]' ELSE r'a([0-9])' END) AS b,"
+                + " REGEXP_EXTRACT('a1', CONCAT('a', '([0-9])')) AS c", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1")))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("1"));
         query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b22', @p) AS a, REGEXP_EXTRACT('a1b22', @p) AS b",
                 "useLegacySql", false, "parameterMode", "NAMED",
                 "queryParameters", List.of(Map.of("name", "p", "parameterType", Map.of("type", "STRING"),

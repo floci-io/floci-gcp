@@ -4023,7 +4023,13 @@ class SqlDialectTranslatorTest {
         assertFalse(SqlDialectTranslator.regexHasCaptureGroup("[[:alpha:](]"));
         assertTrue(SqlDialectTranslator.regexHasCaptureGroup("[[:alpha:]]([0-9])"));
         String computed = sql("SELECT REGEXP_EXTRACT(x, CASE WHEN TRUE THEN 'a([0-9])' ELSE 'b' END) AS v FROM ds.t");
-        assertTrue(computed.contains("END, 1)"), computed);
+        assertTrue(computed.contains("_floci_regexp -> CASE WHEN regexp_matches("), computed);
+        String column = sql("SELECT REGEXP_EXTRACT_ALL(x, p) AS v FROM ds.t");
+        assertTrue(column.contains("struct_pack(v := (x), p := (p))"), column);
+        assertTrue(column.contains("THEN regexp_extract_all(_floci_regexp.v, _floci_regexp.p, 1)"
+                + " ELSE regexp_extract_all(_floci_regexp.v, _floci_regexp.p, 0) END"), column);
+        String literal = sql("SELECT REGEXP_EXTRACT(x, 'a([0-9])') AS v FROM ds.t");
+        assertTrue(literal.contains("regexp_extract(x, 'a([0-9])', 1)"), literal);
         String slice = sql("SELECT ARRAY_SLICE(a, RAND(), 2) AS s FROM ds.t");
         assertTrue(slice.contains("list_transform([RANDOM()], _floci_slice_offset ->")
                 || slice.contains("list_transform([random()], _floci_slice_offset ->"), slice);

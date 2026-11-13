@@ -96,6 +96,48 @@ class CloudBillingRestIntegrationTest {
     }
 
     @Test
+    void listKeepsThePageSizeWhenOnlyThePageTokenIsSent() {
+        linkProject("billing-token-page-a", "billingAccounts/777777-OOOOOO-PPPPPP");
+        linkProject("billing-token-page-b", "billingAccounts/888888-QQQQQQ-RRRRRR");
+
+        String first = given().when().get("/v1/billingAccounts?pageSize=1")
+                .then().statusCode(200)
+                .extract().path("billingAccounts[0].name");
+        String token = given().when().get("/v1/billingAccounts?pageSize=1")
+                .then().statusCode(200)
+                .extract().path("nextPageToken");
+
+        given().when().get("/v1/billingAccounts?pageToken=" + token)
+                .then().statusCode(200)
+                .body("billingAccounts", hasSize(1))
+                .body("billingAccounts[0].name", not(equalTo(first)))
+                .body("nextPageToken", not(equalTo("")));
+    }
+
+    @Test
+    void projectsListKeepsThePageSizeWhenOnlyThePageTokenIsSent() {
+        String account = "billingAccounts/999999-SSSSSS-TTTTTT";
+        linkProject("billing-token-projects-a", account);
+        linkProject("billing-token-projects-b", account);
+        linkProject("billing-token-projects-c", account);
+
+        String token = given().when().get("/v1/" + account + "/projects?pageSize=1")
+                .then().statusCode(200)
+                .body("projectBillingInfo.projectId", contains("billing-token-projects-a"))
+                .extract().path("nextPageToken");
+
+        String last = given().when().get("/v1/" + account + "/projects?pageToken=" + token)
+                .then().statusCode(200)
+                .body("projectBillingInfo.projectId", contains("billing-token-projects-b"))
+                .extract().path("nextPageToken");
+
+        given().when().get("/v1/" + account + "/projects?pageToken=" + last)
+                .then().statusCode(200)
+                .body("projectBillingInfo.projectId", contains("billing-token-projects-c"))
+                .body("nextPageToken", equalTo(""));
+    }
+
+    @Test
     void malformedBillingAccountIdIsAnInvalidArgument() {
         given().when().get("/v1/billingAccounts/not-an-id")
                 .then().statusCode(400)

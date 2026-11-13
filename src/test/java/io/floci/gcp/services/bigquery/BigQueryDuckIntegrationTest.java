@@ -1640,6 +1640,25 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void aFieldNamedLikeAClauseKeywordIsReadAsANameLikeBigQuery() {
+        query(Map.of("query", "SELECT t.limit AS l, t.offset FROM (SELECT 1 AS `limit`, 2 AS `offset`) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("l", "offset")))
+                .body("rows[0].f.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT t.from AS f, t.where, t.order + 1 AS o FROM (SELECT 1 AS `from`, 2 AS `where`,"
+                + " 3 AS `order` UNION ALL SELECT 4, 5, 6) t WHERE t.where > 2 ORDER BY t.order DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f", "where", "o")))
+                .body("rows[0].f.v", equalTo(List.of("4", "5", "7")));
+        query(Map.of("query", "SELECT s.limit, s.group FROM (SELECT STRUCT(1 AS `limit`, 'g' AS `group`) AS s)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("limit", "group")))
+                .body("rows[0].f.v", equalTo(List.of("1", "g")));
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

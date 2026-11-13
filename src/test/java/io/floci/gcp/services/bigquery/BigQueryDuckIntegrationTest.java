@@ -1874,7 +1874,7 @@ class BigQueryDuckIntegrationTest {
     @Test
     @Order(2)
     void aTemporaryFunctionsParametersShadowScriptVariables() {
-        // Live BigQuery: 3 — a parameter is local to the function, so the script variable of the same name
+        // Live BigQuery: 3, a parameter is local to the function, so the script variable of the same name
         // is neither its declaration nor the references in its body.
         query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) AS (x + 1);"
                         + " SELECT f(2)", "useLegacySql", false))

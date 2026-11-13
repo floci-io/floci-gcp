@@ -1310,6 +1310,26 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void copiedVariablesKeepTheirDeclaredTypeOnDuck() {
+        // Live BigQuery: an empty ARRAY<FLOAT64> and a NULL STRING keep their declared type when
+        // another variable copies them.
+        query(Map.of("query", """
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                DECLARE copy DEFAULT empty;
+                DECLARE a STRING;
+                DECLARE b DEFAULT a;
+                SELECT copy, b, ARRAY_LENGTH(copy) AS copy_length;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "STRING", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of()))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(2)
     void structValuesAreAssignedByFieldPositionOnDuck() {
         // Live BigQuery assigns a STRUCT by position: the default and the SET both keep source order,
         // so the differently named `STRUCT(1 AS b, 2 AS a)` still reaches a=1, b=2.

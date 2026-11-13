@@ -963,6 +963,53 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void variableCopiesKeepTheDeclaredTypeOfTheirSource() {
+        // Live BigQuery: `DECLARE copy DEFAULT empty` is an empty ARRAY<FLOAT64> and `DECLARE b
+        // DEFAULT a` a NULL STRING. Neither value conveys a type of its own.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("copy", "FLOAT", "REPEATED"), field("b", "STRING", null))),
+                List.of(Map.of("copy", List.of())), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null, """
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                DECLARE copy DEFAULT empty;
+                DECLARE a STRING;
+                DECLARE b DEFAULT a;
+                SELECT copy, b;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        String sql = request.getValue().sql();
+        assertTrue(sql.contains("CAST([] AS ARRAY<FLOAT64>) AS copy"), sql);
+        assertTrue(sql.contains("CAST(NULL AS STRING) AS b"), sql);
+    }
+
+    @Test
+    void typedArrayUsingValuesKeepTheirElementType() {
+        // Live BigQuery accepts `USING ARRAY<FLOAT64>[] AS values` and binds ARRAY<FLOAT64>.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("f0_", "FLOAT", "REPEATED"))),
+                List.of(Map.of("f0_", List.of())), "SELECT", 0));
+        BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        dynamicService.query(PROJECT, "US", null,
+                "EXECUTE IMMEDIATE \"SELECT @values\" USING ARRAY<FLOAT64>[] AS values;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine).execute(request.capture(), any());
+        Map<String, Object> parameter = request.getValue().queryParameters().getFirst();
+        Map<?, ?> parameterType = (Map<?, ?>) parameter.get("parameterType");
+        assertEquals("ARRAY", parameterType.get("type"));
+        assertEquals("FLOAT64", ((Map<?, ?>) parameterType.get("arrayType")).get("type"));
+    }
+
+    @Test
     void structVariablesTakeDefaultFieldsByPosition() {
         // Live BigQuery returns a=1, b=2 for `STRUCT(1 AS b, 2 AS a)` assigned to
         // `STRUCT<a INT64, b INT64>`: the source field names do not swap the values.

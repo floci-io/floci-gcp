@@ -1847,10 +1847,14 @@ public class BigQueryService {
                 }
             }
             if (type == null) {
-                // `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` keeps the literal's element type, which an
-                // empty list cannot provide on its own.
+                // A value cannot always convey its type: `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` is an
+                // empty list and `DECLARE b DEFAULT a` may be NULL, so keep the literal's element type
+                // or the declared type of the variable the default names.
                 String literalType = defaultExpression != null ? scriptLiteralType(defaultExpression) : null;
-                type = literalType != null ? literalType : inferredScriptVariableType(value);
+                String referenceType = literalType == null && defaultExpression != null
+                        ? scriptVariableReferenceType(defaultExpression, context) : null;
+                type = literalType != null ? literalType
+                        : referenceType != null ? referenceType : inferredScriptVariableType(value);
             }
             value = coerceScriptVariableValue(value, type);
             for (String name : names) {
@@ -2754,6 +2758,12 @@ public class BigQueryService {
     private static String scriptLiteralType(String expression) {
         Matcher literal = SCRIPT_TYPED_ARRAY_LITERAL.matcher(expression.trim());
         return literal.matches() ? "ARRAY<" + normalizeScriptVariableType(literal.group(1)) + ">" : null;
+    }
+
+    /** The declared type of the variable an expression names, or null when it names none. */
+    private static String scriptVariableReferenceType(String expression, ProceduralContext context) {
+        String name = simpleScriptVariableName(expression.trim());
+        return name == null ? null : context.variableTypes().get(name.toLowerCase(Locale.ROOT));
     }
 
     private static List<Object> scriptArrayLiteral(String expression, ProceduralContext context) {

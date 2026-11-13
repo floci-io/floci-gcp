@@ -761,10 +761,12 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   BigQuery names the field `_field_1`. Name each field of a nested `STRUCT` type.
 - A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
   compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
-  time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. Three forms differ: a lowercase `t`
-  or `z` (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) is not coerced, and the comparison fails
-  with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where BigQuery accepts
-  both; a lowercase zone name (`america/los_angeles`) is accepted, where BigQuery fails with `Invalid time
+  time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. A lowercase `t` or `z`
+  (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) is coerced when the other side of the comparison
+  or `BETWEEN` is temporal as written: a typed literal, a temporal function or `CAST`, or a table column
+  of that type. Three forms differ: compared with anything else (an `UNNEST` element, a subquery column)
+  such a value fails with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where
+  BigQuery accepts it; a lowercase zone name (`america/los_angeles`) is accepted, where BigQuery fails with `Invalid time
   zone`; and a value with a zone name compared with a `DATE` succeeds, where BigQuery fails with `Invalid
   date`. An unknown zone name fails with DuckDB's `Unknown TimeZone` rather than BigQuery's `Invalid time
   zone`.

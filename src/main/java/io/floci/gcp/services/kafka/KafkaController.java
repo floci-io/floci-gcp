@@ -25,12 +25,12 @@ import org.jboss.logging.Logger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * REST controller for the GCP Managed Service for Apache Kafka v1 API.
  *
- * Cluster create/delete return immediately-complete LRO responses (done=true).
+ * Cluster create, update and delete return {@code google.longrunning.Operation}s, readable on the
+ * shared v1 operations route. With Docker, create and delete return them running.
  */
 @Path("/v1/projects/{project}/locations/{location}")
 @ApplicationScoped
@@ -59,8 +59,7 @@ public class KafkaController {
         if (clusterId == null || clusterId.isBlank()) {
             return gcpError(400, "clusterId query parameter is required", "INVALID_ARGUMENT");
         }
-        StoredCluster cluster = service.createCluster(project, location, clusterId, body);
-        return Response.ok(operationDone(cluster.getName(), cluster)).build();
+        return Response.ok(service.createCluster(project, location, clusterId, body)).build();
     }
 
     @GET
@@ -89,8 +88,7 @@ public class KafkaController {
                                   @PathParam("clusterId") String clusterId,
                                   Map<String, Object> body) {
         LOG.debugf("Kafka updateCluster project=%s location=%s clusterId=%s", project, location, clusterId);
-        StoredCluster cluster = service.updateCluster(project, location, clusterId, body);
-        return Response.ok(operationDone(cluster.getName(), cluster)).build();
+        return Response.ok(service.updateCluster(project, location, clusterId, body)).build();
     }
 
     @DELETE
@@ -99,10 +97,7 @@ public class KafkaController {
                                   @PathParam("location") String location,
                                   @PathParam("clusterId") String clusterId) {
         LOG.debugf("Kafka deleteCluster project=%s location=%s clusterId=%s", project, location, clusterId);
-        service.deleteCluster(project, location, clusterId);
-        return Response.ok(operationDone(
-                "projects/" + project + "/locations/" + location + "/operations/" + UUID.randomUUID(),
-                Map.of())).build();
+        return Response.ok(service.deleteCluster(project, location, clusterId)).build();
     }
 
     // ── Topics ────────────────────────────────────────────────────────────────
@@ -315,14 +310,6 @@ public class KafkaController {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static Map<String, Object> operationDone(String resourceName, Object response) {
-        String opName = resourceName.replaceAll("/clusters/[^/]+$", "") + "/operations/" + UUID.randomUUID();
-        return Map.of(
-                "name", opName,
-                "done", true,
-                "response", response);
-    }
 
     private static Response gcpError(int code, String message, String status) {
         return Response.status(code)

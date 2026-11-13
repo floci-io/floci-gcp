@@ -27,6 +27,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -200,9 +204,27 @@ class EventarcTest {
         assertThat(operation.getMetadata().unpack(OperationMetadata.class).getTarget())
                 .isEqualTo(PARENT + "/triggers/" + triggerId);
 
+        // Managed Kafka binds the same operations path; its operations must not reach this client,
+        // which cannot unpack their metadata type.
+        String clusterId = TestFixtures.uniqueName("eventarc-ops-kafka");
+        HttpClient http = HttpClient.newHttpClient();
+        HttpResponse<String> cluster = http.send(HttpRequest.newBuilder()
+                        .uri(URI.create(TestFixtures.endpoint() + "/v1/" + PARENT + "/clusters?clusterId=" + clusterId))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(cluster.statusCode()).isEqualTo(200);
+
         List<String> listed = new ArrayList<>();
         operations.listOperations(PARENT, "").iterateAll().forEach(op -> listed.add(op.getName()));
         assertThat(listed).contains(operationName);
+
+        http.send(HttpRequest.newBuilder()
+                        .uri(URI.create(TestFixtures.endpoint() + "/v1/" + PARENT + "/clusters/" + clusterId))
+                        .DELETE()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
 
         operations.cancelOperation(operationName);
         operations.deleteOperation(operationName);

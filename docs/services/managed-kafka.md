@@ -7,7 +7,7 @@ floci-gcp emulates Google Cloud Managed Service for Apache Kafka (MSK) over REST
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Enable/disable Managed Kafka |
-| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; cluster state returns `ACTIVE` immediately) |
+| `FLOCI_GCP_SERVICES_KAFKA_MOCK` | `false` | Use mock mode (no Docker; cluster operations are done at once and the cluster is `ACTIVE` immediately) |
 | `FLOCI_GCP_SERVICES_KAFKA_CONNECT_IMAGE` | `apache/kafka:4.3.1` | Kafka Connect worker image for Connect clusters; must keep the Apache Kafka layout under `/opt/kafka` |
 
 ## Quick Start
@@ -44,6 +44,57 @@ floci-gcp emulates Google Cloud Managed Service for Apache Kafka (MSK) over REST
 
 Set `FLOCI_GCP_SERVICES_KAFKA_MOCK=true` to use mock mode. In mock mode, clusters are created in memory and return `ACTIVE` state immediately without requiring a backing Redpanda container. Useful for testing Terraform or SDK code that provisions Kafka resources but does not produce or consume messages.
 
+## Long-running operations
+
+`CreateCluster`, `UpdateCluster` and `DeleteCluster` return a `google.longrunning.Operation` whose
+metadata is `google.cloud.managedkafka.v1.OperationMetadata` (`createTime`, `endTime`, `target`,
+`verb`, `apiVersion`). The response is the `Cluster` for create and update and `google.protobuf.Empty`
+for delete, each with its `@type`. Operations are served at
+`/v1/projects/{project}/locations/{location}/operations` (`get`, `list`, `delete`, `cancel`), so clients
+that poll, such as `createClusterAsync(...).get()` in the Java SDK, work against floci.
+
+With Docker (the default):
+
+- `CreateCluster` stores the cluster as `CREATING` and returns the operation running. Redpanda starts in
+  the background; when its admin API answers, the cluster turns `ACTIVE` and the operation finishes with
+  the cluster. If the broker cannot start, or is not ready within 90 seconds, the operation finishes with
+  an error (`INTERNAL` or `DEADLINE_EXCEEDED`) and the cluster is removed. If Docker cannot remove
+  the broker either, the cluster is kept as `ACTIVE` instead, so floci still stops its broker on exit
+  and a delete can retry the removal.
+- `DeleteCluster` turns the cluster `DELETING` and returns the operation running; it finishes once
+  Docker confirms the broker container and (under the volume retention policy) its volume are gone. If
+  Docker cannot remove them, the cluster returns to `ACTIVE` and the operation carries the error, so the
+  delete can be retried.
+- `UpdateCluster` only changes stored capacity (the broker is not resized), so its operation is done at
+  once.
+- While a cluster is not `ACTIVE`, `UpdateCluster`, `DeleteCluster`, topic writes, ACL writes and
+  every consumer group call return `400 FAILED_PRECONDITION`. Topic and ACL reads still work.
+- Work still running when floci stops cannot finish. On the next start every cluster left `CREATING`
+  or `DELETING` has its broker container removed, including one the previous run left running, and is
+  removed itself; its operation, if it still exists, finishes as `ABORTED` for a create and done for a
+  delete. If Docker cannot remove the broker, the cluster becomes `ACTIVE` again so it can be deleted,
+  and a delete operation fails with `INTERNAL`.
+
+In mock mode every operation is done when it is returned and the cluster is `ACTIVE` at once.
+
+Deviations and unverified behaviour:
+
+- `CancelOperation` succeeds and leaves the operation unchanged; provisioning and teardown always
+  run to completion.
+- Which calls real Managed Kafka refuses on a `CREATING` or `DELETING` cluster, and with which status,
+  was not verified against the live service.
+- Operation ids are UUIDs, not the `operation-<timestamp>-<hash>` form GCP uses.
+- Eventarc serves operations on the same path. A list never mixes the two APIs, since an SDK client
+  cannot unpack the other API's metadata type: a request whose host is `managedkafka.googleapis.com`
+  lists Managed Kafka operations, and any other host (such as `localhost:4588`) lists Eventarc's, as
+  before Managed Kafka shared the path. `get`, `delete` and `cancel` find an operation by name
+  whichever API owns it, so polling a Kafka operation works through any host. To list Kafka
+  operations through floci's endpoint, a Managed Kafka client must send the
+  `managedkafka.googleapis.com` host (for example a `Host` header); without it the list is
+  Eventarc's.
+- A name no API owns is `404 NOT_FOUND`, unless Managed Kafka and Eventarc are both disabled, when
+  it is `503 UNAVAILABLE` as on their own routes.
+
 ## Consumer Groups
 
 ```bash
@@ -67,6 +118,8 @@ curl -X DELETE \
 - `ListClusters`
 - `UpdateCluster`
 - `DeleteCluster`
+
+**Operations:** `GetOperation`, `ListOperations`, `DeleteOperation`, `CancelOperation`
 
 **Topics:**
 

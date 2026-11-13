@@ -66,6 +66,9 @@ class ServiceRegistryConsistencyTest {
             Map.entry("LocationsV1ListController", "Locations mixin; the API is only known from the request host"),
             Map.entry("LocationsV2GetController", "Locations mixin; the API is only known from the request host"),
             Map.entry("LocationsV2ListController", "Locations mixin; the API is only known from the request host"),
+            Map.entry("LocationOperationsV1Controller",
+                    "google.longrunning.Operations under /v1 shared by Eventarc and Managed Kafka; "
+                            + "gates each operation by the service that owns it"),
             Map.entry("LongRunningOperationsController",
                     "google.longrunning.Operations under /v2 shared by Cloud Run, Cloud Functions and Eventarc; "
                             + "the API is only known from the request host"),

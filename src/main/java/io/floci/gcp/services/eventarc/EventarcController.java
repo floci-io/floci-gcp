@@ -1,6 +1,5 @@
 package io.floci.gcp.services.eventarc;
 
-import com.google.protobuf.Empty;
 import io.floci.gcp.core.common.ProtoJson;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -113,42 +112,6 @@ public class EventarcController {
         return json(ProtoJson.print(service.getProvider(providerName(project, location, providerId))));
     }
 
-    @GET
-    @Path("/operations")
-    public Response listOperations(@PathParam("project") String project,
-                                   @PathParam("location") String location,
-                                   @QueryParam("pageSize") @DefaultValue("0") int pageSize,
-                                   @QueryParam("pageToken") String pageToken) {
-        return json(ProtoJson.print(service.listOperations(project, location, pageSize, pageToken)));
-    }
-
-    @GET
-    @Path("/operations/{operation}")
-    public Response getOperation(@PathParam("project") String project,
-                                 @PathParam("location") String location,
-                                 @PathParam("operation") String operation) {
-        return json(ProtoJson.print(service.getOperation(operationName(project, location, operation))));
-    }
-
-    @DELETE
-    @Path("/operations/{operation}")
-    public Response deleteOperation(@PathParam("project") String project,
-                                    @PathParam("location") String location,
-                                    @PathParam("operation") String operation) {
-        service.deleteOperation(operationName(project, location, operation));
-        return json(ProtoJson.print(Empty.getDefaultInstance()));
-    }
-
-    @POST
-    @Path("/operations/{operation}:cancel")
-    @Consumes(MediaType.WILDCARD)
-    public Response cancelOperation(@PathParam("project") String project,
-                                    @PathParam("location") String location,
-                                    @PathParam("operation") String operation) {
-        service.cancelOperation(operationName(project, location, operation));
-        return json(ProtoJson.print(Empty.getDefaultInstance()));
-    }
-
     private static Response json(String json) {
         return Response.ok(json, MediaType.APPLICATION_JSON).build();
     }
@@ -163,9 +126,5 @@ public class EventarcController {
 
     private static String providerName(String project, String location, String providerId) {
         return "projects/" + project + "/locations/" + location + "/providers/" + providerId;
-    }
-
-    private static String operationName(String project, String location, String operation) {
-        return "projects/" + project + "/locations/" + location + "/operations/" + operation;
     }
 }

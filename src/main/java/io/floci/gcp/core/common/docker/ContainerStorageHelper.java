@@ -321,12 +321,16 @@ public final class ContainerStorageHelper {
             EmulatorConfig config,
             ContainerLifecycleManager lifecycleManager,
             String volumeName) {
-        boolean isMemory = "memory".equals(config.storage().mode());
-        if (isMemory || config.storage().pruneVolumesOnDelete()) {
+        if (removesStorageOnDelete(config)) {
             lifecycleManager.removeVolume(volumeName);
         } else {
             LOG.infov("Retained Docker volume {0}. Remove manually: docker volume rm {0}", volumeName);
         }
+    }
+
+    /** Whether a resource delete removes its volume: always in memory mode, else when pruning is on. */
+    public static boolean removesStorageOnDelete(EmulatorConfig config) {
+        return "memory".equals(config.storage().mode()) || config.storage().pruneVolumesOnDelete();
     }
 
     /**

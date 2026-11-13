@@ -13,7 +13,6 @@ import com.google.cloud.eventarc.v1.OperationMetadata;
 import com.google.cloud.eventarc.v1.Provider;
 import com.google.cloud.eventarc.v1.Transport;
 import com.google.cloud.eventarc.v1.Trigger;
-import com.google.longrunning.ListOperationsResponse;
 import com.google.longrunning.Operation;
 import com.google.protobuf.Timestamp;
 import com.google.rpc.Code;
@@ -50,6 +49,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -279,16 +279,15 @@ public class EventarcService {
     // ── Operations ────────────────────────────────────────────────────────────
 
     public Operation getOperation(String name) {
-        Operation operation = operations.get(name);
-        if (!isEventarcOperation(operation)) {
-            throw GcpException.notFound("Operation not found: " + name);
-        }
-        return operation;
+        return findOperation(name).orElseThrow(() -> GcpException.notFound("Operation not found: " + name));
     }
 
-    public ListOperationsResponse listOperations(String project, String location, int pageSize, String pageToken) {
-        locations.requireListLocation(location, LocationCatalog.Kind.REGION);
-        return operations.list(parent(project, location), pageSize, pageToken, EventarcService::isEventarcOperation);
+    public Optional<Operation> findOperation(String name) {
+        return operations.find(name).filter(EventarcService::isEventarcOperation);
+    }
+
+    public List<Operation> listOperations(String project, String location) {
+        return operations.all(parent(project, location), EventarcService::isEventarcOperation);
     }
 
     public void deleteOperation(String name) {

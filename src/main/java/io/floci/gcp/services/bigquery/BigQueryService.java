@@ -2036,8 +2036,8 @@ public class BigQueryService {
                                                                String jobProjectId, QueryOptions options,
                                                                ProceduralContext context,
                                                                JobLocation jobLocation) {
-        String sql = context.prependTo("SELECT " + expandScriptVariables(expression, context, Set.of())
-                + " AS _floci_script_value");
+        String sql = context.prependTo("SELECT " + expandScriptExpressionVariables(expression, projectId,
+                jobProjectId, options, context, jobLocation) + " AS _floci_script_value");
         BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, sql, options, false),
                 tables(projectId, jobLocation));
         context.recordBytes(result.totalBytesProcessed());
@@ -2823,6 +2823,41 @@ public class BigQueryService {
     }
 
     /**
+     * Expands an expression a procedure evaluates on its own, keeping the names BigQuery resolves first:
+     * the columns of the tables the expression reads and the columns a CTE it defines exposes.
+     */
+    private String expandScriptExpressionVariables(String expression, String projectId, String jobProjectId,
+                                                   QueryOptions options, ProceduralContext context,
+                                                   JobLocation jobLocation) {
+        return expandScriptVariables(expression, context, scriptExpressionColumnNames(expression, projectId,
+                jobProjectId, options, context, jobLocation));
+    }
+
+    /**
+     * The columns an expression a procedure evaluates on its own reads. BigQuery resolves them, and the
+     * columns a CTE it defines exposes, before a script variable of the same name, so an expression that
+     * reads a table collects its columns the way a statement does.
+     */
+    private Set<String> scriptExpressionColumnNames(String expression, String projectId, String jobProjectId,
+                                                     QueryOptions options, ProceduralContext context,
+                                                     JobLocation jobLocation) {
+        String select = "SELECT " + expression;
+        Set<String> columnNames = new LinkedHashSet<>(temporaryColumnNames(select, context));
+        try {
+            SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(select,
+                    projectId, jobProjectId, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    context.temporaryTables());
+            addTableColumnNames(translation.tables(), projectId, jobLocation, context, columnNames);
+        } catch (GcpException e) {
+            // An expression the translator cannot describe reads nothing more this path can name; the
+            // engine that evaluates it reports any error.
+            return columnNames;
+        }
+        return columnNames;
+    }
+
+    /**
      * Adds the lower-cased column names of {@code refs}: a temporary table has no entry in the store,
      * so its schema comes from the script context.
      */
@@ -3233,9 +3268,36 @@ public class BigQueryService {
         }
     }
 
+    /**
+     * The columns a CTE exposes, which BigQuery resolves before a script variable of the same name from
+     * the CTE's definition on, once the statement reads the CTE. {@code definitionEnd} is the parenthesis
+     * that closes the CTE body.
+     */
+    private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int depth) {}
+
+    /**
+     * Whether the statement reads the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it, at the
+     * WITH clause's depth or deeper. A CTE whose columns nothing reads leaves a variable of that name alone.
+     */
+    private static boolean readsCte(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte, int[] depths) {
+        for (int index = cte.definitionEnd() + 1; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !cte.name().equalsIgnoreCase(token.identifierText())
+                    || depths[index] < cte.depth()) {
+                continue;
+            }
+            if (tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens) {
         Set<Integer> selectItemStarts = new LinkedHashSet<>();
         List<ScriptNameResolution.HiddenName> hiddenNames = new ArrayList<>();
+        List<CteColumnScope> cteColumnScopes = new ArrayList<>();
         List<String> clauses = new ArrayList<>();
         clauses.add(null);
         List<Boolean> withClauses = new ArrayList<>();
@@ -3298,9 +3360,14 @@ public class BigQueryService {
             if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
                 int open = nextSignificantToken(tokens, next + 1);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParenthesis(tokens, open);
                     // The name a CTE declares is visible outside its own definition.
-                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open,
-                            matchingParenthesis(tokens, open), depths[index]));
+                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open, close, depths[index]));
+                    // So are the columns its select list exposes, wherever the statement reads the CTE.
+                    Set<String> columns = selectListColumnNames(tokens, open, close);
+                    if (!columns.isEmpty()) {
+                        cteColumnScopes.add(new CteColumnScope(name, columns, close, depths[index]));
+                    }
                     continue;
                 }
             }
@@ -3312,6 +3379,14 @@ public class BigQueryService {
             }
             if (selectList && startsSelectItem(tokens, previous)) {
                 selectItemStarts.add(index);
+            }
+        }
+        for (CteColumnScope cte : cteColumnScopes) {
+            if (readsCte(tokens, cte, depths)) {
+                // The columns are visible from the CTE's definition on, so the body that declares them is
+                // not one of the places they hide a variable.
+                hiddenNames.add(new ScriptNameResolution.HiddenName(cte.columns(), -1, cte.definitionEnd(),
+                        cte.depth()));
             }
         }
         return new ScriptNameResolution(selectItemStarts, hiddenNames, depths, clauseByToken, aliasDepths);
@@ -3332,6 +3407,18 @@ public class BigQueryService {
             return;
         }
         int close = matchingParenthesis(tokens, open);
+        Set<String> names = selectListColumnNames(tokens, open, close);
+        if (!names.isEmpty()) {
+            // A derived table exposes its columns to the query that reads it, so any depth qualifies.
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, -1));
+        }
+    }
+
+    /**
+     * The column names the query between {@code open} and {@code close} exposes: the alias of a select
+     * item, and the name a bare select item carries.
+     */
+    private static Set<String> selectListColumnNames(List<SqlDialectTranslator.Token> tokens, int open, int close) {
         Set<String> names = new LinkedHashSet<>();
         List<String> innerClauses = new ArrayList<>();
         innerClauses.add(null);
@@ -3364,10 +3451,7 @@ public class BigQueryService {
                 names.add(token.text.toLowerCase(Locale.ROOT));
             }
         }
-        if (!names.isEmpty()) {
-            // A derived table exposes its columns to the query that reads it, so any depth qualifies.
-            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, -1));
-        }
+        return names;
     }
 
     /** Whether the parenthesis at {@code open} opens a query rather than grouping an expression. */
@@ -3705,8 +3789,8 @@ public class BigQueryService {
             return Boolean.TRUE.equals(directCondition.value());
         }
         BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
-                context.prependTo("SELECT " + expandScriptVariables(condition, context, Set.of())
-                        + " AS _floci_condition"),
+                context.prependTo("SELECT " + expandScriptExpressionVariables(condition, projectId, jobProjectId,
+                        options, context, jobLocation) + " AS _floci_condition"),
                 options, false), tables(projectId, jobLocation));
         context.recordBytes(result.totalBytesProcessed());
         List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
@@ -3743,8 +3827,9 @@ public class BigQueryService {
                 continue;
             }
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
-                    context.prependTo("SELECT " + expandScriptVariables(loop.condition(), context, Set.of())
-                            + " AS _floci_condition"), options, false),
+                    context.prependTo("SELECT " + expandScriptExpressionVariables(loop.condition(), projectId,
+                            jobProjectId, options, context, jobLocation) + " AS _floci_condition"),
+                    options, false),
                     tables(projectId, jobLocation));
             context.recordBytes(result.totalBytesProcessed());
             List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
@@ -3899,8 +3984,9 @@ public class BigQueryService {
             matches = Boolean.TRUE.equals(directCondition.value());
         } else {
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
-                    context.prependTo("SELECT " + expandScriptVariables(conditional.condition(), context, Set.of())
-                            + " AS _floci_condition"), options, false), tables(projectId, jobLocation));
+                    context.prependTo("SELECT " + expandScriptExpressionVariables(conditional.condition(),
+                            projectId, jobProjectId, options, context, jobLocation) + " AS _floci_condition"),
+                    options, false), tables(projectId, jobLocation));
             context.recordBytes(result.totalBytesProcessed());
             List<TableFieldSchema> conditionFields = result.schema() != null && result.schema().getFields() != null
                     ? result.schema().getFields() : List.of();

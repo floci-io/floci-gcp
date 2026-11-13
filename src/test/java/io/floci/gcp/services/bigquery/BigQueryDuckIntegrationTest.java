@@ -1782,6 +1782,97 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void scriptVariablesLeaveTheColumnsOfASubqueryAndACTEAlone() {
+        // A table column wins inside a subquery too, whether the procedure evaluates the expression on
+        // its own or as a condition. Every value below is live BigQuery's.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = (SELECT v FROM t);
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                IF EXISTS(SELECT 1 FROM t WHERE v = 4) THEN SELECT 'col' AS r; ELSE SELECT 'var' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("col"));
+        // The columns a CTE's select list exposes win over a variable, as a derived table's do: 4, a
+        // row, 2 then 4, and one row.
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v FROM t",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT * FROM t WHERE v > 3",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v UNION ALL SELECT 2) SELECT v AS o FROM t ORDER BY v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[1].f[0].v", equalTo("4"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT COUNT(*) AS c FROM t GROUP BY v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("c"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A later CTE reads the columns an earlier one exposes: 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH a AS (SELECT 4 AS v), b AS (SELECT v FROM a) SELECT v FROM b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A CTE nothing reads declares no column in scope, so the variable still answers: 1, 6 and 4.
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT 5 + v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("6"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT (SELECT v FROM t)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A stored table's column wins in an expression and in a loop condition alike: 3 and one
+        // iteration.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 1;
+                DECLARE m INT64;
+                SET m = (SELECT MAX(id) FROM shop.users);
+                SELECT m;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", """
+                DECLARE i INT64 DEFAULT 0;
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (SELECT COUNT(*) FROM shop.users WHERE id = 1) > i DO
+                  SET n = n + 1;
+                  SET i = i + 1;
+                END WHILE;
+                SELECT n;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
     void aBareBreakOrContinueReportsBigQuerysWording() {
         // Live BigQuery: "BREAK without label is only allowed inside of a loop body at [1:1]".
         query(Map.of("query", "BREAK;", "useLegacySql", false))

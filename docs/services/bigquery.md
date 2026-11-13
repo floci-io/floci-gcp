@@ -121,10 +121,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   a `STRUCT` value is assigned by field position, so `STRUCT(1 AS b, 2 AS a)` reaches
   `STRUCT<a INT64, b INT64>` as `a = 1, b = 2`. Variable references
   are token-substituted as typed literals; the statement's own names win over a variable of the same
-  name: a source column, a column a DML statement names, a CTE name, a `FROM` item's alias (a table,
-  `UNNEST` or derived table), the columns a derived table exposes, function names, and qualified fields
-  are left intact, so a column keeps its name while the values an `INSERT` supplies still bind the
-  variables. A variable that is a whole select item keeps its name as the result column, while
+  name: a source column, a column a DML statement names, a CTE name, the columns a CTE's select list
+  exposes, a `FROM` item's alias (a table, `UNNEST` or derived table), the columns a derived table
+  exposes, function names, and qualified fields are left intact, so a column keeps its name while the
+  values an `INSERT` supplies still bind the variables. The expression a `SET` or `DECLARE` default
+  evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names from the tables
+  they read and the CTEs they define, and a CTE nothing reads declares none of them. A variable that is
+  a whole select item keeps its name as the result column, while
   `SELECT f + 0.2` is named `f0_`, as BigQuery names it; so are a function argument such as
   `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`.
   `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`

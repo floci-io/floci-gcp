@@ -2821,6 +2821,56 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("1"))
                 .body("rows[0].f[1].v.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL(s, p) AS a, REGEXP_EXTRACT(s, p) AS b FROM (SELECT 1 AS k, 'a1b2' AS s,"
+                + " r'[a-z]([0-9])' AS p UNION ALL SELECT 2, 'a1b2', r'[0-9]' UNION ALL SELECT 3, 'a1b2', CAST(NULL AS STRING))"
+                + " ORDER BY k", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.collect { e -> e.v } }", equalTo(List.of(List.of("1", "2"), List.of("1", "2"),
+                        List.of())))
+                .body("rows.collect { it.f[1].v }", equalTo(Arrays.asList("1", "1", null)));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1', CASE WHEN 'x(' = 'x(' THEN r'[0-9]' ELSE r'[0-9]' END) AS a,"
+                + " REGEXP_EXTRACT('a1', CASE WHEN 'y' = 'x' THEN r'[0-9]' ELSE r'a([0-9])' END) AS b,"
+                + " REGEXP_EXTRACT('a1', CONCAT('a', '([0-9])')) AS c", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("1")))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("1"));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a', CASE WHEN TRUE THEN r'[^](]' ELSE r'[^](]' END) AS a,"
+                + " REGEXP_EXTRACT_ALL(r'\\Q1', CASE WHEN TRUE THEN r'\\\\Q([0-9])' ELSE r'\\\\Q([0-9])' END) AS b,"
+                + " REGEXP_EXTRACT(r'\\Q1', CASE WHEN TRUE THEN r'\\\\Q([0-9])' ELSE r'\\\\Q([0-9])' END) AS c",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("a")))
+                .body("rows[0].f[1].v.v", equalTo(List.of("1")))
+                .body("rows[0].f[2].v", equalTo("1"));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL(CONCAT('(a', CHR(10), 'b)'), CONCAT(r'\\Q(a', CHR(10), r'b)\\E')) AS a,"
+                + " REGEXP_EXTRACT(CONCAT('x(a', CHR(10), 'b)'), CONCAT(r'\\Q(a', CHR(10), r'b)\\E')) AS b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("(a\nb)")))
+                .body("rows[0].f[1].v", equalTo("(a\nb)"));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT('1x', CASE WHEN TRUE THEN r'[\\d]([a-z])' ELSE r'[\\d]([a-z])' END) AS a,"
+                + " REGEXP_EXTRACT_ALL('1x2y', CASE WHEN TRUE THEN r'[\\d]([a-z])' ELSE r'[\\d]([a-z])' END) AS b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("x"))
+                .body("rows[0].f[1].v.v", equalTo(List.of("x", "y")));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a(', CASE WHEN TRUE THEN r'[[:^alpha:](]' ELSE r'x' END) AS a",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.v", equalTo(List.of("(")));
+        query(Map.of("query", "SELECT k, REGEXP_EXTRACT_ALL(LAG(s) OVER (ORDER BY k), CASE WHEN TRUE THEN r'[a-z]([0-9])' ELSE r'x' END) AS r"
+                + " FROM UNNEST([STRUCT(1 AS k, 'a1' AS s), STRUCT(2 AS k, 'b2' AS s)]) ORDER BY k", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[1].v.collect { e -> e.v } }", equalTo(List.of(List.of(), List.of("1"))));
+        query(Map.of("query", "SELECT REGEXP_EXTRACT(CAST(COUNT(*) AS STRING), CONCAT('^', '[0-9]+')) AS c FROM UNNEST([1, 2, 3])",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(List.of("3")));
+        query(Map.of("query", "SELECT COUNT(DISTINCT REGEXP_EXTRACT(CAST(GENERATE_UUID() AS STRING), CONCAT('^', '[0-9a-f]+'))) AS n"
+                + " FROM UNNEST([1, 2, 3, 4, 5])", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
         query(Map.of("query", "SELECT REGEXP_EXTRACT_ALL('a1b22', @p) AS a, REGEXP_EXTRACT('a1b22', @p) AS b",
                 "useLegacySql", false, "parameterMode", "NAMED",
                 "queryParameters", List.of(Map.of("name", "p", "parameterType", Map.of("type", "STRING"),

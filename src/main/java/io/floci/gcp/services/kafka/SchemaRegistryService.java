@@ -11,12 +11,15 @@ import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.kafka.SchemaRegistryDataPlane.Scope;
 import io.floci.gcp.services.kafka.model.StoredSchemaRegistry;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,7 +50,18 @@ public class SchemaRegistryService {
     private static final List<String> MODE_BY_NUMBER = List.of("NONE", "READONLY", "READWRITE", "IMPORT");
     private static final List<String> SCHEMA_TYPE_BY_NUMBER = List.of("SCHEMA_TYPE_UNSPECIFIED", "AVRO", "JSON",
             "PROTOBUF");
+    private static final String DEFAULT_CONTEXT = ".";
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * What a data call addresses: a registry, and optionally a context ({@code null} when the
+     * request has no {@code contexts/{context}} segment).
+     */
+    public record Target(String project, String location, String registry, String context) {
+        String registryName() {
+            return parent(project, location) + "/schemaRegistries/" + registry;
+        }
+    }
 
     private final StorageBackend<String, StoredSchemaRegistry> registryStore;
     private final SchemaRegistryDataPlane dataPlane;
@@ -108,22 +122,32 @@ public class SchemaRegistryService {
                 dataPlane.delete(registry);
                 throw e;
             }
-            return registryJson(registry);
+            return registryJson(registry, List.of(DEFAULT_CONTEXT));
         } finally {
             lock.writeLock().unlock();
         }
     }
 
     public Map<String, Object> getRegistry(String project, String location, String registryId) {
-        return registryJson(requireRegistry(project, location, registryId));
+        return call(new Target(project, location, registryId, null), scope -> registryJson(scope.registry()));
     }
 
     public List<Map<String, Object>> listRegistries(String project, String location) {
         String prefix = parent(project, location) + "/schemaRegistries/";
-        return registryStore.scan(k -> k.startsWith(prefix)).stream()
+        List<Map<String, Object>> result = new ArrayList<>();
+        registryStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted((a, b) -> a.getName().compareTo(b.getName()))
-                .map(SchemaRegistryService::registryJson)
-                .toList();
+                .forEach(registry -> {
+                    try {
+                        result.add(getRegistry(project, location, registry.registryId()));
+                    } catch (GcpException e) {
+                        if (e.getHttpStatus() != 404) {
+                            throw e;
+                        }
+                        // Deleted while listing: not part of the answer.
+                    }
+                });
+        return result;
     }
 
     public void deleteRegistry(String project, String location, String registryId) {
@@ -140,40 +164,84 @@ public class SchemaRegistryService {
         }
     }
 
+    // ── Contexts ──────────────────────────────────────────────────────────────
+
+    public JsonNode listContexts(Target target) {
+        return call(target, scope -> dataPlane.listContexts(scope.registry()));
+    }
+
+    /**
+     * A context and the resource names of its subjects. A context exists once a subject has been
+     * registered in it; the default context always exists.
+     */
+    public Map<String, Object> getContext(Target target) {
+        return call(target, scope -> {
+            String context = confluentContext(target.context());
+            boolean exists = false;
+            for (JsonNode name : dataPlane.listContexts(scope.registry())) {
+                exists |= name.asText().equals(context);
+            }
+            if (!exists) {
+                throw GcpException.notFound("Context not found: " + target.registryName() + "/contexts/"
+                        + target.context());
+            }
+            List<String> subjects = new ArrayList<>();
+            String contextPrefix = ":" + context + ":";
+            boolean defaultContext = DEFAULT_CONTEXT.equals(context);
+            for (JsonNode subject : dataPlane.listSubjects(scope, null, false)) {
+                String qualified = subject.asText();
+                // Default context subjects are listed unqualified; every other context's are qualified.
+                String name = null;
+                if (defaultContext && !qualified.startsWith(":")) {
+                    name = qualified;
+                } else if (qualified.startsWith(contextPrefix)) {
+                    name = qualified.substring(contextPrefix.length());
+                }
+                if (name != null) {
+                    subjects.add(target.registryName() + "/contexts/" + target.context() + "/subjects/" + name);
+                }
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("name", target.registryName() + "/contexts/" + target.context());
+            if (!subjects.isEmpty()) {
+                result.put("subjects", subjects);
+            }
+            return result;
+        });
+    }
+
     // ── Subjects and versions ─────────────────────────────────────────────────
 
-    public JsonNode listSubjects(String project, String location, String registryId, String subjectPrefix,
-            boolean deleted) {
-        return call(project, location, registryId, r -> dataPlane.listSubjects(r, subjectPrefix, deleted));
+    public JsonNode listSubjects(Target target, String subjectPrefix, boolean deleted) {
+        return call(target, scope -> dataPlane.listSubjects(scope, subjectPrefix, deleted));
     }
 
-    public JsonNode deleteSubject(String project, String location, String registryId, String subject,
-            boolean permanent) {
-        return call(project, location, registryId, r -> dataPlane.deleteSubject(r, subject, permanent));
+    public JsonNode deleteSubject(Target target, String subject, boolean permanent) {
+        return call(target, scope -> dataPlane.deleteSubject(scope, subject, permanent));
     }
 
-    public JsonNode lookupVersion(String project, String location, String registryId, String subject,
-            JsonNode body, Boolean normalizeParam, Boolean deletedParam) {
+    public JsonNode lookupVersion(Target target, String subject, JsonNode body, Boolean normalizeParam,
+            Boolean deletedParam) {
         ObjectNode schema = schemaPayload(body);
         boolean normalize = flag(normalizeParam, body, "normalize");
         boolean deleted = flag(deletedParam, body, "deleted");
-        return schemaVersion(call(project, location, registryId,
-                r -> dataPlane.lookupVersion(r, subject, schema, normalize, deleted)));
+        return schemaVersion(call(target, scope -> dataPlane.lookupVersion(scope, subject, schema, normalize,
+                deleted)));
     }
 
-    public JsonNode getVersion(String project, String location, String registryId, String subject, String version,
-            boolean deleted) {
-        return schemaVersion(call(project, location, registryId,
-                r -> dataPlane.getVersion(r, subject, version, deleted)));
+    public JsonNode getVersion(Target target, String subject, String version, boolean deleted) {
+        return schemaVersion(call(target, scope -> dataPlane.getVersion(scope, subject, version, deleted)));
     }
 
-    public JsonNode listVersions(String project, String location, String registryId, String subject,
-            boolean deleted) {
-        return call(project, location, registryId, r -> dataPlane.listVersions(r, subject, deleted));
+    public String getRawSchemaVersion(Target target, String subject, String version, boolean deleted) {
+        return call(target, scope -> dataPlane.getRawSchemaVersion(scope, subject, version, deleted));
     }
 
-    public JsonNode createVersion(String project, String location, String registryId, String subject,
-            JsonNode body, Boolean normalizeParam) {
+    public JsonNode listVersions(Target target, String subject, boolean deleted) {
+        return call(target, scope -> dataPlane.listVersions(scope, subject, deleted));
+    }
+
+    public JsonNode createVersion(Target target, String subject, JsonNode body, Boolean normalizeParam) {
         ObjectNode schema = schemaPayload(body);
         if (body.hasNonNull("version")) {
             schema.put("version", body.get("version").asInt());
@@ -182,27 +250,45 @@ public class SchemaRegistryService {
             schema.put("id", body.get("id").asInt());
         }
         boolean normalize = flag(normalizeParam, body, "normalize");
-        JsonNode created = call(project, location, registryId, r -> dataPlane.createVersion(r, subject, schema,
-                normalize));
+        JsonNode created = call(target, scope -> dataPlane.createVersion(scope, subject, schema, normalize));
         return MAPPER.createObjectNode().put("id", created.path("id").asInt());
     }
 
-    public JsonNode deleteVersion(String project, String location, String registryId, String subject,
-            String version, boolean permanent) {
-        return call(project, location, registryId, r -> dataPlane.deleteVersion(r, subject, version, permanent));
+    public JsonNode deleteVersion(Target target, String subject, String version, boolean permanent) {
+        return call(target, scope -> dataPlane.deleteVersion(scope, subject, version, permanent));
     }
 
-    public JsonNode getSchema(String project, String location, String registryId, String id, String subject) {
-        int schemaId;
-        try {
-            schemaId = Integer.parseInt(id);
-        } catch (NumberFormatException e) {
-            throw GcpException.invalidArgument("Schema id must be an integer: " + id);
-        }
-        JsonNode schema = call(project, location, registryId, r -> dataPlane.getSchema(r, schemaId, subject));
+    public JsonNode listReferencedSchemas(Target target, String subject, String version) {
+        return call(target, scope -> dataPlane.listReferencedSchemas(scope, subject, version));
+    }
+
+    // ── Schemas by id ─────────────────────────────────────────────────────────
+
+    public JsonNode getSchema(Target target, String id, String subject) {
+        int schemaId = schemaId(id);
+        JsonNode schema = call(target, scope -> dataPlane.getSchema(scope, schemaId, subject));
         ObjectNode result = MAPPER.createObjectNode();
         copy(schema, result, "schemaType", "schema", "references");
         return result;
+    }
+
+    public String getRawSchema(Target target, String id, String subject) {
+        int schemaId = schemaId(id);
+        return call(target, scope -> dataPlane.getRawSchema(scope, schemaId, subject));
+    }
+
+    public JsonNode listSchemaVersions(Target target, String id, String subject, boolean deleted) {
+        int schemaId = schemaId(id);
+        return call(target, scope -> dataPlane.listSchemaVersions(scope, schemaId, subject, deleted));
+    }
+
+    public JsonNode listSubjectsBySchemaId(Target target, String id, String subject, boolean deleted) {
+        int schemaId = schemaId(id);
+        return call(target, scope -> dataPlane.listSubjectsBySchemaId(scope, schemaId, subject, deleted));
+    }
+
+    public JsonNode listSchemaTypes(Target target) {
+        return call(target, dataPlane::listSchemaTypes);
     }
 
     /**
@@ -210,23 +296,23 @@ public class SchemaRegistryService {
      * {@code null}, against the versions the subject's compatibility level covers: every version
      * for the transitive levels, the latest otherwise.
      */
-    public JsonNode checkCompatibility(String project, String location, String registryId, String subject,
-            String version, JsonNode body, Boolean verboseParam) {
+    public JsonNode checkCompatibility(Target target, String subject, String version, JsonNode body,
+            Boolean verboseParam) {
         ObjectNode schema = schemaPayload(body);
         boolean verbose = flag(verboseParam, body, "verbose");
-        return call(project, location, registryId, r -> {
+        return call(target, scope -> {
             if (version != null) {
-                return compatibilityResult(dataPlane.checkCompatibility(r, subject, version, schema, verbose));
+                return compatibilityResult(dataPlane.checkCompatibility(scope, subject, version, schema, verbose));
             }
             try {
-                String level = dataPlane.getConfig(r, subject, true).path("compatibilityLevel").asText();
+                String level = dataPlane.getConfig(scope, subject, true).path("compatibilityLevel").asText();
                 List<String> versions = level.endsWith("_TRANSITIVE")
-                        ? toStrings(dataPlane.listVersions(r, subject, false))
+                        ? toStrings(dataPlane.listVersions(scope, subject, false))
                         : List.of("latest");
                 ObjectNode result = MAPPER.createObjectNode().put("is_compatible", true);
                 ArrayNode messages = MAPPER.createArrayNode();
                 for (String v : versions) {
-                    JsonNode one = dataPlane.checkCompatibility(r, subject, v, schema, verbose);
+                    JsonNode one = dataPlane.checkCompatibility(scope, subject, v, schema, verbose);
                     if (!one.path("is_compatible").asBoolean()) {
                         result.put("is_compatible", false);
                     }
@@ -248,18 +334,15 @@ public class SchemaRegistryService {
 
     // ── Config and mode ───────────────────────────────────────────────────────
 
-    public JsonNode getConfig(String project, String location, String registryId, String subject,
-            boolean defaultToGlobal) {
-        return schemaConfig(call(project, location, registryId,
-                r -> dataPlane.getConfig(r, subject, defaultToGlobal)));
+    public JsonNode getConfig(Target target, String subject, boolean defaultToGlobal) {
+        return schemaConfig(call(target, scope -> dataPlane.getConfig(scope, subject, defaultToGlobal)));
     }
 
     /**
      * An unset compatibility removes a subject's compatibility (the proto); for the registry it is
      * required.
      */
-    public JsonNode updateConfig(String project, String location, String registryId, String subject,
-            JsonNode body) {
+    public JsonNode updateConfig(Target target, String subject, JsonNode body) {
         if (body.path("normalize").asBoolean(false)) {
             throw GcpException.invalidArgument("floci-gcp does not support normalize in a schema config; "
                     + "pass normalize on CreateVersion or LookupVersion instead");
@@ -269,9 +352,9 @@ public class SchemaRegistryService {
             if (subject == null) {
                 throw GcpException.invalidArgument("compatibility is required for a schema registry config");
             }
-            return call(project, location, registryId, r -> {
+            return call(target, scope -> {
                 try {
-                    dataPlane.deleteConfig(r, subject);
+                    dataPlane.deleteConfig(scope, subject);
                 } catch (SchemaRegistryException e) {
                     if (e.errorCode() != 40408) {
                         throw e;
@@ -280,52 +363,46 @@ public class SchemaRegistryService {
                 return MAPPER.createObjectNode();
             });
         }
-        return schemaConfig(call(project, location, registryId,
-                r -> dataPlane.updateConfig(r, subject, compatibility)));
+        return schemaConfig(call(target, scope -> dataPlane.updateConfig(scope, subject, compatibility)));
     }
 
-    public JsonNode deleteConfig(String project, String location, String registryId, String subject) {
-        return schemaConfig(call(project, location, registryId, r -> dataPlane.deleteConfig(r, subject)));
+    public JsonNode deleteConfig(Target target, String subject) {
+        return schemaConfig(call(target, scope -> dataPlane.deleteConfig(scope, subject)));
     }
 
-    public JsonNode getMode(String project, String location, String registryId, String subject) {
-        return schemaMode(call(project, location, registryId, r -> dataPlane.getMode(r, subject)));
+    public JsonNode getMode(Target target, String subject) {
+        return schemaMode(call(target, scope -> dataPlane.getMode(scope, subject)));
     }
 
-    public JsonNode updateMode(String project, String location, String registryId, String subject, JsonNode body) {
+    public JsonNode updateMode(Target target, String subject, JsonNode body) {
         String mode = enumName(body.get("mode"), MODE_BY_NUMBER);
         if (mode == null) {
             throw GcpException.invalidArgument("mode is required");
         }
-        return schemaMode(call(project, location, registryId, r -> dataPlane.updateMode(r, subject, mode)));
+        return schemaMode(call(target, scope -> dataPlane.updateMode(scope, subject, mode)));
     }
 
-    public JsonNode deleteMode(String project, String location, String registryId, String subject) {
-        return schemaMode(call(project, location, registryId, r -> dataPlane.deleteMode(r, subject)));
+    public JsonNode deleteMode(Target target, String subject) {
+        return schemaMode(call(target, scope -> dataPlane.deleteMode(scope, subject)));
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
-    private StoredSchemaRegistry requireRegistry(String project, String location, String registryId) {
-        String name = parent(project, location) + "/schemaRegistries/" + registryId;
-        return registryStore.get(name).orElseThrow(() -> GcpException.notFound("SchemaRegistry not found: " + name));
-    }
-
-    private JsonNode call(String project, String location, String registryId,
-            Function<StoredSchemaRegistry, JsonNode> action) {
-        String name = parent(project, location) + "/schemaRegistries/" + registryId;
+    private <T> T call(Target target, Function<Scope, T> action) {
+        String name = target.registryName();
         ReadWriteLock lock = lock(name);
         lock.readLock().lock();
         try {
-            StoredSchemaRegistry registry = requireRegistry(project, location, registryId);
-            return translate(() -> action.apply(registry));
+            StoredSchemaRegistry registry = registryStore.get(name)
+                    .orElseThrow(() -> GcpException.notFound("SchemaRegistry not found: " + name));
+            return translate(() -> action.apply(new Scope(registry, target.context())));
         } finally {
             lock.readLock().unlock();
         }
     }
 
     /** Confluent errors as Google errors, keeping the Confluent message. */
-    private static JsonNode translate(Supplier<JsonNode> action) {
+    private static <T> T translate(Supplier<T> action) {
         try {
             return action.get();
         } catch (SchemaRegistryException e) {
@@ -346,8 +423,40 @@ public class SchemaRegistryService {
         return "projects/" + project + "/locations/" + location;
     }
 
-    private static Map<String, Object> registryJson(StoredSchemaRegistry registry) {
-        return Map.of("name", registry.getName());
+    /** The registry and its contexts' resource names; call with the registry's lock held. */
+    private Map<String, Object> registryJson(StoredSchemaRegistry registry) {
+        return registryJson(registry, toStrings(translate(() -> dataPlane.listContexts(registry))));
+    }
+
+    /**
+     * A registry with the given context ids. A new registry has only the default context, so create
+     * answers without another backend call that could fail after its rollback boundary.
+     */
+    private static Map<String, Object> registryJson(StoredSchemaRegistry registry, List<String> contextIds) {
+        List<String> contexts = new ArrayList<>();
+        for (String context : contextIds) {
+            contexts.add(registry.getName() + "/contexts/" + context);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name", registry.getName());
+        result.put("contexts", contexts);
+        return result;
+    }
+
+    /** A context id as Confluent spells it: with a leading dot, {@code "."} for the default. */
+    private static String confluentContext(String context) {
+        if (context == null || context.isEmpty() || DEFAULT_CONTEXT.equals(context)) {
+            return DEFAULT_CONTEXT;
+        }
+        return context.startsWith(".") ? context : "." + context;
+    }
+
+    private static int schemaId(String id) {
+        try {
+            return Integer.parseInt(id);
+        } catch (NumberFormatException e) {
+            throw GcpException.invalidArgument("Schema id must be an integer: " + id);
+        }
     }
 
     /** The Confluent request body for a schema: {@code schema}, {@code schemaType}, {@code references}. */

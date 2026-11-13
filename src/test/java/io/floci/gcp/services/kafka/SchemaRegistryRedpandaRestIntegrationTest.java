@@ -15,6 +15,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItems;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -105,6 +106,65 @@ class SchemaRegistryRedpandaRestIntegrationTest {
         assertEquals(0, containers("rp_main"));
         assertEquals(0, containers("rp_other"));
         given().when().get(registry + "/subjects").then().statusCode(404);
+    }
+
+    @Test
+    void contextsRawSchemasAndReverseLookupsReachRedpanda() {
+        given().contentType("application/json").body("{\"schemaRegistryId\":\"rp_ctx\"}")
+                .when().post(BASE)
+                .then().statusCode(200);
+        String registry = BASE + "/rp_ctx";
+        String name = "projects/" + PROJECT + "/locations/" + LOCATION + "/schemaRegistries/rp_ctx";
+        String ctx = registry + "/contexts/.team";
+
+        int baseId = given().contentType(CONFLUENT).body("{\"schema\":\"" + V1 + "\"}")
+                .when().post(registry + "/subjects/users/versions")
+                .then().statusCode(200).extract().path("id");
+        int refId = given().contentType(CONFLUENT)
+                .body("{\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"W\\\","
+                        + "\\\"fields\\\":[{\\\"name\\\":\\\"u\\\",\\\"type\\\":\\\"U\\\"}]}\","
+                        + "\"references\":[{\"name\":\"U\",\"subject\":\"users\",\"version\":1}]}")
+                .when().post(registry + "/subjects/wrappers/versions")
+                .then().statusCode(200).extract().path("id");
+        given().contentType(CONFLUENT).body("{\"schema\":\"" + V1 + "\"}")
+                .when().post(ctx + "/subjects/users/versions")
+                .then().statusCode(200);
+
+        given().when().get(registry + "/contexts")
+                .then().statusCode(200).body("$", contains(".", ".team"));
+        given().when().get(registry)
+                .then().statusCode(200).body("contexts", contains(name + "/contexts/.", name + "/contexts/.team"));
+        given().when().get(registry + "/contexts/.team")
+                .then().statusCode(200).body("subjects", contains(name + "/contexts/.team/subjects/users"));
+        given().when().get(ctx + "/subjects/users/versions/1")
+                .then().statusCode(200).body("subject", equalTo(":.team:users"));
+
+        given().when().get(registry + "/schemas/ids/" + baseId + "/schema")
+                .then().statusCode(200).body("name", equalTo("U"));
+        given().when().get(registry + "/subjects/users/versions/1/referencedby")
+                .then().statusCode(200).body("$", contains(refId));
+        given().when().get(registry + "/schemas/ids/" + baseId + "/versions")
+                .then().statusCode(200).body("subject", contains("users"));
+        given().when().get(registry + "/schemas/ids/" + baseId + "/subjects")
+                .then().statusCode(200).body("$", contains("users"));
+        given().when().get(registry + "/schemas/types")
+                .then().statusCode(200).body("$", hasItems("AVRO", "JSON", "PROTOBUF"));
+
+        // A context with no config or mode of its own does not inherit the registry's.
+        given().contentType("application/json").body("{\"compatibility\":\"FULL\"}")
+                .when().put(registry + "/config").then().statusCode(200);
+        given().queryParam("defaultToGlobal", true).when().get(ctx + "/config/users")
+                .then().statusCode(200).body("compatibility", equalTo("BACKWARD"));
+        given().contentType("application/json").body("{\"mode\":\"READONLY\"}")
+                .when().put(registry + "/mode").then().statusCode(200);
+        given().contentType(CONFLUENT).body("{\"schema\":\"" + V1 + "\"}")
+                .when().post(ctx + "/subjects/other/versions")
+                .then().statusCode(200);
+        given().contentType(CONFLUENT).body("{\"schema\":\"" + V1 + "\"}")
+                .when().post(registry + "/subjects/plain/versions")
+                .then().statusCode(400).body("error.message", containsString("read-only"));
+
+        given().when().delete(registry).then().statusCode(200);
     }
 
     /** Containers (running or not) floci started for the registry, found by its identity label. */

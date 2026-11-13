@@ -46,6 +46,7 @@ class RedpandaSchemaRegistryDataPlaneTest {
     private ContainerLifecycleManager lifecycle;
     private RedpandaSchemaRegistryDataPlane plane;
     private final StoredSchemaRegistry registry = registry();
+    private final SchemaRegistryDataPlane.Scope scope = new SchemaRegistryDataPlane.Scope(registry, null);
 
     @BeforeEach
     void setUp() throws IOException {
@@ -75,8 +76,8 @@ class RedpandaSchemaRegistryDataPlaneTest {
         plane.ensureRunning(registry);
         when(lifecycle.isContainerRunning("cid")).thenReturn(true);
 
-        assertThrows(GcpException.class, () -> plane.getConfig(registry, null, false));
-        plane.listSubjects(registry, null, false);
+        assertThrows(GcpException.class, () -> plane.getConfig(scope, null, false));
+        plane.listSubjects(scope, null, false);
 
         verify(lifecycle, times(1)).createAndStart(any());
         verify(lifecycle, times(1)).removeIfExists(anyString());
@@ -87,9 +88,9 @@ class RedpandaSchemaRegistryDataPlaneTest {
         plane.ensureRunning(registry);
         when(lifecycle.isContainerRunning("cid")).thenReturn(false);
 
-        GcpException e = assertThrows(GcpException.class, () -> plane.getConfig(registry, null, false));
+        GcpException e = assertThrows(GcpException.class, () -> plane.getConfig(scope, null, false));
         assertEquals(503, e.getHttpStatus());
-        plane.listSubjects(registry, null, false);
+        plane.listSubjects(scope, null, false);
 
         verify(lifecycle, times(2)).createAndStart(any());
     }
@@ -104,7 +105,7 @@ class RedpandaSchemaRegistryDataPlaneTest {
             Thread.interrupted();
         }
         verify(lifecycle).stopAndRemove("cid", null);
-        plane.listSubjects(registry, null, false);
+        plane.listSubjects(scope, null, false);
         verify(lifecycle, times(2)).createAndStart(any());
     }
 

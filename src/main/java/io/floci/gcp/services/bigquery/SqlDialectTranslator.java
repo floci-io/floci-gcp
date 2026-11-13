@@ -501,6 +501,7 @@ final class SqlDialectTranslator {
         rejectScripts();
         validateStarReplacementWindows();
         quoteOffsetIdentifiers();
+        quoteKeywordFieldNames();
         parenthesizeIntervalValues();
     }
 
@@ -788,6 +789,22 @@ final class SqlDialectTranslator {
         }
         int open = nextSignificant(afterName + 1, tokens.size());
         return open >= 0 && tokens.get(open).isPunct("(");
+    }
+
+    /**
+     * A name after a dot is a field or column, never a keyword: {@code t.limit} or {@code s.from}. Quote one that
+     * spells a clause keyword so the scans that stop at those keywords read it as a name, as
+     * {@link #quoteOffsetIdentifiers} does for {@code OFFSET}.
+     */
+    private void quoteKeywordFieldNames() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            int dot = t.kind == Kind.IDENT ? significantBefore(i) : -1;
+            if (dot >= 0 && tokens.get(dot).isPunct(".")
+                    && (CLAUSE_END_KEYWORDS.contains(t.upper()) || t.isKeyword("FROM"))) {
+                tokens.set(i, new Token(Kind.QIDENT, "`" + t.text + "`", t.text));
+            }
+        }
     }
 
     private void quoteOffsetIdentifiers() {

@@ -985,7 +985,7 @@ class SqlDialectTranslatorTest {
     @Test
     void fieldNamesThatMatchClauseKeywordsStayInsideTheWrapper() {
         assertEquals("SELECT * EXCLUDE (\"a\") FROM (SELECT unnest(t.s) FROM \"ds\".\"t\" AS \"t\""
-                        + " WHERE t.limit > 0) AS \"_expanded\"",
+                        + " WHERE t.\"limit\" > 0) AS \"_expanded\"",
                 sql("SELECT t.s.* EXCEPT (a) FROM ds.t t WHERE t.limit > 0"));
     }
 
@@ -2627,7 +2627,7 @@ class SqlDialectTranslatorTest {
                 invalid("SELECT ARRAY_AGG(x ORDER BY x LIMIT 1 + 1) AS a FROM ds.t").getMessage());
         assertEquals("LIMIT expects an integer literal or parameter",
                 invalid("SELECT ARRAY_AGG(x ORDER BY x LIMIT 1.5) AS a FROM ds.t").getMessage());
-        assertEquals("SELECT ARRAY_AGG(t.limit) AS a, list_slice(ARRAY_AGG(t.limit), 1, 1) AS b, ARRAY_AGG(t.ignore) AS c"
+        assertEquals("SELECT ARRAY_AGG(t.\"limit\") AS a, list_slice(ARRAY_AGG(t.\"limit\"), 1, 1) AS b, ARRAY_AGG(t.ignore) AS c"
                 + " FROM \"ds\".\"t\"",
                 sql("SELECT ARRAY_AGG(t.limit) AS a, ARRAY_AGG(t.limit LIMIT 1) AS b, ARRAY_AGG(t.ignore) AS c FROM ds.t"));
     }
@@ -3254,6 +3254,15 @@ class SqlDialectTranslatorTest {
                 SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
         assertNull(SqlDialectTranslator.translate("SELECT STRUCT(x AS n) AS s FROM ds.t ORDER BY s.n", "test-project",
                 null, SqlDialectTranslator.QueryParameters.none()).orderByFieldPaths());
+    }
+
+    @Test
+    void aClauseKeywordAfterADotIsQuotedAsAName() {
+        String limit = sql("SELECT t.limit FROM ds.t");
+        assertTrue(limit.startsWith("SELECT t.\"limit\""), limit);
+        assertFalse(limit.contains("t. AS"), limit);
+        String where = sql("SELECT t.x FROM ds.t WHERE t.where > 2 ORDER BY t.order");
+        assertTrue(where.contains("WHERE t.\"where\" > 2 ORDER BY t.\"order\""), where);
     }
 
     @Test

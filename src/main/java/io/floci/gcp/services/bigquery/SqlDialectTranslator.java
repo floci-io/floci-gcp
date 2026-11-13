@@ -1543,7 +1543,7 @@ final class SqlDialectTranslator {
         return statements;
     }
 
-    private static List<List<Token>> splitArguments(List<Token> tokens, int from, int to) {
+    static List<List<Token>> splitArguments(List<Token> tokens, int from, int to) {
         List<List<Token>> arguments = new ArrayList<>();
         List<Token> current = new ArrayList<>();
         int parentheses = 0;

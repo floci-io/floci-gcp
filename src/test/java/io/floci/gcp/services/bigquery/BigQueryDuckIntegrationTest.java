@@ -1873,6 +1873,78 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aTemporaryFunctionsParametersShadowScriptVariables() {
+        // Live BigQuery: 3 — a parameter is local to the function, so the script variable of the same name
+        // is neither its declaration nor the references in its body.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) AS (x + 1);"
+                        + " SELECT f(2)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        // The function's parameters end with its body: the statement that follows still binds the
+        // variable, as live BigQuery's 7 shows.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) AS (x + 1);"
+                        + " SELECT x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) RETURNS INT64"
+                        + " AS (x * 2); SELECT f(3), x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"))
+                .body("rows[0].f[1].v", equalTo("7"));
+        // A parameter of another name leaves the variable alone inside the body too: 9.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(y INT64) AS (y + x);"
+                        + " SELECT f(2)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
+    void aForLoopLeavesNoResultOfItsOwn() {
+        // Live BigQuery answers a script that ends in a FOR loop with no rows at all, whether the loop
+        // runs or not, so the earlier SELECT's result is gone: no schema, no rows, zero total rows.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1]) WHERE FALSE) DO SET n = n + 1; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema", nullValue())
+                .body("rows", nullValue())
+                .body("totalRows", equalTo("0"));
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1])) DO SET n = n + 1; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema", nullValue())
+                .body("rows", nullValue())
+                .body("totalRows", equalTo("0"));
+        // A loop that runs a query reports that query's result: 5.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1])) DO SELECT 5 AS inner_result; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("inner_result"))
+                .body("rows[0].f[0].v", equalTo("5"));
+        // A WHILE loop that never runs keeps the earlier result: 9.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                WHILE FALSE DO SET n = n + 1; END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("answer"))
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
     void aBareBreakOrContinueReportsBigQuerysWording() {
         // Live BigQuery: "BREAK without label is only allowed inside of a loop body at [1:1]".
         query(Map.of("query", "BREAK;", "useLegacySql", false))

@@ -3226,8 +3226,11 @@ public class BigQueryService {
      * a derived table exposes.
      */
     private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames,
-                                        int[] depths, String[] clauses,
+                                        List<LocalName> localNames, int[] depths, String[] clauses,
                                         Map<String, Set<Integer>> aliasDepths) {
+
+        /** Names that hide a script variable inside one range only: the parameters of a function. */
+        private record LocalName(Set<String> names, int from, int to) {}
 
         /**
          * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo} and, when
@@ -3257,6 +3260,11 @@ public class BigQueryService {
         }
 
         private boolean hides(String name, int index) {
+            for (ScriptNameResolution.LocalName local : localNames) {
+                if (local.names().contains(name) && index >= local.from() && index <= local.to()) {
+                    return true;
+                }
+            }
             for (HiddenName hidden : hiddenNames) {
                 if (hidden.names().contains(name)
                         && (hidden.depth() < 0 || depths[index] >= hidden.depth())
@@ -3294,9 +3302,76 @@ public class BigQueryService {
         return false;
     }
 
+    /**
+     * Collects the parameters a function declaration names: a parameter is local to the function, so it
+     * wins over a script variable of the same name in the declaration and in the body, as it does in
+     * BigQuery. The range ends with the body, so the statements that follow still bind the variable.
+     */
+    private static void addFunctionParameterNames(List<SqlDialectTranslator.Token> tokens,
+                                                  List<ScriptNameResolution.LocalName> localNames) {
+        for (int index = 0; index < tokens.size(); index++) {
+            if (!tokens.get(index).isKeyword("FUNCTION")) {
+                continue;
+            }
+            int name = nextSignificantToken(tokens, index + 1);
+            int open = name < 0 ? -1 : nextSignificantToken(tokens, name + 1);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParenthesis(tokens, open);
+            Set<String> parameters = new LinkedHashSet<>();
+            for (List<SqlDialectTranslator.Token> parameter
+                    : SqlDialectTranslator.splitArguments(tokens, open + 1, close)) {
+                SqlDialectTranslator.Token first = parameter.isEmpty() ? null : parameter.getFirst();
+                if (first != null && (first.kind == SqlDialectTranslator.Kind.IDENT
+                        || first.kind == SqlDialectTranslator.Kind.QIDENT)) {
+                    parameters.add(first.identifierText().toLowerCase(Locale.ROOT));
+                }
+            }
+            if (!parameters.isEmpty()) {
+                localNames.add(new ScriptNameResolution.LocalName(parameters, open, functionBodyEnd(tokens, close)));
+            }
+        }
+    }
+
+    /**
+     * The parenthesis that closes the body of a function declaration, or the end of its statement when
+     * there is none to find.
+     */
+    private static int functionBodyEnd(List<SqlDialectTranslator.Token> tokens, int parametersClose) {
+        for (int index = nextSignificantToken(tokens, parametersClose + 1); index >= 0 && index < tokens.size();
+                index = nextSignificantToken(tokens, index + 1)) {
+            if (tokens.get(index).isPunct(";")) {
+                break;
+            }
+            if (!tokens.get(index).isKeyword("AS")) {
+                continue;
+            }
+            int body = nextSignificantToken(tokens, index + 1);
+            if (body >= 0 && tokens.get(body).isPunct("(")) {
+                return matchingParenthesis(tokens, body);
+            }
+            break;
+        }
+        int depth = 0;
+        for (int index = parametersClose + 1; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && token.isPunct(";")) {
+                return index - 1;
+            }
+        }
+        return tokens.size() - 1;
+    }
+
     private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens) {
         Set<Integer> selectItemStarts = new LinkedHashSet<>();
         List<ScriptNameResolution.HiddenName> hiddenNames = new ArrayList<>();
+        List<ScriptNameResolution.LocalName> localNames = new ArrayList<>();
+        addFunctionParameterNames(tokens, localNames);
         List<CteColumnScope> cteColumnScopes = new ArrayList<>();
         List<String> clauses = new ArrayList<>();
         clauses.add(null);
@@ -3389,7 +3464,8 @@ public class BigQueryService {
                         cte.depth()));
             }
         }
-        return new ScriptNameResolution(selectItemStarts, hiddenNames, depths, clauseByToken, aliasDepths);
+        return new ScriptNameResolution(selectItemStarts, hiddenNames, localNames, depths, clauseByToken,
+                aliasDepths);
     }
 
     /**

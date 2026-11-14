@@ -1738,6 +1738,26 @@ class BigQueryDuckIntegrationTest {
                 .body("rows", hasSize(2))
                 .body("rows[0].f[0].v", equalTo("4"))
                 .body("rows[1].f[0].v", equalTo("1"));
+        // A WITH clause declares its CTE for every branch of the set operation, so a later branch that reads
+        // it resolves the column too, while a branch that does not still binds the variable: 0 and 4, then
+        // 0, 4 and 1.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM t UNION ALL SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(3))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"))
+                .body("rows[2].f[0].v", equalTo("1"));
         // A branch still reads the columns the query around the set operation reads: 4 + 2 = 6.
         query(Map.of("query", """
                 DECLARE v INT64 DEFAULT 1;

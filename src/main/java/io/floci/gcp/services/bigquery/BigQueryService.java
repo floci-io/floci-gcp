@@ -3112,6 +3112,9 @@ public class BigQueryService {
         List<Integer> parents = new ArrayList<>();
         parents.add(-1);
         parents.add(0);
+        List<Integer> setOperations = new ArrayList<>();
+        setOperations.add(0);
+        setOperations.add(1);
         Deque<QueryFrame> frames = new ArrayDeque<>();
         int depth = 0;
         int scope = 1;
@@ -3124,6 +3127,8 @@ public class BigQueryService {
                     depth++;
                     parents.add(scope);
                     scope = parents.size() - 1;
+                    // A query of its own starts a set operation of its own.
+                    setOperations.add(scope);
                 }
             } else if (token.isPunct(")") && !frames.isEmpty()) {
                 QueryFrame frame = frames.pop();
@@ -3134,12 +3139,13 @@ public class BigQueryService {
             } else if (token.kind == SqlDialectTranslator.Kind.IDENT && startsSetOperation(tokens, index)) {
                 // A branch of a set operation sits beside the query it continues, not inside it.
                 parents.add(parents.get(scope));
+                setOperations.add(setOperations.get(scope));
                 scope = parents.size() - 1;
             }
             depths[index] = depth;
             scopes[index] = scope;
         }
-        return new QueryStructure(depths, scopes, parents);
+        return new QueryStructure(depths, scopes, parents, setOperations);
     }
 
     /** A parenthesis that opens a query, and the query it opened if it opened one. */
@@ -3363,15 +3369,32 @@ public class BigQueryService {
      * The queries a statement is made of: {@code depths} counts the queries that enclose a token,
      * {@code scopes} names the innermost query it belongs to, and {@code parents} links a scope to the query
      * that encloses it. Two queries at the same depth, the branches of a set operation or sibling subqueries,
-     * are scopes of their own, so the columns one reads leave the names the other writes to the variable. The
-     * root scope encloses every query of the statement.
+     * are scopes of their own, so the columns one reads leave the names the other writes to the variable,
+     * while {@code setOperations} names the branch that opened the set operation a scope belongs to, because
+     * the CTEs a WITH clause declares reach every branch. The root scope encloses every query of the
+     * statement.
      */
-    private record QueryStructure(int[] depths, int[] scopes, List<Integer> parents) {
+    private record QueryStructure(int[] depths, int[] scopes, List<Integer> parents,
+                                  List<Integer> setOperations) {
 
         /** Whether a token in {@code scope} resolves a name the query {@code owner} declares. */
         private boolean within(int scope, int owner) {
             for (int at = scope; at >= 0; at = parents.get(at)) {
                 if (at == owner) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Whether a token in {@code scope} stands in the query {@code owner} names, a branch of the set
+         * operation it is part of included: a CTE is visible to every branch, while the columns a branch
+         * reads stay its own.
+         */
+        private boolean namesQuery(int scope, int owner) {
+            for (int at = scope; at >= 0; at = parents.get(at)) {
+                if (at == owner || setOperations.get(at).equals(setOperations.get(owner))) {
                     return true;
                 }
             }
@@ -3451,7 +3474,8 @@ public class BigQueryService {
 
     /**
      * The queries that read the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it in the WITH
-     * clause's own query or in one nested inside it, and its columns resolve there. A CTE whose columns
+     * clause's own query or in one nested inside it, a branch of the set operation it is part of included,
+     * since a WITH clause declares its CTE for every branch. Its columns resolve there. A CTE whose columns
      * nothing reads leaves a variable of that name alone.
      */
     private static Set<Integer> cteReadScopes(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte,
@@ -3461,7 +3485,7 @@ public class BigQueryService {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
                     || !cte.name().equalsIgnoreCase(token.identifierText())
-                    || !structure.within(structure.scopes()[index], cte.scope())
+                    || !structure.namesQuery(structure.scopes()[index], cte.scope())
                     || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)) {
                 continue;
             }

@@ -1768,6 +1768,37 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aScriptVariablesArithmeticIsTypedByItsOperands() {
+        // The operands, not the declared type of the target, type the arithmetic: BigQuery subtracts these
+        // two INT64 literals exactly and then coerces the 1 to FLOAT64, and multiplies 3 by 4 in INT64.
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 9007199254740993 - 9007199254740992;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("1.0"));
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 3 * 4;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("12.0"));
+        // A FLOAT64 target does not widen the operands, so an INT64 overflow still fails.
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 9223372036854775807 + 1;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Integer Overflow"));
+    }
+
+    @Test
+    @Order(2)
     void scriptVariablesLeaveTheStatementsOwnNamesAlone() {
         // Live BigQuery resolves the derived table's column first: 2, not the variable.
         query(Map.of("query", "DECLARE x INT64 DEFAULT 1; SELECT x FROM (SELECT 2 AS x)", "useLegacySql", false))

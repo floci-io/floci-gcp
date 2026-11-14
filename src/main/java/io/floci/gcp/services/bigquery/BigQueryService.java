@@ -2370,15 +2370,16 @@ public class BigQueryService {
                 evaluated = null;
             } else if (!(left instanceof Number leftNumber) || !(right instanceof Number rightNumber)) {
                 throw QueryEngine.invalidQuery("Variable arithmetic requires numeric operands.");
-            } else if ("FLOAT64".equals(type) || "FLOAT".equals(type)
-                    || left instanceof Double || right instanceof Double) {
+            } else if (leftNumber instanceof Double || rightNumber instanceof Double) {
+                // The operands type the arithmetic, not the declared type of the target: BigQuery evaluates
+                // `9007199254740993 - 9007199254740992` as INT64 and coerces the exact 1 to FLOAT64, so a
+                // FLOAT64 target does not widen the operands first.
                 evaluated = switch (arithmetic.group(2)) {
                     case "+" -> leftNumber.doubleValue() + rightNumber.doubleValue();
                     case "-" -> leftNumber.doubleValue() - rightNumber.doubleValue();
                     default -> leftNumber.doubleValue() * rightNumber.doubleValue();
                 };
-            } else if ("NUMERIC".equals(type) || leftNumber instanceof BigDecimal
-                    || rightNumber instanceof BigDecimal) {
+            } else if (leftNumber instanceof BigDecimal || rightNumber instanceof BigDecimal) {
                 BigDecimal leftDecimal = scriptDecimal(leftNumber);
                 BigDecimal rightDecimal = scriptDecimal(rightNumber);
                 evaluated = switch (arithmetic.group(2)) {

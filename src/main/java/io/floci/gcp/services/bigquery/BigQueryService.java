@@ -2867,9 +2867,12 @@ public class BigQueryService {
     private void addTableColumnNames(String sql, Collection<SqlDialectTranslator.TableRef> refs, String projectId,
                                      JobLocation jobLocation, ProceduralContext context, ScriptColumns columns) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
-        Map<String, Integer> tableDepths = tableDepths(tokens, queryDepths(tokens), SCRIPT_TABLE_KEYWORDS);
+        Map<String, Set<Integer>> tableScopes = tableScopes(tokens, queryStructure(tokens), SCRIPT_TABLE_KEYWORDS);
         for (SqlDialectTranslator.TableRef ref : refs) {
-            columns.add(tableColumnNames(ref, projectId, jobLocation, context), tableDepth(tableDepths, ref));
+            Set<String> columnNames = tableColumnNames(ref, projectId, jobLocation, context);
+            for (int scope : tableScopesOf(tableScopes, ref)) {
+                columns.add(columnNames, scope);
+            }
         }
     }
 
@@ -2991,10 +2994,13 @@ public class BigQueryService {
             return;
         }
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
-        Map<String, Integer> tableDepths = tableDepths(tokens, queryDepths(tokens), SCRIPT_TABLE_KEYWORDS);
+        Map<String, Set<Integer>> tableScopes = tableScopes(tokens, queryStructure(tokens), SCRIPT_TABLE_KEYWORDS);
         for (SqlDialectTranslator.TableRef ref : translation.tables()) {
             if (skip == null || !skip.equalsIgnoreCase(ref.tableId())) {
-                columns.add(tableColumnNames(ref, projectId, jobLocation, context), tableDepth(tableDepths, ref));
+                Set<String> columnNames = tableColumnNames(ref, projectId, jobLocation, context);
+                for (int scope : tableScopesOf(tableScopes, ref)) {
+                    columns.add(columnNames, scope);
+                }
             }
         }
     }
@@ -3078,7 +3084,7 @@ public class BigQueryService {
             return columns;
         }
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
-        int[] depths = queryDepths(tokens);
+        QueryStructure structure = queryStructure(tokens);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
@@ -3088,56 +3094,95 @@ public class BigQueryService {
             if (!context.temporaryTables().contains(name) || !tablePosition(tokens, index, keywords)) {
                 continue;
             }
-            columns.add(fieldNames(context.temporaryTableColumns(name)), depths[index]);
+            columns.add(fieldNames(context.temporaryTableColumns(name)), structure.scopes()[index]);
         }
         return columns;
     }
 
     /**
-     * The query depth of every token: a parenthesis that opens a query is a scope of its own, while one
-     * that groups an expression stays at the depth and in the clause around it.
+     * The queries a statement is made of. A parenthesis that opens a query is a scope of its own, while one
+     * that groups an expression stays in the query around it, and each branch of a set operation is a query
+     * of its own, so the columns one branch reads leave the names another branch writes alone. The root
+     * scope encloses every query, so a name it declares is a name no query resolves.
      */
-    private static int[] queryDepths(List<SqlDialectTranslator.Token> tokens) {
+    private static QueryStructure queryStructure(List<SqlDialectTranslator.Token> tokens) {
         int[] depths = new int[tokens.size()];
-        Deque<Boolean> queries = new ArrayDeque<>();
+        int[] scopes = new int[tokens.size()];
+        List<Integer> parents = new ArrayList<>();
+        parents.add(-1);
+        parents.add(0);
+        Deque<QueryFrame> frames = new ArrayDeque<>();
         int depth = 0;
+        int scope = 1;
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.isPunct("(")) {
                 boolean query = startsQuery(tokens, index);
-                queries.push(query);
+                frames.push(new QueryFrame(scope, query));
                 if (query) {
                     depth++;
+                    parents.add(scope);
+                    scope = parents.size() - 1;
                 }
-            } else if (token.isPunct(")") && !queries.isEmpty() && queries.pop()) {
-                depth--;
+            } else if (token.isPunct(")") && !frames.isEmpty()) {
+                QueryFrame frame = frames.pop();
+                if (frame.query()) {
+                    depth--;
+                    scope = frame.enclosingScope();
+                }
+            } else if (token.kind == SqlDialectTranslator.Kind.IDENT && startsSetOperation(tokens, index)) {
+                // A branch of a set operation sits beside the query it continues, not inside it.
+                parents.add(parents.get(scope));
+                scope = parents.size() - 1;
             }
             depths[index] = depth;
+            scopes[index] = scope;
         }
-        return depths;
+        return new QueryStructure(depths, scopes, parents);
+    }
+
+    /** A parenthesis that opens a query, and the query it opened if it opened one. */
+    private record QueryFrame(int enclosingScope, boolean query) {}
+
+    /**
+     * Whether the keyword at {@code index} starts a branch of a set operation. {@code EXCEPT} does too,
+     * except in the select-star form {@code SELECT * EXCEPT (...)}, which stays inside its query.
+     */
+    private static boolean startsSetOperation(List<SqlDialectTranslator.Token> tokens, int index) {
+        SqlDialectTranslator.Token token = tokens.get(index);
+        if (token.isKeyword("UNION") || token.isKeyword("INTERSECT")) {
+            return true;
+        }
+        if (!token.isKeyword("EXCEPT")) {
+            return false;
+        }
+        int previous = previousSignificantToken(tokens, index - 1);
+        return previous < 0 || !tokens.get(previous).isPunct("*");
     }
 
     /**
-     * The query depth of the tables a statement names, by bare and by qualified lower-case name: the
-     * shallowest table position that reads the table. A table has no entry when the statement names it
-     * in no position the scan recognizes, such as an {@code INFORMATION_SCHEMA} pseudo-table.
+     * The queries that read the tables a statement names, by bare and by qualified lower-case name. A table
+     * has no entry when the statement names it in no position the scan recognizes, such as an
+     * {@code INFORMATION_SCHEMA} pseudo-table.
      */
-    private static Map<String, Integer> tableDepths(List<SqlDialectTranslator.Token> tokens, int[] depths,
-                                                    Set<String> keywords) {
-        Map<String, Integer> tableDepths = new LinkedHashMap<>();
+    private static Map<String, Set<Integer>> tableScopes(List<SqlDialectTranslator.Token> tokens,
+                                                         QueryStructure structure, Set<String> keywords) {
+        Map<String, Set<Integer>> tableScopes = new LinkedHashMap<>();
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
                     || !tablePosition(tokens, index, keywords)) {
                 continue;
             }
-            tableDepths.merge(token.identifierText().toLowerCase(Locale.ROOT), depths[index], Math::min);
+            int scope = structure.scopes()[index];
+            tableScopes.computeIfAbsent(token.identifierText().toLowerCase(Locale.ROOT), key -> new LinkedHashSet<>())
+                    .add(scope);
             List<String> chain = tableNameChain(tokens, index);
             if (chain.size() > 1) {
-                tableDepths.merge(String.join(".", chain), depths[index], Math::min);
+                tableScopes.computeIfAbsent(String.join(".", chain), key -> new LinkedHashSet<>()).add(scope);
             }
         }
-        return tableDepths;
+        return tableScopes;
     }
 
     /** The dotted name ending at {@code index}, lower-cased and in source order. */
@@ -3157,17 +3202,19 @@ public class BigQueryService {
     }
 
     /**
-     * The depth at which a statement reads {@code ref}: its qualified name wins, its bare name is the
-     * fallback, and a table the scan cannot place keeps its columns out of a variable's way everywhere.
+     * The queries that read {@code ref}: its qualified name wins, its bare name is the fallback, and a table
+     * the scan cannot place keeps its columns out of a variable's way in every query, as the root scope
+     * encloses all of them.
      */
-    private static int tableDepth(Map<String, Integer> tableDepths, SqlDialectTranslator.TableRef ref) {
-        Integer qualified = tableDepths.get(ref.datasetId().toLowerCase(Locale.ROOT) + "."
+    private static Set<Integer> tableScopesOf(Map<String, Set<Integer>> tableScopes,
+                                              SqlDialectTranslator.TableRef ref) {
+        Set<Integer> qualified = tableScopes.get(ref.datasetId().toLowerCase(Locale.ROOT) + "."
                 + ref.tableId().toLowerCase(Locale.ROOT));
         if (qualified != null) {
             return qualified;
         }
-        Integer bare = tableDepths.get(ref.tableId().toLowerCase(Locale.ROOT));
-        return bare != null ? bare : 0;
+        Set<Integer> bare = tableScopes.get(ref.tableId().toLowerCase(Locale.ROOT));
+        return bare != null ? bare : Set.of(0);
     }
 
     private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns) {
@@ -3198,7 +3245,7 @@ public class BigQueryService {
     private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns,
                                                 Set<Integer> columnPositions) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
-        ScriptNameResolution resolution = scriptNameResolution(tokens);
+        ScriptNameResolution resolution = scriptNameResolution(tokens, columns);
         StringBuilder expanded = new StringBuilder();
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
@@ -3209,8 +3256,7 @@ public class BigQueryService {
                     && SCRIPT_DECLARATION_KEYWORDS.contains(tokens.get(previous).upper());
             boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
-            boolean columnName = columns.hides(name, resolution.depths()[index]) || columnPositions.contains(index)
-                    || resolution.hides(name, index);
+            boolean columnName = columnPositions.contains(index) || resolution.hides(name, index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnName
                     || resolution.isAliasReference(name, index)) {
@@ -3276,30 +3322,59 @@ public class BigQueryService {
     }
 
     /**
-     * The lower-cased columns the tables a statement names expose, each with the shallowest query depth
-     * that reads one of them. A table a nested query reads hides a variable of the same name inside that
-     * query only, while a column the query itself reads hides it in that query and in the ones nested in
-     * it: {@code DECLARE v INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v;
-     * SET v = v + (SELECT COUNT(*) FROM t)} binds {@code v} outside the subquery and the column inside.
+     * The lower-cased columns the tables a statement names expose, each with the queries that read one of
+     * them. A table hides a variable of the same name in the query that reads it and in the queries nested
+     * inside it, so {@code DECLARE v INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v;
+     * SET v = v + (SELECT COUNT(*) FROM t)} binds {@code v} outside the subquery and the column inside, and
+     * {@code SELECT COUNT(*) FROM t UNION ALL SELECT v} keeps the variable in the branch that reads no table.
      */
     private static final class ScriptColumns {
 
-        private final Map<String, Integer> depths = new LinkedHashMap<>();
+        private final Map<String, Set<Integer>> scopes = new LinkedHashMap<>();
 
-        private void add(Collection<String> columns, int depth) {
+        private void add(Collection<String> columns, int scope) {
             for (String column : columns) {
-                depths.merge(column, depth, Math::min);
+                scopes.computeIfAbsent(column, key -> new LinkedHashSet<>()).add(scope);
             }
         }
 
         private void add(ScriptColumns columns) {
-            columns.depths.forEach((column, depth) -> depths.merge(column, depth, Math::min));
+            columns.scopes.forEach((column, owners) ->
+                    scopes.computeIfAbsent(column, key -> new LinkedHashSet<>()).addAll(owners));
         }
 
-        /** Whether a token at {@code depth} names one of the columns rather than a script variable. */
-        private boolean hides(String name, int depth) {
-            Integer columnDepth = depths.get(name);
-            return columnDepth != null && depth >= columnDepth;
+        /** Whether a token in {@code scope} names one of the columns rather than a script variable. */
+        private boolean hides(String name, int scope, QueryStructure structure) {
+            Set<Integer> owners = scopes.get(name);
+            if (owners == null) {
+                return false;
+            }
+            for (int owner : owners) {
+                if (structure.within(scope, owner)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * The queries a statement is made of: {@code depths} counts the queries that enclose a token,
+     * {@code scopes} names the innermost query it belongs to, and {@code parents} links a scope to the query
+     * that encloses it. Two queries at the same depth, the branches of a set operation or sibling subqueries,
+     * are scopes of their own, so the columns one reads leave the names the other writes to the variable. The
+     * root scope encloses every query of the statement.
+     */
+    private record QueryStructure(int[] depths, int[] scopes, List<Integer> parents) {
+
+        /** Whether a token in {@code scope} resolves a name the query {@code owner} declares. */
+        private boolean within(int scope, int owner) {
+            for (int at = scope; at >= 0; at = parents.get(at)) {
+                if (at == owner) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -3310,18 +3385,18 @@ public class BigQueryService {
      * a derived table exposes.
      */
     private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames,
-                                        List<LocalName> localNames, int[] depths, String[] clauses,
-                                        Map<String, Set<Integer>> aliasDepths) {
+                                        List<LocalName> localNames, QueryStructure structure, String[] clauses,
+                                        Map<String, Set<Integer>> aliasDepths, ScriptColumns columns) {
 
         /** Names that hide a script variable inside one range only: the parameters of a function. */
         private record LocalName(Set<String> names, int from, int to) {}
 
         /**
-         * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo} and, when
-         * {@code depth} is not negative, at that query depth and deeper only: a nested query's alias names a
-         * column inside its own query, not in the query that encloses it.
+         * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo}, in the
+         * query {@code scope} and in the queries nested inside it: a nested query's alias names a column
+         * inside its own query, not in the query that encloses it.
          */
-        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo, int depth) {}
+        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo, int scope) {}
 
         private boolean startsSelectItem(int index) {
             return selectItemStarts.contains(index);
@@ -3340,54 +3415,58 @@ public class BigQueryService {
                 return false;
             }
             Set<Integer> declaredDepths = aliasDepths.get(name);
-            return declaredDepths != null && declaredDepths.contains(depths[index]);
+            return declaredDepths != null && declaredDepths.contains(structure.depths()[index]);
         }
 
+        /**
+         * Whether the name resolves to something the statement declares, rather than to a script variable: a
+         * column of one of its tables, a CTE or FROM item alias, a derived table's column, or a parameter of
+         * a temporary function.
+         */
         private boolean hides(String name, int index) {
             for (ScriptNameResolution.LocalName local : localNames) {
                 if (local.names().contains(name) && index >= local.from() && index <= local.to()) {
                     return true;
                 }
             }
+            int scope = structure.scopes()[index];
             for (HiddenName hidden : hiddenNames) {
                 if (hidden.names().contains(name)
-                        && (hidden.depth() < 0 || depths[index] >= hidden.depth())
+                        && structure.within(scope, hidden.scope())
                         && (index < hidden.excludedFrom() || index > hidden.excludedTo())) {
                     return true;
                 }
             }
-            return false;
+            return columns.hides(name, scope, structure);
         }
     }
 
     /**
      * The columns a CTE exposes, which BigQuery resolves before a script variable of the same name from
      * the CTE's definition on, once the statement reads the CTE. {@code definitionEnd} is the parenthesis
-     * that closes the CTE body, and {@code depth} the WITH clause's query depth.
+     * that closes the CTE body, and {@code scope} the query the WITH clause belongs to.
      */
-    private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int depth) {}
+    private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int scope) {}
 
     /**
-     * The shallowest depth at which the statement reads the CTE {@code cte}, or -1 when it reads none: a
-     * {@code FROM} or {@code JOIN} item names it, at the WITH clause's depth or deeper, and its columns
-     * resolve at that depth and deeper. A CTE whose columns nothing reads leaves a variable of that name
-     * alone.
+     * The queries that read the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it in the WITH
+     * clause's own query or in one nested inside it, and its columns resolve there. A CTE whose columns
+     * nothing reads leaves a variable of that name alone.
      */
-    private static int cteReadDepth(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte, int[] depths) {
-        int readDepth = -1;
+    private static Set<Integer> cteReadScopes(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte,
+                                              QueryStructure structure) {
+        Set<Integer> readScopes = new LinkedHashSet<>();
         for (int index = cte.definitionEnd() + 1; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
                     || !cte.name().equalsIgnoreCase(token.identifierText())
-                    || depths[index] < cte.depth()
+                    || !structure.within(structure.scopes()[index], cte.scope())
                     || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)) {
                 continue;
             }
-            if (readDepth < 0 || depths[index] < readDepth) {
-                readDepth = depths[index];
-            }
+            readScopes.add(structure.scopes()[index]);
         }
-        return readDepth;
+        return readScopes;
     }
 
     /**
@@ -3455,7 +3534,8 @@ public class BigQueryService {
         return tokens.size() - 1;
     }
 
-    private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens) {
+    private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens,
+                                                             ScriptColumns columns) {
         Set<Integer> selectItemStarts = new LinkedHashSet<>();
         List<ScriptNameResolution.HiddenName> hiddenNames = new ArrayList<>();
         List<ScriptNameResolution.LocalName> localNames = new ArrayList<>();
@@ -3465,11 +3545,11 @@ public class BigQueryService {
         clauses.add(null);
         List<Boolean> withClauses = new ArrayList<>();
         withClauses.add(false);
-        int[] depths = queryDepths(tokens);
+        QueryStructure structure = queryStructure(tokens);
         String[] clauseByToken = new String[tokens.size()];
         Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
-        List<Boolean> queryScopes = new ArrayList<>();
-        queryScopes.add(true);
+        List<Boolean> parenQueries = new ArrayList<>();
+        parenQueries.add(true);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
@@ -3478,16 +3558,16 @@ public class BigQueryService {
                     // keeps the clause and the alias scope around it.
                     boolean query = token.isPunct("(") && startsQuery(tokens, index);
                     if (token.isPunct("(")) {
-                        addDerivedTableColumns(tokens, index, clauses.getLast(), depths, hiddenNames);
+                        addDerivedTableColumns(tokens, index, clauses.getLast(), structure, hiddenNames);
                     }
                     clauses.add(query ? null : clauses.getLast());
                     withClauses.add(false);
-                    queryScopes.add(query);
+                    parenQueries.add(query);
                 } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
                         && clauses.size() > 1) {
                     clauses.removeLast();
                     withClauses.removeLast();
-                    queryScopes.removeLast();
+                    parenQueries.removeLast();
                 }
                 continue;
             }
@@ -3508,22 +3588,23 @@ public class BigQueryService {
             }
             // Only a query's own select list names its columns. A function call's arguments or a
             // grouped expression inherit the clause they sit in, but declare nothing there.
-            boolean selectList = queryScopes.get(depth) && "SELECT".equals(clauses.get(depth));
+            boolean selectList = parenQueries.get(depth) && "SELECT".equals(clauses.get(depth));
             String name = token.text.toLowerCase(Locale.ROOT);
             clauseByToken[index] = clauses.get(depth);
             if (previous >= 0 && tokens.get(previous).isKeyword("AS") && selectList) {
-                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(depths[index]);
+                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(structure.depths()[index]);
             }
             if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
                 int open = nextSignificantToken(tokens, next + 1);
                 if (open >= 0 && tokens.get(open).isPunct("(")) {
                     int close = matchingParenthesis(tokens, open);
                     // The name a CTE declares is visible outside its own definition.
-                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open, close, depths[index]));
+                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open, close,
+                            structure.scopes()[index]));
                     // So are the columns its select list exposes, wherever the statement reads the CTE.
-                    Set<String> columns = selectListColumnNames(tokens, open, close);
-                    if (!columns.isEmpty()) {
-                        cteColumnScopes.add(new CteColumnScope(name, columns, close, depths[index]));
+                    Set<String> cteColumns = selectListColumnNames(tokens, open, close);
+                    if (!cteColumns.isEmpty()) {
+                        cteColumnScopes.add(new CteColumnScope(name, cteColumns, close, structure.scopes()[index]));
                     }
                     continue;
                 }
@@ -3531,7 +3612,8 @@ public class BigQueryService {
             if ("FROM".equals(clauses.get(depth)) && previous >= 0 && tokens.get(previous).isKeyword("AS")) {
                 // The alias of a table, UNNEST or derived table names a column scope of its own, which is
                 // visible in the query that declares it and in a query nested inside it.
-                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1, depths[index]));
+                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1,
+                        structure.scopes()[index]));
                 continue;
             }
             if (selectList && startsSelectItem(tokens, previous)) {
@@ -3539,17 +3621,16 @@ public class BigQueryService {
             }
         }
         for (CteColumnScope cte : cteColumnScopes) {
-            int readDepth = cteReadDepth(tokens, cte, depths);
-            if (readDepth >= 0) {
-                // The columns are visible from the CTE's definition on, at the depth that reads the CTE and
-                // deeper: the body that declares them, and the query around a name it does not expose,
-                // still bind the variable.
+            for (int readScope : cteReadScopes(tokens, cte, structure)) {
+                // The columns are visible from the CTE's definition on, in the query that reads the CTE and
+                // in the queries nested inside it: the body that declares them, and a sibling query of the
+                // one that reads them, still bind the variable.
                 hiddenNames.add(new ScriptNameResolution.HiddenName(cte.columns(), -1, cte.definitionEnd(),
-                        readDepth));
+                        readScope));
             }
         }
-        return new ScriptNameResolution(selectItemStarts, hiddenNames, localNames, depths, clauseByToken,
-                aliasDepths);
+        return new ScriptNameResolution(selectItemStarts, hiddenNames, localNames, structure, clauseByToken,
+                aliasDepths, columns);
     }
 
     /**
@@ -3558,7 +3639,8 @@ public class BigQueryService {
      * resolves the derived table's column first.
      */
     private static void addDerivedTableColumns(List<SqlDialectTranslator.Token> tokens, int open, String clause,
-                                               int[] depths, List<ScriptNameResolution.HiddenName> hiddenNames) {
+                                               QueryStructure structure,
+                                               List<ScriptNameResolution.HiddenName> hiddenNames) {
         int previous = previousSignificantToken(tokens, open - 1);
         boolean fromItem = "FROM".equals(clause) && previous >= 0
                 && (tokens.get(previous).isKeyword("FROM") || tokens.get(previous).isKeyword("JOIN")
@@ -3570,8 +3652,8 @@ public class BigQueryService {
         Set<String> names = selectListColumnNames(tokens, open, close);
         if (!names.isEmpty()) {
             // A derived table exposes its columns to the query that reads it, and to a query nested inside
-            // that one, but not to a name the query around a nested read writes.
-            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, depths[previous]));
+            // that one, but not to a sibling query or to a name the query around a nested read writes.
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, structure.scopes()[previous]));
         }
     }
 

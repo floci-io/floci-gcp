@@ -1697,6 +1697,77 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aScriptVariablesColumnsStayInTheQueryThatReadsThem() {
+        // Each branch of a set operation, and each sibling subquery, is a query of its own: the columns one
+        // reads leave the names another writes to the variable. Every value below is live BigQuery's.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT COUNT(*) FROM t UNION ALL SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT MAX(v) FROM t) AS a, (SELECT v) AS b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        // A CTE or a derived table a branch reads exposes its columns there, not in the branch beside it.
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v FROM t UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; SELECT v FROM (SELECT 4 AS v) UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; SELECT 4 AS v UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        // A branch still reads the columns the query around the set operation reads: 4 + 2 = 6.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT SUM(x) FROM (SELECT (SELECT v) AS x UNION ALL SELECT 2)) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"));
+        // The select-star EXCEPT stays inside its query, so the table's columns still answer: 4, and
+        // EXCEPT DISTINCT really is a set operation: one row, 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v, 2 AS w;
+                SELECT * EXCEPT(w) FROM t WHERE v > 0;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT v FROM t EXCEPT DISTINCT SELECT 9;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+    }
+
+    @Test
+    @Order(2)
     void scriptVariablesLeaveTheStatementsOwnNamesAlone() {
         // Live BigQuery resolves the derived table's column first: 2, not the variable.
         query(Map.of("query", "DECLARE x INT64 DEFAULT 1; SELECT x FROM (SELECT 2 AS x)", "useLegacySql", false))
